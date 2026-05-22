@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn projection_run_diffs_standing_context_without_self_waking() {
         let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([9; 32]);
         let projector = NeedUntilOffer {
             role,
@@ -761,7 +761,7 @@ mod tests {
     #[test]
     fn projection_run_replaces_need_with_intent_when_context_appears() {
         let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([9; 32]);
         let projector = NeedUntilOffer {
             role: role.clone(),
@@ -798,7 +798,7 @@ mod tests {
         let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
 
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([7; 32]);
         let offer = ContextOffer {
             owner: offered.id,
@@ -839,7 +839,7 @@ mod tests {
         let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
 
-        let role = Role::new("range").unwrap();
+        let role = "range".to_string();
         let key = ContextKey::from_bytes(b"m");
         let offer = ContextOffer {
             owner: offered.id,
@@ -879,7 +879,7 @@ mod tests {
         let offered = Fact::new(FactScope::Global, 2, b"watched".to_vec());
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
 
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([8; 32]);
         let offer = ContextOffer {
             owner: offered.id,
@@ -913,7 +913,7 @@ mod tests {
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
         let target = Fact::new(FactScope::Global, 1, b"unbounded".to_vec());
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
 
         for index in 0..=PROJECTION_CONTEXT_FIXPOINT_LIMIT {
             let offered = Fact::new(FactScope::Global, index as u64 + 2, vec![index as u8]);
@@ -1092,7 +1092,7 @@ mod tests {
         ) -> Result<ProjectionOutput, String> {
             Ok(ProjectionOutput::new().offer(ContextOffer {
                 owner: [9; 32],
-                role: Role::new("exact").unwrap(),
+                role: "exact".to_string(),
                 scope: fact.scope.clone(),
                 start_key: ContextKey::from_bytes(fact.id),
                 end_key: ContextKey::from_bytes(fact.id),
@@ -1110,7 +1110,7 @@ mod tests {
         ) -> Result<ProjectionOutput, String> {
             Ok(ProjectionOutput::new().need(ContextNeed {
                 owner: [9; 32],
-                role: Role::new("exact").unwrap(),
+                role: "exact".to_string(),
                 scope: fact.scope.clone(),
                 start_key: ContextKey::from_bytes(fact.id),
                 end_key: ContextKey::from_bytes(fact.id),

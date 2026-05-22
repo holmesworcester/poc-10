@@ -56,54 +56,7 @@ const CONTEXT_KEY_PART_BYTES: u8 = 1;
 const CONTEXT_KEY_PART_U64: u8 = 2;
 
 /// Protocol-defined relationship role used for context matching.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Role(String);
-
-impl Role {
-    /// Roles are protocol identifiers, not free-form labels.
-    ///
-    /// The lowercase ASCII shape keeps persisted rows stable across languages
-    /// and makes accidental UI strings or Rust type names fail early.
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err("context role cannot be empty".to_string());
-        }
-        if !value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-        {
-            return Err(format!("invalid context role {value:?}"));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn expect(value: &'static str) -> Self {
-        Self::new(value).expect("valid context role")
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&'static str> for Role {
-    fn from(value: &'static str) -> Self {
-        Self::expect(value)
-    }
-}
-
-impl PartialEq<&str> for Role {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl PartialEq<Role> for &str {
-    fn eq(&self, other: &Role) -> bool {
-        *self == other.as_str()
-    }
-}
+pub type Role = String;
 
 /// Opaque byte key within a context role and scope.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -434,13 +387,6 @@ mod tests {
     use crate::core::facts::FactScope;
 
     #[test]
-    fn role_rejects_broad_free_text() {
-        assert!(Role::new("exact_event").is_ok());
-        assert!(Role::new("ExactEvent").is_err());
-        assert!(Role::new("exact-event").is_err());
-    }
-
-    #[test]
     fn context_key_parts_encode_canonical_bounded_bytes() {
         let id = [1; 32];
         let key = ContextKey::from_parts([
@@ -489,7 +435,7 @@ mod tests {
     #[test]
     fn context_set_builder_keeps_needs_and_offers_explicit() {
         let id = [1; 32];
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([2; 32]);
         let set = ContextSet::new()
             .need(ContextNeed {
@@ -514,7 +460,7 @@ mod tests {
     #[test]
     fn normalized_context_set_sorts_and_deduplicates() {
         let id = [1; 32];
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let need = ContextNeed {
             owner: id,
             role,
@@ -534,7 +480,7 @@ mod tests {
     #[test]
     fn diff_context_sets_reports_only_real_replacements() {
         let id = [1; 32];
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let stable = ContextNeed {
             owner: id,
             role: role.clone(),
@@ -569,7 +515,7 @@ mod tests {
     #[test]
     fn identical_context_sets_have_empty_delta() {
         let id = [1; 32];
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([2; 32]);
         let set = ContextSet::new()
             .need(ContextNeed {

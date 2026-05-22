@@ -13,7 +13,7 @@ const PROACTIVE_DOMAIN: u8 = 1;
 const REQUESTED_DOMAIN: u8 = 2;
 
 pub fn wrap_source_role() -> Role {
-    Role::expect(ROLE)
+    ROLE.to_string()
 }
 
 pub fn proactive_wrap_source_need(

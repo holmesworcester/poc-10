@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 
-use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::cli::{decode_hex_32, encode_hex_32, CliArgs, CliOutput};
 use crate::core::command_context::{CommandContext, CommandOutput};
 
 use super::commands;
@@ -123,18 +123,15 @@ pub fn invite_output(receipt: &commands::CreateInviteReceipt) -> CliOutput {
 pub fn accept_output(receipt: &commands::AcceptInviteReceipt) -> CliOutput {
     let mut lines = vec![format!("connected: {}", receipt.connected_addr)];
     if let Some(workspace_id) = receipt.workspace_id {
-        lines.push(format!(
-            "workspace_id: {}",
-            commands::encode_hex(&workspace_id)
-        ));
+        lines.push(format!("workspace_id: {}", encode_hex_32(&workspace_id)));
     }
     if let Some(user_id) = receipt.user_id {
-        lines.push(format!("user_id: {}", commands::encode_hex(&user_id)));
+        lines.push(format!("user_id: {}", encode_hex_32(&user_id)));
     }
     if let Some(endpoint_shared_id) = receipt.endpoint_shared_id {
         lines.push(format!(
             "endpoint_shared_id: {}",
-            commands::encode_hex(&endpoint_shared_id)
+            encode_hex_32(&endpoint_shared_id)
         ));
     }
     if let Some(endpoint_role) = receipt.endpoint_role {
@@ -142,7 +139,7 @@ pub fn accept_output(receipt: &commands::AcceptInviteReceipt) -> CliOutput {
     }
     lines.push(format!(
         "request_id: {}",
-        commands::encode_hex(&receipt.request_id)
+        encode_hex_32(&receipt.request_id)
     ));
     CliOutput::lines(lines)
 }
@@ -170,7 +167,7 @@ impl InviteArgs {
                     let value = rest
                         .next()
                         .ok_or_else(|| "invite --workspace requires a value".to_string())?;
-                    workspace_id = Some(commands::decode_hex_32(value)?);
+                    workspace_id = Some(decode_hex_32(value)?);
                 }
                 "--public-addr" => {
                     let value = rest
@@ -195,7 +192,7 @@ impl InviteArgs {
 impl InviteServerArgs {
     fn parse(args: CliArgs<'_>) -> Result<Self, String> {
         let workspace = args.get(0).ok_or_else(|| INVITE_SERVER_USAGE.to_string())?;
-        let workspace_id = commands::decode_hex_32(workspace)?;
+        let workspace_id = decode_hex_32(workspace)?;
         let mut public_addr = None;
         let mut rest = args.values()[1..].iter();
         while let Some(arg) = rest.next() {
@@ -236,7 +233,7 @@ struct LinkArgs {
 impl LinkArgs {
     fn parse(args: CliArgs<'_>) -> Result<Self, String> {
         let workspace = args.get(0).ok_or_else(|| LINK_USAGE.to_string())?;
-        let workspace_id = commands::decode_hex_32(workspace)?;
+        let workspace_id = decode_hex_32(workspace)?;
         let mut public_addr = None;
         let mut rest = args.values()[1..].iter();
         while let Some(arg) = rest.next() {

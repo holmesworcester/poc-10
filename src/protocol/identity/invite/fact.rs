@@ -9,6 +9,7 @@
 //! id it will be paired with, while an accepted invite (acceptor side) scopes
 //! the secret to one workspace/invite pair.
 
+use crate::core::cli::encode_hex_32;
 use crate::core::facts::FactId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,16 +57,6 @@ impl InviteSecretFact {
 pub fn bootstrap_secret_hash(secret: &[u8; 32]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"topo-bootstrap-token-v1");
-    hasher.update(encode_hex(secret).as_bytes());
+    hasher.update(encode_hex_32(secret).as_bytes());
     *hasher.finalize().as_bytes()
-}
-
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    out
 }

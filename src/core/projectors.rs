@@ -480,13 +480,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{ContextKey, Role};
+    use crate::core::context::ContextKey;
     use crate::core::facts::FactScope;
 
     #[test]
     fn projection_output_keeps_context_and_work_separate() {
         let id = [1; 32];
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let key = ContextKey::from_bytes([2; 32]);
         let output = ProjectionOutput::new()
             .need(ContextNeed {
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn projection_output_exposes_normalized_replacement_context() {
         let id = [1; 32];
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let need = ContextNeed {
             owner: id,
             role,
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn projection_context_indexes_matched_payloads_by_need() {
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let need_a = ContextNeed {
             owner: [1; 32],
             role: role.clone(),
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn projection_context_decodes_payload_with_fact_codec() {
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let need = ContextNeed {
             owner: [1; 32],
             role,
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(
             context.payload_as::<FirstByteCodec>(&ContextNeed {
                 owner: [2; 32],
-                role: Role::new("exact").unwrap(),
+                role: "exact".to_string(),
                 scope: FactScope::Global,
                 start_key: ContextKey::from_bytes([20; 32]),
                 end_key: ContextKey::from_bytes([20; 32]),
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn projection_context_decodes_checked_matched_payloads() {
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let need = ContextNeed {
             owner: [1; 32],
             role,
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn checked_typed_payloads_report_offer_payload_mismatch_before_decode() {
-        let role = Role::new("exact").unwrap();
+        let role = "exact".to_string();
         let need = ContextNeed {
             owner: [1; 32],
             role,

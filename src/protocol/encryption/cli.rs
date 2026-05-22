@@ -4,7 +4,7 @@
 //! read-model decisions live in `commands.rs`; runtime draining, handler
 //! dispatch, and persistence stay at the root app/runtime boundary.
 
-use crate::core::cli::{decode_hex_32_named as core_decode_hex_32, encode_hex, CliArgs, CliOutput};
+use crate::core::cli::{decode_hex_32_named, encode_hex, CliArgs, CliOutput};
 use crate::core::command_context::{CommandContext, CommandOutput};
 
 use super::commands;
@@ -29,9 +29,8 @@ pub fn key_recipient(
         ctx,
         commands::CreateRecipientKey {
             created_at_ms: ctx.next_timestamp(),
-            workspace_id: decode_hex_32(workspace)?,
-            previous_recipient_key_id:
-                crate::protocol::encryption::fact::NO_PREVIOUS_RECIPIENT_KEY,
+            workspace_id: decode_hex_32_named(workspace, "workspace id")?,
+            previous_recipient_key_id: crate::protocol::encryption::fact::NO_PREVIOUS_RECIPIENT_KEY,
         },
     )
 }
@@ -47,7 +46,7 @@ pub fn rotate_recipient(
         ctx,
         commands::CreateRecipientKey {
             created_at_ms: ctx.next_timestamp(),
-            workspace_id: decode_hex_32(workspace)?,
+            workspace_id: decode_hex_32_named(workspace, "workspace id")?,
             previous_recipient_key_id,
         },
     )
@@ -84,7 +83,10 @@ pub fn key_frontier(
         ctx,
         commands::CreateKeyFrontier {
             created_at_ms: ctx.next_timestamp(),
-            workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
+            workspace_id: decode_hex_32_named(
+                args.get(0).expect("length checked"),
+                "workspace id",
+            )?,
         },
     )
 }
@@ -110,9 +112,15 @@ pub fn key_frontier_output(receipt: &commands::CreateKeyFrontierReceipt) -> CliO
 pub fn key_wrap_args(args: CliArgs<'_>) -> Result<commands::KeyWrapQuery, String> {
     args.require_len(3, KEY_WRAP_USAGE)?;
     Ok(commands::KeyWrapQuery {
-        workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
-        removal_frontier_id: decode_hex_32(args.get(1).expect("length checked"))?,
-        recipient_key_id: decode_hex_32(args.get(2).expect("length checked"))?,
+        workspace_id: decode_hex_32_named(args.get(0).expect("length checked"), "workspace id")?,
+        removal_frontier_id: decode_hex_32_named(
+            args.get(1).expect("length checked"),
+            "removal frontier id",
+        )?,
+        recipient_key_id: decode_hex_32_named(
+            args.get(2).expect("length checked"),
+            "recipient key id",
+        )?,
     })
 }
 
@@ -142,8 +150,11 @@ pub fn key_wrap_lookup_output(lookup: &commands::KeyWrapLookup) -> CliOutput {
 pub fn key_access_args(args: CliArgs<'_>) -> Result<commands::KeyAccessQuery, String> {
     args.require_len(2, KEY_ACCESS_USAGE)?;
     Ok(commands::KeyAccessQuery {
-        workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
-        removal_frontier_id: decode_hex_32(args.get(1).expect("length checked"))?,
+        workspace_id: decode_hex_32_named(args.get(0).expect("length checked"), "workspace id")?,
+        removal_frontier_id: decode_hex_32_named(
+            args.get(1).expect("length checked"),
+            "removal frontier id",
+        )?,
     })
 }
 
@@ -194,17 +205,17 @@ pub fn key_node_args(args: CliArgs<'_>) -> Result<KeyNodeArgs, String> {
         .parse::<u64>()
         .map_err(|_| "key-node range_width must be a u64".to_string())?;
     let tombstone_node_id = if let Some(value) = args.get(5) {
-        core_decode_hex_32(value, "tombstone node id")?
+        decode_hex_32_named(value, "tombstone node id")?
     } else {
         [0; 32]
     };
     Ok(KeyNodeArgs {
-        workspace_id: core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")?,
-        removal_frontier_id: core_decode_hex_32(
+        workspace_id: decode_hex_32_named(args.get(0).expect("length checked"), "workspace id")?,
+        removal_frontier_id: decode_hex_32_named(
             args.get(1).expect("length checked"),
             "removal frontier id",
         )?,
-        source_secret_id: core_decode_hex_32(
+        source_secret_id: decode_hex_32_named(
             args.get(2).expect("length checked"),
             "source secret id",
         )?,
@@ -216,7 +227,7 @@ pub fn key_node_args(args: CliArgs<'_>) -> Result<KeyNodeArgs, String> {
 
 pub fn keys_workspace_id(args: CliArgs<'_>) -> Result<[u8; 32], String> {
     args.require_len(1, KEYS_USAGE)?;
-    core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")
+    decode_hex_32_named(args.get(0).expect("length checked"), "workspace id")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +239,7 @@ pub struct ChopNowArgs {
 pub fn chop_now_args(args: CliArgs<'_>) -> Result<ChopNowArgs, String> {
     args.require_len(2, CHOP_NOW_USAGE)?;
     Ok(ChopNowArgs {
-        workspace_id: core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")?,
+        workspace_id: decode_hex_32_named(args.get(0).expect("length checked"), "workspace id")?,
         floor_minute: args
             .get(1)
             .expect("length checked")
@@ -342,8 +353,4 @@ pub fn key_access_output(
         format!("removal_frontier_id: {}", encode_hex(removal_frontier_id)),
         format!("access: {}", if access { "yes" } else { "no" }),
     ])
-}
-
-fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    core_decode_hex_32(value, "workspace id")
 }

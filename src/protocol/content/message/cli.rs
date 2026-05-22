@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::core::cli::{
-    decode_hex_32, encode_hex_32, read_file_bytes, write_file_bytes, CliArgs, CliOutput,
+    decode_hex_32, encode_hex_32, read_file_bytes, short_hex_32, write_file_bytes, CliArgs,
+    CliOutput,
 };
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
@@ -278,7 +279,7 @@ pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput
                     .ok()
                     .flatten()
             })
-            .unwrap_or_else(|| short_hex(&message.signer_id));
+            .unwrap_or_else(|| short_hex_32(&message.signer_id));
         lines.push(format!(
             "{}. [{}] {author}: {}",
             index + 1,
@@ -423,7 +424,7 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
             let username = username_by_user
                 .get(&peer.user_authority_fact_id)
                 .cloned()
-                .unwrap_or_else(|| short_hex(&peer.user_authority_fact_id));
+                .unwrap_or_else(|| short_hex_32(&peer.user_authority_fact_id));
             let label = format!("{}/{}", username, peer.device_name);
             if peer.endpoint_id == local.endpoint {
                 lines.push(format!("    {label} (you)"));
@@ -449,7 +450,7 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
                     .get(&message.signer_id)
                     .or_else(|| username_by_user.get(&message.author_user_id))
                     .cloned()
-                    .unwrap_or_else(|| short_hex(&message.signer_id));
+                    .unwrap_or_else(|| short_hex_32(&message.signer_id));
                 lines.push(format!("    {author} [now]"));
                 last_author = Some(message.signer_id);
             }
@@ -459,7 +460,7 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
                     let author = username_by_user
                         .get(&reaction.author_user_id)
                         .cloned()
-                        .unwrap_or_else(|| short_hex(&reaction.author_user_id));
+                        .unwrap_or_else(|| short_hex_32(&reaction.author_user_id));
                     lines.push(format!("         {} {author}", reaction.emoji));
                 }
             }
@@ -832,8 +833,4 @@ fn format_bytes(bytes: u64) -> String {
 
 fn decode_id(value: &str) -> Result<[u8; 32], String> {
     decode_hex_32(value).map_err(|_| "id must be 64 hex characters".to_string())
-}
-
-fn short_hex(bytes: &[u8; 32]) -> String {
-    encode_hex_32(bytes)[..12].to_string()
 }

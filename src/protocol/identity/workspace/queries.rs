@@ -4,6 +4,7 @@
 //! projected row state directly. They never write, construct facts, project,
 //! or dispatch intents.
 
+use crate::core::cli::encode_hex_32;
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 use crate::core::store::Store;
@@ -38,20 +39,16 @@ pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceS
     list_workspaces(store)?
         .into_iter()
         .find(|workspace| workspace.workspace_id == workspace_id)
-        .ok_or_else(|| format!("workspace row not found for {}", hex_id(&workspace_id)))
+        .ok_or_else(|| {
+            format!(
+                "workspace row not found for {}",
+                encode_hex_32(&workspace_id)
+            )
+        })
 }
 
 pub fn count_workspaces(store: &Store) -> Result<usize, String> {
     store
         .table_row_count(rows::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))
-}
-
-fn hex_id(id: &FactId) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in id {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }

@@ -10,7 +10,7 @@ use crate::core::facts::{FactId, FactScope};
 const ROLE: &str = "secret_coverage";
 
 pub fn secret_role() -> Role {
-    Role::expect(ROLE)
+    ROLE.to_string()
 }
 
 pub fn secret_need(

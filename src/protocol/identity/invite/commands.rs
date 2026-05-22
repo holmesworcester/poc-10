@@ -14,6 +14,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
+use crate::core::cli::{decode_hex_32, encode_hex_32 as encode_hex};
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -190,12 +191,11 @@ pub fn create_device_link(
         user_invite_fact_id: None,
         public_key: crypto::ed25519_public_key(&invite_private_key),
     };
-    let device_invite_bytes =
-        crate::protocol::identity::signed_fact::create::sign_payload_bytes(
-            membership.endpoint_shared_id,
-            &local.signing_secret,
-            identity::device_invite::layout::encode_fact(&device_invite)?,
-        )?;
+    let device_invite_bytes = crate::protocol::identity::signed_fact::create::sign_payload_bytes(
+        membership.endpoint_shared_id,
+        &local.signing_secret,
+        identity::device_invite::layout::encode_fact(&device_invite)?,
+    )?;
     let device_invite_fact = Fact::new(
         FactScope::Global,
         device_invite.created_at_ms,
@@ -250,12 +250,11 @@ pub fn create_invite_server(
         workspace_id: input.workspace_id,
         authority_fact_id: authority.admin_id,
     };
-    let invite_server_bytes =
-        crate::protocol::identity::signed_fact::create::sign_payload_bytes(
-            authority.signer_id,
-            &local.signing_secret,
-            identity::invite_server::layout::encode_fact(&invite_server)?,
-        )?;
+    let invite_server_bytes = crate::protocol::identity::signed_fact::create::sign_payload_bytes(
+        authority.signer_id,
+        &local.signing_secret,
+        identity::invite_server::layout::encode_fact(&invite_server)?,
+    )?;
     let invite_server_fact = Fact::new(
         FactScope::Global,
         invite_server.created_at_ms,
@@ -835,35 +834,4 @@ fn decode_address(value: &str) -> Result<SocketAddr, String> {
     candidate
         .parse()
         .map_err(|_| "invite ADDRESS is invalid".to_string())
-}
-
-pub fn encode_hex(bytes: &[u8; 32]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-pub fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err("invite hex field must be 64 hex characters".to_string());
-    }
-    let mut out = [0; 32];
-    let bytes = value.as_bytes();
-    for idx in 0..32 {
-        out[idx] = (hex_value(bytes[idx * 2])? << 4) | hex_value(bytes[idx * 2 + 1])?;
-    }
-    Ok(out)
-}
-
-fn hex_value(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("invite hex field is not hex".to_string()),
-    }
 }

@@ -155,6 +155,11 @@ pub fn encode_hex_32(id: &[u8; 32]) -> String {
     encode_hex(id)
 }
 
+/// Encode a compact display prefix for a 32-byte id.
+pub fn short_hex_32(id: &[u8; 32]) -> String {
+    encode_hex_32(id)[..12].to_string()
+}
+
 /// Encode arbitrary bytes as lowercase hex.
 pub fn encode_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -187,7 +192,9 @@ fn hex_nibble(byte: u8, label: &str) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_hex_32, encode_hex, encode_hex_32, run, CliArgs, CliCommand, CliOutput};
+    use super::{
+        decode_hex_32, encode_hex, encode_hex_32, run, short_hex_32, CliArgs, CliCommand, CliOutput,
+    };
 
     fn ok_command(_ctx: &mut usize, args: CliArgs<'_>) -> Result<CliOutput, String> {
         Ok(CliOutput::line(format!("args: {}", args.values().len())))
@@ -235,6 +242,7 @@ mod tests {
     fn encode_hex_uses_lowercase() {
         assert_eq!(encode_hex(&[0, 1, 10, 15, 16, 255]), "00010a0f10ff");
         assert_eq!(encode_hex_32(&[0xab; 32]), "ab".repeat(32));
+        assert_eq!(short_hex_32(&[0xab; 32]), "abababababab");
     }
 
     #[test]

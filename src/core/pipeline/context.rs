@@ -234,7 +234,7 @@ fn insert_context_edge_in_tx(
 fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNeed> {
     Ok(ContextNeed {
         owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-        role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
+        role: row.get::<_, String>(1)?,
         scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
             .map_err(rusqlite::Error::InvalidParameterName)?,
         start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
@@ -246,7 +246,7 @@ fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNee
 fn selected_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOffer> {
     Ok(ContextOffer {
         owner: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-        role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
+        role: row.get::<_, String>(1)?,
         scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
             .map_err(rusqlite::Error::InvalidParameterName)?,
         start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
