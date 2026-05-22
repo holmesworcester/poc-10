@@ -1,7 +1,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
-use crate::protocol::context_keys::{self, WrapSourceDescriptor, WrapSourceKind};
+use crate::protocol::facts::encryption::wrap_source::{self, WrapSourceDescriptor, WrapSourceKind};
 use crate::protocol::facts::identity;
 
 use super::layout;
@@ -13,7 +13,7 @@ pub(super) fn matching_wrap_sources_with_signer(
     projection_context
         .matched_payloads_for(need)
         .filter_map(|(offer, payload)| {
-            context_keys::wrap_source_offer_valid_for_need(need, offer)
+            wrap_source::wrap_source_offer_valid_for_need(need, offer)
                 .map(|source| (offer, payload, source))
         })
         .map(|(_, payload, source)| {
@@ -36,13 +36,15 @@ pub(super) fn add_signer_needs_for_matching_sources(
     need: &ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     for (offer, payload) in projection_context.matched_payloads_for(need) {
-        let Some(source) = context_keys::wrap_source_offer_valid_for_need(need, offer) else {
+        let Some(source) = wrap_source::wrap_source_offer_valid_for_need(need, offer) else {
             continue;
         };
         validate_wrap_source_payload(payload, &source)?;
-        output = output.need(crate::protocol::context_keys::local_signer_secret_need(
+        output = output.need(crate::core::context::ContextNeed::range(
             need.owner,
+            "local_signer_secret",
             need.scope.clone(),
+            source.owner_endpoint_id,
             source.owner_endpoint_id,
         ));
     }
@@ -55,8 +57,13 @@ fn local_signer_secret_fact_id(
     scope: &FactScope,
     signer_id: FactId,
 ) -> Option<FactId> {
-    let need =
-        crate::protocol::context_keys::local_signer_secret_need(owner, scope.clone(), signer_id);
+    let need = crate::core::context::ContextNeed::range(
+        owner,
+        "local_signer_secret",
+        scope.clone(),
+        signer_id,
+        signer_id,
+    );
     projection_context
         .matched_payloads_for(&need)
         .map(|(_, payload)| payload.id)

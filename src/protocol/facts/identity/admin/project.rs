@@ -15,7 +15,6 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::admin::fact::AdminFact;
 use crate::protocol::facts::identity::user;
@@ -175,9 +174,11 @@ struct BootstrapAdminNeeds {
 impl BootstrapAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact) -> Self {
         Self {
-            workspace: context_keys::exact_need(
+            workspace: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::workspace_role(),
+                "identity_workspace",
+                crate::core::facts::FactScope::Global,
+                admin.workspace_id,
                 admin.workspace_id,
             ),
         }
@@ -197,17 +198,27 @@ struct DelegatedAdminNeeds {
 impl DelegatedAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact) -> Self {
         Self {
-            workspace: context_keys::exact_need(
+            workspace: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::workspace_role(),
+                "identity_workspace",
+                crate::core::facts::FactScope::Global,
+                admin.workspace_id,
                 admin.workspace_id,
             ),
-            authority: context_keys::exact_need(
+            authority: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::admin_role(),
+                "identity_admin",
+                crate::core::facts::FactScope::Global,
+                admin.authority_fact_id,
                 admin.authority_fact_id,
             ),
-            user: context_keys::exact_need(owner, context_keys::user_role(), admin.user_fact_id),
+            user: crate::core::context::ContextNeed::range(
+                owner,
+                "identity_user",
+                crate::core::facts::FactScope::Global,
+                admin.user_fact_id,
+                admin.user_fact_id,
+            ),
         }
     }
 
@@ -236,15 +247,19 @@ fn materialized_output(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     Ok(output
-        .offer(context_keys::exact_offer(
+        .offer(crate::core::context::ContextOffer::range(
             fact.id,
-            context_keys::admin_role(),
+            "identity_admin",
+            crate::core::facts::FactScope::Global,
+            fact.id,
+            fact.id,
         ))
-        .offer(context_keys::scoped_key_offer(
+        .offer(crate::core::context::ContextOffer::range(
             fact.id,
-            context_keys::admin_role(),
-            admin.workspace_id,
-            admin.user_fact_id.to_vec(),
+            "identity_admin",
+            crate::protocol::facts::identity::workspace::scope(admin.workspace_id),
+            admin.user_fact_id,
+            admin.user_fact_id,
         ))
         .row_mutation(RowMutation::PutRow(admin_row(fact.id, admin)?))
         .intent(share_fact_with_workspace_intent_for_fact(

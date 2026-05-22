@@ -15,7 +15,6 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::invite_server::fact::InviteServerFact;
 use crate::protocol::facts::identity::{admin, endpoint_shared, workspace};
@@ -169,9 +168,11 @@ struct WorkspaceSignedNeeds {
 impl WorkspaceSignedNeeds {
     fn new(owner: FactId, invite: &InviteServerFact) -> Self {
         Self {
-            workspace: context_keys::exact_need(
+            workspace: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::workspace_role(),
+                "identity_workspace",
+                crate::core::facts::FactScope::Global,
+                invite.workspace_id,
                 invite.workspace_id,
             ),
         }
@@ -190,14 +191,18 @@ struct EndpointAdminNeeds {
 impl EndpointAdminNeeds {
     fn new(owner: FactId, invite: &InviteServerFact, signer_id: FactId) -> Self {
         Self {
-            endpoint_shared: context_keys::exact_need(
+            endpoint_shared: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::endpoint_shared_role(),
+                "identity_endpoint_shared",
+                crate::core::facts::FactScope::Global,
+                signer_id,
                 signer_id,
             ),
-            admin: context_keys::exact_need(
+            admin: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::admin_role(),
+                "identity_admin",
+                crate::core::facts::FactScope::Global,
+                invite.authority_fact_id,
                 invite.authority_fact_id,
             ),
         }
@@ -216,10 +221,18 @@ fn materialized_output(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     Ok(output
-        .offer(context_keys::invite_server_offer(fact.id))
-        .offer(context_keys::invite_server_key_offer(
+        .offer(crate::core::context::ContextOffer::range(
             fact.id,
-            invite.workspace_id,
+            "identity_invite_server",
+            crate::core::facts::FactScope::Global,
+            fact.id,
+            fact.id,
+        ))
+        .offer(crate::core::context::ContextOffer::range(
+            fact.id,
+            "identity_invite_server_key",
+            crate::protocol::facts::identity::workspace::scope(invite.workspace_id),
+            invite.public_key.to_vec(),
             invite.public_key,
         ))
         .row_mutation(RowMutation::PutRow(invite_server_row(fact.id, invite)?))

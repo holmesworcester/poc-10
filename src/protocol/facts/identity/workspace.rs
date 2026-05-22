@@ -11,6 +11,13 @@ pub mod runtime_counts;
 
 pub const TYPE_WORKSPACE: u8 = layout::TYPE_WORKSPACE;
 
+pub fn scope(workspace_id: crate::core::facts::FactId) -> crate::core::facts::FactScope {
+    crate::core::facts::FactScope::Scoped {
+        kind: crate::core::facts::ScopeKind::new("workspace").expect("valid workspace scope"),
+        id: workspace_id,
+    }
+}
+
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::WorkspaceFact, String> {
     layout::decode_fact(bytes)
 }

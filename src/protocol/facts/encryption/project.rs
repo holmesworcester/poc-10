@@ -20,7 +20,6 @@ use super::local_recipient_key::local_recipient_key;
 use super::recipient_key::recipient_key;
 use super::signed_key_wrap::signed_key_wrap;
 use super::validation::require_fact_scope;
-use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -77,7 +76,7 @@ fn removal_frontier(
     frontier: super::fact::RemovalFrontierFact,
 ) -> Result<ProjectionOutput, String> {
     // 1. Structural.
-    let scope = context_keys::workspace_scope(frontier.workspace_id);
+    let scope = crate::protocol::facts::identity::workspace::scope(frontier.workspace_id);
     require_fact_scope(fact, &scope)?;
 
     // 2. Authority.
@@ -89,10 +88,20 @@ fn removal_frontier(
     // before this fact can become usable frontier context. Otherwise an
     // unauthenticated workspace-scoped byte string could advertise a key
     // frontier.
-    let owner_signer_need =
-        context_keys::signer_need(fact.id, scope.clone(), frontier.owner_endpoint_id);
-    let local_signer_need =
-        context_keys::local_signer_secret_need(fact.id, scope.clone(), frontier.owner_endpoint_id);
+    let owner_signer_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "content_signer",
+        scope.clone(),
+        frontier.owner_endpoint_id,
+        frontier.owner_endpoint_id,
+    );
+    let local_signer_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "local_signer_secret",
+        scope.clone(),
+        frontier.owner_endpoint_id,
+        frontier.owner_endpoint_id,
+    );
     let waiting = ProjectionOutput::new()
         .need(owner_signer_need.clone())
         .need(local_signer_need.clone());
@@ -107,7 +116,13 @@ fn removal_frontier(
 
     // 3. Materialize.
     Ok(waiting
-        .offer(context_keys::frontier_offer(fact.id, scope, fact.id))
+        .offer(crate::core::context::ContextOffer::range(
+            fact.id,
+            "encryption_removal_frontier",
+            scope,
+            fact.id,
+            fact.id,
+        ))
         .intent(share_fact_with_workspace_intent_for_fact(
             frontier.workspace_id,
             fact,

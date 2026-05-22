@@ -14,7 +14,6 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
-use crate::protocol::context_keys as message_keys;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{message, message_deletion};
 use crate::protocol::facts::identity;
@@ -55,16 +54,23 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = message_keys::workspace_scope(reaction.workspace_id);
+        let scope = crate::protocol::facts::identity::workspace::scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, signer);
-        let target_need =
-            message_keys::message_need(fact.id, scope.clone(), reaction.target_message_id);
-        let author_need = crate::protocol::context_keys::exact_need(
+        let target_need = crate::core::context::ContextNeed::range(
             fact.id,
-            crate::protocol::context_keys::user_role(),
+            "content_message",
+            scope.clone(),
+            reaction.target_message_id,
+            reaction.target_message_id,
+        );
+        let author_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "identity_user",
+            crate::core::facts::FactScope::Global,
+            reaction.author_user_id,
             reaction.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -99,12 +105,15 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             reaction.target_message_id,
             "reaction target",
         )?;
-        let target_deletion_need = message_keys::deletion_need(
+        let target_deletion_need = crate::core::context::ContextNeed::for_key_parts(
             fact.id,
+            "content_deleted",
             scope.clone(),
-            reaction.target_message_id,
-            target_context.message.author_user_id,
-        );
+            [
+                reaction.target_message_id,
+                target_context.message.author_user_id,
+            ],
+        )?;
         if let Some(deletion) =
             context_payload(context, &target_deletion_need, "reaction target deletion")?
         {

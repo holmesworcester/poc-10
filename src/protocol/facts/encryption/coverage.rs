@@ -1,4 +1,4 @@
-//! Secret coverage context keys.
+//! Secret coverage context ranges.
 //!
 //! Core only sees byte ranges. This module chooses the coordinate layout for
 //! encrypted-message secret coverage and validates candidate overlaps before a
@@ -7,12 +7,10 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{FactId, FactScope};
 
-use super::exact::{protocol_role, range_need_for_key_range, range_offer_for_key_range};
-
-pub const SECRET_COVERAGE_ROLE: &str = "secret_coverage";
+const ROLE: &str = "secret_coverage";
 
 pub fn secret_role() -> Role {
-    protocol_role(SECRET_COVERAGE_ROLE)
+    Role::expect(ROLE)
 }
 
 pub fn secret_need(
@@ -24,7 +22,7 @@ pub fn secret_need(
     leaf_id: FactId,
 ) -> ContextNeed {
     let key = secret_need_key(workspace_id, frontier_id, minute, leaf_id);
-    range_need_for_key_range(
+    ContextNeed::range(
         owner,
         secret_role(),
         scope,
@@ -56,7 +54,7 @@ pub fn secret_offer(
         end_minute,
         prefix_bound(leaf_prefix, prefix_bytes, BoundSide::High),
     );
-    range_offer_for_key_range(owner, secret_role(), scope, start, end)
+    ContextOffer::range(owner, secret_role(), scope, start, end)
 }
 
 // Versioned keys make persisted context rows self-describing. A need names one
@@ -192,13 +190,13 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::context_keys::workspace_scope;
+    use crate::protocol::facts::identity::workspace::scope;
 
     #[test]
     fn secret_coverage_validates_time_range_and_leaf_prefix() {
         let workspace = [1; 32];
         let frontier = [2; 32];
-        let scope = workspace_scope(workspace);
+        let scope = scope(workspace);
         let mut prefix = [0; 32];
         prefix[0] = 0b1010_1111;
         let mut leaf = [0; 32];
@@ -213,7 +211,7 @@ mod tests {
     fn secret_coverage_rejects_wrong_prefix() {
         let workspace = [1; 32];
         let frontier = [2; 32];
-        let scope = workspace_scope(workspace);
+        let scope = scope(workspace);
         let mut prefix = [0; 32];
         prefix[0] = 0b1111_0000;
         let mut leaf = [0; 32];
@@ -228,7 +226,7 @@ mod tests {
     fn secret_coverage_rejects_inverted_offer_range() {
         let workspace = [1; 32];
         let frontier = [2; 32];
-        let scope = workspace_scope(workspace);
+        let scope = scope(workspace);
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, [9; 32]);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 50, 40, 0, [0; 32]);
 

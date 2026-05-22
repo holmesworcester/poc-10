@@ -78,14 +78,19 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(authority_need)
-            .offer(crate::protocol::context_keys::signer_offer(
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
-                crate::protocol::context_keys::workspace_scope(event.workspace_id),
+                "content_signer",
+                crate::protocol::facts::identity::workspace::scope(event.workspace_id),
+                event.endpoint_id,
                 event.endpoint_id,
             ))
-            .offer(crate::protocol::context_keys::exact_offer(
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
-                crate::protocol::context_keys::endpoint_shared_role(),
+                "identity_endpoint_shared",
+                crate::core::facts::FactScope::Global,
+                fact.id,
+                fact.id,
             ))
             .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &event)?))
             .intent(share_fact_with_workspace_intent_for_fact(
@@ -101,14 +106,18 @@ fn authority_need(
     signer_id: [u8; 32],
 ) -> ContextNeed {
     match event.endpoint_role {
-        EndpointRole::InviteServer => crate::protocol::context_keys::exact_need(
+        EndpointRole::InviteServer => crate::core::context::ContextNeed::range(
             fact.id,
-            crate::protocol::context_keys::invite_server_role(),
+            "identity_invite_server",
+            crate::core::facts::FactScope::Global,
+            signer_id,
             signer_id,
         ),
-        EndpointRole::Device => crate::protocol::context_keys::exact_need(
+        EndpointRole::Device => crate::core::context::ContextNeed::range(
             fact.id,
-            crate::protocol::context_keys::device_invite_role(),
+            "identity_device_invite",
+            crate::core::facts::FactScope::Global,
+            signer_id,
             signer_id,
         ),
     }

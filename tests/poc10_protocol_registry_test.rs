@@ -43,7 +43,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 }
 
 #[test]
-fn context_key_plumbing_is_centralized_by_relation() {
+fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden_fact_module_files = rust_files(&root.join("src/protocol/facts"))
         .into_iter()
@@ -62,33 +62,28 @@ fn context_key_plumbing_is_centralized_by_relation() {
 
     assert!(
         forbidden_fact_module_files.is_empty(),
-        "fact modules must emit protocol-defined needs/offers, not own context-key/context/selector files:\n{}",
+        "fact modules must emit core context ranges directly or call domain-owned range encoders, not own context/selector/matcher source-of-truth files:\n{}",
         forbidden_fact_module_files.join("\n")
     );
 
-    let context_key_files = rust_files(&root.join("src/protocol/context_keys"))
-        .into_iter()
-        .filter_map(|path| {
-            path.file_stem()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
-        .collect::<BTreeSet<_>>();
-    let expected = BTreeSet::from([
-        "coverage".to_string(),
-        "exact".to_string(),
-        "wrap_source".to_string(),
-    ]);
-
-    assert_eq!(
-        context_key_files, expected,
-        "protocol context keys should stay organized by relation"
-    );
-
     assert!(
-        root.join("src/protocol/context_keys.rs").is_file(),
-        "protocol context keys need a root manifest file instead of a mod.rs"
+        !root.join("src/protocol/context_keys.rs").exists(),
+        "central protocol context-key manifests recreate a role registry; use core ranges and domain-owned encoders"
     );
+    assert!(
+        !root.join("src/protocol/context_keys").exists(),
+        "central protocol context-key directories recreate a matcher namespace; use core ranges and domain-owned encoders"
+    );
+
+    for required in [
+        "src/protocol/facts/encryption/coverage.rs",
+        "src/protocol/facts/encryption/wrap_source.rs",
+    ] {
+        assert!(
+            root.join(required).is_file(),
+            "nontrivial protocol range encoders should live with the domain that validates them: {required}"
+        );
+    }
 }
 
 #[test]

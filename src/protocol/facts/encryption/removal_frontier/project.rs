@@ -59,9 +59,11 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
         }
 
         // 2. Authority and referenced removal context.
-        let authority_need = crate::protocol::context_keys::exact_need(
+        let authority_need = crate::core::context::ContextNeed::range(
             fact.id,
-            crate::protocol::context_keys::admin_role(),
+            "identity_admin",
+            crate::core::facts::FactScope::Global,
+            frontier.authority_admin_id,
             frontier.authority_admin_id,
         );
         let ref_needs = frontier
@@ -69,9 +71,11 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
             .iter()
             .copied()
             .map(|ref_id| {
-                crate::protocol::context_keys::exact_fact_need(
+                crate::core::context::ContextNeed::range(
                     fact.id,
+                    "sync_exact_fact",
                     expected_scope.clone(),
+                    ref_id,
                     ref_id,
                 )
             })
@@ -105,9 +109,11 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
 
         // 3. Materialize.
         Ok(waiting
-            .offer(crate::protocol::context_keys::exact_fact_offer(
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
+                "sync_exact_fact",
                 expected_scope,
+                fact.id,
                 fact.id,
             ))
             .row_mutation(RowMutation::PutRow(removal_frontier_row(
@@ -146,7 +152,6 @@ mod projector_tests {
     use topo::protocol::facts::identity::admin::fact::AdminFact;
     use topo::protocol::intents::sync::share_fact_with_workspace;
 
-    use topo::protocol::context_keys as sync_keys;
     use topo::protocol::facts::encryption::removal_frontier::fact::RemovalFrontierFact;
     use topo::protocol::facts::encryption::removal_frontier::{layout, project, rows};
 
@@ -183,39 +188,52 @@ mod projector_tests {
 
         let context = ProjectionContext::from_matches(vec![
             matched(
-                crate::protocol::context_keys::exact_need(
+                crate::core::context::ContextNeed::range(
                     fact.id,
-                    crate::protocol::context_keys::admin_role(),
+                    "identity_admin",
+                    crate::core::facts::FactScope::Global,
+                    admin.id,
                     admin.id,
                 ),
-                crate::protocol::context_keys::exact_offer(
+                crate::core::context::ContextOffer::range(
                     admin.id,
-                    crate::protocol::context_keys::admin_role(),
+                    "identity_admin",
+                    crate::core::facts::FactScope::Global,
+                    admin.id,
+                    admin.id,
                 ),
                 admin.clone(),
             ),
             matched(
-                sync_keys::exact_fact_need(
+                crate::core::context::ContextNeed::range(
                     fact.id,
+                    "sync_exact_fact",
                     workspace_scope(frontier.workspace_id),
+                    ref_a.id,
                     ref_a.id,
                 ),
-                sync_keys::exact_fact_offer(
+                crate::core::context::ContextOffer::range(
                     ref_a.id,
+                    "sync_exact_fact",
                     workspace_scope(frontier.workspace_id),
+                    ref_a.id,
                     ref_a.id,
                 ),
                 ref_a.clone(),
             ),
             matched(
-                sync_keys::exact_fact_need(
+                crate::core::context::ContextNeed::range(
                     fact.id,
+                    "sync_exact_fact",
                     workspace_scope(frontier.workspace_id),
+                    ref_b.id,
                     ref_b.id,
                 ),
-                sync_keys::exact_fact_offer(
+                crate::core::context::ContextOffer::range(
                     ref_b.id,
+                    "sync_exact_fact",
                     workspace_scope(frontier.workspace_id),
+                    ref_b.id,
                     ref_b.id,
                 ),
                 ref_b.clone(),

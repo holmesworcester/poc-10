@@ -83,9 +83,11 @@ pub fn decode_raw_or_signed_fact<T>(
 
 pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<ContextNeed> {
     signer.map(|signer| {
-        crate::protocol::context_keys::exact_need(
+        crate::core::context::ContextNeed::range(
             owner,
-            crate::protocol::context_keys::endpoint_shared_role(),
+            "identity_endpoint_shared",
+            crate::core::facts::FactScope::Global,
+            signer.signer_id,
             signer.signer_id,
         )
     })

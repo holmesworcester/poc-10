@@ -27,12 +27,12 @@ use crate::core::projectors::{
 };
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{SchemaSource, TableName};
+use crate::protocol::cli as command;
 use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
 use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
     sync as sync_intents, transport as transport_intents,
 };
-use crate::protocol::{assertions, cli as command};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -211,13 +211,17 @@ CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIM
     ],
 };
 
+// Every CLI command's host function must live in `protocol::cli`. This macro
+// takes the run function as a bare identifier and resolves it against the
+// `command` (`protocol::cli`) module, so registering a command whose handler
+// lives anywhere else simply does not compile.
 macro_rules! cli_command {
-    ($name:literal, $usage:path, $run:path) => {
+    ($name:literal, $usage:path, $run:ident) => {
         CliCommand {
             name: $name,
             usage: $usage,
             help: "",
-            run: $run,
+            run: command::$run,
         }
     };
 }
@@ -226,182 +230,138 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!(
         "create-workspace",
         identity::workspace::cli::CREATE_WORKSPACE_USAGE,
-        command::create_workspace
+        create_workspace
     ),
-    cli_command!(
-        "invite",
-        identity::invite::cli::INVITE_USAGE,
-        command::invite
-    ),
+    cli_command!("invite", identity::invite::cli::INVITE_USAGE, invite),
     cli_command!(
         "invite-server",
         identity::invite::cli::INVITE_SERVER_USAGE,
-        command::invite_server
+        invite_server
     ),
-    cli_command!(
-        "accept",
-        identity::invite::cli::ACCEPT_USAGE,
-        command::accept
-    ),
+    cli_command!("accept", identity::invite::cli::ACCEPT_USAGE, accept),
     cli_command!(
         "accept-invite-server",
         identity::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
-        command::accept_invite_server
+        accept_invite_server
     ),
-    cli_command!("link", identity::invite::cli::LINK_USAGE, command::link),
+    cli_command!("link", identity::invite::cli::LINK_USAGE, link),
     cli_command!(
         "accept-link",
         identity::invite::cli::ACCEPT_LINK_USAGE,
-        command::accept_link
+        accept_link
     ),
     cli_command!(
         "identity",
         identity::endpoint_shared::cli::IDENTITY_USAGE,
-        command::identity
+        identity
     ),
-    cli_command!(
-        "peers",
-        identity::endpoint_shared::cli::PEERS_USAGE,
-        command::peers
-    ),
+    cli_command!("peers", identity::endpoint_shared::cli::PEERS_USAGE, peers),
     cli_command!(
         "workspaces",
         identity::workspace::cli::WORKSPACES_USAGE,
-        command::workspaces
+        workspaces
     ),
-    cli_command!("users", identity::user::cli::USERS_USAGE, command::users),
+    cli_command!("users", identity::user::cli::USERS_USAGE, users),
     cli_command!(
         "key-recipient",
         encryption::cli::KEY_RECIPIENT_USAGE,
-        command::key_recipient
+        key_recipient
     ),
     cli_command!(
         "key-rotate-recipient",
         encryption::cli::KEY_ROTATE_RECIPIENT_USAGE,
-        command::key_recipient_rotation
+        key_recipient_rotation
     ),
     cli_command!(
         "key-frontier",
         encryption::cli::KEY_FRONTIER_USAGE,
-        command::key_frontier
+        key_frontier
     ),
-    cli_command!(
-        "key-wrap",
-        encryption::cli::KEY_WRAP_USAGE,
-        command::key_wrap
-    ),
-    cli_command!(
-        "key-access",
-        encryption::cli::KEY_ACCESS_USAGE,
-        command::key_access
-    ),
-    cli_command!(
-        "key-derive",
-        encryption::cli::KEY_DERIVE_USAGE,
-        command::key_derive
-    ),
-    cli_command!(
-        "key-node",
-        encryption::cli::KEY_NODE_USAGE,
-        command::key_node
-    ),
-    cli_command!("keys", encryption::cli::KEYS_USAGE, command::keys),
-    cli_command!(
-        "chop-now",
-        encryption::cli::CHOP_NOW_USAGE,
-        command::chop_now
-    ),
+    cli_command!("key-wrap", encryption::cli::KEY_WRAP_USAGE, key_wrap),
+    cli_command!("key-access", encryption::cli::KEY_ACCESS_USAGE, key_access),
+    cli_command!("key-derive", encryption::cli::KEY_DERIVE_USAGE, key_derive),
+    cli_command!("key-node", encryption::cli::KEY_NODE_USAGE, key_node),
+    cli_command!("keys", encryption::cli::KEYS_USAGE, keys),
+    cli_command!("chop-now", encryption::cli::CHOP_NOW_USAGE, chop_now),
     cli_command!(
         "disappearing-set",
         encryption::disappearing_messages_setting::cli::DISAPPEARING_SET_USAGE,
-        command::disappearing_set
+        disappearing_set
     ),
     cli_command!(
         "disappearing-status",
         encryption::disappearing_messages_setting::cli::DISAPPEARING_STATUS_USAGE,
-        command::disappearing_status
+        disappearing_status
     ),
     cli_command!(
         "disappearing-tighten",
         encryption::disappearing_messages_setting::cli::DISAPPEARING_TIGHTEN_USAGE,
-        command::disappearing_tighten
+        disappearing_tighten
     ),
     cli_command!(
         "disappearing-compact",
         encryption::disappearing_messages_setting::cli::DISAPPEARING_COMPACT_USAGE,
-        command::disappearing_compact
+        disappearing_compact
     ),
-    cli_command!("send", content::message::cli::SEND_USAGE, command::send),
-    cli_command!("react", content::message::cli::REACT_USAGE, command::react),
+    cli_command!("send", content::message::cli::SEND_USAGE, send),
+    cli_command!("react", content::message::cli::REACT_USAGE, react),
     cli_command!(
         "send-file",
         content::message::cli::SEND_FILE_USAGE,
-        command::send_file
+        send_file
     ),
-    cli_command!("files", content::message::cli::FILES_USAGE, command::files),
+    cli_command!("files", content::message::cli::FILES_USAGE, files),
     cli_command!(
         "save-file",
         content::message::cli::SAVE_FILE_USAGE,
-        command::save_file
+        save_file
     ),
     cli_command!(
         "delete-file",
         content::file_deletion::cli::DELETE_FILE_USAGE,
-        command::delete_file
+        delete_file
     ),
     cli_command!(
         "delete-message",
         content::message::cli::DELETE_MESSAGE_USAGE,
-        command::delete_message
+        delete_message
     ),
-    cli_command!(
-        "messages",
-        content::message::cli::MESSAGES_USAGE,
-        command::messages
-    ),
-    cli_command!("view", content::message::cli::VIEW_USAGE, command::view),
+    cli_command!("messages", content::message::cli::MESSAGES_USAGE, messages),
+    cli_command!("view", content::message::cli::VIEW_USAGE, view),
     cli_command!(
         "grant-admin",
         identity::admin::cli::GRANT_ADMIN_USAGE,
-        command::grant_admin
+        grant_admin
     ),
-    cli_command!(
-        "generate",
-        content::event::cli::GENERATE_USAGE,
-        command::generate
-    ),
+    cli_command!("generate", content::event::cli::GENERATE_USAGE, generate),
     cli_command!(
         "generate-deps",
         sync::cascade_fact::cli::GENERATE_DEPS_USAGE,
-        command::generate_deps
+        generate_deps
     ),
     cli_command!(
         "replay-deps-reverse",
         sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
-        command::replay_deps_reverse
+        replay_deps_reverse
     ),
     cli_command!(
         "sync-status",
         sync::shared_fact::cli::SYNC_STATUS_USAGE,
-        command::sync_status
+        sync_status
     ),
     cli_command!(
         "negentropy-drain",
         sync::shared_fact::cli::NEGENTROPY_DRAIN_USAGE,
-        command::negentropy_drain
+        negentropy_drain
     ),
     cli_command!(
         "content-count",
         content::event::cli::CONTENT_COUNT_USAGE,
-        command::content_count
+        content_count
     ),
-    cli_command!("assert", assertions::ASSERT_USAGE, command::assert_cli),
-    cli_command!("clock", crate::core::clock::CLOCK_USAGE, command::clock),
-    cli_command!(
-        "count",
-        identity::workspace::cli::COUNT_USAGE,
-        command::count
-    ),
+    cli_command!("assert", command::ASSERT_USAGE, assert_cli),
+    cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
+    cli_command!("count", identity::workspace::cli::COUNT_USAGE, count),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[

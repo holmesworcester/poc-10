@@ -13,7 +13,6 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::context_keys;
 use crate::protocol::facts::content::message::authority;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -51,7 +50,7 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = context_keys::workspace_scope(event.workspace_id);
+        let scope = crate::protocol::facts::identity::workspace::scope(event.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.

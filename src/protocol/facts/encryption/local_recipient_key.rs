@@ -1,6 +1,5 @@
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
-use crate::protocol::context_keys;
 use crate::protocol::facts::encryption::fact::LocalRecipientKeyFact;
 use crate::protocol::facts::encryption::intent::{
     purge_retired_recipient_material_intent, PurgeRetiredRecipientMaterialIntent,
@@ -14,11 +13,16 @@ pub(super) fn local_recipient_key(
     projection_context: &ProjectionContext,
     local: LocalRecipientKeyFact,
 ) -> Result<ProjectionOutput, String> {
-    let scope = crate::protocol::context_keys::workspace_scope(local.workspace_id);
+    let scope = crate::protocol::facts::identity::workspace::scope(local.workspace_id);
     require_local_scope(fact)?;
 
-    let recipient_need =
-        context_keys::recipient_key_need(fact.id, scope.clone(), local.recipient_key_id);
+    let recipient_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "recipient_key",
+        scope.clone(),
+        local.recipient_key_id,
+        local.recipient_key_id,
+    );
     let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
         return Ok(ProjectionOutput::new().need(recipient_need));
     };
@@ -30,13 +34,14 @@ pub(super) fn local_recipient_key(
         return Err("local recipient key public key does not match recipient".to_string());
     }
 
-    let superseded_need =
-        context_keys::recipient_superseded_need(fact.id, scope.clone(), local.recipient_key_id);
-    let is_superseded = projection_context.offers().iter().any(|offer| {
-        offer.role == superseded_need.role
-            && offer.start_key == superseded_need.start_key
-            && offer.end_key == superseded_need.end_key
-    });
+    let superseded_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "recipient_superseded",
+        scope.clone(),
+        local.recipient_key_id,
+        local.recipient_key_id,
+    );
+    let is_superseded = projection_context.payload_for(&superseded_need).is_some();
     let output = ProjectionOutput::new()
         .need(recipient_need)
         .need(superseded_need);
@@ -50,9 +55,11 @@ pub(super) fn local_recipient_key(
         )));
     }
 
-    Ok(output.offer(context_keys::local_recipient_key_offer(
+    Ok(output.offer(crate::core::context::ContextOffer::range(
         fact.id,
+        "local_recipient_key",
         scope,
+        local.recipient_key_id,
         local.recipient_key_id,
     )))
 }

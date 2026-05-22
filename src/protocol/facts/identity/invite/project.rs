@@ -48,8 +48,20 @@ impl TypedProjector<super::Codec> for InviteSecretProjector {
         }
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(crate::protocol::context_keys::invite_secret_offer(fact.id))
-            .offer(crate::protocol::context_keys::connection_invite_secret_offer(fact.id, fact.id))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "identity_invite_secret",
+                crate::core::facts::FactScope::Global,
+                fact.id,
+                fact.id,
+            ))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "connection_invite_secret",
+                crate::core::facts::FactScope::Local,
+                fact.id,
+                fact.id,
+            ))
             .row_mutation(RowMutation::PutRow(invite_secret_row(&invite_secret)?)))
     }
 }

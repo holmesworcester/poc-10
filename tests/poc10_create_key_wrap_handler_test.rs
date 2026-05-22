@@ -1,13 +1,14 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::protocol::context_keys::{workspace_scope, WrapSourceDescriptor, WrapSourceKind};
 use topo::protocol::facts::encryption::fact::{
     LocalKeySecretFact, RecipientKeyFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
 };
 use topo::protocol::facts::encryption::intent;
 use topo::protocol::facts::encryption::layout;
+use topo::protocol::facts::encryption::wrap_source::{WrapSourceDescriptor, WrapSourceKind};
 use topo::protocol::facts::identity;
 use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::facts::identity::workspace::scope as workspace_scope;
 use topo::protocol::intents::encryption::create_key_wrap::CreateKeyWrapHandler;
 
 #[test]

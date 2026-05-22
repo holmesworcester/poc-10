@@ -4,7 +4,6 @@
 //! bytes. User-facing timestamping and receipts live in `commands.rs`.
 
 use crate::core::facts::{Fact, FactId};
-use crate::protocol::context_keys;
 
 use super::fact::{AuthorId, ContentMessageDeletionFact, WorkspaceId};
 use super::layout;
@@ -26,7 +25,7 @@ pub fn delete_message(
         author_user_id,
     };
     Ok(Fact::new(
-        context_keys::workspace_scope(workspace_id),
+        crate::protocol::facts::identity::workspace::scope(workspace_id),
         created_at_ms,
         layout::encode_fact(&deletion)?,
     ))

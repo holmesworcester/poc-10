@@ -1,7 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{ProjectionContext, Projector};
-use topo::protocol::context_keys::workspace_scope;
 use topo::protocol::facts::encryption::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
     WrappedSecretKind,
@@ -10,6 +9,7 @@ use topo::protocol::facts::encryption::layout as key_wrap_layout;
 use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::facts::identity::signed_fact::project::SignedFactProjector;
 use topo::protocol::facts::identity::signed_fact::{create, layout};
+use topo::protocol::facts::identity::workspace::scope as workspace_scope;
 
 #[test]
 fn signed_fact_round_trips_and_verifies_key_wrap_payload() {

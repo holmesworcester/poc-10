@@ -5,7 +5,7 @@ use crate::core::intents::{Intent, IntentKind};
 use crate::core::wire;
 
 use super::fact::{RecipientKeyId, WorkspaceId};
-use crate::protocol::context_keys::{WrapSourceDescriptor, WrapSourceKind};
+use crate::protocol::facts::encryption::wrap_source::{WrapSourceDescriptor, WrapSourceKind};
 
 pub const CREATE_KEY_WRAP: &str = "create_key_wrap";
 pub const UNWRAP_KEY_WRAP: &str = "unwrap_key_wrap";

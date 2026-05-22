@@ -13,7 +13,6 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::context_keys;
 use crate::protocol::facts::sync::encrypted_root::project::require_fact_scope;
 
 #[derive(Debug, Clone, Default)]
@@ -43,18 +42,22 @@ impl TypedProjector<super::Codec> for SyncKeyWrapAvailableProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = context_keys::workspace_scope(key.workspace_id);
+        let scope = crate::protocol::facts::identity::workspace::scope(key.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(context_keys::exact_fact_offer(
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
+                "sync_exact_fact",
                 scope.clone(),
                 key.key_wrap_id,
+                key.key_wrap_id,
             ))
-            .offer(context_keys::key_wrap_offer(
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
+                "sync_key_wrap",
                 scope,
+                key.key_wrap_id,
                 key.key_wrap_id,
             )))
     }

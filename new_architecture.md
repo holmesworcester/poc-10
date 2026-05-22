@@ -7,7 +7,7 @@ migration checkpoint. The target vocabulary is deliberately small:
 facts
 context needs
 context offers
-context keys
+context ranges
 projectors
 intents
 intent handlers
@@ -33,7 +33,7 @@ The migration succeeds when:
 - Core owns facts, context, command context, byte-range context matching, generic runtime/app mechanics,
   pending fact processing, context wake fanout, intent dispatch, storage mechanics, wire
   field primitives, and crypto helpers.
-- Fact modules own fact semantics: layouts, projectors, context roles,
+- Fact modules own fact semantics: layouts, projectors, context roles/ranges,
   command constructors, read-model rows, module-local CLI adapters, module
   queries, and protocol validation rules.
 - Intent handlers own bounded stateful work and handler checkpoint state.
@@ -117,8 +117,8 @@ fixtures and the deferred partial-download-progress content tests.
 Implemented target slices:
 
 - Core fact/context/intent/projector contracts.
-- Context needs/offers/context keys for exact facts, secret coverage, receive
-  provenance, deletion/update wakeups, and recipient-key supersession.
+- Context needs/offers for exact fact ids, secret coverage, receive provenance,
+  deletion/update wakeups, and recipient-key supersession.
 - Row mutations as the projector- and handler-owned path for bounded read-model
   writes and deletes.
 - Pending-fact projection replaces each fact's needs/offers, wakes context
@@ -169,11 +169,10 @@ src/
   core.rs
   protocol.rs
   protocol/
-    context_keys.rs
-    context_keys/
-      exact.rs
-      coverage.rs
-      wrap_source.rs
+    facts/
+      encryption/
+        coverage.rs
+        wrap_source.rs
 
   core/
     schema.rs
@@ -253,15 +252,18 @@ src/
 ```
 
 The exact fact module names can change. The ownership pattern should not.
-Only `src/core/context.rs` owns context primitives. Protocol context roles, key
-encoders, need constructors, offer constructors, and candidate validation belong
-under `src/protocol/context_keys/`, organized by relation such as exact,
-coverage, or wrap-source. Fact modules must not define their own `matchers.rs`,
-`context.rs`, or `selectors.rs` files. Projectors own which protocol-defined
-needs and offers they emit, while context-key modules own only key layout and
-candidate validation. Need/offer shapes should be as generic as the relation
-allows, using event type plus typed key parameters instead of fact-module-specific
-context-key vocabulary.
+Only `src/core/context.rs` owns context primitives. Every dependency is a
+byte-range edge with `owner`, `role`, `scope`, `start_key`, and `end_key`.
+Exact dependencies are just ranges with identical endpoints. There is no
+central protocol role registry or separate point API; projectors choose the
+role strings they validate and emit `ContextNeed::range` /
+`ContextOffer::range` directly when the key is a simple fact id or composite
+id. Nontrivial protocol byte layouts and candidate validation belong beside the
+domain that owns the semantics, such as encryption secret coverage and
+wrap-source ranges under `src/protocol/facts/encryption/`. Fact modules must
+not define their own `matchers.rs`, `context.rs`, or `selectors.rs` files.
+Core only stores, indexes, overlaps, and wakes; projectors must decode and
+validate matched payloads before giving candidates semantic authority.
 
 A fact module is one fact family. A directory that defines several durable
 fact types is a bundle and should be split before review, even when the facts
@@ -383,10 +385,10 @@ queries.rs
 rows.rs
   current migration checkpoint for read-model row shapes
 
-protocol/context_keys/*.rs
-  one relation per file; each context-key module owns the relation's role
-  constants, key encoders, need/offer constructors,
-  candidate validation, and relation-specific tests
+facts/<domain>/<range-helper>.rs
+  nontrivial context range encoders live beside the domain that validates their
+  candidates. Simple fact-id and composite-id ranges are emitted directly from
+  projectors with `ContextNeed::range` and `ContextOffer::range`.
 
 frame.rs / receive.rs
   transit-specific fixed-frame helpers and receive classification
@@ -505,7 +507,7 @@ Workspace remains a protocol concept, not a special core concept.
 ## Context
 
 Projectors do not issue arbitrary broad queries. Core supplies
-`ProjectionContext` from offers matched through one protocol-owned byte-range
+`ProjectionContext` from offers matched through one core-owned byte-range
 relation:
 
 ```rust
@@ -592,12 +594,20 @@ decode and validate matched facts semantically before emitting rows, offers, or
 intents. This deliberately keeps workspace, frontier, signer, and authorization
 rules out of core.
 
-Standard context key shapes:
+Core owns the syntax for simple exact/composite keys: `ContextKey::from_parts`
+encodes bounded typed parts, and `ContextNeed::for_key_parts` /
+`ContextOffer::for_key_parts` create the identical-endpoint range. Protocol
+code still owns which fields are included, their order, the role string, and
+the matched-payload validation. Domain-owned helpers remain appropriate only
+when a relation needs order-preserving low/high endpoints or candidate decoding,
+as with encryption coverage and wrap-source ranges.
+
+Standard context range shapes:
 
 ```text
 Exact fact key
-  Need(role="fact", range=[fact_id, fact_id])
-  Offer(role="fact", range=[fact_id, fact_id])
+  Need(role="sync_exact_fact", range=[fact_id, fact_id])
+  Offer(role="sync_exact_fact", range=[fact_id, fact_id])
 
 Secret coverage key range
   Need(role="secret_coverage", range=[workspace/frontier/minute/leaf, same])
@@ -609,12 +619,12 @@ Receive provenance key
   Offer(role="transit_received", range=[received_fact_id, received_fact_id])
 
 Deletion/update key
-  Need(role="message_deletion", range=[message_id, message_id])
-  Offer(role="message_deletion", range=[message_id, message_id])
+  Need(role="content_deleted", range=[target_id + author_id, same])
+  Offer(role="content_deleted", range=[target_id + author_id, same])
 
 Recipient-key supersession key
-  Need(role="recipient_key_superseded", range=[recipient_key_id, recipient_key_id])
-  Offer(role="recipient_key_superseded", range=[recipient_key_id, recipient_key_id])
+  Need(role="recipient_superseded", range=[recipient_key_id, recipient_key_id])
+  Offer(role="recipient_superseded", range=[recipient_key_id, recipient_key_id])
 ```
 
 Scope is part of the match key. Projectors still validate semantic correctness,
@@ -754,15 +764,16 @@ When implementing or reviewing a projector:
    explicit typed deferred intents owned by handlers.
 8. Keep helper functions small, local to the fact family, and named after the
    invariant they validate.
-9. Add any new context role, key encoding, need constructor, offer constructor,
-   and candidate validation to the relation-specific module under
-   src/protocol/context_keys/.
+9. Emit simple fact-id or composite-id context with `ContextNeed::range` and
+   `ContextOffer::range` directly. Put nontrivial range encodings and
+   candidate validation beside the domain that validates them.
 10. If a module is temporarily a row shell because sibling context is not ready,
     document the exact behavior gap in the module docs and remove that gap when
     the sibling context lands.
-11. Do not add protocol-specific context.rs, selectors.rs, or fact-module
-    matchers.rs helper/source-of-truth files. Keep projection logic in
-    project.rs and relation-specific context keys in src/protocol/context_keys/.
+11. Do not add protocol-specific context.rs, selectors.rs, central context-key
+    modules, or fact-module matchers.rs helper/source-of-truth files. Keep
+    projection logic in project.rs and domain-owned range helpers beside the
+    domain that validates them.
 ```
 
 ## Intents
@@ -1274,7 +1285,7 @@ core.pending_projection as an internal pending-fact checkpoint
 core.intents
 core.inbox
 local receive facts
-context keys
+context ranges
 flat intent handlers
 ```
 
@@ -1302,13 +1313,13 @@ adding new compatibility layers:
 - Keep root manifests declaration-only.
 - Keep every handler as a themed, self-contained file under
   `src/protocol/intents/`.
-- Register fact types, context roles, intent kinds, handlers, and wire layouts
-  in visible manifests.
+- Register fact types, intent kinds, handlers, and wire layouts in visible
+  manifests.
 - Generate row and wire boilerplate from the three schema declaration files.
 - Prefer one exact helper per invariant over one flexible helper with flags.
 - Give every deferred and ephemeral intent kind an idempotence key.
-- Give every context-key relation deterministic tests for new-need-to-old-offer and
-  new-offer-to-old-need matching.
+- Give every nontrivial context range encoder deterministic tests for candidate
+  validation.
 - Keep CLI parsing thin: parse arguments, call one command constructor or read
   model, print output.
 - Keep read models separate from projection scheduling and handler checkpoint

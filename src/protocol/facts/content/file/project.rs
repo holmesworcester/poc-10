@@ -15,8 +15,6 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
-use crate::protocol::context_keys;
-use crate::protocol::context_keys as message_keys;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{file_deletion, message, message_deletion};
 use crate::protocol::facts::identity;
@@ -59,17 +57,29 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             envelope,
         } = decoded;
         validate_file_fields(&file)?;
-        let scope = message_keys::workspace_scope(file.workspace_id);
+        let scope = crate::protocol::facts::identity::workspace::scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, signer);
-        let file_deletion_need =
-            message_keys::deletion_need(fact.id, scope.clone(), fact.id, file.author_user_id);
-        let parent_need = message_keys::message_need(fact.id, scope.clone(), file.message_id);
-        let author_need = crate::protocol::context_keys::exact_need(
+        let file_deletion_need = crate::core::context::ContextNeed::for_key_parts(
             fact.id,
-            crate::protocol::context_keys::user_role(),
+            "content_deleted",
+            scope.clone(),
+            [fact.id, file.author_user_id],
+        )?;
+        let parent_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "content_message",
+            scope.clone(),
+            file.message_id,
+            file.message_id,
+        );
+        let author_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "identity_user",
+            crate::core::facts::FactScope::Global,
+            file.author_user_id,
             file.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -111,12 +121,12 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             file.message_id,
             "file parent",
         )?;
-        let parent_deletion_need = message_keys::deletion_need(
+        let parent_deletion_need = crate::core::context::ContextNeed::for_key_parts(
             fact.id,
+            "content_deleted",
             scope.clone(),
-            file.message_id,
-            parent.message.author_user_id,
-        );
+            [file.message_id, parent.message.author_user_id],
+        )?;
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?
         {
@@ -152,10 +162,18 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             Some(parent_deletion_need),
             Some(author_need),
         ])
-        .offer(context_keys::file_offer(fact.id, scope, file.file_id))
-        .offer(crate::protocol::context_keys::exact_fact_offer(
+        .offer(crate::core::context::ContextOffer::range(
             fact.id,
-            message_keys::workspace_scope(file.workspace_id),
+            "content_file",
+            scope,
+            file.file_id,
+            file.file_id,
+        ))
+        .offer(crate::core::context::ContextOffer::range(
+            fact.id,
+            "sync_exact_fact",
+            crate::protocol::facts::identity::workspace::scope(file.workspace_id),
+            fact.id,
             fact.id,
         ))
         .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file)))

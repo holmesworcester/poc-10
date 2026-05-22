@@ -1,8 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-use topo::protocol::context_keys as encryption_context;
-use topo::protocol::context_keys as history_context;
-use topo::protocol::context_keys as message_context;
 use topo::protocol::facts::encryption::fact::{
     LocalHistoryNodeSecretFact, LocalKeySecretFact, RemovalFrontierFact,
 };
@@ -24,7 +21,7 @@ fn local_key_secret_waits_for_frontier_then_offers_root_material() {
     assert!(waiting.effects.intents.is_empty());
     assert!(waiting.offers.is_empty());
     assert_eq!(waiting.needs.len(), 1);
-    assert_eq!(waiting.needs[0].role, encryption_context::frontier_role());
+    assert_eq!(waiting.needs[0].role, "encryption_removal_frontier");
 
     let projected = projector
         .project(
@@ -35,15 +32,15 @@ fn local_key_secret_waits_for_frontier_then_offers_root_material() {
     assert!(projected
         .offers
         .iter()
-        .any(|offer| offer.role == encryption_context::wrap_source_role()));
+        .any(|offer| offer.role == "wrap_source"));
     assert!(projected
         .offers
         .iter()
-        .any(|offer| offer.role == history_context::source_secret_role()));
+        .any(|offer| offer.role == "local_secret_source"));
     assert!(projected
         .offers
         .iter()
-        .any(|offer| offer.role == message_context::secret_role()));
+        .any(|offer| offer.role == "secret_coverage"));
 }
 
 #[test]
@@ -74,11 +71,11 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
     assert!(projected
         .offers
         .iter()
-        .any(|offer| offer.role == encryption_context::wrap_source_role()));
+        .any(|offer| offer.role == "wrap_source"));
     assert!(projected
         .offers
         .iter()
-        .any(|offer| offer.role == history_context::source_secret_role()));
+        .any(|offer| offer.role == "local_secret_source"));
 
     let parent = history_node_fact(workspace, frontier.id, owner, root.id, [0; 32], 30, 2);
     let tombstoning = history_node_fact(workspace, frontier.id, owner, parent.id, [9; 32], 30, 1);
@@ -100,7 +97,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
 
 fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at_ms: u64) -> Fact {
     Fact::new(
-        message_context::workspace_scope(workspace_id),
+        topo::protocol::facts::identity::workspace::scope(workspace_id),
         created_at_ms,
         encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
             workspace_id,
@@ -160,18 +157,42 @@ fn history_node_fact(
 }
 
 fn frontier_match(owner: [u8; 32], workspace_id: [u8; 32], frontier: Fact) -> MatchedContext {
-    let scope = message_context::workspace_scope(workspace_id);
+    let scope = topo::protocol::facts::identity::workspace::scope(workspace_id);
     matched(
-        encryption_context::frontier_need(owner, scope.clone(), frontier.id),
-        encryption_context::frontier_offer(frontier.id, scope, frontier.id),
+        topo::core::context::ContextNeed::range(
+            owner,
+            "encryption_removal_frontier",
+            scope.clone(),
+            frontier.id,
+            frontier.id,
+        ),
+        topo::core::context::ContextOffer::range(
+            frontier.id,
+            "encryption_removal_frontier",
+            scope,
+            frontier.id,
+            frontier.id,
+        ),
         frontier,
     )
 }
 
 fn source_match(owner: [u8; 32], source_secret_id: [u8; 32], source: Fact) -> MatchedContext {
     matched(
-        history_context::source_secret_need(owner, source_secret_id),
-        history_context::source_secret_offer(source.id, source.id),
+        topo::core::context::ContextNeed::range(
+            owner,
+            "local_secret_source",
+            topo::core::facts::FactScope::Local,
+            source_secret_id,
+            source_secret_id,
+        ),
+        topo::core::context::ContextOffer::range(
+            source.id,
+            "local_secret_source",
+            topo::core::facts::FactScope::Local,
+            source.id,
+            source.id,
+        ),
         source,
     )
 }

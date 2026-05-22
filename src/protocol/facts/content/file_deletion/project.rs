@@ -14,7 +14,6 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::context_keys;
 use crate::protocol::facts::content::file;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::identity;
@@ -55,19 +54,23 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = context_keys::workspace_scope(deletion.workspace_id);
+        let scope = crate::protocol::facts::identity::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
         let signer_need = authority::signer_need(fact.id, signer);
-        let target_need = crate::protocol::context_keys::exact_fact_need(
+        let target_need = crate::core::context::ContextNeed::range(
             fact.id,
+            "sync_exact_fact",
             scope.clone(),
             deletion.target_file_id,
+            deletion.target_file_id,
         );
-        let author_need = crate::protocol::context_keys::exact_need(
+        let author_need = crate::core::context::ContextNeed::range(
             fact.id,
-            crate::protocol::context_keys::user_role(),
+            "identity_user",
+            crate::core::facts::FactScope::Global,
+            deletion.author_user_id,
             deletion.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -116,12 +119,12 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
         });
         Ok(
             output_with_needs([signer_need, Some(target_need), Some(author_need)])
-                .offer(context_keys::deletion_offer(
+                .offer(crate::core::context::ContextOffer::for_key_parts(
                     fact.id,
+                    "content_deleted",
                     scope,
-                    deletion.target_file_id,
-                    deletion.author_user_id,
-                ))
+                    [deletion.target_file_id, deletion.author_user_id],
+                )?)
                 .row_mutation(RowMutation::InsertValues(row))
                 .intent(share_fact_with_workspace_intent_for_fact(
                     deletion.workspace_id,

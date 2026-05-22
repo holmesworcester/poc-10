@@ -15,7 +15,6 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::device_invite::fact::DeviceInviteFact;
 use crate::protocol::facts::identity::{endpoint_shared, user, user_invite, workspace};
@@ -206,19 +205,25 @@ struct UserSignedNeeds {
 impl UserSignedNeeds {
     fn new(owner: FactId, invite: &DeviceInviteFact, user_invite_fact_id: FactId) -> Self {
         Self {
-            workspace: context_keys::exact_need(
+            workspace: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::workspace_role(),
+                "identity_workspace",
+                crate::core::facts::FactScope::Global,
+                invite.workspace_id,
                 invite.workspace_id,
             ),
-            user: context_keys::exact_need(
+            user: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::user_role(),
+                "identity_user",
+                crate::core::facts::FactScope::Global,
+                invite.user_authority_fact_id,
                 invite.user_authority_fact_id,
             ),
-            user_invite: context_keys::exact_need(
+            user_invite: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::user_invite_role(),
+                "identity_user_invite",
+                crate::core::facts::FactScope::Global,
+                user_invite_fact_id,
                 user_invite_fact_id,
             ),
         }
@@ -240,14 +245,18 @@ struct EndpointSignedNeeds {
 impl EndpointSignedNeeds {
     fn new(owner: FactId, invite: &DeviceInviteFact, signer_id: FactId) -> Self {
         Self {
-            workspace: context_keys::exact_need(
+            workspace: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::workspace_role(),
+                "identity_workspace",
+                crate::core::facts::FactScope::Global,
+                invite.workspace_id,
                 invite.workspace_id,
             ),
-            endpoint_shared: context_keys::exact_need(
+            endpoint_shared: crate::core::context::ContextNeed::range(
                 owner,
-                context_keys::endpoint_shared_role(),
+                "identity_endpoint_shared",
+                crate::core::facts::FactScope::Global,
+                signer_id,
                 signer_id,
             ),
         }
@@ -274,20 +283,32 @@ fn materialized_output(
     invite: &DeviceInviteFact,
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
+    let device_invite_key = device_invite_key(invite.user_authority_fact_id, invite.public_key);
     Ok(output
         .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
-        .offer(context_keys::exact_offer(
+        .offer(crate::core::context::ContextOffer::range(
             fact.id,
-            context_keys::device_invite_role(),
+            "identity_device_invite",
+            crate::core::facts::FactScope::Global,
+            fact.id,
+            fact.id,
         ))
-        .offer(context_keys::scoped_key_offer(
+        .offer(crate::core::context::ContextOffer::range(
             fact.id,
-            context_keys::device_invite_key_role(),
-            invite.workspace_id,
-            context_keys::device_invite_key(invite.user_authority_fact_id, invite.public_key),
+            "identity_device_invite_key",
+            crate::protocol::facts::identity::workspace::scope(invite.workspace_id),
+            device_invite_key.clone(),
+            device_invite_key,
         ))
         .intent(share_fact_with_workspace_intent_for_fact(
             invite.workspace_id,
             fact,
         )))
+}
+
+fn device_invite_key(user_authority_fact_id: FactId, public_key: [u8; 32]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(64);
+    key.extend_from_slice(&user_authority_fact_id);
+    key.extend_from_slice(&public_key);
+    key
 }

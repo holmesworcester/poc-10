@@ -16,7 +16,6 @@ use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
-use crate::protocol::context_keys;
 use crate::protocol::facts::content::{file, file_slice, message, message_deletion, reaction};
 use crate::protocol::facts::identity;
 
@@ -109,7 +108,7 @@ pub fn react(
         ciphertext: emoji.as_bytes().to_vec(),
     };
     let fact = Fact::new(
-        context_keys::workspace_scope(workspace_id),
+        crate::protocol::facts::identity::workspace::scope(workspace_id),
         created_at_ms,
         reaction::layout::encode_fact(&reaction)?,
     );
@@ -178,7 +177,7 @@ pub fn send_file(
         sealed_metadata: encode_file_metadata(&filename, &parsed.mime)?,
     };
     let descriptor_fact = Fact::new(
-        context_keys::workspace_scope(parsed.workspace_id),
+        crate::protocol::facts::identity::workspace::scope(parsed.workspace_id),
         created_at_ms,
         file::layout::encode_fact(&descriptor)?,
     );
@@ -193,7 +192,7 @@ pub fn send_file(
             ciphertext: chunk.to_vec(),
         };
         facts.push(Fact::new(
-            context_keys::workspace_scope(parsed.workspace_id),
+            crate::protocol::facts::identity::workspace::scope(parsed.workspace_id),
             slice.created_at_ms,
             file_slice::layout::encode_fact(&slice)?,
         ));
@@ -242,7 +241,7 @@ pub fn delete_message(
         author_user_id: target.author_user_id,
     };
     let fact = Fact::new(
-        context_keys::workspace_scope(workspace_id),
+        crate::protocol::facts::identity::workspace::scope(workspace_id),
         created_at_ms,
         message_deletion::layout::encode_fact(&deletion)?,
     );

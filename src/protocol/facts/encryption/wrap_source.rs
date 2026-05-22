@@ -1,4 +1,4 @@
-//! Wrap-source context keys.
+//! Wrap-source context ranges.
 //!
 //! Local key material can satisfy proactive recipient-key convergence or a
 //! specific remote key request. Core only matches byte ranges; this module
@@ -7,15 +7,13 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{FactId, FactScope};
 
-use super::exact::{protocol_role, range_need_for_key_range, range_offer_for_key_range};
-
-pub const WRAP_SOURCE_ROLE: &str = "wrap_source";
+const ROLE: &str = "wrap_source";
 
 const PROACTIVE_DOMAIN: u8 = 1;
 const REQUESTED_DOMAIN: u8 = 2;
 
 pub fn wrap_source_role() -> Role {
-    protocol_role(WRAP_SOURCE_ROLE)
+    Role::expect(ROLE)
 }
 
 pub fn proactive_wrap_source_need(
@@ -27,7 +25,7 @@ pub fn proactive_wrap_source_need(
     let start = proactive_wrap_key_prefix(workspace_id, min_frontier_created_at_ms);
     let mut end = proactive_wrap_key_prefix(workspace_id, u64::MAX);
     end.extend_from_slice(&[0xff; ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN]);
-    range_need_for_key_range(owner, wrap_source_role(), scope, start, end)
+    ContextNeed::range(owner, wrap_source_role(), scope, start, end)
 }
 
 pub fn requested_wrap_source_need(
@@ -39,7 +37,7 @@ pub fn requested_wrap_source_need(
     let start = requested_wrap_key_prefix(workspace_id, frontier_id);
     let mut end = start.clone();
     end.extend_from_slice(&[0xff; ENCODED_WRAP_SOURCE_DESCRIPTOR_LEN]);
-    range_need_for_key_range(owner, wrap_source_role(), scope, start, end)
+    ContextNeed::range(owner, wrap_source_role(), scope, start, end)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,21 +116,23 @@ pub fn wrap_source_offers(
     source: WrapSourceDescriptor,
 ) -> Vec<ContextOffer> {
     let metadata = encode_wrap_source_descriptor(&source).as_bytes().to_vec();
-    let proactive = point_offer(
+    let proactive_key = wrap_offer_key(PROACTIVE_DOMAIN, &source, &metadata);
+    let proactive = ContextOffer::range(
         owner,
+        wrap_source_role(),
         scope.clone(),
-        wrap_offer_key(PROACTIVE_DOMAIN, &source, &metadata),
+        proactive_key.clone(),
+        proactive_key,
     );
-    let requested = point_offer(
+    let requested_key = wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata);
+    let requested = ContextOffer::range(
         owner,
+        wrap_source_role(),
         scope,
-        wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata),
+        requested_key.clone(),
+        requested_key,
     );
     vec![proactive, requested]
-}
-
-fn point_offer(owner: FactId, scope: FactScope, key: Vec<u8>) -> ContextOffer {
-    range_offer_for_key_range(owner, wrap_source_role(), scope, key.clone(), key)
 }
 
 fn wrap_offer_key(domain: u8, source: &WrapSourceDescriptor, metadata: &[u8]) -> Vec<u8> {
@@ -348,11 +348,11 @@ pub fn wrap_source_offer_valid_for_need(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::context_keys::workspace_scope;
+    use crate::protocol::facts::identity::workspace::scope;
 
     #[test]
     fn wrap_source_validates_requested_frontier_only() {
-        let scope = workspace_scope([1; 32]);
+        let scope = scope([1; 32]);
         let need = requested_wrap_source_need([2; 32], scope.clone(), [1; 32], [3; 32]);
         let matching =
             frontier_root_wrap_source_offers([4; 32], scope.clone(), [1; 32], [3; 32], [5; 32], 50);
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn wrap_source_validates_proactive_minimum_creation_time() {
-        let scope = workspace_scope([1; 32]);
+        let scope = scope([1; 32]);
         let need = proactive_wrap_source_need([2; 32], scope.clone(), [1; 32], 50);
         let old =
             frontier_root_wrap_source_offers([3; 32], scope.clone(), [1; 32], [4; 32], [5; 32], 49);

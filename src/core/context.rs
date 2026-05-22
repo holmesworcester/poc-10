@@ -1,21 +1,43 @@
 //! Standing context relationships used to wake fact projection.
 //!
-//! Context is the durable matching surface between projectors; it is not a
-//! hidden dependency loader or a second projection queue. A projector writes
-//! the needs and offers it owns, and core reports newly satisfiable byte-range
-//! overlaps. The semantic meaning of a role or key range stays with the fact
-//! module that created it.
+//! Context is the durable dependency surface between projectors; it is not a
+//! hidden dependency loader or a second projection queue. A projector writes the
+//! needs and offers it owns, and core reports newly satisfiable range overlaps.
+//! The semantic meaning of a role or byte range stays with the projector that
+//! created it and with the projector that later validates the matched payload.
 //!
-//! Context is how one fact says "wake me when another fact matching this shape
-//! exists" without reaching directly into another module's tables. A need names
-//! the fact that should be reprojected. An offer names the fact that can be
-//! loaded as matched payload. Core stores both as durable rows and matches them
-//! by role, scope, and overlapping opaque byte ranges.
+//! Every context edge is a range:
 //!
-//! `scope`, `role`, `start_key`, and `end_key` form the match surface. `owner`
-//! says which fact produced the row so later projection can replace that fact's
-//! context without deleting anyone else's rows; the same fact is loaded as the
-//! payload when the offer matches a need.
+//! ```text
+//! owner, role, scope, start_key, end_key
+//! ```
+//!
+//! `role` and `scope` partition the search space. `start_key` and `end_key` are
+//! inclusive opaque byte endpoints inside that partition. Exact dependencies do
+//! not use a separate "point" concept; they are just ranges whose endpoints are
+//! identical. Core can build bounded canonical keys from simple parts for exact
+//! and composite-key dependencies. Broader dependencies still choose an
+//! order-preserving byte layout in the protocol domain so ordinary
+//! lexicographic range overlap is enough to find candidates.
+//!
+//! Core's only matching rule is:
+//!
+//! ```text
+//! need.role == offer.role
+//! need.scope == offer.scope
+//! need.start_key <= offer.end_key
+//! offer.start_key <= need.end_key
+//! ```
+//!
+//! Core never parses range bytes. It stores them, indexes them, performs the
+//! overlap query, wakes affected owners, and loads the offer owner's fact as
+//! matched payload. The woken projector must still decode and validate the
+//! candidate before emitting rows, offers, or intents.
+//!
+//! `owner` says which fact produced the row so later projection can replace
+//! that fact's context without deleting anyone else's rows. For needs, `owner`
+//! is the fact that should be reprojected. For offers, `owner` is also the
+//! payload fact core loads when the offer overlaps a need.
 //!
 //! Projection owns context by replacement, not append. When a fact projects, it
 //! emits the complete current set of needs and offers for that fact. Core diffs
@@ -25,6 +47,13 @@
 use crate::core::facts::{FactId, FactScope};
 use crate::core::wire::Writer;
 use std::collections::BTreeSet;
+
+/// Maximum encoded size for a core-built canonical context key.
+pub const CONTEXT_KEY_MAX_BYTES: usize = 512;
+const CONTEXT_KEY_MAX_PARTS: usize = 32;
+const CONTEXT_KEY_TUPLE_V1: u8 = 1;
+const CONTEXT_KEY_PART_BYTES: u8 = 1;
+const CONTEXT_KEY_PART_U64: u8 = 2;
 
 /// Protocol-defined relationship role used for context matching.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -49,14 +78,92 @@ impl Role {
         Ok(Self(value))
     }
 
+    pub fn expect(value: &'static str) -> Self {
+        Self::new(value).expect("valid context role")
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<&'static str> for Role {
+    fn from(value: &'static str) -> Self {
+        Self::expect(value)
+    }
+}
+
+impl PartialEq<&str> for Role {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<Role> for &str {
+    fn eq(&self, other: &Role) -> bool {
+        *self == other.as_str()
     }
 }
 
 /// Opaque byte key within a context role and scope.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextKey(Vec<u8>);
+
+/// One part of a core-built canonical context key.
+///
+/// This is syntax only. Protocol projectors still choose which fields belong in
+/// a key and validate any matched payload semantically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextKeyPart {
+    Bytes(Vec<u8>),
+    U64(u64),
+}
+
+impl ContextKeyPart {
+    pub fn bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes(bytes.into())
+    }
+
+    pub fn u64(value: u64) -> Self {
+        Self::U64(value)
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for ContextKeyPart {
+    fn from(value: [u8; N]) -> Self {
+        Self::Bytes(value.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for ContextKeyPart {
+    fn from(value: &[u8; N]) -> Self {
+        Self::Bytes(value.to_vec())
+    }
+}
+
+impl From<&[u8]> for ContextKeyPart {
+    fn from(value: &[u8]) -> Self {
+        Self::Bytes(value.to_vec())
+    }
+}
+
+impl From<Vec<u8>> for ContextKeyPart {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Bytes(value)
+    }
+}
+
+impl From<&Vec<u8>> for ContextKeyPart {
+    fn from(value: &Vec<u8>) -> Self {
+        Self::Bytes(value.clone())
+    }
+}
+
+impl From<u64> for ContextKeyPart {
+    fn from(value: u64) -> Self {
+        Self::U64(value)
+    }
+}
 
 impl ContextKey {
     /// Build an opaque range endpoint owned by one fact module.
@@ -68,9 +175,80 @@ impl ContextKey {
         Self(bytes.into())
     }
 
+    /// Build a bounded canonical key from typed parts.
+    ///
+    /// Use this for exact or composite-key dependencies where the entire key is
+    /// matched as one degenerate range. Domain-specific range helpers should
+    /// still build their own low/high endpoints when byte ordering matters.
+    pub fn from_parts<I, P>(parts: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<ContextKeyPart>,
+    {
+        let mut bytes = vec![CONTEXT_KEY_TUPLE_V1];
+        let mut count = 0usize;
+        for part in parts {
+            count += 1;
+            if count > CONTEXT_KEY_MAX_PARTS {
+                return Err(format!(
+                    "context key has more than {CONTEXT_KEY_MAX_PARTS} parts"
+                ));
+            }
+            append_context_key_part(&mut bytes, part.into())?;
+            if bytes.len() > CONTEXT_KEY_MAX_BYTES {
+                return Err(format!("context key exceeds {CONTEXT_KEY_MAX_BYTES} bytes"));
+            }
+        }
+        if count == 0 {
+            return Err("context key must contain at least one part".to_string());
+        }
+        Ok(Self(bytes))
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+}
+
+impl From<Vec<u8>> for ContextKey {
+    fn from(value: Vec<u8>) -> Self {
+        Self::from_bytes(value)
+    }
+}
+
+impl From<&[u8]> for ContextKey {
+    fn from(value: &[u8]) -> Self {
+        Self::from_bytes(value)
+    }
+}
+
+impl<const N: usize> From<[u8; N]> for ContextKey {
+    fn from(value: [u8; N]) -> Self {
+        Self::from_bytes(value)
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for ContextKey {
+    fn from(value: &[u8; N]) -> Self {
+        Self::from_bytes(value)
+    }
+}
+
+fn append_context_key_part(bytes: &mut Vec<u8>, part: ContextKeyPart) -> Result<(), String> {
+    match part {
+        ContextKeyPart::Bytes(part) => {
+            let len = u16::try_from(part.len())
+                .map_err(|_| "context key byte part is too large".to_string())?;
+            bytes.push(CONTEXT_KEY_PART_BYTES);
+            bytes.extend_from_slice(&len.to_be_bytes());
+            bytes.extend_from_slice(&part);
+        }
+        ContextKeyPart::U64(value) => {
+            bytes.push(CONTEXT_KEY_PART_U64);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    Ok(())
 }
 
 /// A standing request by one fact for matching context.
@@ -93,6 +271,58 @@ pub struct ContextNeed {
     pub end_key: ContextKey,
 }
 
+impl ContextNeed {
+    pub fn for_key(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        key: impl Into<ContextKey>,
+    ) -> Self {
+        let key = key.into();
+        Self {
+            owner,
+            role: role.into(),
+            scope,
+            start_key: key.clone(),
+            end_key: key,
+        }
+    }
+
+    pub fn for_key_parts<I, P>(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        parts: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<ContextKeyPart>,
+    {
+        Ok(Self::for_key(
+            owner,
+            role,
+            scope,
+            ContextKey::from_parts(parts)?,
+        ))
+    }
+
+    pub fn range(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        start_key: impl Into<Vec<u8>>,
+        end_key: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            owner,
+            role: role.into(),
+            scope,
+            start_key: ContextKey::from_bytes(start_key),
+            end_key: ContextKey::from_bytes(end_key),
+        }
+    }
+}
+
 /// A standing statement that one fact can provide context to matching needs.
 ///
 /// The offer's `owner` is the fact that emitted this relationship and the fact
@@ -109,6 +339,58 @@ pub struct ContextOffer {
     pub start_key: ContextKey,
     /// Inclusive end of the opaque byte range this offer provides.
     pub end_key: ContextKey,
+}
+
+impl ContextOffer {
+    pub fn for_key(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        key: impl Into<ContextKey>,
+    ) -> Self {
+        let key = key.into();
+        Self {
+            owner,
+            role: role.into(),
+            scope,
+            start_key: key.clone(),
+            end_key: key,
+        }
+    }
+
+    pub fn for_key_parts<I, P>(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        parts: I,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<ContextKeyPart>,
+    {
+        Ok(Self::for_key(
+            owner,
+            role,
+            scope,
+            ContextKey::from_parts(parts)?,
+        ))
+    }
+
+    pub fn range(
+        owner: FactId,
+        role: impl Into<Role>,
+        scope: FactScope,
+        start_key: impl Into<Vec<u8>>,
+        end_key: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            owner,
+            role: role.into(),
+            scope,
+            start_key: ContextKey::from_bytes(start_key),
+            end_key: ContextKey::from_bytes(end_key),
+        }
+    }
 }
 
 /// Encode a fact scope into the stable bytes used by context match indexes.
@@ -226,6 +508,48 @@ mod tests {
         assert!(Role::new("exact_event").is_ok());
         assert!(Role::new("ExactEvent").is_err());
         assert!(Role::new("exact-event").is_err());
+    }
+
+    #[test]
+    fn context_key_parts_encode_canonical_bounded_bytes() {
+        let key = ContextKey::from_parts([
+            ContextKeyPart::from([1; 32]),
+            ContextKeyPart::u64(42),
+            ContextKeyPart::bytes(b"constant".as_slice()),
+        ])
+        .expect("canonical key");
+        let same = ContextKey::from_parts([
+            ContextKeyPart::from([1; 32]),
+            ContextKeyPart::from(42u64),
+            ContextKeyPart::from(b"constant".as_slice()),
+        ])
+        .expect("canonical key");
+
+        assert_eq!(key, same);
+        assert!(key.as_bytes().len() <= CONTEXT_KEY_MAX_BYTES);
+        assert_eq!(key.as_bytes()[0], CONTEXT_KEY_TUPLE_V1);
+    }
+
+    #[test]
+    fn context_key_parts_reject_empty_oversized_and_too_many_parts() {
+        assert!(ContextKey::from_parts(Vec::<ContextKeyPart>::new()).is_err());
+        assert!(ContextKey::from_parts([vec![0; CONTEXT_KEY_MAX_BYTES]]).is_err());
+        assert!(ContextKey::from_parts([[0u8; 1]; CONTEXT_KEY_MAX_PARTS + 1]).is_err());
+    }
+
+    #[test]
+    fn key_part_need_and_offer_are_degenerate_ranges() {
+        let owner = [1; 32];
+        let scope = FactScope::Global;
+        let need =
+            ContextNeed::for_key_parts(owner, "composite", scope.clone(), [[2; 32], [3; 32]])
+                .expect("need");
+        let offer = ContextOffer::for_key_parts(owner, "composite", scope, [[2; 32], [3; 32]])
+            .expect("offer");
+
+        assert_eq!(need.start_key, need.end_key);
+        assert_eq!(offer.start_key, offer.end_key);
+        assert_eq!(need.start_key, offer.start_key);
     }
 
     #[test]

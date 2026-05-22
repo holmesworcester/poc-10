@@ -15,7 +15,6 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::context_keys as history_keys;
 
 use super::rows::local_history_node_secret_row;
 use secret_path::{
@@ -52,20 +51,31 @@ impl TypedProjector<super::Codec> for LocalHistoryNodeSecretProjector {
         if fact.scope != FactScope::Local {
             return Err("local history node secret fact must have FactScope::Local".to_string());
         }
-        let workspace_scope = crate::protocol::context_keys::workspace_scope(node.workspace_id);
+        let workspace_scope = crate::protocol::facts::identity::workspace::scope(node.workspace_id);
 
         // 2. Context and path validation.
-        let frontier_need = crate::protocol::context_keys::exact_fact_need(
+        let frontier_need = crate::core::context::ContextNeed::range(
             fact.id,
+            "sync_exact_fact",
             workspace_scope.clone(),
             node.removal_frontier_id,
+            node.removal_frontier_id,
         );
-        let source_need = history_keys::source_secret_need(fact.id, node.source_secret_id);
+        let source_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "local_secret_source",
+            crate::core::facts::FactScope::Local,
+            node.source_secret_id,
+            node.source_secret_id,
+        );
         let tombstone_need = if node.tombstone_node_id == [0; 32] {
             None
         } else {
-            Some(history_keys::source_secret_need(
+            Some(crate::core::context::ContextNeed::range(
                 fact.id,
+                "local_secret_source",
+                crate::core::facts::FactScope::Local,
+                node.tombstone_node_id,
                 node.tombstone_node_id,
             ))
         };
@@ -124,13 +134,21 @@ impl TypedProjector<super::Codec> for LocalHistoryNodeSecretProjector {
 
         // 3. Materialize.
         Ok(waiting
-            .offer(crate::protocol::context_keys::exact_fact_offer(
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
+                "sync_exact_fact",
                 FactScope::Local,
                 fact.id,
+                fact.id,
             ))
-            .offer(history_keys::source_secret_offer(fact.id, fact.id))
-            .offer(crate::protocol::context_keys::secret_offer(
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "local_secret_source",
+                crate::core::facts::FactScope::Local,
+                fact.id,
+                fact.id,
+            ))
+            .offer(crate::protocol::facts::encryption::coverage::secret_offer(
                 fact.id,
                 workspace_scope,
                 node.workspace_id,
@@ -163,8 +181,6 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope, ScopeKind};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-    use topo::protocol::context_keys;
-    use topo::protocol::context_keys as sync_keys;
     use topo::protocol::facts::encryption::fact::LocalKeySecretFact;
     use topo::protocol::facts::encryption::layout as encryption_layout;
     use topo::protocol::facts::encryption::local_history_node_secret::fact::{
@@ -226,7 +242,7 @@ mod projector_tests {
         assert!(projected
             .offers
             .iter()
-            .any(|offer| offer.role == context_keys::source_secret_role()));
+            .any(|offer| offer.role == "local_secret_source"));
 
         let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.workspace_id, [1; 32]);
@@ -363,14 +379,18 @@ mod projector_tests {
         frontier: Fact,
     ) -> MatchedContext {
         matched(
-            sync_keys::exact_fact_need(
+            crate::core::context::ContextNeed::range(
                 owner,
+                "sync_exact_fact",
                 workspace_scope(node.workspace_id),
                 node.removal_frontier_id,
+                node.removal_frontier_id,
             ),
-            sync_keys::exact_fact_offer(
+            crate::core::context::ContextOffer::range(
                 frontier.id,
+                "sync_exact_fact",
                 workspace_scope(node.workspace_id),
+                frontier.id,
                 frontier.id,
             ),
             frontier,
@@ -379,8 +399,20 @@ mod projector_tests {
 
     fn source_match(owner: [u8; 32], source_secret_id: [u8; 32], source: Fact) -> MatchedContext {
         matched(
-            context_keys::source_secret_need(owner, source_secret_id),
-            context_keys::source_secret_offer(source.id, source.id),
+            crate::core::context::ContextNeed::range(
+                owner,
+                "local_secret_source",
+                crate::core::facts::FactScope::Local,
+                source_secret_id,
+                source_secret_id,
+            ),
+            crate::core::context::ContextOffer::range(
+                source.id,
+                "local_secret_source",
+                crate::core::facts::FactScope::Local,
+                source.id,
+                source.id,
+            ),
             source,
         )
     }

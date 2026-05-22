@@ -17,7 +17,6 @@ use super::fact::{
     LocalKeySecretFact, LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact,
 };
 use super::layout;
-use crate::protocol::context_keys;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateRecipientKey {
@@ -165,7 +164,7 @@ pub fn create_recipient_key(
         created_at_ms: input.created_at_ms,
     };
     let recipient_fact = Fact::new(
-        context_keys::workspace_scope(input.workspace_id),
+        crate::protocol::facts::identity::workspace::scope(input.workspace_id),
         input.created_at_ms,
         layout::encode_recipient_key(&recipient)?,
     );
@@ -206,7 +205,7 @@ pub fn create_key_frontier(
         created_at_ms: input.created_at_ms,
     };
     let frontier_fact = Fact::new(
-        context_keys::workspace_scope(input.workspace_id),
+        crate::protocol::facts::identity::workspace::scope(input.workspace_id),
         input.created_at_ms,
         layout::encode_removal_frontier(&frontier)?,
     );

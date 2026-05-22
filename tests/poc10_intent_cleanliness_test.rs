@@ -321,7 +321,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and relation decoding in protocol context keys:\n{}",
+        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and range decoding beside the validating domain:\n{}",
         offenders.join("\n")
     );
 }
@@ -433,7 +433,7 @@ fn event_module_context_rs_files_do_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put protocol context-key constructors and candidate validation under src/protocol/context_keys instead:\n{}",
+        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put nontrivial range encoders and candidate validation beside the domain that validates them instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -461,7 +461,7 @@ fn legacy_custom_context_matcher_api_does_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "the legacy ContextMatcher API is retired; use core-owned byte-range overlap and protocol context-key candidate validation instead:\n{}",
+        "the legacy ContextMatcher API is retired; use core-owned byte-range overlap and projector/domain candidate validation instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -496,7 +496,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
 
     assert!(
         offenders.is_empty(),
-        "temporary protocol context.rs helper files are not the context source of truth; protocol context-key constructors and candidate validation belong under src/protocol/context_keys, while ProjectionContext inspection belongs in project.rs:\n{}",
+        "temporary protocol context.rs helper files are not the context source of truth; range encoders and candidate validation belong beside their domain, while ProjectionContext inspection belongs in project.rs:\n{}",
         offenders.join("\n")
     );
 }

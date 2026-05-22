@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod commands;
+pub mod coverage;
 pub mod create;
 pub mod disappearing_messages_setting;
 pub mod fact;
@@ -15,3 +16,4 @@ pub mod removal_frontier;
 pub mod rows;
 mod signed_key_wrap;
 mod validation;
+pub mod wrap_source;

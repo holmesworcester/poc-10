@@ -6,7 +6,6 @@
 use crate::core::clock;
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::{Fact, FactId};
-use crate::protocol::context_keys;
 use crate::protocol::facts::content::event::{fact::ContentEventFact, layout, queries};
 use crate::protocol::facts::identity;
 
@@ -53,7 +52,7 @@ pub fn generate(
             payload,
         };
         let fact = Fact::new(
-            context_keys::workspace_scope(workspace_id),
+            crate::protocol::facts::identity::workspace::scope(workspace_id),
             timestamp,
             layout::encode_fact(&event)?,
         );

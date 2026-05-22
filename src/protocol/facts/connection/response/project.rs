@@ -15,9 +15,6 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::context_keys as ephemeral_keys;
-use crate::protocol::context_keys as receive_keys;
-use crate::protocol::context_keys as request_keys;
 use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::connection::request;
 use crate::protocol::facts::identity::invite;
@@ -71,7 +68,13 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
         }
 
         // 2. Shared request and invite context.
-        let request_need = request_keys::connection_request_need(fact.id, response.request_id);
+        let request_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "connection_request",
+            crate::core::facts::FactScope::Global,
+            response.request_id,
+            response.request_id,
+        );
         let Some(request_context) = projection_context.payload_for(&request_need) else {
             return Ok(waiting_output([request_need]));
         };
@@ -87,8 +90,13 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
         }
         validate_request_response(&response, &request)?;
 
-        let invite_need =
-            request_keys::connection_invite_secret_need(fact.id, response.invite_secret_fact_id);
+        let invite_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "connection_invite_secret",
+            crate::core::facts::FactScope::Local,
+            response.invite_secret_fact_id,
+            response.invite_secret_fact_id,
+        );
         let Some(invite_context) = projection_context.payload_for(&invite_need) else {
             return Ok(waiting_output([request_need, invite_need]));
         };
@@ -116,11 +124,20 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
             return Err("connection response handshake hash does not match transcript".to_string());
         }
 
-        let responder_ephemeral_need = ephemeral_keys::connection_ephemeral_secret_need(
+        let responder_ephemeral_need = crate::core::context::ContextNeed::range(
             fact.id,
+            "connection_ephemeral_secret",
+            crate::core::facts::FactScope::Local,
+            response.responder_ephemeral_secret_fact_id,
             response.responder_ephemeral_secret_fact_id,
         );
-        let receive_need = receive_keys::transit_received_need(fact.id, fact.id);
+        let receive_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "transport_transit_received",
+            crate::core::facts::FactScope::Local,
+            fact.id,
+            fact.id,
+        );
 
         if let Some(receive) = projection_context
             .matched_payloads_for(&receive_need)
@@ -136,8 +153,11 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
                     .to_string()
             })?;
             validate_receive_provenance(fact.id, &response, &received)?;
-            let initiator_ephemeral_need = ephemeral_keys::connection_ephemeral_secret_need(
+            let initiator_ephemeral_need = crate::core::context::ContextNeed::range(
                 fact.id,
+                "connection_ephemeral_secret",
+                crate::core::facts::FactScope::Local,
+                response.initiator_ephemeral_secret_fact_id,
                 response.initiator_ephemeral_secret_fact_id,
             );
             let Some(initiator_ephemeral) =
@@ -340,9 +360,6 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-    use topo::protocol::context_keys as ephemeral_context;
-    use topo::protocol::context_keys as received_context;
-    use topo::protocol::context_keys as request_context;
     use topo::protocol::facts::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
@@ -449,24 +466,60 @@ mod projector_tests {
 
     fn request_match(owner: [u8; 32], request: Fact) -> MatchedContext {
         MatchedContext {
-            need: request_context::connection_request_need(owner, request.id),
-            offer: request_context::connection_request_offer(request.id, request.id),
+            need: crate::core::context::ContextNeed::range(
+                owner,
+                "connection_request",
+                crate::core::facts::FactScope::Global,
+                request.id,
+                request.id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                request.id,
+                "connection_request",
+                crate::core::facts::FactScope::Global,
+                request.id,
+                request.id,
+            ),
             payload: request,
         }
     }
 
     fn invite_match(owner: [u8; 32], invite: Fact) -> MatchedContext {
         MatchedContext {
-            need: request_context::connection_invite_secret_need(owner, invite.id),
-            offer: request_context::connection_invite_secret_offer(invite.id, invite.id),
+            need: crate::core::context::ContextNeed::range(
+                owner,
+                "connection_invite_secret",
+                crate::core::facts::FactScope::Local,
+                invite.id,
+                invite.id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                invite.id,
+                "connection_invite_secret",
+                crate::core::facts::FactScope::Local,
+                invite.id,
+                invite.id,
+            ),
             payload: invite,
         }
     }
 
     fn ephemeral_match(owner: [u8; 32], ephemeral: Fact) -> MatchedContext {
         MatchedContext {
-            need: ephemeral_context::connection_ephemeral_secret_need(owner, ephemeral.id),
-            offer: ephemeral_context::connection_ephemeral_secret_offer(ephemeral.id, ephemeral.id),
+            need: crate::core::context::ContextNeed::range(
+                owner,
+                "connection_ephemeral_secret",
+                crate::core::facts::FactScope::Local,
+                ephemeral.id,
+                ephemeral.id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                ephemeral.id,
+                "connection_ephemeral_secret",
+                crate::core::facts::FactScope::Local,
+                ephemeral.id,
+                ephemeral.id,
+            ),
             payload: ephemeral,
         }
     }
@@ -494,8 +547,20 @@ mod projector_tests {
             received_layout::encode_fact(&received).expect("encode provenance"),
         );
         MatchedContext {
-            need: received_context::transit_received_need(owner, response_id),
-            offer: received_context::transit_received_offer(fact.id, response_id),
+            need: crate::core::context::ContextNeed::range(
+                owner,
+                "transport_transit_received",
+                crate::core::facts::FactScope::Local,
+                response_id,
+                response_id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                fact.id,
+                "transport_transit_received",
+                crate::core::facts::FactScope::Local,
+                response_id,
+                response_id,
+            ),
             payload: fact,
         }
     }
@@ -516,7 +581,7 @@ mod projector_tests {
         assert!(output
             .needs
             .iter()
-            .any(|need| need.role == request_context::connection_request_role()));
+            .any(|need| need.role == "connection_request"));
     }
 
     #[test]

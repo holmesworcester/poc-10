@@ -25,7 +25,7 @@
 //! The invariant is replacement by owner. Projection output is the complete
 //! context set for one fact, and wake fanout considers only added rows from the
 //! replacement delta. If protocol semantics change, keep the generic overlap
-//! overlap query here and change the protocol-owned key encoders/validators.
+//! query here and change the domain-owned key encoders/validators.
 
 use crate::core::context::{
     scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role,
