@@ -81,7 +81,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             fact.id,
             "content_deleted",
             scope,
-            [parent.id, file.author_user_id],
+            [&parent.id, &file.author_user_id],
         )?;
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?

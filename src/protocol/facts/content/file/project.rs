@@ -66,7 +66,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             fact.id,
             "content_deleted",
             scope.clone(),
-            [fact.id, file.author_user_id],
+            [&fact.id, &file.author_user_id],
         )?;
         let parent_need = crate::core::context::ContextNeed::range(
             fact.id,
@@ -125,7 +125,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             fact.id,
             "content_deleted",
             scope.clone(),
-            [file.message_id, parent.message.author_user_id],
+            [&file.message_id, &parent.message.author_user_id],
         )?;
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?

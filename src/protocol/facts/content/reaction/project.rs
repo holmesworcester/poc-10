@@ -110,8 +110,8 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             "content_deleted",
             scope.clone(),
             [
-                reaction.target_message_id,
-                target_context.message.author_user_id,
+                &reaction.target_message_id,
+                &target_context.message.author_user_id,
             ],
         )?;
         if let Some(deletion) =

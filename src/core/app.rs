@@ -8,12 +8,17 @@
 //!
 //! Core still does not know command semantics. For non-daemon commands it opens
 //! the declared runtime, constructs the protocol-owned context, calls the
-//! registered function, and prints the returned `CliOutput`.
+//! registered function, and prints the returned `CliOutput`. The generic
+//! `assert eventually` wrapper repeats that same command path and compares only
+//! scalar `field: value` output lines.
 
 use crate::core::cli::{self, CliArgs, CliCommand, CliOutput};
 use crate::core::daemon::{self, DaemonDescription};
 use crate::core::runtime::{Runtime, RuntimeDescription};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Complete protocol declaration needed by the generic CLI runner.
 pub struct ProtocolDescription<C: 'static> {
@@ -68,6 +73,10 @@ pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> 
         ),
         format!("  {} --db PATH stop", description.name),
         format!("  {} --db PATH reset", description.name),
+        format!(
+            "  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
+            description.name
+        ),
     ]);
     for command in description.commands {
         lines.push(format!(
@@ -91,6 +100,7 @@ fn run_parsed<C: 'static>(
         "start" => run_start(description, parsed),
         "stop" => run_stop(parsed),
         "reset" => run_reset(parsed),
+        "assert" => run_assert(description, parsed),
         _ => run_protocol_command(description, parsed),
     }
 }
@@ -124,6 +134,62 @@ fn run_reset(parsed: ParsedArgs) -> Result<CliOutput, String> {
     daemon::reset(&db, CliArgs::new(&parsed.command[1..]))
 }
 
+fn run_assert<C: 'static>(
+    description: &'static ProtocolDescription<C>,
+    parsed: ParsedArgs,
+) -> Result<CliOutput, String> {
+    let db = parsed
+        .db
+        .clone()
+        .ok_or_else(|| "assert requires --db PATH".to_string())?;
+    let assertion = EventuallyAssertion::parse(description, &parsed.command[1..])?;
+    let started = Instant::now();
+    let timeout = Duration::from_millis(assertion.timeout_ms);
+    let poll = Duration::from_millis(assertion.poll_ms);
+    let mut polls = 0usize;
+    let mut last_observed = String::from("missing field");
+
+    loop {
+        polls += 1;
+        let command_output = run_protocol_command(
+            description,
+            ParsedArgs {
+                db: Some(db.clone()),
+                command: assertion.command.clone(),
+            },
+        )?;
+        let fields = output_fields(&command_output)?;
+        if let Some(observed) = fields.get(&assertion.field) {
+            last_observed = observed.clone();
+            if assertion.op.matches(observed, &assertion.expected)? {
+                return Ok(CliOutput::lines(vec![
+                    "ok: true".to_string(),
+                    format!("command: {}", assertion.command.join(" ")),
+                    format!("field: {}", assertion.field),
+                    format!("op: {}", assertion.op.as_str()),
+                    format!("expected: {}", assertion.expected),
+                    format!("observed: {observed}"),
+                    format!("elapsed_ms: {}", started.elapsed().as_millis()),
+                    format!("polls: {polls}"),
+                ]));
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "assert eventually timed out after {}ms: {} {} {} {}, last observed {}",
+                assertion.timeout_ms,
+                assertion.command.join(" "),
+                assertion.field,
+                assertion.op.as_str(),
+                assertion.expected,
+                last_observed,
+            ));
+        }
+        thread::sleep(poll);
+    }
+}
+
 fn run_protocol_command<C: 'static>(
     description: &'static ProtocolDescription<C>,
     parsed: ParsedArgs,
@@ -149,6 +215,191 @@ fn run_protocol_command<C: 'static>(
     let mut context = (description.context)(runtime, parsed.db);
     cli::run(description.commands, &mut context, &parsed.command)
         .map_err(|err| with_usage_footer(description, err))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventuallyAssertion {
+    command: Vec<String>,
+    field: String,
+    op: CompareOp,
+    expected: String,
+    timeout_ms: u64,
+    poll_ms: u64,
+}
+
+impl EventuallyAssertion {
+    fn parse<C: 'static>(
+        description: &ProtocolDescription<C>,
+        args: &[String],
+    ) -> Result<Self, String> {
+        let (args, timeout_ms, poll_ms) = parse_assert_options(description, args)?;
+        if args.first().map(String::as_str) != Some("eventually") {
+            return Err(assert_usage(description));
+        }
+        let body = &args[1..];
+        if body.len() < 4 {
+            return Err(assert_usage(description));
+        }
+
+        let field_index = body.len() - 3;
+        let command = body[..field_index].to_vec();
+        let Some(command_name) = command.first().map(String::as_str) else {
+            return Err(assert_usage(description));
+        };
+        if matches!(command_name, "assert" | "start" | "stop" | "reset") {
+            return Err("assert eventually can wrap only protocol commands".to_string());
+        }
+        if !description
+            .commands
+            .iter()
+            .any(|command| command.name == command_name)
+        {
+            return Err(usage(
+                description,
+                &format!("unknown command `{command_name}`"),
+            ));
+        }
+
+        Ok(Self {
+            command,
+            field: body[field_index].clone(),
+            op: CompareOp::parse(description, &body[field_index + 1])?,
+            expected: body[field_index + 2].clone(),
+            timeout_ms,
+            poll_ms,
+        })
+    }
+}
+
+fn parse_assert_options<C: 'static>(
+    description: &ProtocolDescription<C>,
+    args: &[String],
+) -> Result<(Vec<String>, u64, u64), String> {
+    let mut remaining = Vec::new();
+    let mut timeout_ms = 30_000u64;
+    let mut poll_ms = 250u64;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--timeout-ms" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| assert_usage(description))?;
+                timeout_ms = parse_positive_u64(description, value)?;
+                index += 2;
+            }
+            "--poll-ms" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| assert_usage(description))?;
+                poll_ms = parse_positive_u64(description, value)?;
+                index += 2;
+            }
+            _ => {
+                remaining.push(args[index].clone());
+                index += 1;
+            }
+        }
+    }
+    Ok((remaining, timeout_ms, poll_ms))
+}
+
+fn parse_positive_u64<C: 'static>(
+    description: &ProtocolDescription<C>,
+    value: &str,
+) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| assert_usage(description))
+}
+
+fn assert_usage<C: 'static>(description: &ProtocolDescription<C>) -> String {
+    format!(
+        "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
+        description.name
+    )
+}
+
+fn output_fields(output: &CliOutput) -> Result<BTreeMap<String, String>, String> {
+    let mut fields = BTreeMap::new();
+    for line in &output.lines {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if fields
+            .insert(key.to_string(), value.trim().to_string())
+            .is_some()
+        {
+            return Err(format!("assert eventually saw duplicate field `{key}`"));
+        }
+    }
+    Ok(fields)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+impl CompareOp {
+    fn parse<C: 'static>(
+        description: &ProtocolDescription<C>,
+        value: &str,
+    ) -> Result<Self, String> {
+        match value {
+            "=" | "==" | "eq" => Ok(Self::Eq),
+            "!=" | "ne" => Ok(Self::Ne),
+            ">" | "gt" => Ok(Self::Gt),
+            ">=" | "gte" => Ok(Self::Gte),
+            "<" | "lt" => Ok(Self::Lt),
+            "<=" | "lte" => Ok(Self::Lte),
+            _ => Err(assert_usage(description)),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Gt => ">",
+            Self::Gte => ">=",
+            Self::Lt => "<",
+            Self::Lte => "<=",
+        }
+    }
+
+    fn matches(self, observed: &str, expected: &str) -> Result<bool, String> {
+        match self {
+            Self::Eq => Ok(observed == expected),
+            Self::Ne => Ok(observed != expected),
+            Self::Gt | Self::Gte | Self::Lt | Self::Lte => {
+                let observed = observed
+                    .parse::<u64>()
+                    .map_err(|_| format!("observed value {observed:?} is not numeric"))?;
+                let expected = expected
+                    .parse::<u64>()
+                    .map_err(|_| format!("expected value {expected:?} is not numeric"))?;
+                Ok(match self {
+                    Self::Gt => observed > expected,
+                    Self::Gte => observed >= expected,
+                    Self::Lt => observed < expected,
+                    Self::Lte => observed <= expected,
+                    Self::Eq | Self::Ne => unreachable!(),
+                })
+            }
+        }
+    }
 }
 
 fn with_usage_footer<C: 'static>(description: &ProtocolDescription<C>, err: String) -> String {

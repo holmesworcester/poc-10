@@ -32,7 +32,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .commands
         .iter()
         .any(|command| command.name == "send"));
-    assert!(MATCH_PROTOCOL
+    assert!(!MATCH_PROTOCOL
         .commands
         .iter()
         .any(|command| command.name == "assert"));

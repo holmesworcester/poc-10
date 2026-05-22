@@ -125,7 +125,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
                     fact.id,
                     "content_deleted",
                     scope,
-                    [deletion.target_message_id, deletion.author_user_id],
+                    [&deletion.target_message_id, &deletion.author_user_id],
                 )?)
                 .row_mutation(RowMutation::InsertValues(row))
                 .intent(share_fact_with_workspace_intent_for_fact(

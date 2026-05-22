@@ -749,39 +749,39 @@ fn wait_for_leaf_count(db: &str, workspace_id: &str, expected: &str) {
 }
 
 fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
-    let mut last = String::new();
-    for _ in 0..300 {
-        let output = topo(&["--db", db, "content-count", workspace_id]);
-        if output.status.success() {
-            let out = stdout(&output);
-            if line_value(&out, "content_facts") == expected {
-                return;
-            }
-            last = out;
-        } else {
-            last = stderr(&output);
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("content count did not reach {expected}:\n{last}");
+    assert_success(topo(&[
+        "--db",
+        db,
+        "assert",
+        "eventually",
+        "content-count",
+        workspace_id,
+        "content_facts",
+        "eq",
+        expected,
+        "--timeout-ms",
+        "30000",
+        "--poll-ms",
+        "100",
+    ]));
 }
 
 fn wait_for_root_fingerprint_to_change(db: &str, previous: &str) -> String {
-    let mut last = String::new();
-    for _ in 0..300 {
-        let output = topo(&["--db", db, "sync-status"]);
-        if output.status.success() {
-            let out = stdout(&output);
-            if line_value(&out, "root_fingerprint") != previous {
-                return out;
-            }
-            last = out;
-        } else {
-            last = stderr(&output);
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("root_fingerprint did not change from {previous}:\n{last}");
+    assert_success(topo(&[
+        "--db",
+        db,
+        "assert",
+        "eventually",
+        "sync-status",
+        "root_fingerprint",
+        "ne",
+        previous,
+        "--timeout-ms",
+        "30000",
+        "--poll-ms",
+        "100",
+    ]));
+    sync_status(db)
 }
 
 fn wait_for_key_derive(db: &str, expected: &str) -> String {

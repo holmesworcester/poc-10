@@ -88,7 +88,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             fact.id,
             "content_deleted",
             scope.clone(),
-            [fact.id, message.author_user_id],
+            [&fact.id, &message.author_user_id],
         )?;
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
@@ -836,14 +836,14 @@ mod projector_tests {
                 message_fact.id,
                 "content_deleted",
                 scope.clone(),
-                [message_fact.id, message.author_user_id],
+                [&message_fact.id, &message.author_user_id],
             )
             .expect("deletion need"),
             offer: crate::core::context::ContextOffer::for_key_parts(
                 deletion_fact.id,
                 "content_deleted",
                 scope,
-                [message_fact.id, message.author_user_id],
+                [&message_fact.id, &message.author_user_id],
             )
             .expect("deletion offer"),
             payload: deletion_fact.clone(),

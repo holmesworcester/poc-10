@@ -910,31 +910,43 @@ fn poll_for_content_count_at_least(
     expected: usize,
     timeout_ms: u64,
 ) -> usize {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut last = String::new();
-    while Instant::now() < deadline {
-        let out = assert_success(topo(&["--db", db, "content-count", workspace]));
-        let observed = line_value(&out, "content_events")
-            .parse()
-            .expect("content_events usize");
-        if observed >= expected {
-            return observed;
-        }
-        last = out;
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("content count did not reach {expected}; last output:\n{last}");
+    let expected = expected.to_string();
+    let timeout_ms = timeout_ms.to_string();
+    let out = assert_success(topo(&[
+        "--db",
+        db,
+        "assert",
+        "eventually",
+        "content-count",
+        workspace,
+        "content_events",
+        "gte",
+        &expected,
+        "--timeout-ms",
+        &timeout_ms,
+        "--poll-ms",
+        "100",
+    ]));
+    line_value(&out, "observed")
+        .parse()
+        .expect("observed content_events usize")
 }
 
 fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
-    let mut last = String::new();
-    for _ in 0..300 {
-        let out = assert_success(topo(&["--db", db, "content-count", workspace]));
-        if line_value(&out, "content_events") == expected.to_string() {
-            return;
-        }
-        last = out;
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("content count did not reach {expected}; last output:\n{last}");
+    let expected = expected.to_string();
+    assert_success(topo(&[
+        "--db",
+        db,
+        "assert",
+        "eventually",
+        "content-count",
+        workspace,
+        "content_events",
+        "eq",
+        &expected,
+        "--timeout-ms",
+        "30000",
+        "--poll-ms",
+        "100",
+    ]));
 }

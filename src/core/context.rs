@@ -113,15 +113,15 @@ pub struct ContextKey(Vec<u8>);
 ///
 /// This is syntax only. Protocol projectors still choose which fields belong in
 /// a key and validate any matched payload semantically.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContextKeyPart {
-    Bytes(Vec<u8>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextKeyPart<'a> {
+    Bytes(&'a [u8]),
     U64(u64),
 }
 
-impl ContextKeyPart {
-    pub fn bytes(bytes: impl Into<Vec<u8>>) -> Self {
-        Self::Bytes(bytes.into())
+impl<'a> ContextKeyPart<'a> {
+    pub fn bytes(bytes: &'a [u8]) -> Self {
+        Self::Bytes(bytes)
     }
 
     pub fn u64(value: u64) -> Self {
@@ -129,37 +129,19 @@ impl ContextKeyPart {
     }
 }
 
-impl<const N: usize> From<[u8; N]> for ContextKeyPart {
-    fn from(value: [u8; N]) -> Self {
-        Self::Bytes(value.to_vec())
-    }
-}
-
-impl<const N: usize> From<&[u8; N]> for ContextKeyPart {
-    fn from(value: &[u8; N]) -> Self {
-        Self::Bytes(value.to_vec())
-    }
-}
-
-impl From<&[u8]> for ContextKeyPart {
-    fn from(value: &[u8]) -> Self {
-        Self::Bytes(value.to_vec())
-    }
-}
-
-impl From<Vec<u8>> for ContextKeyPart {
-    fn from(value: Vec<u8>) -> Self {
+impl<'a, const N: usize> From<&'a [u8; N]> for ContextKeyPart<'a> {
+    fn from(value: &'a [u8; N]) -> Self {
         Self::Bytes(value)
     }
 }
 
-impl From<&Vec<u8>> for ContextKeyPart {
-    fn from(value: &Vec<u8>) -> Self {
-        Self::Bytes(value.clone())
+impl<'a> From<&'a [u8]> for ContextKeyPart<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self::Bytes(value)
     }
 }
 
-impl From<u64> for ContextKeyPart {
+impl<'a> From<u64> for ContextKeyPart<'a> {
     fn from(value: u64) -> Self {
         Self::U64(value)
     }
@@ -180,10 +162,10 @@ impl ContextKey {
     /// Use this for exact or composite-key dependencies where the entire key is
     /// matched as one degenerate range. Domain-specific range helpers should
     /// still build their own low/high endpoints when byte ordering matters.
-    pub fn from_parts<I, P>(parts: I) -> Result<Self, String>
+    pub fn from_parts<'a, I, P>(parts: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = P>,
-        P: Into<ContextKeyPart>,
+        P: Into<ContextKeyPart<'a>>,
     {
         let mut bytes = vec![CONTEXT_KEY_TUPLE_V1];
         let mut count = 0usize;
@@ -210,38 +192,14 @@ impl ContextKey {
     }
 }
 
-impl From<Vec<u8>> for ContextKey {
-    fn from(value: Vec<u8>) -> Self {
-        Self::from_bytes(value)
-    }
-}
-
-impl From<&[u8]> for ContextKey {
-    fn from(value: &[u8]) -> Self {
-        Self::from_bytes(value)
-    }
-}
-
-impl<const N: usize> From<[u8; N]> for ContextKey {
-    fn from(value: [u8; N]) -> Self {
-        Self::from_bytes(value)
-    }
-}
-
-impl<const N: usize> From<&[u8; N]> for ContextKey {
-    fn from(value: &[u8; N]) -> Self {
-        Self::from_bytes(value)
-    }
-}
-
-fn append_context_key_part(bytes: &mut Vec<u8>, part: ContextKeyPart) -> Result<(), String> {
+fn append_context_key_part(bytes: &mut Vec<u8>, part: ContextKeyPart<'_>) -> Result<(), String> {
     match part {
         ContextKeyPart::Bytes(part) => {
             let len = u16::try_from(part.len())
                 .map_err(|_| "context key byte part is too large".to_string())?;
             bytes.push(CONTEXT_KEY_PART_BYTES);
             bytes.extend_from_slice(&len.to_be_bytes());
-            bytes.extend_from_slice(&part);
+            bytes.extend_from_slice(part);
         }
         ContextKeyPart::U64(value) => {
             bytes.push(CONTEXT_KEY_PART_U64);
@@ -272,23 +230,7 @@ pub struct ContextNeed {
 }
 
 impl ContextNeed {
-    pub fn for_key(
-        owner: FactId,
-        role: impl Into<Role>,
-        scope: FactScope,
-        key: impl Into<ContextKey>,
-    ) -> Self {
-        let key = key.into();
-        Self {
-            owner,
-            role: role.into(),
-            scope,
-            start_key: key.clone(),
-            end_key: key,
-        }
-    }
-
-    pub fn for_key_parts<I, P>(
+    pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
         scope: FactScope,
@@ -296,14 +238,16 @@ impl ContextNeed {
     ) -> Result<Self, String>
     where
         I: IntoIterator<Item = P>,
-        P: Into<ContextKeyPart>,
+        P: Into<ContextKeyPart<'a>>,
     {
-        Ok(Self::for_key(
+        let key = ContextKey::from_parts(parts)?;
+        Ok(Self {
             owner,
-            role,
+            role: role.into(),
             scope,
-            ContextKey::from_parts(parts)?,
-        ))
+            start_key: key.clone(),
+            end_key: key,
+        })
     }
 
     pub fn range(
@@ -342,23 +286,7 @@ pub struct ContextOffer {
 }
 
 impl ContextOffer {
-    pub fn for_key(
-        owner: FactId,
-        role: impl Into<Role>,
-        scope: FactScope,
-        key: impl Into<ContextKey>,
-    ) -> Self {
-        let key = key.into();
-        Self {
-            owner,
-            role: role.into(),
-            scope,
-            start_key: key.clone(),
-            end_key: key,
-        }
-    }
-
-    pub fn for_key_parts<I, P>(
+    pub fn for_key_parts<'a, I, P>(
         owner: FactId,
         role: impl Into<Role>,
         scope: FactScope,
@@ -366,14 +294,16 @@ impl ContextOffer {
     ) -> Result<Self, String>
     where
         I: IntoIterator<Item = P>,
-        P: Into<ContextKeyPart>,
+        P: Into<ContextKeyPart<'a>>,
     {
-        Ok(Self::for_key(
+        let key = ContextKey::from_parts(parts)?;
+        Ok(Self {
             owner,
-            role,
+            role: role.into(),
             scope,
-            ContextKey::from_parts(parts)?,
-        ))
+            start_key: key.clone(),
+            end_key: key,
+        })
     }
 
     pub fn range(
@@ -512,14 +442,15 @@ mod tests {
 
     #[test]
     fn context_key_parts_encode_canonical_bounded_bytes() {
+        let id = [1; 32];
         let key = ContextKey::from_parts([
-            ContextKeyPart::from([1; 32]),
+            ContextKeyPart::from(&id),
             ContextKeyPart::u64(42),
             ContextKeyPart::bytes(b"constant".as_slice()),
         ])
         .expect("canonical key");
         let same = ContextKey::from_parts([
-            ContextKeyPart::from([1; 32]),
+            ContextKeyPart::from(&id),
             ContextKeyPart::from(42u64),
             ContextKeyPart::from(b"constant".as_slice()),
         ])
@@ -532,19 +463,22 @@ mod tests {
 
     #[test]
     fn context_key_parts_reject_empty_oversized_and_too_many_parts() {
-        assert!(ContextKey::from_parts(Vec::<ContextKeyPart>::new()).is_err());
-        assert!(ContextKey::from_parts([vec![0; CONTEXT_KEY_MAX_BYTES]]).is_err());
-        assert!(ContextKey::from_parts([[0u8; 1]; CONTEXT_KEY_MAX_PARTS + 1]).is_err());
+        assert!(ContextKey::from_parts(Vec::<ContextKeyPart<'_>>::new()).is_err());
+        let oversized = vec![0; CONTEXT_KEY_MAX_BYTES];
+        assert!(ContextKey::from_parts([ContextKeyPart::bytes(&oversized)]).is_err());
+        let parts = [[0u8; 1]; CONTEXT_KEY_MAX_PARTS + 1];
+        assert!(ContextKey::from_parts(parts.iter()).is_err());
     }
 
     #[test]
     fn key_part_need_and_offer_are_degenerate_ranges() {
         let owner = [1; 32];
         let scope = FactScope::Global;
-        let need =
-            ContextNeed::for_key_parts(owner, "composite", scope.clone(), [[2; 32], [3; 32]])
-                .expect("need");
-        let offer = ContextOffer::for_key_parts(owner, "composite", scope, [[2; 32], [3; 32]])
+        let first = [2; 32];
+        let second = [3; 32];
+        let need = ContextNeed::for_key_parts(owner, "composite", scope.clone(), [&first, &second])
+            .expect("need");
+        let offer = ContextOffer::for_key_parts(owner, "composite", scope, [&first, &second])
             .expect("offer");
 
         assert_eq!(need.start_key, need.end_key);

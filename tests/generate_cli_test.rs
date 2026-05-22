@@ -78,7 +78,10 @@ fn assert_eventually_cli_reports_true_when_condition_is_met() {
     ]));
 
     assert_eq!(line_value(&out, "ok"), "true");
-    assert_eq!(line_value(&out, "target"), "content-count");
+    assert_eq!(
+        line_value(&out, "command"),
+        format!("content-count {workspace_id}")
+    );
     assert_eq!(line_value(&out, "field"), "content_events");
     assert_eq!(line_value(&out, "observed"), "2");
 }

@@ -359,7 +359,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         content::event::cli::CONTENT_COUNT_USAGE,
         content_count
     ),
-    cli_command!("assert", command::ASSERT_USAGE, assert_cli),
     cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
     cli_command!("count", identity::workspace::cli::COUNT_USAGE, count),
 ];

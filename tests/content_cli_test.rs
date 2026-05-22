@@ -1237,21 +1237,21 @@ fn content_event_count(db: &str, workspace_id: &str) -> String {
 }
 
 fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
-    let mut last = String::new();
-    for _ in 0..300 {
-        let output = topo(&["--db", db, "content-count", workspace_id]);
-        if output.status.success() {
-            let out = stdout(&output);
-            if line_value(&out, "content_events") == expected {
-                return;
-            }
-            last = out;
-        } else {
-            last = stderr(&output);
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("content count did not reach {expected}:\n{last}");
+    assert_success(topo(&[
+        "--db",
+        db,
+        "assert",
+        "eventually",
+        "content-count",
+        workspace_id,
+        "content_events",
+        "eq",
+        expected,
+        "--timeout-ms",
+        "30000",
+        "--poll-ms",
+        "100",
+    ]));
 }
 
 fn wait_for_files_count(db: &str, workspace_id: &str, expected: &str) {
