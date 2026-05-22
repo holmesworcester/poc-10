@@ -7,7 +7,7 @@ migration checkpoint. The target vocabulary is deliberately small:
 facts
 context needs
 context offers
-context matchers
+context keys
 projectors
 intents
 intent handlers
@@ -30,7 +30,7 @@ The migration succeeds when:
 - The old mechanisms are gone, not wrapped: label stores, blocked tables,
   ready queues, pending reprojection queues, worker-specific domain queues, and
   receive metadata side channels.
-- Core owns facts, context, command context, context matchers, generic runtime/app mechanics,
+- Core owns facts, context, command context, byte-range context matching, generic runtime/app mechanics,
   pending fact processing, context wake fanout, intent dispatch, storage mechanics, wire
   field primitives, and crypto helpers.
 - Fact modules own fact semantics: layouts, projectors, context roles,
@@ -94,7 +94,7 @@ fixtures and the deferred partial-download-progress content tests.
   modules only.
 - The runtime calls SQL-backed core pipeline workers under
   `src/core/pipeline/`: `projection.rs` projects pending facts,
-  `projection_commit.rs` wakes context-matcher dependents,
+  `projection_commit.rs` wakes context dependents,
   `fact_context.rs` runs the single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
   durable and ephemeral intents.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
@@ -117,7 +117,7 @@ fixtures and the deferred partial-download-progress content tests.
 Implemented target slices:
 
 - Core fact/context/intent/projector contracts.
-- Context needs/offers/matchers for exact facts, secret coverage, receive
+- Context needs/offers/context keys for exact facts, secret coverage, receive
   provenance, deletion/update wakeups, and recipient-key supersession.
 - Row mutations as the projector- and handler-owned path for bounded read-model
   writes and deletes.
@@ -169,10 +169,9 @@ src/
   core.rs
   protocol.rs
   protocol/
-    matchers.rs
-    matchers/
+    context_keys.rs
+    context_keys/
       exact.rs
-      range.rs
       coverage.rs
       wrap_source.rs
 
@@ -184,7 +183,6 @@ src/
     runtime.rs
     facts.rs
     context.rs
-    matchers.rs
     projectors.rs
     intents.rs
     pipeline.rs
@@ -255,15 +253,15 @@ src/
 ```
 
 The exact fact module names can change. The ownership pattern should not.
-Only `src/core/context.rs` owns context primitives. Protocol context roles,
-selectors, need constructors, offer constructors, and matcher implementations
-belong under `src/protocol/matchers/`, organized by generic matching relation
-such as exact, range, coverage, or wrap-source. Fact modules must not define
-their own `matchers.rs`, `context.rs`, or `selectors.rs` files. Projectors own
-which protocol-defined needs and offers they emit, while matcher modules own
-only candidate-pairing algorithms. Need/offer shapes should be as generic as
-the matching relation allows, using event type plus typed selector parameters
-instead of fact-module-specific matcher vocabulary.
+Only `src/core/context.rs` owns context primitives. Protocol context roles, key
+encoders, need constructors, offer constructors, and candidate validation belong
+under `src/protocol/context_keys/`, organized by relation such as exact,
+coverage, or wrap-source. Fact modules must not define their own `matchers.rs`,
+`context.rs`, or `selectors.rs` files. Projectors own which protocol-defined
+needs and offers they emit, while context-key modules own only key layout and
+candidate validation. Need/offer shapes should be as generic as the relation
+allows, using event type plus typed key parameters instead of fact-module-specific
+context-key vocabulary.
 
 A fact module is one fact family. A directory that defines several durable
 fact types is a bundle and should be split before review, even when the facts
@@ -288,7 +286,7 @@ dumping-ground files.
 
 `src/protocol/registry.rs` is the target protocol registry. It is the table of
 contents across CLI commands, schema sources, fact registrations, context
-matcher roles, intent kinds, handlers, and the projector/handler route
+context roles, intent kinds, handlers, and the projector/handler route
 factories that bind those declarations to core runtime traits. It is allowed
 to name protocol factories, but not to own runtime lifecycle, storage opening,
 network IO loops, or daemon policy.
@@ -315,7 +313,7 @@ lifecycle commands, open the declared runtime, accept network bytes, convert
 claimed inbound bytes through the declared protocol constructor, process
 declared time wakes, run projection/intent/projection work, and call a
 registered command function. It must not learn protocol command names, handler
-names, matcher roles, or fact tags.
+names, context roles, or fact tags.
 
 The registry owns the CLI command table: command name, usage string, and the
 protocol-owned function pointer that core should call. Fact-scope `cli.rs`
@@ -385,10 +383,10 @@ queries.rs
 rows.rs
   current migration checkpoint for read-model row shapes
 
-protocol/matchers/*.rs
-  one generic matching relation per file; each matcher module owns the
-  relation's role constants, selector constructors, need/offer constructors,
-  matcher implementation, and relation-specific tests
+protocol/context_keys/*.rs
+  one relation per file; each context-key module owns the relation's role
+  constants, key encoders, need/offer constructors,
+  candidate validation, and relation-specific tests
 
 frame.rs / receive.rs
   transit-specific fixed-frame helpers and receive classification
@@ -515,16 +513,16 @@ struct ContextNeed {
     owner: FactId,
     role: Role,
     scope: FactScope,
-    start_key: Selector,
-    end_key: Selector,
+    start_key: ContextKey,
+    end_key: ContextKey,
 }
 
 struct ContextOffer {
     owner: FactId,
     role: Role,
     scope: FactScope,
-    start_key: Selector,
-    end_key: Selector,
+    start_key: ContextKey,
+    end_key: ContextKey,
 }
 ```
 
@@ -578,7 +576,7 @@ again unless matching offers change.
 
 ## Context Matching
 
-Core owns one candidate matcher for every context role:
+Core owns one candidate overlap query for every context role:
 
 ```text
 same role
@@ -588,33 +586,33 @@ offer.start_key <= need.end_key
 ```
 
 Exact dependencies are represented as degenerate ranges where `start_key ==
-end_key`. Broader selectors encode canonical bytes so ordinary lexicographic
+end_key`. Broader key ranges encode canonical bytes so ordinary lexicographic
 range overlap is enough to find candidates. The target projector must still
 decode and validate matched facts semantically before emitting rows, offers, or
 intents. This deliberately keeps workspace, frontier, signer, and authorization
 rules out of core.
 
-Standard matchers:
+Standard context key shapes:
 
 ```text
-Exact fact matcher
+Exact fact key
   Need(role="fact", range=[fact_id, fact_id])
   Offer(role="fact", range=[fact_id, fact_id])
 
-Secret coverage matcher
+Secret coverage key range
   Need(role="secret_coverage", range=[workspace/frontier/minute/leaf, same])
   Offer(role="secret_coverage", range=[workspace/frontier/minute-prefix-low,
                                         workspace/frontier/minute-prefix-high])
 
-Receive provenance matcher
+Receive provenance key
   Need(role="transit_received", range=[received_fact_id, received_fact_id])
   Offer(role="transit_received", range=[received_fact_id, received_fact_id])
 
-Deletion/update matcher
+Deletion/update key
   Need(role="message_deletion", range=[message_id, message_id])
   Offer(role="message_deletion", range=[message_id, message_id])
 
-Recipient-key supersession matcher
+Recipient-key supersession key
   Need(role="recipient_key_superseded", range=[recipient_key_id, recipient_key_id])
   Offer(role="recipient_key_superseded", range=[recipient_key_id, recipient_key_id])
 ```
@@ -637,7 +635,7 @@ It may declare:
 schema sources
 fact names and tags
 projector names
-context matcher roles
+context roles
 intent kinds and execution class
 handler names and accepted intent kinds
 ```
@@ -697,7 +695,7 @@ pub fn project(fact: &Fact, ctx: &ProjectionContext) -> Result<ProjectionOutput,
 emitted and returns the matched offer owner's fact. Offers no longer carry a
 separate payload reference: the offered fact owns its context, and projectors
 must validate that matched fact before emitting rows, offers, or intents. The
-projector does not query the store, run matcher logic, or decide candidate
+projector does not query the store, run overlap queries, or decide candidate
 matching; core already built the context from matched needs/offers before
 invoking the projector.
 
@@ -710,8 +708,8 @@ exception.
 The `waiting` output is not a blocked state. It is the fact's current standing
 context surface. If a matching offer already exists, the projection preparation
 loop adds that matched context and reruns before committing the waiting output.
-If a matching offer arrives later, the matcher wakes this fact and core supplies
-that matched context on the next projection. If the output can be affected by
+If a matching offer arrives later, context wake fanout wakes this fact and core
+supplies that matched context on the next projection. If the output can be affected by
 future update/about facts such as deletions or key coverage, the projector keeps
 those stable needs in the successful output too.
 
@@ -756,15 +754,15 @@ When implementing or reviewing a projector:
    explicit typed deferred intents owned by handlers.
 8. Keep helper functions small, local to the fact family, and named after the
    invariant they validate.
-9. Add any new context role, need constructor, offer constructor, and matching
-   behavior to the relation-specific module under src/protocol/matchers/, then
-   register that matcher in src/protocol/registry.rs.
+9. Add any new context role, key encoding, need constructor, offer constructor,
+   and candidate validation to the relation-specific module under
+   src/protocol/context_keys/.
 10. If a module is temporarily a row shell because sibling context is not ready,
     document the exact behavior gap in the module docs and remove that gap when
     the sibling context lands.
 11. Do not add protocol-specific context.rs, selectors.rs, or fact-module
     matchers.rs helper/source-of-truth files. Keep projection logic in
-    project.rs and relation-specific matching in src/protocol/matchers/.
+    project.rs and relation-specific context keys in src/protocol/context_keys/.
 ```
 
 ## Intents
@@ -1065,7 +1063,7 @@ The receive fact offers context:
 Offer(
     owner = transit_received_fact_id,
     role = "transit_received",
-    selector = received_fact_id,
+    key = received_fact_id,
 )
 ```
 
@@ -1150,7 +1148,7 @@ Offer(
 )
 ```
 
-The generic byte-range matcher wakes content facts when coverage appears. The
+The generic byte-range overlap query wakes content facts when coverage appears. The
 content projector treats the matched offer as a candidate and validates the
 workspace, frontier, time, hash prefix, key identity, and local key material
 before opening content.
@@ -1195,7 +1193,7 @@ Recipient-key supersession is an update/offer:
 recipient_key successor projector
   -> validates self-contained supersession authority
   -> DeleteRow(old recipient_key row)
-  -> Offer(role="recipient_key_superseded", selector=old_recipient_key_id)
+  -> Offer(role="recipient_key_superseded", key=old_recipient_key_id)
   -> Intent(PurgeRetiredRecipientMaterial)
 ```
 
@@ -1276,7 +1274,7 @@ core.pending_projection as an internal pending-fact checkpoint
 core.intents
 core.inbox
 local receive facts
-context matchers
+context keys
 flat intent handlers
 ```
 
@@ -1309,7 +1307,7 @@ adding new compatibility layers:
 - Generate row and wire boilerplate from the three schema declaration files.
 - Prefer one exact helper per invariant over one flexible helper with flags.
 - Give every deferred and ephemeral intent kind an idempotence key.
-- Give every context matcher deterministic tests for new-need-to-old-offer and
+- Give every context-key relation deterministic tests for new-need-to-old-offer and
   new-offer-to-old-need matching.
 - Keep CLI parsing thin: parse arguments, call one command constructor or read
   model, print output.
@@ -1324,7 +1322,7 @@ The final model is:
 facts produce needs, offers, and intents
 needs and offers are stored as context_edges
 context_edges wake projection
-context matchers find candidates
+core byte-range overlap finds candidates
 projectors validate protocol meaning
 row mutations commit exact state
 deferred intents drive bounded handlers

@@ -1,19 +1,19 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::protocol::context_keys::{self, WrapSourceDescriptor, WrapSourceKind};
 use crate::protocol::facts::identity;
-use crate::protocol::matchers::{self, WrapSourceKind, WrapSourceSelector};
 
 use super::layout;
 
 pub(super) fn matching_wrap_sources_with_signer(
     projection_context: &ProjectionContext,
     need: &ContextNeed,
-) -> Result<Vec<(FactId, FactId, WrapSourceSelector)>, String> {
+) -> Result<Vec<(FactId, FactId, WrapSourceDescriptor)>, String> {
     projection_context
         .matched_payloads_for(need)
         .filter_map(|(offer, payload)| {
-            matchers::wrap_source_offer_matches_need(need, offer)
+            context_keys::wrap_source_offer_valid_for_need(need, offer)
                 .map(|source| (offer, payload, source))
         })
         .map(|(_, payload, source)| {
@@ -36,11 +36,11 @@ pub(super) fn add_signer_needs_for_matching_sources(
     need: &ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     for (offer, payload) in projection_context.matched_payloads_for(need) {
-        let Some(source) = matchers::wrap_source_offer_matches_need(need, offer) else {
+        let Some(source) = context_keys::wrap_source_offer_valid_for_need(need, offer) else {
             continue;
         };
         validate_wrap_source_payload(payload, &source)?;
-        output = output.need(crate::protocol::matchers::local_signer_secret_need(
+        output = output.need(crate::protocol::context_keys::local_signer_secret_need(
             need.owner,
             need.scope.clone(),
             source.owner_endpoint_id,
@@ -55,7 +55,8 @@ fn local_signer_secret_fact_id(
     scope: &FactScope,
     signer_id: FactId,
 ) -> Option<FactId> {
-    let need = crate::protocol::matchers::local_signer_secret_need(owner, scope.clone(), signer_id);
+    let need =
+        crate::protocol::context_keys::local_signer_secret_need(owner, scope.clone(), signer_id);
     projection_context
         .matched_payloads_for(&need)
         .map(|(_, payload)| payload.id)
@@ -109,7 +110,10 @@ pub(super) fn require_local_scope(fact: &Fact) -> Result<(), String> {
     }
 }
 
-fn validate_wrap_source_payload(payload: &Fact, source: &WrapSourceSelector) -> Result<(), String> {
+fn validate_wrap_source_payload(
+    payload: &Fact,
+    source: &WrapSourceDescriptor,
+) -> Result<(), String> {
     if payload.scope != FactScope::Local {
         return Err("wrap source context must be local key material".to_string());
     }
@@ -122,7 +126,7 @@ fn validate_wrap_source_payload(payload: &Fact, source: &WrapSourceSelector) -> 
                 || root.owner_endpoint_id != source.owner_endpoint_id
                 || root.created_at_ms != source.frontier_created_at_ms
             {
-                return Err("wrap source root payload does not match selector".to_string());
+                return Err("wrap source root payload does not match descriptor".to_string());
             }
         }
         WrapSourceKind::HistoryNode {
@@ -142,7 +146,7 @@ fn validate_wrap_source_payload(payload: &Fact, source: &WrapSourceSelector) -> 
                 || node.bit_depth != bit_depth
                 || node.fact_id_prefix != fact_id_prefix
             {
-                return Err("wrap source history payload does not match selector".to_string());
+                return Err("wrap source history payload does not match descriptor".to_string());
             }
         }
     }

@@ -17,7 +17,7 @@
 //! queues and indexes needed to move work; it does not encode protocol policy
 //! such as what makes a message valid, which key can decrypt content, or which
 //! sync range should be requested. That policy belongs beside the fact, query,
-//! matcher, and projector modules that understand it.
+//! context-key, and projector modules that understand it.
 //!
 //! Add a table here when the table is part of core's runtime mechanics. Add it
 //! in a protocol module when it stores protocol meaning, even if core commits

@@ -99,7 +99,7 @@ impl ProjectionContext {
     ///
     /// This is crate-visible because only core should grow projection context.
     /// Projectors receive the resulting snapshot but do not query storage or run
-    /// matchers themselves.
+    /// overlap queries themselves.
     pub(crate) fn extend_with_matches(&mut self, other: ProjectionContext) -> bool {
         let mut changed = false;
 
@@ -159,7 +159,7 @@ impl ProjectionContext {
     /// Return the payload fact supplied for an exact need, if any.
     ///
     /// This is a lookup over context core already matched and loaded before
-    /// projection. It does not query storage or run matcher logic.
+    /// projection. It does not query storage or run overlap queries.
     pub fn payload_for(&self, need: &ContextNeed) -> Option<&Fact> {
         self.matched_entries_for(need)
             .next()
@@ -480,28 +480,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{Role, Selector};
+    use crate::core::context::{ContextKey, Role};
     use crate::core::facts::FactScope;
 
     #[test]
     fn projection_output_keeps_context_and_work_separate() {
         let id = [1; 32];
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([2; 32]);
+        let key = ContextKey::from_bytes([2; 32]);
         let output = ProjectionOutput::new()
             .need(ContextNeed {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                start_key: selector.clone(),
-                end_key: selector.clone(),
+                start_key: key.clone(),
+                end_key: key.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
                 role,
                 scope: FactScope::Global,
-                start_key: selector.clone(),
-                end_key: selector,
+                start_key: key.clone(),
+                end_key: key,
             });
 
         assert_eq!(output.needs.len(), 1);
@@ -517,8 +517,8 @@ mod tests {
             owner: id,
             role,
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([2; 32]),
-            end_key: Selector::from_bytes([2; 32]),
+            start_key: ContextKey::from_bytes([2; 32]),
+            end_key: ContextKey::from_bytes([2; 32]),
         };
         let output = ProjectionOutput::new()
             .need(need.clone())
@@ -534,15 +534,15 @@ mod tests {
             owner: [1; 32],
             role: role.clone(),
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([10; 32]),
-            end_key: Selector::from_bytes([10; 32]),
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
         };
         let need_b = ContextNeed {
             owner: [2; 32],
             role: role.clone(),
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([20; 32]),
-            end_key: Selector::from_bytes([20; 32]),
+            start_key: ContextKey::from_bytes([20; 32]),
+            end_key: ContextKey::from_bytes([20; 32]),
         };
         let context = ProjectionContext::from_matches(vec![
             matched_context(need_a.clone(), [11; 32]),
@@ -571,8 +571,8 @@ mod tests {
             owner: [1; 32],
             role,
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([10; 32]),
-            end_key: Selector::from_bytes([10; 32]),
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
         };
         let context = ProjectionContext::from_matches(vec![matched_context(need.clone(), [7; 32])]);
 
@@ -582,8 +582,8 @@ mod tests {
                 owner: [2; 32],
                 role: Role::new("exact").unwrap(),
                 scope: FactScope::Global,
-                start_key: Selector::from_bytes([20; 32]),
-                end_key: Selector::from_bytes([20; 32]),
+                start_key: ContextKey::from_bytes([20; 32]),
+                end_key: ContextKey::from_bytes([20; 32]),
             }),
             Ok(None)
         );
@@ -596,8 +596,8 @@ mod tests {
             owner: [1; 32],
             role,
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([10; 32]),
-            end_key: Selector::from_bytes([10; 32]),
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
         };
         let context = ProjectionContext::from_matches(vec![
             matched_context(need.clone(), [7; 32]),
@@ -623,8 +623,8 @@ mod tests {
             owner: [1; 32],
             role,
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([10; 32]),
-            end_key: Selector::from_bytes([10; 32]),
+            start_key: ContextKey::from_bytes([10; 32]),
+            end_key: ContextKey::from_bytes([10; 32]),
         };
         let mut matched = matched_context(need.clone(), [7; 32]);
         matched.offer.owner = [8; 32];

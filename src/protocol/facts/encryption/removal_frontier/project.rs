@@ -59,9 +59,9 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
         }
 
         // 2. Authority and referenced removal context.
-        let authority_need = crate::protocol::matchers::exact_need(
+        let authority_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::admin_role(),
+            crate::protocol::context_keys::admin_role(),
             frontier.authority_admin_id,
         );
         let ref_needs = frontier
@@ -69,7 +69,11 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
             .iter()
             .copied()
             .map(|ref_id| {
-                crate::protocol::matchers::exact_fact_need(fact.id, expected_scope.clone(), ref_id)
+                crate::protocol::context_keys::exact_fact_need(
+                    fact.id,
+                    expected_scope.clone(),
+                    ref_id,
+                )
             })
             .collect::<Vec<_>>();
 
@@ -101,7 +105,7 @@ impl TypedProjector<super::Codec> for RemovalFrontierProjector {
 
         // 3. Materialize.
         Ok(waiting
-            .offer(crate::protocol::matchers::exact_fact_offer(
+            .offer(crate::protocol::context_keys::exact_fact_offer(
                 fact.id,
                 expected_scope,
                 fact.id,
@@ -142,9 +146,9 @@ mod projector_tests {
     use topo::protocol::facts::identity::admin::fact::AdminFact;
     use topo::protocol::intents::sync::share_fact_with_workspace;
 
+    use topo::protocol::context_keys as sync_keys;
     use topo::protocol::facts::encryption::removal_frontier::fact::RemovalFrontierFact;
     use topo::protocol::facts::encryption::removal_frontier::{layout, project, rows};
-    use topo::protocol::matchers as sync_matchers;
 
     fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {
         FactScope::Scoped {
@@ -179,24 +183,24 @@ mod projector_tests {
 
         let context = ProjectionContext::from_matches(vec![
             matched(
-                crate::protocol::matchers::exact_need(
+                crate::protocol::context_keys::exact_need(
                     fact.id,
-                    crate::protocol::matchers::admin_role(),
+                    crate::protocol::context_keys::admin_role(),
                     admin.id,
                 ),
-                crate::protocol::matchers::exact_offer(
+                crate::protocol::context_keys::exact_offer(
                     admin.id,
-                    crate::protocol::matchers::admin_role(),
+                    crate::protocol::context_keys::admin_role(),
                 ),
                 admin.clone(),
             ),
             matched(
-                sync_matchers::exact_fact_need(
+                sync_keys::exact_fact_need(
                     fact.id,
                     workspace_scope(frontier.workspace_id),
                     ref_a.id,
                 ),
-                sync_matchers::exact_fact_offer(
+                sync_keys::exact_fact_offer(
                     ref_a.id,
                     workspace_scope(frontier.workspace_id),
                     ref_a.id,
@@ -204,12 +208,12 @@ mod projector_tests {
                 ref_a.clone(),
             ),
             matched(
-                sync_matchers::exact_fact_need(
+                sync_keys::exact_fact_need(
                     fact.id,
                     workspace_scope(frontier.workspace_id),
                     ref_b.id,
                 ),
-                sync_matchers::exact_fact_offer(
+                sync_keys::exact_fact_offer(
                     ref_b.id,
                     workspace_scope(frontier.workspace_id),
                     ref_b.id,

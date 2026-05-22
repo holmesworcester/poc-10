@@ -1,10 +1,10 @@
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::protocol::context_keys;
 use crate::protocol::facts::encryption::fact::KeyRequestFact;
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::validation::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
@@ -16,13 +16,13 @@ pub(super) fn key_request(
     projection_context: &ProjectionContext,
     request: KeyRequestFact,
 ) -> Result<ProjectionOutput, String> {
-    let scope = crate::protocol::matchers::workspace_scope(request.workspace_id);
+    let scope = crate::protocol::context_keys::workspace_scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
 
     let recipient_need =
-        matchers::recipient_key_need(fact.id, scope.clone(), request.recipient_key_id);
-    let frontier_need = matchers::frontier_need(fact.id, scope.clone(), request.frontier_id);
-    let source_need = matchers::requested_wrap_source_need(
+        context_keys::recipient_key_need(fact.id, scope.clone(), request.recipient_key_id);
+    let frontier_need = context_keys::frontier_need(fact.id, scope.clone(), request.frontier_id);
+    let source_need = context_keys::requested_wrap_source_need(
         fact.id,
         scope,
         request.workspace_id,

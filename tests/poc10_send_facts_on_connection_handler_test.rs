@@ -44,7 +44,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     let local_endpoint = local_endpoint();
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
     let fact = Fact::new(
-        topo::protocol::matchers::workspace_scope([7; 32]),
+        topo::protocol::context_keys::workspace_scope([7; 32]),
         1,
         shared_fact_layout::encode_fact(&SharedFact {
             workspace_id: [7; 32],

@@ -48,7 +48,7 @@ impl TypedProjector<super::Codec> for WorkspaceProjector {
         }
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(crate::protocol::matchers::workspace_offer(fact.id))
+            .offer(crate::protocol::context_keys::workspace_offer(fact.id))
             .row_mutation(RowMutation::PutRow(workspace_row(fact.id, &workspace)?))
             .intent(share_fact_with_workspace_intent_for_fact(fact.id, fact)))
     }

@@ -78,14 +78,14 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(authority_need)
-            .offer(crate::protocol::matchers::signer_offer(
+            .offer(crate::protocol::context_keys::signer_offer(
                 fact.id,
-                crate::protocol::matchers::workspace_scope(event.workspace_id),
+                crate::protocol::context_keys::workspace_scope(event.workspace_id),
                 event.endpoint_id,
             ))
-            .offer(crate::protocol::matchers::exact_offer(
+            .offer(crate::protocol::context_keys::exact_offer(
                 fact.id,
-                crate::protocol::matchers::endpoint_shared_role(),
+                crate::protocol::context_keys::endpoint_shared_role(),
             ))
             .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &event)?))
             .intent(share_fact_with_workspace_intent_for_fact(
@@ -101,14 +101,14 @@ fn authority_need(
     signer_id: [u8; 32],
 ) -> ContextNeed {
     match event.endpoint_role {
-        EndpointRole::InviteServer => crate::protocol::matchers::exact_need(
+        EndpointRole::InviteServer => crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::invite_server_role(),
+            crate::protocol::context_keys::invite_server_role(),
             signer_id,
         ),
-        EndpointRole::Device => crate::protocol::matchers::exact_need(
+        EndpointRole::Device => crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::device_invite_role(),
+            crate::protocol::context_keys::device_invite_role(),
             signer_id,
         ),
     }

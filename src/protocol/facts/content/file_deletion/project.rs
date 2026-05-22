@@ -14,12 +14,12 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::context_keys;
 use crate::protocol::facts::content::file;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::rows::{file_deletion_row, FileDeletionRow};
 
@@ -55,19 +55,19 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = matchers::workspace_scope(deletion.workspace_id);
+        let scope = context_keys::workspace_scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
         let signer_need = authority::signer_need(fact.id, signer);
-        let target_need = crate::protocol::matchers::exact_fact_need(
+        let target_need = crate::protocol::context_keys::exact_fact_need(
             fact.id,
             scope.clone(),
             deletion.target_file_id,
         );
-        let author_need = crate::protocol::matchers::exact_need(
+        let author_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::user_role(),
+            crate::protocol::context_keys::user_role(),
             deletion.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -116,7 +116,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
         });
         Ok(
             output_with_needs([signer_need, Some(target_need), Some(author_need)])
-                .offer(matchers::deletion_offer(
+                .offer(context_keys::deletion_offer(
                     fact.id,
                     scope,
                     deletion.target_file_id,

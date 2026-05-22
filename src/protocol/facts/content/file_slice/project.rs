@@ -16,11 +16,11 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
+use crate::protocol::context_keys as file_keys;
+use crate::protocol::context_keys as message_keys;
 use crate::protocol::facts::content::file;
 use crate::protocol::facts::content::file_deletion;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers as file_matchers;
-use crate::protocol::matchers as message_matchers;
 
 use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
 
@@ -51,11 +51,11 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = message_matchers::workspace_scope(slice.workspace_id);
+        let scope = message_keys::workspace_scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let file_need = file_matchers::file_need(fact.id, scope.clone(), slice.file_id);
+        let file_need = file_keys::file_need(fact.id, scope.clone(), slice.file_id);
         let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
@@ -74,7 +74,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             return Err("file slice index is out of range for parent file".to_string());
         }
         let file_deletion_need =
-            message_matchers::deletion_need(fact.id, scope, parent.id, file.author_user_id);
+            message_keys::deletion_need(fact.id, scope, parent.id, file.author_user_id);
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {

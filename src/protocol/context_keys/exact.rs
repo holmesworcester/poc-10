@@ -2,9 +2,9 @@
 //!
 //! Most protocol relationships still match one exact byte key. They are encoded
 //! as degenerate ranges where `start_key == end_key`; broader relations use the
-//! same core-owned overlap matcher with protocol-owned byte layouts.
+//! same core-owned overlap query with protocol-owned byte layouts.
 
-use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
 
 pub const CONNECTION_EPHEMERAL_SECRET_ROLE: &str = "connection_ephemeral_secret";
@@ -47,39 +47,39 @@ pub fn workspace_scope(workspace_id: FactId) -> FactScope {
     }
 }
 
-pub fn exact_need_for_selector(
+pub fn exact_need_for_key(
     owner: FactId,
     role: Role,
     scope: FactScope,
-    selector: impl Into<Vec<u8>>,
+    key: impl Into<Vec<u8>>,
 ) -> ContextNeed {
-    let selector = selector.into();
+    let key = key.into();
     ContextNeed {
         owner,
         role,
         scope,
-        start_key: Selector::from_bytes(selector.clone()),
-        end_key: Selector::from_bytes(selector),
+        start_key: ContextKey::from_bytes(key.clone()),
+        end_key: ContextKey::from_bytes(key),
     }
 }
 
-pub fn exact_offer_for_selector(
+pub fn exact_offer_for_key(
     owner: FactId,
     role: Role,
     scope: FactScope,
-    selector: impl Into<Vec<u8>>,
+    key: impl Into<Vec<u8>>,
 ) -> ContextOffer {
-    let selector = selector.into();
+    let key = key.into();
     ContextOffer {
         owner,
         role,
         scope,
-        start_key: Selector::from_bytes(selector.clone()),
-        end_key: Selector::from_bytes(selector),
+        start_key: ContextKey::from_bytes(key.clone()),
+        end_key: ContextKey::from_bytes(key),
     }
 }
 
-pub fn range_need_for_selector(
+pub fn range_need_for_key_range(
     owner: FactId,
     role: Role,
     scope: FactScope,
@@ -90,12 +90,12 @@ pub fn range_need_for_selector(
         owner,
         role,
         scope,
-        start_key: Selector::from_bytes(start_key),
-        end_key: Selector::from_bytes(end_key),
+        start_key: ContextKey::from_bytes(start_key),
+        end_key: ContextKey::from_bytes(end_key),
     }
 }
 
-pub fn range_offer_for_selector(
+pub fn range_offer_for_key_range(
     owner: FactId,
     role: Role,
     scope: FactScope,
@@ -106,17 +106,17 @@ pub fn range_offer_for_selector(
         owner,
         role,
         scope,
-        start_key: Selector::from_bytes(start_key),
-        end_key: Selector::from_bytes(end_key),
+        start_key: ContextKey::from_bytes(start_key),
+        end_key: ContextKey::from_bytes(end_key),
     }
 }
 
 pub fn exact_need(owner: FactId, role: Role, id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, role, FactScope::Global, id)
+    exact_need_for_key(owner, role, FactScope::Global, id)
 }
 
 pub fn exact_offer(owner: FactId, role: Role) -> ContextOffer {
-    exact_offer_for_selector(owner, role, FactScope::Global, owner)
+    exact_offer_for_key(owner, role, FactScope::Global, owner)
 }
 
 pub fn connection_ephemeral_secret_role() -> Role {
@@ -124,7 +124,7 @@ pub fn connection_ephemeral_secret_role() -> Role {
 }
 
 pub fn connection_ephemeral_secret_need(owner: FactId, secret_id: FactId) -> ContextNeed {
-    exact_need_for_selector(
+    exact_need_for_key(
         owner,
         connection_ephemeral_secret_role(),
         FactScope::Local,
@@ -133,7 +133,7 @@ pub fn connection_ephemeral_secret_need(owner: FactId, secret_id: FactId) -> Con
 }
 
 pub fn connection_ephemeral_secret_offer(owner: FactId, secret_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(
+    exact_offer_for_key(
         owner,
         connection_ephemeral_secret_role(),
         FactScope::Local,
@@ -146,7 +146,7 @@ pub fn connection_invite_secret_role() -> Role {
 }
 
 pub fn connection_invite_secret_need(owner: FactId, invite_secret_id: FactId) -> ContextNeed {
-    exact_need_for_selector(
+    exact_need_for_key(
         owner,
         connection_invite_secret_role(),
         FactScope::Local,
@@ -155,7 +155,7 @@ pub fn connection_invite_secret_need(owner: FactId, invite_secret_id: FactId) ->
 }
 
 pub fn connection_invite_secret_offer(owner: FactId, invite_secret_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(
+    exact_offer_for_key(
         owner,
         connection_invite_secret_role(),
         FactScope::Local,
@@ -168,7 +168,7 @@ pub fn connection_request_role() -> Role {
 }
 
 pub fn connection_request_need(owner: FactId, request_id: FactId) -> ContextNeed {
-    exact_need_for_selector(
+    exact_need_for_key(
         owner,
         connection_request_role(),
         FactScope::Global,
@@ -177,7 +177,7 @@ pub fn connection_request_need(owner: FactId, request_id: FactId) -> ContextNeed
 }
 
 pub fn connection_request_offer(owner: FactId, request_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(
+    exact_offer_for_key(
         owner,
         connection_request_role(),
         FactScope::Global,
@@ -190,11 +190,11 @@ pub fn file_role() -> Role {
 }
 
 pub fn file_need(owner: FactId, scope: FactScope, file_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, file_role(), scope, file_id)
+    exact_need_for_key(owner, file_role(), scope, file_id)
 }
 
 pub fn file_offer(owner: FactId, scope: FactScope, file_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, file_role(), scope, file_id)
+    exact_offer_for_key(owner, file_role(), scope, file_id)
 }
 
 pub fn message_role() -> Role {
@@ -202,11 +202,11 @@ pub fn message_role() -> Role {
 }
 
 pub fn message_need(owner: FactId, scope: FactScope, message_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, message_role(), scope, message_id)
+    exact_need_for_key(owner, message_role(), scope, message_id)
 }
 
 pub fn message_offer(owner: FactId, scope: FactScope, message_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, message_role(), scope, message_id)
+    exact_offer_for_key(owner, message_role(), scope, message_id)
 }
 
 pub fn message_meta_role() -> Role {
@@ -214,11 +214,11 @@ pub fn message_meta_role() -> Role {
 }
 
 pub fn message_meta_need(owner: FactId, scope: FactScope, message_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, message_meta_role(), scope, message_id)
+    exact_need_for_key(owner, message_meta_role(), scope, message_id)
 }
 
 pub fn message_meta_offer(owner: FactId, scope: FactScope, message_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, message_meta_role(), scope, message_id)
+    exact_offer_for_key(owner, message_meta_role(), scope, message_id)
 }
 
 pub fn deletion_role() -> Role {
@@ -231,13 +231,11 @@ pub fn deletion_need(
     target_id: FactId,
     author_user_id: FactId,
 ) -> ContextNeed {
-    exact_need_for_selector(
+    exact_need_for_key(
         owner,
         deletion_role(),
         scope,
-        deletion_selector(target_id, author_user_id)
-            .as_bytes()
-            .to_vec(),
+        deletion_key(target_id, author_user_id).as_bytes().to_vec(),
     )
 }
 
@@ -247,21 +245,19 @@ pub fn deletion_offer(
     target_id: FactId,
     author_user_id: FactId,
 ) -> ContextOffer {
-    exact_offer_for_selector(
+    exact_offer_for_key(
         owner,
         deletion_role(),
         scope,
-        deletion_selector(target_id, author_user_id)
-            .as_bytes()
-            .to_vec(),
+        deletion_key(target_id, author_user_id).as_bytes().to_vec(),
     )
 }
 
-pub fn deletion_selector(target_id: FactId, author_user_id: FactId) -> Selector {
+pub fn deletion_key(target_id: FactId, author_user_id: FactId) -> ContextKey {
     let mut bytes = Vec::with_capacity(64);
     bytes.extend_from_slice(&target_id);
     bytes.extend_from_slice(&author_user_id);
-    Selector::from_bytes(bytes)
+    ContextKey::from_bytes(bytes)
 }
 
 pub fn workspace_role() -> Role {
@@ -328,18 +324,18 @@ pub fn scoped_key_need(
     owner: FactId,
     role: Role,
     workspace_id: FactId,
-    selector: Vec<u8>,
+    key: Vec<u8>,
 ) -> ContextNeed {
-    exact_need_for_selector(owner, role, workspace_scope(workspace_id), selector)
+    exact_need_for_key(owner, role, workspace_scope(workspace_id), key)
 }
 
 pub fn scoped_key_offer(
     owner: FactId,
     role: Role,
     workspace_id: FactId,
-    selector: Vec<u8>,
+    key: Vec<u8>,
 ) -> ContextOffer {
-    exact_offer_for_selector(owner, role, workspace_scope(workspace_id), selector)
+    exact_offer_for_key(owner, role, workspace_scope(workspace_id), key)
 }
 
 pub fn user_invite_key_offer(
@@ -380,7 +376,7 @@ pub fn source_secret_role() -> Role {
 }
 
 pub fn source_secret_need(owner: FactId, source_secret_id: FactId) -> ContextNeed {
-    exact_need_for_selector(
+    exact_need_for_key(
         owner,
         source_secret_role(),
         FactScope::Local,
@@ -389,7 +385,7 @@ pub fn source_secret_need(owner: FactId, source_secret_id: FactId) -> ContextNee
 }
 
 pub fn source_secret_offer(owner: FactId, source_secret_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(
+    exact_offer_for_key(
         owner,
         source_secret_role(),
         FactScope::Local,
@@ -402,7 +398,7 @@ pub fn local_signer_secret_role() -> Role {
 }
 
 pub fn local_signer_secret_need(owner: FactId, scope: FactScope, signer_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, local_signer_secret_role(), scope, signer_id)
+    exact_need_for_key(owner, local_signer_secret_role(), scope, signer_id)
 }
 
 pub fn local_signer_secret_offer(
@@ -410,7 +406,7 @@ pub fn local_signer_secret_offer(
     scope: FactScope,
     signer_id: FactId,
 ) -> ContextOffer {
-    exact_offer_for_selector(owner, local_signer_secret_role(), scope, signer_id)
+    exact_offer_for_key(owner, local_signer_secret_role(), scope, signer_id)
 }
 
 pub fn transit_received_role() -> Role {
@@ -418,7 +414,7 @@ pub fn transit_received_role() -> Role {
 }
 
 pub fn transit_received_need(owner: FactId, received_fact_id: FactId) -> ContextNeed {
-    exact_need_for_selector(
+    exact_need_for_key(
         owner,
         transit_received_role(),
         FactScope::Local,
@@ -427,7 +423,7 @@ pub fn transit_received_need(owner: FactId, received_fact_id: FactId) -> Context
 }
 
 pub fn transit_received_offer(owner: FactId, received_fact_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(
+    exact_offer_for_key(
         owner,
         transit_received_role(),
         FactScope::Local,
@@ -444,7 +440,7 @@ pub fn recipient_key_need(
     scope: FactScope,
     recipient_key_id: FactId,
 ) -> ContextNeed {
-    exact_need_for_selector(owner, recipient_key_role(), scope, recipient_key_id)
+    exact_need_for_key(owner, recipient_key_role(), scope, recipient_key_id)
 }
 
 pub fn recipient_key_offer(
@@ -452,7 +448,7 @@ pub fn recipient_key_offer(
     scope: FactScope,
     recipient_key_id: FactId,
 ) -> ContextOffer {
-    exact_offer_for_selector(owner, recipient_key_role(), scope, recipient_key_id)
+    exact_offer_for_key(owner, recipient_key_role(), scope, recipient_key_id)
 }
 
 pub fn local_recipient_key_role() -> Role {
@@ -464,7 +460,7 @@ pub fn local_recipient_key_need(
     scope: FactScope,
     recipient_key_id: FactId,
 ) -> ContextNeed {
-    exact_need_for_selector(owner, local_recipient_key_role(), scope, recipient_key_id)
+    exact_need_for_key(owner, local_recipient_key_role(), scope, recipient_key_id)
 }
 
 pub fn local_recipient_key_offer(
@@ -472,7 +468,7 @@ pub fn local_recipient_key_offer(
     scope: FactScope,
     recipient_key_id: FactId,
 ) -> ContextOffer {
-    exact_offer_for_selector(owner, local_recipient_key_role(), scope, recipient_key_id)
+    exact_offer_for_key(owner, local_recipient_key_role(), scope, recipient_key_id)
 }
 
 pub fn frontier_role() -> Role {
@@ -480,11 +476,11 @@ pub fn frontier_role() -> Role {
 }
 
 pub fn frontier_need(owner: FactId, scope: FactScope, frontier_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, frontier_role(), scope, frontier_id)
+    exact_need_for_key(owner, frontier_role(), scope, frontier_id)
 }
 
 pub fn frontier_offer(owner: FactId, scope: FactScope, frontier_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, frontier_role(), scope, frontier_id)
+    exact_offer_for_key(owner, frontier_role(), scope, frontier_id)
 }
 
 pub fn recipient_superseded_role() -> Role {
@@ -496,7 +492,7 @@ pub fn recipient_superseded_need(
     scope: FactScope,
     recipient_key_id: FactId,
 ) -> ContextNeed {
-    exact_need_for_selector(owner, recipient_superseded_role(), scope, recipient_key_id)
+    exact_need_for_key(owner, recipient_superseded_role(), scope, recipient_key_id)
 }
 
 pub fn recipient_superseded_offer(
@@ -504,7 +500,7 @@ pub fn recipient_superseded_offer(
     scope: FactScope,
     recipient_key_id: FactId,
 ) -> ContextOffer {
-    exact_offer_for_selector(owner, recipient_superseded_role(), scope, recipient_key_id)
+    exact_offer_for_key(owner, recipient_superseded_role(), scope, recipient_key_id)
 }
 
 pub fn signer_role() -> Role {
@@ -512,11 +508,11 @@ pub fn signer_role() -> Role {
 }
 
 pub fn signer_need(owner: FactId, scope: FactScope, signer_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, signer_role(), scope, signer_id)
+    exact_need_for_key(owner, signer_role(), scope, signer_id)
 }
 
 pub fn signer_offer(owner: FactId, scope: FactScope, signer_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, signer_role(), scope, signer_id)
+    exact_offer_for_key(owner, signer_role(), scope, signer_id)
 }
 
 pub fn exact_fact_role() -> Role {
@@ -524,11 +520,11 @@ pub fn exact_fact_role() -> Role {
 }
 
 pub fn exact_fact_need(owner: FactId, scope: FactScope, fact_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, exact_fact_role(), scope, fact_id)
+    exact_need_for_key(owner, exact_fact_role(), scope, fact_id)
 }
 
 pub fn exact_fact_offer(owner: FactId, scope: FactScope, fact_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, exact_fact_role(), scope, fact_id)
+    exact_offer_for_key(owner, exact_fact_role(), scope, fact_id)
 }
 
 pub fn key_wrap_role() -> Role {
@@ -536,11 +532,11 @@ pub fn key_wrap_role() -> Role {
 }
 
 pub fn key_wrap_need(owner: FactId, scope: FactScope, key_wrap_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, key_wrap_role(), scope, key_wrap_id)
+    exact_need_for_key(owner, key_wrap_role(), scope, key_wrap_id)
 }
 
 pub fn key_wrap_offer(owner: FactId, scope: FactScope, key_wrap_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, key_wrap_role(), scope, key_wrap_id)
+    exact_offer_for_key(owner, key_wrap_role(), scope, key_wrap_id)
 }
 
 #[cfg(test)]
@@ -548,7 +544,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_helpers_encode_only_role_scope_selector_and_owner() {
+    fn exact_helpers_encode_only_role_scope_key_and_owner() {
         let owner = [1; 32];
         let scope = workspace_scope([2; 32]);
         let need = exact_fact_need(owner, scope.clone(), [3; 32]);

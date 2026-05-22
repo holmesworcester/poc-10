@@ -1,12 +1,12 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::protocol::context_keys;
 use crate::protocol::facts::encryption::intent::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::facts::encryption::rows::{key_wrap_row, KeyWrapRow};
 use crate::protocol::facts::identity::signed_fact;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::validation::{has_matching_signer_public_key, matched_payload_fact, require_fact_scope};
 
@@ -17,19 +17,19 @@ pub(super) fn signed_key_wrap(
 ) -> Result<ProjectionOutput, String> {
     let envelope = signed.envelope;
     let wrap = signed.payload;
-    let scope = crate::protocol::matchers::workspace_scope(wrap.workspace_id);
+    let scope = crate::protocol::context_keys::workspace_scope(wrap.workspace_id);
     require_fact_scope(fact, &scope)?;
     if envelope.signer_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not match signed envelope signer".to_string());
     }
 
     let signer_need =
-        crate::protocol::matchers::signer_need(fact.id, scope.clone(), envelope.signer_id);
+        crate::protocol::context_keys::signer_need(fact.id, scope.clone(), envelope.signer_id);
     let recipient_need =
-        matchers::recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
-    let frontier_need = matchers::frontier_need(fact.id, scope.clone(), wrap.frontier_id);
+        context_keys::recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
+    let frontier_need = context_keys::frontier_need(fact.id, scope.clone(), wrap.frontier_id);
     let local_recipient_need =
-        matchers::local_recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
+        context_keys::local_recipient_key_need(fact.id, scope.clone(), wrap.recipient_key_id);
 
     let signer_ready = has_matching_signer_public_key(
         projection_context,
@@ -77,12 +77,12 @@ pub(super) fn signed_key_wrap(
             signer_public_key: envelope.signer_public_key,
             wrap: wrap.clone(),
         })?))
-        .offer(crate::protocol::matchers::exact_fact_offer(
+        .offer(crate::protocol::context_keys::exact_fact_offer(
             fact.id,
             scope.clone(),
             fact.id,
         ))
-        .offer(crate::protocol::matchers::key_wrap_offer(
+        .offer(crate::protocol::context_keys::key_wrap_offer(
             fact.id, scope, fact.id,
         ))
         .intent(share_fact_with_workspace_intent_for_fact(

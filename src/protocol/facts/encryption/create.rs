@@ -12,7 +12,7 @@ use super::intent::{
     CreateKeyWrapIntent, PurgeRetiredRecipientMaterialIntent, UnwrapKeyWrapIntent,
 };
 use super::layout;
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 pub const KEY_WRAP_PURPOSE: &[u8] = b"topo key wrap v1";
 
@@ -82,7 +82,7 @@ pub fn create_key_wrap_fact(
         .map_err(|_| "key wrap ciphertext length mismatch".to_string())?;
 
     Ok(Fact::new(
-        matchers::workspace_scope(intent.workspace_id),
+        context_keys::workspace_scope(intent.workspace_id),
         wrap.created_at_ms,
         layout::encode_key_wrap(&wrap)?,
     ))
@@ -184,7 +184,7 @@ pub fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
         return Err("key wrap signer does not match signed envelope signer".to_string());
     }
     Ok(Fact::new(
-        matchers::workspace_scope(wrap.workspace_id),
+        context_keys::workspace_scope(wrap.workspace_id),
         wrap.created_at_ms,
         bytes,
     ))
@@ -215,12 +215,12 @@ fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<Wra
         return Err("source fact id does not match create_key_wrap intent".to_string());
     }
     match intent.source {
-        matchers::WrapSourceKind::FrontierRoot => {
+        context_keys::WrapSourceKind::FrontierRoot => {
             let source = layout::decode_local_key_secret(&source_fact.bytes)?;
             require_source_workspace_and_frontier(intent, source.workspace_id, source.frontier_id)?;
             Ok(root_material(source_fact.id, source))
         }
-        matchers::WrapSourceKind::HistoryNode {
+        context_keys::WrapSourceKind::HistoryNode {
             range_start,
             range_width,
             bit_depth,
@@ -474,7 +474,7 @@ mod tests {
 
         let fact = admit_signed_key_wrap_fact(bytes.clone()).expect("admit signed key wrap");
 
-        assert_eq!(fact.scope, matchers::workspace_scope(wrap.workspace_id));
+        assert_eq!(fact.scope, context_keys::workspace_scope(wrap.workspace_id));
         assert_eq!(fact.timestamp, wrap.created_at_ms);
         assert_eq!(fact.bytes, bytes);
     }

@@ -11,8 +11,8 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::context_keys;
 use crate::protocol::facts::sync::encrypted_root::project as encrypted_root_project;
-use crate::protocol::matchers;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncRangeRequestProjector;
@@ -41,7 +41,7 @@ impl TypedProjector<super::Codec> for SyncRangeRequestProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = matchers::workspace_scope(request.workspace_id);
+        let scope = context_keys::workspace_scope(request.workspace_id);
         encrypted_root_project::require_fact_scope(fact, &scope)?;
 
         // 2. Materialize.

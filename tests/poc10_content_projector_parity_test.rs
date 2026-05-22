@@ -30,11 +30,13 @@ fn signed_content_event_waits_for_endpoint_shared_signer_context() {
 
     assert!(output.effects.intents.is_empty());
     assert!(output.offers.is_empty());
-    assert!(output.needs.contains(&topo::protocol::matchers::exact_need(
-        fact.id,
-        topo::protocol::matchers::endpoint_shared_role(),
-        signer.id
-    )));
+    assert!(output
+        .needs
+        .contains(&topo::protocol::context_keys::exact_need(
+            fact.id,
+            topo::protocol::context_keys::endpoint_shared_role(),
+            signer.id
+        )));
 }
 
 #[test]
@@ -60,9 +62,9 @@ fn signed_content_event_defers_signature_check_until_signer_context_exists() {
     assert!(waiting.offers.is_empty());
     assert!(waiting
         .needs
-        .contains(&topo::protocol::matchers::exact_need(
+        .contains(&topo::protocol::context_keys::exact_need(
             fact.id,
-            topo::protocol::matchers::endpoint_shared_role(),
+            topo::protocol::context_keys::endpoint_shared_role(),
             signer.id
         )));
 
@@ -165,11 +167,13 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
 
     assert!(output.effects.intents.is_empty());
     assert!(output.offers.is_empty());
-    assert!(output.needs.contains(&topo::protocol::matchers::exact_need(
-        fact.id,
-        topo::protocol::matchers::endpoint_shared_role(),
-        signer.id
-    )));
+    assert!(output
+        .needs
+        .contains(&topo::protocol::context_keys::exact_need(
+            fact.id,
+            topo::protocol::context_keys::endpoint_shared_role(),
+            signer.id
+        )));
 }
 
 #[test]
@@ -268,11 +272,13 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
 
     assert!(output.effects.intents.is_empty());
     assert!(output.offers.is_empty());
-    assert!(output.needs.contains(&topo::protocol::matchers::exact_need(
-        fact.id,
-        topo::protocol::matchers::endpoint_shared_role(),
-        signer.id
-    )));
+    assert!(output
+        .needs
+        .contains(&topo::protocol::context_keys::exact_need(
+            fact.id,
+            topo::protocol::context_keys::endpoint_shared_role(),
+            signer.id
+        )));
 }
 
 #[test]
@@ -357,7 +363,7 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
     };
     Fact::new(
-        topo::protocol::matchers::workspace_scope(workspace_id),
+        topo::protocol::context_keys::workspace_scope(workspace_id),
         message.created_at_ms,
         content::message::layout::encode_fact(&message).expect("encode message"),
     )
@@ -377,7 +383,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         sealed_metadata: b"sealed".to_vec(),
     };
     Fact::new(
-        topo::protocol::matchers::workspace_scope(workspace_id),
+        topo::protocol::context_keys::workspace_scope(workspace_id),
         file.created_at_ms,
         content::file::layout::encode_fact(&file).expect("encode file"),
     )
@@ -390,7 +396,7 @@ fn signed_fact_in_workspace(
     timestamp: u64,
 ) -> Fact {
     Fact::new(
-        topo::protocol::matchers::workspace_scope(WORKSPACE),
+        topo::protocol::context_keys::workspace_scope(WORKSPACE),
         timestamp,
         identity::signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
             .expect("sign content fact"),
@@ -408,14 +414,14 @@ fn tamper_signature(fact: &mut Fact) {
 
 fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {
     MatchedContext {
-        need: topo::protocol::matchers::exact_need(
+        need: topo::protocol::context_keys::exact_need(
             owner.id,
-            topo::protocol::matchers::endpoint_shared_role(),
+            topo::protocol::context_keys::endpoint_shared_role(),
             signer.id,
         ),
-        offer: topo::protocol::matchers::exact_offer(
+        offer: topo::protocol::context_keys::exact_offer(
             signer.id,
-            topo::protocol::matchers::endpoint_shared_role(),
+            topo::protocol::context_keys::endpoint_shared_role(),
         ),
         payload: signer.clone(),
     }
@@ -427,14 +433,14 @@ fn message_signer_match(
     signer: &Fact,
 ) -> MatchedContext {
     MatchedContext {
-        need: topo::protocol::matchers::signer_need(
+        need: topo::protocol::context_keys::signer_need(
             owner.id,
-            topo::protocol::matchers::workspace_scope(message.workspace_id),
+            topo::protocol::context_keys::workspace_scope(message.workspace_id),
             message.signer_id,
         ),
-        offer: topo::protocol::matchers::signer_offer(
+        offer: topo::protocol::context_keys::signer_offer(
             signer.id,
-            topo::protocol::matchers::workspace_scope(message.workspace_id),
+            topo::protocol::context_keys::workspace_scope(message.workspace_id),
             message.signer_id,
         ),
         payload: signer.clone(),
@@ -443,14 +449,14 @@ fn message_signer_match(
 
 fn author_match(owner: &Fact, author: &Fact) -> MatchedContext {
     MatchedContext {
-        need: topo::protocol::matchers::exact_need(
+        need: topo::protocol::context_keys::exact_need(
             owner.id,
-            topo::protocol::matchers::user_role(),
+            topo::protocol::context_keys::user_role(),
             author.id,
         ),
-        offer: topo::protocol::matchers::exact_offer(
+        offer: topo::protocol::context_keys::exact_offer(
             author.id,
-            topo::protocol::matchers::user_role(),
+            topo::protocol::context_keys::user_role(),
         ),
         payload: author.clone(),
     }
@@ -458,14 +464,14 @@ fn author_match(owner: &Fact, author: &Fact) -> MatchedContext {
 
 fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
     MatchedContext {
-        need: topo::protocol::matchers::message_need(
+        need: topo::protocol::context_keys::message_need(
             owner.id,
-            topo::protocol::matchers::workspace_scope(WORKSPACE),
+            topo::protocol::context_keys::workspace_scope(WORKSPACE),
             message.id,
         ),
-        offer: topo::protocol::matchers::message_offer(
+        offer: topo::protocol::context_keys::message_offer(
             message.id,
-            topo::protocol::matchers::workspace_scope(WORKSPACE),
+            topo::protocol::context_keys::workspace_scope(WORKSPACE),
             message.id,
         ),
         payload: message.clone(),
@@ -475,8 +481,8 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
 #[allow(dead_code)]
 fn file_event_match(owner: &Fact, file: &Fact) -> MatchedContext {
     MatchedContext {
-        need: topo::protocol::matchers::exact_fact_need(owner.id, file.scope.clone(), file.id),
-        offer: topo::protocol::matchers::exact_fact_offer(file.id, file.scope.clone(), file.id),
+        need: topo::protocol::context_keys::exact_fact_need(owner.id, file.scope.clone(), file.id),
+        offer: topo::protocol::context_keys::exact_fact_offer(file.id, file.scope.clone(), file.id),
         payload: file.clone(),
     }
 }

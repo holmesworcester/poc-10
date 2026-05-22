@@ -13,8 +13,8 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::context_keys;
 use crate::protocol::facts::sync::encrypted_root::project::require_fact_scope;
-use crate::protocol::matchers;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;
@@ -43,13 +43,15 @@ impl TypedProjector<super::Codec> for SyncSharedFactProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = matchers::workspace_scope(shared.workspace_id);
+        let scope = context_keys::workspace_scope(shared.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
-        Ok(ProjectionOutput::new().offer(matchers::exact_fact_offer(
-            fact.id,
-            scope,
-            shared.fact_id,
-        )))
+        Ok(
+            ProjectionOutput::new().offer(context_keys::exact_fact_offer(
+                fact.id,
+                scope,
+                shared.fact_id,
+            )),
+        )
     }
 }

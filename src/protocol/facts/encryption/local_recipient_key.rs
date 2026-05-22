@@ -1,11 +1,11 @@
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::protocol::context_keys;
 use crate::protocol::facts::encryption::fact::LocalRecipientKeyFact;
 use crate::protocol::facts::encryption::intent::{
     purge_retired_recipient_material_intent, PurgeRetiredRecipientMaterialIntent,
 };
 use crate::protocol::facts::encryption::layout;
-use crate::protocol::matchers;
 
 use super::validation::{matched_payload_fact, require_local_scope};
 
@@ -14,11 +14,11 @@ pub(super) fn local_recipient_key(
     projection_context: &ProjectionContext,
     local: LocalRecipientKeyFact,
 ) -> Result<ProjectionOutput, String> {
-    let scope = crate::protocol::matchers::workspace_scope(local.workspace_id);
+    let scope = crate::protocol::context_keys::workspace_scope(local.workspace_id);
     require_local_scope(fact)?;
 
     let recipient_need =
-        matchers::recipient_key_need(fact.id, scope.clone(), local.recipient_key_id);
+        context_keys::recipient_key_need(fact.id, scope.clone(), local.recipient_key_id);
     let Some(recipient_fact) = matched_payload_fact(projection_context, &recipient_need) else {
         return Ok(ProjectionOutput::new().need(recipient_need));
     };
@@ -31,7 +31,7 @@ pub(super) fn local_recipient_key(
     }
 
     let superseded_need =
-        matchers::recipient_superseded_need(fact.id, scope.clone(), local.recipient_key_id);
+        context_keys::recipient_superseded_need(fact.id, scope.clone(), local.recipient_key_id);
     let is_superseded = projection_context.offers().iter().any(|offer| {
         offer.role == superseded_need.role
             && offer.start_key == superseded_need.start_key
@@ -50,7 +50,7 @@ pub(super) fn local_recipient_key(
         )));
     }
 
-    Ok(output.offer(matchers::local_recipient_key_offer(
+    Ok(output.offer(context_keys::local_recipient_key_offer(
         fact.id,
         scope,
         local.recipient_key_id,

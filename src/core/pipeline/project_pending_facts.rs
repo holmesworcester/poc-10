@@ -698,7 +698,7 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
+    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
     use crate::core::facts::FactScope;
     use crate::core::intents::{Intent, IntentKind};
 
@@ -739,10 +739,10 @@ mod tests {
     fn projection_run_diffs_standing_context_without_self_waking() {
         let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([9; 32]);
+        let key = ContextKey::from_bytes([9; 32]);
         let projector = NeedUntilOffer {
             role,
-            selector,
+            key,
             intent_kind: IntentKind::new("followup").unwrap(),
         };
 
@@ -762,10 +762,10 @@ mod tests {
     fn projection_run_replaces_need_with_intent_when_context_appears() {
         let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([9; 32]);
+        let key = ContextKey::from_bytes([9; 32]);
         let projector = NeedUntilOffer {
             role: role.clone(),
-            selector: selector.clone(),
+            key: key.clone(),
             intent_kind: IntentKind::new("followup").unwrap(),
         };
         let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
@@ -775,8 +775,8 @@ mod tests {
             owner: [2; 32],
             role,
             scope: FactScope::Global,
-            start_key: selector.clone(),
-            end_key: selector,
+            start_key: key.clone(),
+            end_key: key,
         };
 
         let next = run_projection(&projector, &fact, &previous, vec![offer])
@@ -799,20 +799,20 @@ mod tests {
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
 
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([7; 32]);
+        let key = ContextKey::from_bytes([7; 32]);
         let offer = ContextOffer {
             owner: offered.id,
             role: role.clone(),
             scope: target.scope.clone(),
-            start_key: selector.clone(),
-            end_key: selector.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
         };
         crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
         let projector = PrematureNeedUntilPayload {
             role: role.clone(),
-            selector: selector.clone(),
+            key: key.clone(),
         };
         let pending = PendingFact {
             fact_id: target.id,
@@ -840,13 +840,13 @@ mod tests {
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
 
         let role = Role::new("range").unwrap();
-        let selector = Selector::from_bytes(b"m");
+        let key = ContextKey::from_bytes(b"m");
         let offer = ContextOffer {
             owner: offered.id,
             role: role.clone(),
             scope: target.scope.clone(),
-            start_key: Selector::from_bytes(b"a"),
-            end_key: Selector::from_bytes(b"z"),
+            start_key: ContextKey::from_bytes(b"a"),
+            end_key: ContextKey::from_bytes(b"z"),
         };
         crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -859,7 +859,7 @@ mod tests {
         };
         let projector = PrematureNeedUntilPayload {
             role: role.clone(),
-            selector,
+            key,
         };
         let effects = prepare_projection_effects(&projector, pending, &store, &[])
             .expect("prepare projection");
@@ -880,13 +880,13 @@ mod tests {
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
 
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([8; 32]);
+        let key = ContextKey::from_bytes([8; 32]);
         let offer = ContextOffer {
             owner: offered.id,
             role: role.clone(),
             scope: target.scope.clone(),
-            start_key: selector.clone(),
-            end_key: selector.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
         };
         crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
@@ -897,13 +897,9 @@ mod tests {
             previous_context: ContextSet::new(),
             projection_context: ProjectionContext::default(),
         };
-        let effects = prepare_projection_effects(
-            &WatchNeedProjector { role, selector },
-            pending,
-            &store,
-            &[],
-        )
-        .expect("prepare projection");
+        let effects =
+            prepare_projection_effects(&WatchNeedProjector { role, key }, pending, &store, &[])
+                .expect("prepare projection");
 
         assert_eq!(effects.next_context.needs.len(), 1);
         assert_eq!(effects.context_delta.added_needs.len(), 1);
@@ -926,8 +922,8 @@ mod tests {
                 owner: offered.id,
                 role: role.clone(),
                 scope: target.scope.clone(),
-                start_key: Selector::from_bytes(vec![index as u8]),
-                end_key: Selector::from_bytes(vec![index as u8]),
+                start_key: ContextKey::from_bytes(vec![index as u8]),
+                end_key: ContextKey::from_bytes(vec![index as u8]),
             };
             crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
                 .expect("insert stored offer");
@@ -968,7 +964,7 @@ mod tests {
 
     struct NeedUntilOffer {
         role: Role,
-        selector: Selector,
+        key: ContextKey,
         intent_kind: IntentKind,
     }
 
@@ -983,8 +979,8 @@ mod tests {
                     owner: fact.id,
                     role: self.role.clone(),
                     scope: fact.scope.clone(),
-                    start_key: self.selector.clone(),
-                    end_key: self.selector.clone(),
+                    start_key: self.key.clone(),
+                    end_key: self.key.clone(),
                 }))
             } else {
                 Ok(ProjectionOutput::new().intent(Intent::new(
@@ -1002,7 +998,7 @@ mod tests {
 
     struct PrematureNeedUntilPayload {
         role: Role,
-        selector: Selector,
+        key: ContextKey,
     }
 
     impl Projector for PrematureNeedUntilPayload {
@@ -1015,8 +1011,8 @@ mod tests {
                 owner: fact.id,
                 role: self.role.clone(),
                 scope: fact.scope.clone(),
-                start_key: self.selector.clone(),
-                end_key: self.selector.clone(),
+                start_key: self.key.clone(),
+                end_key: self.key.clone(),
             };
 
             if let Some(payload) = context.payload_for(&need) {
@@ -1037,7 +1033,7 @@ mod tests {
 
     struct WatchNeedProjector {
         role: Role,
-        selector: Selector,
+        key: ContextKey,
     }
 
     impl Projector for WatchNeedProjector {
@@ -1050,8 +1046,8 @@ mod tests {
                 owner: fact.id,
                 role: self.role.clone(),
                 scope: fact.scope.clone(),
-                start_key: self.selector.clone(),
-                end_key: self.selector.clone(),
+                start_key: self.key.clone(),
+                end_key: self.key.clone(),
             };
             let mut output = ProjectionOutput::new().need(need.clone());
             if context.payload_for(&need).is_some() {
@@ -1080,8 +1076,8 @@ mod tests {
                 owner: fact.id,
                 role: self.role.clone(),
                 scope: fact.scope.clone(),
-                start_key: Selector::from_bytes(next_selector.clone()),
-                end_key: Selector::from_bytes(next_selector),
+                start_key: ContextKey::from_bytes(next_selector.clone()),
+                end_key: ContextKey::from_bytes(next_selector),
             }))
         }
     }
@@ -1098,8 +1094,8 @@ mod tests {
                 owner: [9; 32],
                 role: Role::new("exact").unwrap(),
                 scope: fact.scope.clone(),
-                start_key: Selector::from_bytes(fact.id),
-                end_key: Selector::from_bytes(fact.id),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
             }))
         }
     }
@@ -1116,8 +1112,8 @@ mod tests {
                 owner: [9; 32],
                 role: Role::new("exact").unwrap(),
                 scope: fact.scope.clone(),
-                start_key: Selector::from_bytes(fact.id),
-                end_key: Selector::from_bytes(fact.id),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
             }))
         }
     }

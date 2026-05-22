@@ -109,7 +109,7 @@ fn projector_implementation_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn contains_context_matcher_logic(text: &str) -> bool {
+fn contains_legacy_custom_context_matcher_api(text: &str) -> bool {
     let production = strip_line_comments(production_text_before_unit_tests(text));
     [
         "impl ContextMatcher for",
@@ -321,7 +321,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and relation decoding in protocol matchers:\n{}",
+        "projectors should consume typed matched payloads, not raw standing context rows. Keep offer owner checks in core ProjectionContext helpers and relation decoding in protocol context keys:\n{}",
         offenders.join("\n")
     );
 }
@@ -433,26 +433,25 @@ fn event_module_context_rs_files_do_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put protocol context constructors and relation-specific matching under src/protocol/matchers instead:\n{}",
+        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put protocol context-key constructors and candidate validation under src/protocol/context_keys instead:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-fn context_matcher_logic_lives_under_protocol_matchers() {
+fn legacy_custom_context_matcher_api_does_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
     for path in rust_files(&root.join("src")) {
         let text = source_text(&path);
-        if !contains_context_matcher_logic(&text) {
+        if !contains_legacy_custom_context_matcher_api(&text) {
             continue;
         }
         let relative = path.strip_prefix(root).unwrap();
         if relative.starts_with("src/core/pipeline.rs")
             || relative.starts_with("src/core/pipeline/")
             || relative.starts_with("src/core/fact_store.rs")
-            || relative.starts_with("src/protocol/matchers")
         {
             continue;
         }
@@ -462,7 +461,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
 
     assert!(
         offenders.is_empty(),
-        "relation-specific context key logic belongs under src/protocol/matchers, with core-owned byte-range overlap in src/core/pipeline.rs:\n{}",
+        "the legacy ContextMatcher API is retired; use core-owned byte-range overlap and protocol context-key candidate validation instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -497,7 +496,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
 
     assert!(
         offenders.is_empty(),
-        "temporary protocol context.rs helper files are not the context source of truth; protocol context constructors and matcher logic belong under src/protocol/matchers, while ProjectionContext inspection belongs in project.rs:\n{}",
+        "temporary protocol context.rs helper files are not the context source of truth; protocol context-key constructors and candidate validation belong under src/protocol/context_keys, while ProjectionContext inspection belongs in project.rs:\n{}",
         offenders.join("\n")
     );
 }

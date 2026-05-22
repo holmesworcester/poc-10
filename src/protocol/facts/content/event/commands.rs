@@ -6,9 +6,9 @@
 use crate::core::clock;
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::{Fact, FactId};
+use crate::protocol::context_keys;
 use crate::protocol::facts::content::event::{fact::ContentEventFact, layout, queries};
 use crate::protocol::facts::identity;
-use crate::protocol::matchers;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateReceipt {
@@ -53,7 +53,7 @@ pub fn generate(
             payload,
         };
         let fact = Fact::new(
-            matchers::workspace_scope(workspace_id),
+            context_keys::workspace_scope(workspace_id),
             timestamp,
             layout::encode_fact(&event)?,
         );

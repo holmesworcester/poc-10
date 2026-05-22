@@ -16,12 +16,12 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::context_keys as message_keys;
 use crate::protocol::facts::content::message;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers as message_matchers;
 
 use super::rows::{message_deletion_row, MessageDeletionRow};
 
@@ -57,16 +57,16 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = message_matchers::workspace_scope(deletion.workspace_id);
+        let scope = message_keys::workspace_scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
         let signer_need = authority::signer_need(fact.id, signer);
         let target_need =
-            message_matchers::message_meta_need(fact.id, scope.clone(), deletion.target_message_id);
-        let author_need = crate::protocol::matchers::exact_need(
+            message_keys::message_meta_need(fact.id, scope.clone(), deletion.target_message_id);
+        let author_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::user_role(),
+            crate::protocol::context_keys::user_role(),
             deletion.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -115,7 +115,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         });
         Ok(
             output_with_needs([signer_need, Some(target_need), Some(author_need)])
-                .offer(message_matchers::deletion_offer(
+                .offer(message_keys::deletion_offer(
                     fact.id,
                     scope,
                     deletion.target_message_id,
@@ -218,12 +218,12 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactId, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::context_keys as message_context;
     use topo::protocol::facts::content::message::{
         fact::ContentMessageFact, layout as message_layout,
     };
     use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::facts::content::message_deletion::{layout, project, rows};
-    use topo::protocol::matchers as message_context;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
 
@@ -290,9 +290,9 @@ mod projector_tests {
         )));
         assert!(output
             .needs
-            .contains(&crate::protocol::matchers::exact_need(
+            .contains(&crate::protocol::context_keys::exact_need(
                 fact.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
                 deletion.author_user_id
             )));
     }
@@ -321,9 +321,9 @@ mod projector_tests {
         )));
         assert!(output
             .needs
-            .contains(&crate::protocol::matchers::exact_need(
+            .contains(&crate::protocol::context_keys::exact_need(
                 fact.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
                 deletion.author_user_id
             )));
     }
@@ -456,14 +456,14 @@ mod projector_tests {
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
         MatchedContext {
-            need: crate::protocol::matchers::exact_need(
+            need: crate::protocol::context_keys::exact_need(
                 deletion_fact.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
                 author_fact.id,
             ),
-            offer: crate::protocol::matchers::exact_offer(
+            offer: crate::protocol::context_keys::exact_offer(
                 author_fact.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
             ),
             payload: author_fact.clone(),
         }

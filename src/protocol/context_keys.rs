@@ -1,4 +1,4 @@
-//! Protocol context matcher surface.
+//! Protocol context key surface.
 //!
 //! Fact modules emit these generic need/offer shapes from their projectors.
 //! Helper modules are organized by relation, not by fact module.

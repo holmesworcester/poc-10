@@ -1,12 +1,12 @@
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::protocol::context_keys;
+use crate::protocol::context_keys as history_keys;
 use crate::protocol::facts::encryption::fact::{LocalHistoryNodeSecretFact, LocalKeySecretFact};
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::facts::encryption::local_history_node_secret::fact::{
     mask_prefix_to_depth, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
 };
-use crate::protocol::matchers;
-use crate::protocol::matchers as history_matchers;
 
 use super::validation::{matched_payload_fact, require_local_scope};
 
@@ -15,16 +15,16 @@ pub(super) fn project_local_key_secret(
     projection_context: &ProjectionContext,
     secret: LocalKeySecretFact,
 ) -> Result<ProjectionOutput, String> {
-    let scope = crate::protocol::matchers::workspace_scope(secret.workspace_id);
+    let scope = crate::protocol::context_keys::workspace_scope(secret.workspace_id);
     require_local_scope(fact)?;
-    let frontier_need = matchers::frontier_need(fact.id, scope.clone(), secret.frontier_id);
+    let frontier_need = context_keys::frontier_need(fact.id, scope.clone(), secret.frontier_id);
     let Some(frontier_fact) = matched_payload_fact(projection_context, &frontier_need) else {
         return Ok(ProjectionOutput::new().need(frontier_need));
     };
     validate_local_key_frontier(frontier_fact, &secret)?;
 
     let mut output = ProjectionOutput::new().need(frontier_need);
-    for offer in matchers::frontier_root_wrap_source_offers(
+    for offer in context_keys::frontier_root_wrap_source_offers(
         fact.id,
         scope.clone(),
         secret.workspace_id,
@@ -35,8 +35,8 @@ pub(super) fn project_local_key_secret(
         output = output.offer(offer);
     }
     Ok(output
-        .offer(history_matchers::source_secret_offer(fact.id, fact.id))
-        .offer(crate::protocol::matchers::secret_offer(
+        .offer(history_keys::source_secret_offer(fact.id, fact.id))
+        .offer(crate::protocol::context_keys::secret_offer(
             fact.id,
             scope,
             secret.workspace_id,
@@ -53,14 +53,14 @@ pub(super) fn project_local_history_node_secret(
     projection_context: &ProjectionContext,
     node: LocalHistoryNodeSecretFact,
 ) -> Result<ProjectionOutput, String> {
-    let scope = crate::protocol::matchers::workspace_scope(node.workspace_id);
+    let scope = crate::protocol::context_keys::workspace_scope(node.workspace_id);
     require_local_scope(fact)?;
-    let frontier_need = matchers::frontier_need(fact.id, scope.clone(), node.frontier_id);
-    let source_need = history_matchers::source_secret_need(fact.id, node.source_secret_id);
+    let frontier_need = context_keys::frontier_need(fact.id, scope.clone(), node.frontier_id);
+    let source_need = history_keys::source_secret_need(fact.id, node.source_secret_id);
     let tombstone_need = if node.tombstone_node_id == [0; 32] {
         None
     } else {
-        Some(history_matchers::source_secret_need(
+        Some(history_keys::source_secret_need(
             fact.id,
             node.tombstone_node_id,
         ))
@@ -124,7 +124,7 @@ pub(super) fn project_local_history_node_secret(
         .try_into()
         .map_err(|_| "history node prefix byte width overflow".to_string())?;
     let mut output = waiting;
-    for offer in matchers::history_node_wrap_source_offers(
+    for offer in context_keys::history_node_wrap_source_offers(
         fact.id,
         scope.clone(),
         node.workspace_id,
@@ -138,8 +138,8 @@ pub(super) fn project_local_history_node_secret(
         output = output.offer(offer);
     }
     Ok(output
-        .offer(history_matchers::source_secret_offer(fact.id, fact.id))
-        .offer(crate::protocol::matchers::secret_offer(
+        .offer(history_keys::source_secret_offer(fact.id, fact.id))
+        .offer(crate::protocol::context_keys::secret_offer(
             fact.id,
             scope,
             node.workspace_id,

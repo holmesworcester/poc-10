@@ -4,7 +4,7 @@
 //! bytes. User-facing timestamping and receipts live in `commands.rs`.
 
 use crate::core::facts::{Fact, FactId};
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 use super::fact::{AuthorId, ContentFileDeletionFact, WorkspaceId};
 use super::layout;
@@ -26,7 +26,7 @@ pub fn delete_file(
         author_user_id,
     };
     Ok(Fact::new(
-        matchers::workspace_scope(workspace_id),
+        context_keys::workspace_scope(workspace_id),
         created_at_ms,
         layout::encode_fact(&deletion)?,
     ))

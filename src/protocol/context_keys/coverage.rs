@@ -4,10 +4,10 @@
 //! encrypted-message secret coverage and validates candidate overlaps before a
 //! projector treats an offer as authoritative.
 
-use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{FactId, FactScope};
 
-use super::exact::{protocol_role, range_need_for_selector, range_offer_for_selector};
+use super::exact::{protocol_role, range_need_for_key_range, range_offer_for_key_range};
 
 pub const SECRET_COVERAGE_ROLE: &str = "secret_coverage";
 
@@ -23,8 +23,8 @@ pub fn secret_need(
     minute: u64,
     leaf_id: FactId,
 ) -> ContextNeed {
-    let key = secret_need_selector(workspace_id, frontier_id, minute, leaf_id);
-    range_need_for_selector(
+    let key = secret_need_key(workspace_id, frontier_id, minute, leaf_id);
+    range_need_for_key_range(
         owner,
         secret_role(),
         scope,
@@ -56,19 +56,19 @@ pub fn secret_offer(
         end_minute,
         prefix_bound(leaf_prefix, prefix_bytes, BoundSide::High),
     );
-    range_offer_for_selector(owner, secret_role(), scope, start, end)
+    range_offer_for_key_range(owner, secret_role(), scope, start, end)
 }
 
 // Versioned keys make persisted context rows self-describing. A need names one
 // leaf at one minute. An offer names an inclusive coordinate range; projectors
 // still validate the intended workspace/frontier/time/prefix semantics.
-pub fn secret_need_selector(
+pub fn secret_need_key(
     workspace_id: FactId,
     frontier_id: FactId,
     minute: u64,
     leaf_id: FactId,
-) -> Selector {
-    Selector::from_bytes(secret_range_key(workspace_id, frontier_id, minute, leaf_id))
+) -> ContextKey {
+    ContextKey::from_bytes(secret_range_key(workspace_id, frontier_id, minute, leaf_id))
 }
 
 fn secret_range_key(
@@ -102,7 +102,7 @@ fn prefix_bound(mut prefix: FactId, prefix_bytes: u8, side: BoundSide) -> FactId
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SecretNeedSelector {
+pub struct SecretNeedKey {
     pub workspace_id: FactId,
     pub frontier_id: FactId,
     pub minute: u64,
@@ -110,7 +110,7 @@ pub struct SecretNeedSelector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SecretOfferSelector {
+pub struct SecretOfferRange {
     pub workspace_id: FactId,
     pub frontier_id: FactId,
     pub start_minute: u64,
@@ -119,12 +119,12 @@ pub struct SecretOfferSelector {
     pub prefix_bytes: u8,
 }
 
-pub fn decode_secret_need_selector(selector: &Selector) -> Option<SecretNeedSelector> {
-    let bytes = selector.as_bytes();
+pub fn decode_secret_need_key(key: &ContextKey) -> Option<SecretNeedKey> {
+    let bytes = key.as_bytes();
     if bytes.len() != 105 || bytes[0] != 1 {
         return None;
     }
-    Some(SecretNeedSelector {
+    Some(SecretNeedKey {
         workspace_id: bytes[1..33].try_into().ok()?,
         frontier_id: bytes[33..65].try_into().ok()?,
         minute: u64::from_be_bytes(bytes[65..73].try_into().ok()?),
@@ -132,9 +132,9 @@ pub fn decode_secret_need_selector(selector: &Selector) -> Option<SecretNeedSele
     })
 }
 
-fn decode_secret_offer_range(offer: &ContextOffer) -> Option<SecretOfferSelector> {
-    let start = decode_secret_need_selector(&offer.start_key)?;
-    let end = decode_secret_need_selector(&offer.end_key)?;
+fn decode_secret_offer_range(offer: &ContextOffer) -> Option<SecretOfferRange> {
+    let start = decode_secret_need_key(&offer.start_key)?;
+    let end = decode_secret_need_key(&offer.end_key)?;
     if start.workspace_id != end.workspace_id
         || start.frontier_id != end.frontier_id
         || start.minute > end.minute
@@ -142,7 +142,7 @@ fn decode_secret_offer_range(offer: &ContextOffer) -> Option<SecretOfferSelector
         return None;
     }
     let prefix_bytes = common_prefix_bytes(&start.leaf_id, &end.leaf_id);
-    Some(SecretOfferSelector {
+    Some(SecretOfferRange {
         workspace_id: start.workspace_id,
         frontier_id: start.frontier_id,
         start_minute: start.minute,
@@ -160,27 +160,27 @@ fn common_prefix_bytes(left: &FactId, right: &FactId) -> u8 {
         .min(32) as u8
 }
 
-pub fn secret_offer_matches_need(need: &ContextNeed, offer: &ContextOffer) -> bool {
+pub fn secret_coverage_offer_valid_for_need(need: &ContextNeed, offer: &ContextOffer) -> bool {
     if need.role != offer.role || need.scope != offer.scope {
         return false;
     }
     if need.start_key != need.end_key {
         return false;
     }
-    let Some(need) = decode_secret_need_selector(&need.start_key) else {
+    let Some(need) = decode_secret_need_key(&need.start_key) else {
         return false;
     };
-    let Some(offer_selector) = decode_secret_offer_range(offer) else {
+    let Some(offer_range) = decode_secret_offer_range(offer) else {
         return false;
     };
-    need.workspace_id == offer_selector.workspace_id
-        && need.frontier_id == offer_selector.frontier_id
-        && need.minute >= offer_selector.start_minute
-        && need.minute <= offer_selector.end_minute
+    need.workspace_id == offer_range.workspace_id
+        && need.frontier_id == offer_range.frontier_id
+        && need.minute >= offer_range.start_minute
+        && need.minute <= offer_range.end_minute
         && prefix_matches(
             &need.leaf_id,
-            &offer_selector.leaf_prefix,
-            offer_selector.prefix_bytes,
+            &offer_range.leaf_prefix,
+            offer_range.prefix_bytes,
         )
 }
 
@@ -192,10 +192,10 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::matchers::workspace_scope;
+    use crate::protocol::context_keys::workspace_scope;
 
     #[test]
-    fn secret_coverage_matches_time_range_and_leaf_prefix() {
+    fn secret_coverage_validates_time_range_and_leaf_prefix() {
         let workspace = [1; 32];
         let frontier = [2; 32];
         let scope = workspace_scope(workspace);
@@ -206,7 +206,7 @@ mod tests {
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
 
-        assert!(secret_offer_matches_need(&need, &offer));
+        assert!(secret_coverage_offer_valid_for_need(&need, &offer));
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, leaf);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 40, 50, 1, prefix);
 
-        assert!(!secret_offer_matches_need(&need, &offer));
+        assert!(!secret_coverage_offer_valid_for_need(&need, &offer));
     }
 
     #[test]
@@ -232,6 +232,6 @@ mod tests {
         let need = secret_need([3; 32], scope.clone(), workspace, frontier, 42, [9; 32]);
         let offer = secret_offer([4; 32], scope, workspace, frontier, 50, 40, 0, [0; 32]);
 
-        assert!(!secret_offer_matches_need(&need, &offer));
+        assert!(!secret_coverage_offer_valid_for_need(&need, &offer));
     }
 }

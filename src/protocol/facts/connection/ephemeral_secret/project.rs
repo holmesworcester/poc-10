@@ -14,7 +14,7 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 use super::rows::connection_ephemeral_secret_row;
 
@@ -51,7 +51,7 @@ impl TypedProjector<super::Codec> for ConnectionEphemeralSecretProjector {
 
         // 3. Materialize.
         Ok(ProjectionOutput::new()
-            .offer(matchers::connection_ephemeral_secret_offer(
+            .offer(context_keys::connection_ephemeral_secret_offer(
                 fact.id, fact.id,
             ))
             .row_mutation(RowMutation::PutRow(connection_ephemeral_secret_row(

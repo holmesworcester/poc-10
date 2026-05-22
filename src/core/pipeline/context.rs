@@ -25,10 +25,10 @@
 //! The invariant is replacement by owner. Projection output is the complete
 //! context set for one fact, and wake fanout considers only added rows from the
 //! replacement delta. If protocol semantics change, keep the generic overlap
-//! matcher here and change the protocol-owned key encoders/validators.
+//! overlap query here and change the protocol-owned key encoders/validators.
 
 use crate::core::context::{
-    scope_key, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
+    scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role,
 };
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
@@ -237,8 +237,8 @@ fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNee
         role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
         scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
             .map_err(rusqlite::Error::InvalidParameterName)?,
-        start_key: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
-        end_key: Selector::from_bytes(row.get::<_, Vec<u8>>(4)?),
+        start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(4)?),
     })
 }
 
@@ -249,8 +249,8 @@ fn selected_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOf
         role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
         scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
             .map_err(rusqlite::Error::InvalidParameterName)?,
-        start_key: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
-        end_key: Selector::from_bytes(row.get::<_, Vec<u8>>(4)?),
+        start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(4)?),
     })
 }
 

@@ -12,7 +12,7 @@ use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 use super::fact::LocalSignerSecretFact;
 
@@ -61,7 +61,7 @@ fn project_local_signer_secret(
     let scope = workspace_scope(secret.workspace_id);
     // 3. Materialize.
     Ok(
-        ProjectionOutput::new().offer(matchers::local_signer_secret_offer(
+        ProjectionOutput::new().offer(context_keys::local_signer_secret_offer(
             fact.id,
             scope,
             secret.signer_id,

@@ -43,7 +43,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 }
 
 #[test]
-fn context_matcher_plumbing_is_centralized_by_matching_relation() {
+fn context_key_plumbing_is_centralized_by_relation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let forbidden_fact_module_files = rust_files(&root.join("src/protocol/facts"))
         .into_iter()
@@ -62,11 +62,11 @@ fn context_matcher_plumbing_is_centralized_by_matching_relation() {
 
     assert!(
         forbidden_fact_module_files.is_empty(),
-        "fact modules must emit protocol-defined needs/offers, not own matcher/context/selector files:\n{}",
+        "fact modules must emit protocol-defined needs/offers, not own context-key/context/selector files:\n{}",
         forbidden_fact_module_files.join("\n")
     );
 
-    let matcher_files = rust_files(&root.join("src/protocol/matchers"))
+    let context_key_files = rust_files(&root.join("src/protocol/context_keys"))
         .into_iter()
         .filter_map(|path| {
             path.file_stem()
@@ -81,13 +81,13 @@ fn context_matcher_plumbing_is_centralized_by_matching_relation() {
     ]);
 
     assert_eq!(
-        matcher_files, expected,
-        "protocol matchers should stay organized by generic matching relation"
+        context_key_files, expected,
+        "protocol context keys should stay organized by relation"
     );
 
     assert!(
-        root.join("src/protocol/matchers.rs").is_file(),
-        "protocol matchers need a root manifest file instead of a mod.rs"
+        root.join("src/protocol/context_keys.rs").is_file(),
+        "protocol context keys need a root manifest file instead of a mod.rs"
     );
 }
 

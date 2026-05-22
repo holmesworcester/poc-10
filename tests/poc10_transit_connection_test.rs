@@ -93,7 +93,7 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
         encryption::layout::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
-            topo::protocol::matchers::workspace_scope([7; 32]),
+            topo::protocol::context_keys::workspace_scope([7; 32]),
             1,
             vec![private_tag, 1, 2, 3],
         );
@@ -119,7 +119,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
     let store = store_with_local_endpoint();
     let (connection_fact, connection) = connection_fact();
     let fact = Fact::new(
-        topo::protocol::matchers::workspace_scope([7; 32]),
+        topo::protocol::context_keys::workspace_scope([7; 32]),
         1,
         shared_fact_layout::encode_fact(&SharedFact {
             workspace_id: [7; 32],

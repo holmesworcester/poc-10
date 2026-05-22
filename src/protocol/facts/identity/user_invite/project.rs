@@ -15,11 +15,11 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user_invite::fact::UserInviteFact;
 use crate::protocol::facts::identity::{admin, endpoint_shared, workspace};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::rows::user_invite_row;
 
@@ -166,7 +166,11 @@ struct WorkspaceSignedNeeds {
 impl WorkspaceSignedNeeds {
     fn new(owner: FactId, invite: &UserInviteFact) -> Self {
         Self {
-            workspace: matchers::exact_need(owner, matchers::workspace_role(), invite.workspace_id),
+            workspace: context_keys::exact_need(
+                owner,
+                context_keys::workspace_role(),
+                invite.workspace_id,
+            ),
         }
     }
 
@@ -183,12 +187,16 @@ struct EndpointAdminNeeds {
 impl EndpointAdminNeeds {
     fn new(owner: FactId, invite: &UserInviteFact, signer_id: FactId) -> Self {
         Self {
-            endpoint_shared: matchers::exact_need(
+            endpoint_shared: context_keys::exact_need(
                 owner,
-                matchers::endpoint_shared_role(),
+                context_keys::endpoint_shared_role(),
                 signer_id,
             ),
-            admin: matchers::exact_need(owner, matchers::admin_role(), invite.authority_fact_id),
+            admin: context_keys::exact_need(
+                owner,
+                context_keys::admin_role(),
+                invite.authority_fact_id,
+            ),
         }
     }
 
@@ -205,8 +213,8 @@ fn materialized_output(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     Ok(output
-        .offer(matchers::user_invite_offer(fact.id))
-        .offer(matchers::user_invite_key_offer(
+        .offer(context_keys::user_invite_offer(fact.id))
+        .offer(context_keys::user_invite_key_offer(
             fact.id,
             invite.workspace_id,
             invite.public_key,

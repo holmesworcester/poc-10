@@ -11,7 +11,7 @@ use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 #[derive(Debug, Clone, Default)]
 pub struct TransitReceivedProjector;
@@ -45,7 +45,7 @@ impl TypedProjector<super::Codec> for TransitReceivedProjector {
         }
         // 3. Materialize.
         Ok(
-            ProjectionOutput::new().offer(matchers::transit_received_offer(
+            ProjectionOutput::new().offer(context_keys::transit_received_offer(
                 fact.id,
                 received.received_fact_id,
             )),

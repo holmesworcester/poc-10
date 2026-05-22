@@ -14,12 +14,12 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
+use crate::protocol::context_keys as message_keys;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{message, message_deletion};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers as message_matchers;
 
 use super::rows::{reaction_row, ReactionRow, REACTION_KEY_COLUMNS, REACTION_ROWS};
 
@@ -55,16 +55,16 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = message_matchers::workspace_scope(reaction.workspace_id);
+        let scope = message_keys::workspace_scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, signer);
         let target_need =
-            message_matchers::message_need(fact.id, scope.clone(), reaction.target_message_id);
-        let author_need = crate::protocol::matchers::exact_need(
+            message_keys::message_need(fact.id, scope.clone(), reaction.target_message_id);
+        let author_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::user_role(),
+            crate::protocol::context_keys::user_role(),
             reaction.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -99,7 +99,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             reaction.target_message_id,
             "reaction target",
         )?;
-        let target_deletion_need = message_matchers::deletion_need(
+        let target_deletion_need = message_keys::deletion_need(
             fact.id,
             scope.clone(),
             reaction.target_message_id,

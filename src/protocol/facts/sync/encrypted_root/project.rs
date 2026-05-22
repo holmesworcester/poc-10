@@ -12,7 +12,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncEncryptedRootProjector;
@@ -41,10 +41,16 @@ impl TypedProjector<super::Codec> for SyncEncryptedRootProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = matchers::workspace_scope(root.workspace_id);
+        let scope = context_keys::workspace_scope(root.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
-        Ok(ProjectionOutput::new().offer(matchers::exact_fact_offer(fact.id, scope, root.fact_id)))
+        Ok(
+            ProjectionOutput::new().offer(context_keys::exact_fact_offer(
+                fact.id,
+                scope,
+                root.fact_id,
+            )),
+        )
     }
 }
 

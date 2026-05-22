@@ -15,13 +15,13 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::admin::fact::AdminFact;
 use crate::protocol::facts::identity::user;
 use crate::protocol::facts::identity::workspace;
 use crate::protocol::facts::identity::workspace::fact::WorkspaceFact;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::layout;
 use super::rows::admin_row;
@@ -175,7 +175,11 @@ struct BootstrapAdminNeeds {
 impl BootstrapAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact) -> Self {
         Self {
-            workspace: matchers::exact_need(owner, matchers::workspace_role(), admin.workspace_id),
+            workspace: context_keys::exact_need(
+                owner,
+                context_keys::workspace_role(),
+                admin.workspace_id,
+            ),
         }
     }
 
@@ -193,9 +197,17 @@ struct DelegatedAdminNeeds {
 impl DelegatedAdminNeeds {
     fn new(owner: FactId, admin: &AdminFact) -> Self {
         Self {
-            workspace: matchers::exact_need(owner, matchers::workspace_role(), admin.workspace_id),
-            authority: matchers::exact_need(owner, matchers::admin_role(), admin.authority_fact_id),
-            user: matchers::exact_need(owner, matchers::user_role(), admin.user_fact_id),
+            workspace: context_keys::exact_need(
+                owner,
+                context_keys::workspace_role(),
+                admin.workspace_id,
+            ),
+            authority: context_keys::exact_need(
+                owner,
+                context_keys::admin_role(),
+                admin.authority_fact_id,
+            ),
+            user: context_keys::exact_need(owner, context_keys::user_role(), admin.user_fact_id),
         }
     }
 
@@ -224,10 +236,13 @@ fn materialized_output(
     output: ProjectionOutput,
 ) -> Result<ProjectionOutput, String> {
     Ok(output
-        .offer(matchers::exact_offer(fact.id, matchers::admin_role()))
-        .offer(matchers::scoped_key_offer(
+        .offer(context_keys::exact_offer(
             fact.id,
-            matchers::admin_role(),
+            context_keys::admin_role(),
+        ))
+        .offer(context_keys::scoped_key_offer(
+            fact.id,
+            context_keys::admin_role(),
             admin.workspace_id,
             admin.user_fact_id.to_vec(),
         ))

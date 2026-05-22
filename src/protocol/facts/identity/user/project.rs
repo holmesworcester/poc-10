@@ -62,9 +62,9 @@ impl TypedProjector<super::Codec> for UserProjector {
         }
 
         // 2. Authority.
-        let invite_need = crate::protocol::matchers::exact_need(
+        let invite_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::user_invite_role(),
+            crate::protocol::context_keys::user_invite_role(),
             envelope.signer_id,
         );
         let Some(invite_fact) = context.payload_for(&invite_need) else {
@@ -92,9 +92,9 @@ impl TypedProjector<super::Codec> for UserProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(invite_need)
-            .offer(crate::protocol::matchers::exact_offer(
+            .offer(crate::protocol::context_keys::exact_offer(
                 fact.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
             ))
             .row_mutation(RowMutation::PutRow(user_row(
                 fact.id,

@@ -15,13 +15,13 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
+use crate::protocol::context_keys;
+use crate::protocol::context_keys as message_keys;
 use crate::protocol::facts::content::message::authority::{self, DecodedPayload};
 use crate::protocol::facts::content::{file_deletion, message, message_deletion};
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::user;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
-use crate::protocol::matchers as message_matchers;
 
 use super::fact::MAX_FILE_BYTES;
 use super::rows::{content_file_row, FILE_KEY_COLUMNS, FILE_ROWS};
@@ -59,17 +59,17 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             envelope,
         } = decoded;
         validate_file_fields(&file)?;
-        let scope = message_matchers::workspace_scope(file.workspace_id);
+        let scope = message_keys::workspace_scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
         let signer_need = authority::signer_need(fact.id, signer);
         let file_deletion_need =
-            message_matchers::deletion_need(fact.id, scope.clone(), fact.id, file.author_user_id);
-        let parent_need = message_matchers::message_need(fact.id, scope.clone(), file.message_id);
-        let author_need = crate::protocol::matchers::exact_need(
+            message_keys::deletion_need(fact.id, scope.clone(), fact.id, file.author_user_id);
+        let parent_need = message_keys::message_need(fact.id, scope.clone(), file.message_id);
+        let author_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::user_role(),
+            crate::protocol::context_keys::user_role(),
             file.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
@@ -111,7 +111,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             file.message_id,
             "file parent",
         )?;
-        let parent_deletion_need = message_matchers::deletion_need(
+        let parent_deletion_need = message_keys::deletion_need(
             fact.id,
             scope.clone(),
             file.message_id,
@@ -152,10 +152,10 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             Some(parent_deletion_need),
             Some(author_need),
         ])
-        .offer(matchers::file_offer(fact.id, scope, file.file_id))
-        .offer(crate::protocol::matchers::exact_fact_offer(
+        .offer(context_keys::file_offer(fact.id, scope, file.file_id))
+        .offer(crate::protocol::context_keys::exact_fact_offer(
             fact.id,
-            message_matchers::workspace_scope(file.workspace_id),
+            message_keys::workspace_scope(file.workspace_id),
             fact.id,
         ))
         .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file)))

@@ -16,6 +16,9 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::context_keys;
+use crate::protocol::context_keys as ephemeral_keys;
+use crate::protocol::context_keys as receive_keys;
 use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::identity::invite;
 use crate::protocol::facts::transport::transit_received;
@@ -25,9 +28,6 @@ use crate::protocol::intents::connection::create_response::{
 use crate::protocol::intents::connection::send_bootstrap_request::{
     send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
 };
-use crate::protocol::matchers;
-use crate::protocol::matchers as ephemeral_matchers;
-use crate::protocol::matchers as receive_matchers;
 
 use super::addr::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
@@ -70,7 +70,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
 
         // 2. Shared invite context.
         let invite_need =
-            matchers::connection_invite_secret_need(fact.id, request.invite_secret_fact_id);
+            context_keys::connection_invite_secret_need(fact.id, request.invite_secret_fact_id);
         let Some(invite) = projection_context.payload_for(&invite_need) else {
             return Ok(waiting_output([invite_need]));
         };
@@ -86,7 +86,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
 
         if fact.scope == FactScope::Local {
             // 2a. Local send path.
-            let ephemeral_need = ephemeral_matchers::connection_ephemeral_secret_need(
+            let ephemeral_need = ephemeral_keys::connection_ephemeral_secret_need(
                 fact.id,
                 request.initiator_ephemeral_secret_fact_id,
             );
@@ -118,7 +118,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
         }
 
         // 2b. Received bootstrap path.
-        let receive_need = receive_matchers::transit_received_need(fact.id, fact.id);
+        let receive_need = receive_keys::transit_received_need(fact.id, fact.id);
         let Some(receive) = projection_context
             .matched_payloads_for(&receive_need)
             .map(|(_, fact)| fact)
@@ -196,7 +196,9 @@ fn materialized_output(
     request: &ConnectionRequestFact,
 ) -> Result<ProjectionOutput, String> {
     let mut output = ProjectionOutput::new()
-        .offer(matchers::connection_request_offer(request_id, request_id))
+        .offer(context_keys::connection_request_offer(
+            request_id, request_id,
+        ))
         .row_mutation(RowMutation::PutRow(connection_request_row(
             request_id, request,
         )?));
@@ -281,6 +283,9 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::context_keys as ephemeral_keys;
+    use topo::protocol::context_keys as received_keys;
+    use topo::protocol::context_keys as request_keys;
     use topo::protocol::facts::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
@@ -297,9 +302,6 @@ mod projector_tests {
     use topo::protocol::intents::connection::create_response::{
         decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
     };
-    use topo::protocol::matchers as ephemeral_matchers;
-    use topo::protocol::matchers as received_matchers;
-    use topo::protocol::matchers as request_matchers;
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
         let invite = InviteSecretFact::new([55; 32]);
@@ -356,22 +358,19 @@ mod projector_tests {
     }
 
     fn invite_match(owner: [u8; 32], invite: Fact) -> MatchedContext {
-        let need = request_matchers::connection_invite_secret_need(owner, invite.id);
+        let need = request_keys::connection_invite_secret_need(owner, invite.id);
         MatchedContext {
             need: need.clone(),
-            offer: request_matchers::connection_invite_secret_offer(invite.id, invite.id),
+            offer: request_keys::connection_invite_secret_offer(invite.id, invite.id),
             payload: invite,
         }
     }
 
     fn ephemeral_match(owner: [u8; 32], ephemeral: Fact) -> MatchedContext {
-        let need = ephemeral_matchers::connection_ephemeral_secret_need(owner, ephemeral.id);
+        let need = ephemeral_keys::connection_ephemeral_secret_need(owner, ephemeral.id);
         MatchedContext {
             need,
-            offer: ephemeral_matchers::connection_ephemeral_secret_offer(
-                ephemeral.id,
-                ephemeral.id,
-            ),
+            offer: ephemeral_keys::connection_ephemeral_secret_offer(ephemeral.id, ephemeral.id),
             payload: ephemeral,
         }
     }
@@ -398,10 +397,10 @@ mod projector_tests {
             13,
             received_layout::encode_fact(&received).expect("encode provenance"),
         );
-        let need = received_matchers::transit_received_need(owner, request_id);
+        let need = received_keys::transit_received_need(owner, request_id);
         MatchedContext {
             need,
-            offer: received_matchers::transit_received_offer(fact.id, request_id),
+            offer: received_keys::transit_received_offer(fact.id, request_id),
             payload: fact,
         }
     }
@@ -418,13 +417,10 @@ mod projector_tests {
 
         assert!(output.effects.intents.is_empty());
         assert_eq!(output.needs.len(), 2);
-        assert!(
-            output
-                .needs
-                .iter()
-                .any(|need| need.role.as_str()
-                    == ephemeral_matchers::CONNECTION_EPHEMERAL_SECRET_ROLE)
-        );
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == ephemeral_keys::CONNECTION_EPHEMERAL_SECRET_ROLE));
     }
 
     #[test]
@@ -442,7 +438,7 @@ mod projector_tests {
         assert!(output
             .needs
             .iter()
-            .any(|need| need.role == received_matchers::transit_received_role()));
+            .any(|need| need.role == received_keys::transit_received_role()));
     }
 
     #[test]
@@ -463,7 +459,7 @@ mod projector_tests {
         assert_eq!(output.offers.len(), 1);
         assert_eq!(
             output.offers[0].role.as_str(),
-            request_matchers::CONNECTION_REQUEST_ROLE
+            request_keys::CONNECTION_REQUEST_ROLE
         );
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
@@ -497,7 +493,7 @@ mod projector_tests {
         assert_eq!(output.effects.row_mutations.len(), 1);
         assert_eq!(
             output.offers[0].role.as_str(),
-            request_matchers::CONNECTION_REQUEST_ROLE
+            request_keys::CONNECTION_REQUEST_ROLE
         );
         let response_intent = output
             .effects

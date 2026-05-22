@@ -122,7 +122,7 @@ fn materialize_replayed_cascade_offers(
         }
 
         let offer =
-            crate::protocol::matchers::exact_fact_offer(fact.id, fact.scope.clone(), fact.id);
+            crate::protocol::context_keys::exact_fact_offer(fact.id, fact.scope.clone(), fact.id);
         offers.push(offer);
         completed_fact_ids.push(fact.id);
         applied.insert(fact.id);
@@ -134,7 +134,7 @@ fn materialize_replayed_cascade_offers(
 }
 
 fn applied_cascade_fact_count(runtime: &Runtime) -> usize {
-    let role = crate::protocol::matchers::exact_fact_role();
+    let role = crate::protocol::context_keys::exact_fact_role();
     runtime
         .facts()
         .filter(|fact| layout::decode_fact(fact.body()).is_ok())

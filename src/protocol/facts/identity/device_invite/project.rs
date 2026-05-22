@@ -15,11 +15,11 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::protocol::context_keys;
 use crate::protocol::facts::identity;
 use crate::protocol::facts::identity::device_invite::fact::DeviceInviteFact;
 use crate::protocol::facts::identity::{endpoint_shared, user, user_invite, workspace};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::rows::device_invite_row;
 
@@ -206,11 +206,19 @@ struct UserSignedNeeds {
 impl UserSignedNeeds {
     fn new(owner: FactId, invite: &DeviceInviteFact, user_invite_fact_id: FactId) -> Self {
         Self {
-            workspace: matchers::exact_need(owner, matchers::workspace_role(), invite.workspace_id),
-            user: matchers::exact_need(owner, matchers::user_role(), invite.user_authority_fact_id),
-            user_invite: matchers::exact_need(
+            workspace: context_keys::exact_need(
                 owner,
-                matchers::user_invite_role(),
+                context_keys::workspace_role(),
+                invite.workspace_id,
+            ),
+            user: context_keys::exact_need(
+                owner,
+                context_keys::user_role(),
+                invite.user_authority_fact_id,
+            ),
+            user_invite: context_keys::exact_need(
+                owner,
+                context_keys::user_invite_role(),
                 user_invite_fact_id,
             ),
         }
@@ -232,10 +240,14 @@ struct EndpointSignedNeeds {
 impl EndpointSignedNeeds {
     fn new(owner: FactId, invite: &DeviceInviteFact, signer_id: FactId) -> Self {
         Self {
-            workspace: matchers::exact_need(owner, matchers::workspace_role(), invite.workspace_id),
-            endpoint_shared: matchers::exact_need(
+            workspace: context_keys::exact_need(
                 owner,
-                matchers::endpoint_shared_role(),
+                context_keys::workspace_role(),
+                invite.workspace_id,
+            ),
+            endpoint_shared: context_keys::exact_need(
+                owner,
+                context_keys::endpoint_shared_role(),
                 signer_id,
             ),
         }
@@ -264,15 +276,15 @@ fn materialized_output(
 ) -> Result<ProjectionOutput, String> {
     Ok(output
         .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
-        .offer(matchers::exact_offer(
+        .offer(context_keys::exact_offer(
             fact.id,
-            matchers::device_invite_role(),
+            context_keys::device_invite_role(),
         ))
-        .offer(matchers::scoped_key_offer(
+        .offer(context_keys::scoped_key_offer(
             fact.id,
-            matchers::device_invite_key_role(),
+            context_keys::device_invite_key_role(),
             invite.workspace_id,
-            matchers::device_invite_key(invite.user_authority_fact_id, invite.public_key),
+            context_keys::device_invite_key(invite.user_authority_fact_id, invite.public_key),
         ))
         .intent(share_fact_with_workspace_intent_for_fact(
             invite.workspace_id,

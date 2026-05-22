@@ -57,9 +57,9 @@ impl TypedProjector<super::Codec> for InviteAcceptedProjector {
         }
 
         // 2. Context.
-        let secret_need = crate::protocol::matchers::exact_need(
+        let secret_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::invite_secret_role(),
+            crate::protocol::context_keys::invite_secret_role(),
             accepted.invite_secret_fact_id,
         );
         let Some(secret_fact) = context.payload_for(&secret_need) else {

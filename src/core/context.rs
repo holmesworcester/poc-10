@@ -56,9 +56,9 @@ impl Role {
 
 /// Opaque byte key within a context role and scope.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Selector(Vec<u8>);
+pub struct ContextKey(Vec<u8>);
 
-impl Selector {
+impl ContextKey {
     /// Build an opaque range endpoint owned by one fact module.
     ///
     /// Core stores, sorts, and compares these bytes, but never parses them.
@@ -88,9 +88,9 @@ pub struct ContextNeed {
     /// Matching scope.
     pub scope: FactScope,
     /// Inclusive start of the opaque byte range this need asks for.
-    pub start_key: Selector,
+    pub start_key: ContextKey,
     /// Inclusive end of the opaque byte range this need asks for.
-    pub end_key: Selector,
+    pub end_key: ContextKey,
 }
 
 /// A standing statement that one fact can provide context to matching needs.
@@ -106,9 +106,9 @@ pub struct ContextOffer {
     /// Matching scope.
     pub scope: FactScope,
     /// Inclusive start of the opaque byte range this offer provides.
-    pub start_key: Selector,
+    pub start_key: ContextKey,
     /// Inclusive end of the opaque byte range this offer provides.
-    pub end_key: Selector,
+    pub end_key: ContextKey,
 }
 
 /// Encode a fact scope into the stable bytes used by context match indexes.
@@ -122,7 +122,7 @@ pub(crate) fn scope_key(scope: &FactScope) -> Vec<u8> {
 ///
 /// Projection output replaces the previous set for that owner. This replacement
 /// model is what prevents stable unmet needs from self-waking forever: only
-/// added or removed relationships produce a delta for matchers to inspect.
+/// added or removed relationships produce a delta for wake fanout to inspect.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSet {
     /// Standing needs owned by one fact.
@@ -160,7 +160,7 @@ impl ContextSet {
 
 /// The added and removed relationships from replacing one owner's context set.
 ///
-/// Matchers only consider additions for wake generation. Removals are still
+/// Wake fanout only considers additions. Removals are still
 /// recorded so tests and persistence can prove that projection replacement is
 /// exact.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -188,7 +188,7 @@ impl ContextSetDelta {
 ///
 /// Projection commit uses this after every projection. Re-emitting the same
 /// need or offer is a no-op; changing it is represented as removal plus
-/// addition so the matcher sees only genuinely new possible matches.
+/// addition so wake fanout sees only genuinely new possible matches.
 pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSetDelta {
     let previous_needs = previous.needs.iter().cloned().collect::<BTreeSet<_>>();
     let next_needs = next.needs.iter().cloned().collect::<BTreeSet<_>>();
@@ -232,21 +232,21 @@ mod tests {
     fn context_set_builder_keeps_needs_and_offers_explicit() {
         let id = [1; 32];
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([2; 32]);
+        let key = ContextKey::from_bytes([2; 32]);
         let set = ContextSet::new()
             .need(ContextNeed {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                start_key: selector.clone(),
-                end_key: selector.clone(),
+                start_key: key.clone(),
+                end_key: key.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
                 role,
                 scope: FactScope::Global,
-                start_key: selector.clone(),
-                end_key: selector,
+                start_key: key.clone(),
+                end_key: key,
             });
 
         assert_eq!(set.needs.len(), 1);
@@ -261,8 +261,8 @@ mod tests {
             owner: id,
             role,
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([2; 32]),
-            end_key: Selector::from_bytes([2; 32]),
+            start_key: ContextKey::from_bytes([2; 32]),
+            end_key: ContextKey::from_bytes([2; 32]),
         };
 
         let set = ContextSet::new()
@@ -281,15 +281,15 @@ mod tests {
             owner: id,
             role: role.clone(),
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([2; 32]),
-            end_key: Selector::from_bytes([2; 32]),
+            start_key: ContextKey::from_bytes([2; 32]),
+            end_key: ContextKey::from_bytes([2; 32]),
         };
         let added = ContextNeed {
             owner: id,
             role,
             scope: FactScope::Global,
-            start_key: Selector::from_bytes([3; 32]),
-            end_key: Selector::from_bytes([3; 32]),
+            start_key: ContextKey::from_bytes([3; 32]),
+            end_key: ContextKey::from_bytes([3; 32]),
         };
 
         let previous = ContextSet::new()
@@ -312,21 +312,21 @@ mod tests {
     fn identical_context_sets_have_empty_delta() {
         let id = [1; 32];
         let role = Role::new("exact").unwrap();
-        let selector = Selector::from_bytes([2; 32]);
+        let key = ContextKey::from_bytes([2; 32]);
         let set = ContextSet::new()
             .need(ContextNeed {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                start_key: selector.clone(),
-                end_key: selector.clone(),
+                start_key: key.clone(),
+                end_key: key.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
                 role,
                 scope: FactScope::Global,
-                start_key: selector.clone(),
-                end_key: selector,
+                start_key: key.clone(),
+                end_key: key,
             })
             .normalized();
 

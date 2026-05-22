@@ -18,6 +18,7 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
+use crate::protocol::context_keys;
 use crate::protocol::facts::content::message_deletion;
 use crate::protocol::facts::encryption;
 use crate::protocol::facts::identity;
@@ -27,7 +28,6 @@ use crate::protocol::intents::content::purge_deleted_message::{
 };
 use crate::protocol::intents::content::purge_expired_message::{self, PurgeExpiredMessage};
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::authority::{self, DecodedPayload};
 use super::retention::message_row_delete;
@@ -68,7 +68,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             envelope,
             ..
         } = decoded;
-        let scope = matchers::workspace_scope(message.workspace_id);
+        let scope = context_keys::workspace_scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
         if let Some(envelope) = envelope.as_ref() {
             if envelope.signer_id != message.signer_id {
@@ -77,15 +77,15 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         }
 
         // 2. Context and deletion gates.
-        let signer_need = matchers::signer_need(fact.id, scope.clone(), message.signer_id);
+        let signer_need = context_keys::signer_need(fact.id, scope.clone(), message.signer_id);
         let deletion_need =
-            matchers::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
-        let author_need = crate::protocol::matchers::exact_need(
+            context_keys::deletion_need(fact.id, scope.clone(), fact.id, message.author_user_id);
+        let author_need = crate::protocol::context_keys::exact_need(
             fact.id,
-            crate::protocol::matchers::user_role(),
+            crate::protocol::context_keys::user_role(),
             message.author_user_id,
         );
-        let secret_need = matchers::secret_need(
+        let secret_need = context_keys::secret_need(
             fact.id,
             scope.clone(),
             message.workspace_id,
@@ -114,7 +114,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
         authority::verify_envelope(envelope.as_ref(), "message")?;
 
-        let metadata_output = base_output.offer(matchers::message_meta_offer(
+        let metadata_output = base_output.offer(context_keys::message_meta_offer(
             fact.id,
             scope.clone(),
             fact.id,
@@ -138,7 +138,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
 
         // 3. Materialize.
         Ok(metadata_output
-            .offer(matchers::message_offer(fact.id, scope, fact.id))
+            .offer(context_keys::message_offer(fact.id, scope, fact.id))
             .row_mutation(RowMutation::InsertValues(content_message_row(
                 fact.id, &message,
             )))
@@ -267,7 +267,7 @@ fn matched_secret_payload<'a>(
     need: &'a ContextNeed,
 ) -> Result<Option<&'a Fact>, String> {
     for (offer, payload) in context.matched_payloads_for(need) {
-        if !matchers::secret_offer_matches_need(need, offer) {
+        if !context_keys::secret_coverage_offer_valid_for_need(need, offer) {
             return Err("content message secret context offer does not match need".to_string());
         }
         if encryption::layout::decode_local_key_secret(payload.body()).is_ok()
@@ -435,6 +435,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::context_keys as message_context;
     use topo::protocol::facts::content::message::fact::ContentMessageFact;
     use topo::protocol::facts::content::message::{layout, project, rows};
     use topo::protocol::facts::content::message_deletion::fact::ContentMessageDeletionFact;
@@ -446,7 +447,6 @@ mod projector_tests {
         fact::{EndpointRole, EndpointSharedFact},
         layout as endpoint_shared_layout,
     };
-    use topo::protocol::matchers as message_context;
 
     use topo::protocol::facts::identity::user::{fact::UserFact, layout as user_layout};
 
@@ -558,7 +558,7 @@ mod projector_tests {
         assert!(output
             .needs
             .iter()
-            .any(|need| need.role == crate::protocol::matchers::user_role()));
+            .any(|need| need.role == crate::protocol::context_keys::user_role()));
         assert!(output
             .needs
             .iter()
@@ -749,14 +749,14 @@ mod projector_tests {
         author: &Fact,
     ) -> MatchedContext {
         MatchedContext {
-            need: crate::protocol::matchers::exact_need(
+            need: crate::protocol::context_keys::exact_need(
                 message_fact.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
                 message.author_user_id,
             ),
-            offer: crate::protocol::matchers::exact_offer(
+            offer: crate::protocol::context_keys::exact_offer(
                 author.id,
-                crate::protocol::matchers::user_role(),
+                crate::protocol::context_keys::user_role(),
             ),
             payload: author.clone(),
         }

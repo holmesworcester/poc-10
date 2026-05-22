@@ -5,7 +5,7 @@ use crate::core::intents::{Intent, IntentKind};
 use crate::core::wire;
 
 use super::fact::{RecipientKeyId, WorkspaceId};
-use crate::protocol::matchers::{WrapSourceKind, WrapSourceSelector};
+use crate::protocol::context_keys::{WrapSourceDescriptor, WrapSourceKind};
 
 pub const CREATE_KEY_WRAP: &str = "create_key_wrap";
 pub const UNWRAP_KEY_WRAP: &str = "unwrap_key_wrap";
@@ -41,7 +41,7 @@ pub fn create_key_wrap_intent(
     recipient_key_id: RecipientKeyId,
     source_fact_id: FactId,
     signer_secret_fact_id: FactId,
-    source: WrapSourceSelector,
+    source: WrapSourceDescriptor,
 ) -> Intent {
     let input = CreateKeyWrapIntent {
         workspace_id: source.workspace_id,

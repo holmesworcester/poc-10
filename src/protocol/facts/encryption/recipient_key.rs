@@ -1,11 +1,11 @@
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::protocol::context_keys;
 use crate::protocol::facts::encryption::fact::RecipientKeyFact;
 use crate::protocol::facts::encryption::fact::NO_PREVIOUS_RECIPIENT_KEY;
 use crate::protocol::facts::encryption::intent::create_key_wrap_intent;
 use crate::protocol::facts::encryption::layout;
 use crate::protocol::intents::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
-use crate::protocol::matchers;
 
 use super::validation::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
@@ -17,7 +17,7 @@ pub(super) fn recipient_key(
     projection_context: &ProjectionContext,
     recipient: RecipientKeyFact,
 ) -> Result<ProjectionOutput, String> {
-    let scope = crate::protocol::matchers::workspace_scope(recipient.workspace_id);
+    let scope = crate::protocol::context_keys::workspace_scope(recipient.workspace_id);
     require_fact_scope(fact, &scope)?;
     if recipient.previous_recipient_key_id == fact.id {
         return Err(
@@ -26,7 +26,7 @@ pub(super) fn recipient_key(
         );
     }
 
-    let superseded_need = matchers::recipient_superseded_need(fact.id, scope.clone(), fact.id);
+    let superseded_need = context_keys::recipient_superseded_need(fact.id, scope.clone(), fact.id);
     let is_superseded = projection_context.offers().iter().any(|offer| {
         offer.role == superseded_need.role
             && offer.start_key == superseded_need.start_key
@@ -35,7 +35,7 @@ pub(super) fn recipient_key(
     let mut output = ProjectionOutput::new().need(superseded_need);
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
-        let previous_need = matchers::recipient_key_need(
+        let previous_need = context_keys::recipient_key_need(
             fact.id,
             scope.clone(),
             recipient.previous_recipient_key_id,
@@ -45,7 +45,7 @@ pub(super) fn recipient_key(
             return Ok(output);
         };
         validate_previous_recipient_key(previous_fact, &recipient)?;
-        output = output.offer(matchers::recipient_superseded_offer(
+        output = output.offer(context_keys::recipient_superseded_offer(
             fact.id,
             scope.clone(),
             recipient.previous_recipient_key_id,
@@ -53,7 +53,7 @@ pub(super) fn recipient_key(
     }
 
     output = output
-        .offer(matchers::recipient_key_offer(
+        .offer(context_keys::recipient_key_offer(
             fact.id,
             scope.clone(),
             fact.id,
@@ -73,7 +73,7 @@ pub(super) fn recipient_key(
         } else {
             recipient.created_at_ms
         };
-    let wrap_need = matchers::proactive_wrap_source_need(
+    let wrap_need = context_keys::proactive_wrap_source_need(
         fact.id,
         scope.clone(),
         recipient.workspace_id,

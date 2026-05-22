@@ -442,7 +442,7 @@ fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
 }
 
 fn workspace_scope(workspace_id: FactId) -> FactScope {
-    crate::protocol::matchers::workspace_scope(workspace_id)
+    crate::protocol::context_keys::workspace_scope(workspace_id)
 }
 
 fn received_provenance_fact(

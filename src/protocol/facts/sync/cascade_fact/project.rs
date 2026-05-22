@@ -12,7 +12,7 @@ use crate::core::facts::Fact;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::matchers;
+use crate::protocol::context_keys;
 
 #[derive(Debug, Clone, Default)]
 pub struct CascadeFactProjector;
@@ -48,7 +48,7 @@ impl TypedProjector<super::Codec> for CascadeFactProjector {
         // 2. Context.
         let mut output = ProjectionOutput::new();
         for dependency_id in decoded.dependencies {
-            let need = matchers::exact_fact_need(fact.id, fact.scope.clone(), dependency_id);
+            let need = context_keys::exact_fact_need(fact.id, fact.scope.clone(), dependency_id);
             if !has_matched_dependency(context, &need, dependency_id)? {
                 output = output.need(need);
             }
@@ -56,7 +56,7 @@ impl TypedProjector<super::Codec> for CascadeFactProjector {
 
         // 3. Materialize.
         if output.needs.is_empty() {
-            output = output.offer(matchers::exact_fact_offer(
+            output = output.offer(context_keys::exact_fact_offer(
                 fact.id,
                 fact.scope.clone(),
                 fact.id,

@@ -1,5 +1,6 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
+use topo::protocol::context_keys::{workspace_scope, WrapSourceDescriptor, WrapSourceKind};
 use topo::protocol::facts::encryption::fact::{
     LocalKeySecretFact, RecipientKeyFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
 };
@@ -8,7 +9,6 @@ use topo::protocol::facts::encryption::layout;
 use topo::protocol::facts::identity;
 use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::intents::encryption::create_key_wrap::CreateKeyWrapHandler;
-use topo::protocol::matchers::{workspace_scope, WrapSourceKind, WrapSourceSelector};
 
 #[test]
 fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
@@ -18,7 +18,7 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
     let recipient = recipient_key_fact(workspace, endpoint, [4; 32]);
     let source = local_root_fact(workspace, frontier, endpoint, [5; 32]);
     let signer = local_signer_secret_fact(workspace, endpoint);
-    let source_selector = WrapSourceSelector {
+    let source_descriptor = WrapSourceDescriptor {
         workspace_id: workspace,
         frontier_id: frontier,
         owner_endpoint_id: endpoint,
@@ -26,7 +26,7 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
         kind: WrapSourceKind::FrontierRoot,
     };
     let materialize =
-        intent::create_key_wrap_intent(recipient.id, source.id, signer.id, source_selector);
+        intent::create_key_wrap_intent(recipient.id, source.id, signer.id, source_descriptor);
     let handler = CreateKeyWrapHandler::new();
     let context = HandlerContext::with_facts([recipient.clone(), source.clone(), signer.clone()]);
 

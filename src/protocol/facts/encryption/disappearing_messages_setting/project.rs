@@ -64,21 +64,21 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
         let authority_need = if setting.supersedes_setting_id.is_none()
             && setting.author_user_id == setting.workspace_id
         {
-            crate::protocol::matchers::exact_need(
+            crate::protocol::context_keys::exact_need(
                 fact.id,
-                crate::protocol::matchers::workspace_role(),
+                crate::protocol::context_keys::workspace_role(),
                 setting.workspace_id,
             )
         } else {
-            crate::protocol::matchers::scoped_key_need(
+            crate::protocol::context_keys::scoped_key_need(
                 fact.id,
-                crate::protocol::matchers::admin_role(),
+                crate::protocol::context_keys::admin_role(),
                 setting.workspace_id,
                 setting.author_user_id.to_vec(),
             )
         };
         let previous_need = setting.supersedes_setting_id.map(|previous_id| {
-            crate::protocol::matchers::exact_fact_need(fact.id, FactScope::Global, previous_id)
+            crate::protocol::context_keys::exact_fact_need(fact.id, FactScope::Global, previous_id)
         });
         let mut waiting = ProjectionOutput::new().need(authority_need.clone());
         if let Some(need) = &previous_need {
@@ -105,7 +105,7 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
         // 3. Materialize.
         let row = setting_row(fact.id, &setting)?;
         Ok(waiting
-            .offer(crate::protocol::matchers::exact_fact_offer(
+            .offer(crate::protocol::context_keys::exact_fact_offer(
                 fact.id,
                 FactScope::Global,
                 fact.id,
@@ -193,7 +193,7 @@ mod projector_tests {
     use topo::protocol::facts::identity::admin::fact::AdminFact;
     use topo::protocol::intents::sync::share_fact_with_workspace;
 
-    use topo::protocol::matchers as sync_matchers;
+    use topo::protocol::context_keys as sync_keys;
 
     fn workspace_setting() -> DisappearingMessagesSettingFact {
         DisappearingMessagesSettingFact {
@@ -234,7 +234,7 @@ mod projector_tests {
         assert!(projected
             .offers
             .iter()
-            .any(|offer| offer.role == sync_matchers::exact_fact_role()));
+            .any(|offer| offer.role == sync_keys::exact_fact_role()));
         assert_share_intent(&projected.effects.intents, setting.workspace_id, fact.id);
 
         let row = decode_single_put_row(&projected.effects.row_mutations[0]);
@@ -376,15 +376,15 @@ mod projector_tests {
         authority: Fact,
     ) -> MatchedContext {
         matched(
-            crate::protocol::matchers::scoped_key_need(
+            crate::protocol::context_keys::scoped_key_need(
                 owner,
-                crate::protocol::matchers::admin_role(),
+                crate::protocol::context_keys::admin_role(),
                 setting.workspace_id,
                 setting.author_user_id.to_vec(),
             ),
-            crate::protocol::matchers::scoped_key_offer(
+            crate::protocol::context_keys::scoped_key_offer(
                 authority.id,
-                crate::protocol::matchers::admin_role(),
+                crate::protocol::context_keys::admin_role(),
                 setting.workspace_id,
                 setting.author_user_id.to_vec(),
             ),
@@ -394,8 +394,8 @@ mod projector_tests {
 
     fn previous_match(owner: [u8; 32], previous: Fact) -> MatchedContext {
         matched(
-            sync_matchers::exact_fact_need(owner, FactScope::Global, previous.id),
-            sync_matchers::exact_fact_offer(previous.id, FactScope::Global, previous.id),
+            sync_keys::exact_fact_need(owner, FactScope::Global, previous.id),
+            sync_keys::exact_fact_offer(previous.id, FactScope::Global, previous.id),
             previous,
         )
     }

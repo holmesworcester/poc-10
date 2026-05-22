@@ -15,6 +15,9 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::context_keys as ephemeral_keys;
+use crate::protocol::context_keys as receive_keys;
+use crate::protocol::context_keys as request_keys;
 use crate::protocol::facts::connection::ephemeral_secret;
 use crate::protocol::facts::connection::request;
 use crate::protocol::facts::identity::invite;
@@ -24,9 +27,6 @@ use crate::protocol::facts::transport::transit_received::{
 use crate::protocol::intents::sync::seed_connection::{
     seed_connection_sync_intent, SeedConnectionSync,
 };
-use crate::protocol::matchers as ephemeral_matchers;
-use crate::protocol::matchers as receive_matchers;
-use crate::protocol::matchers as request_matchers;
 
 use super::create;
 use super::fact::ConnectionResponseFact;
@@ -71,7 +71,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
         }
 
         // 2. Shared request and invite context.
-        let request_need = request_matchers::connection_request_need(fact.id, response.request_id);
+        let request_need = request_keys::connection_request_need(fact.id, response.request_id);
         let Some(request_context) = projection_context.payload_for(&request_need) else {
             return Ok(waiting_output([request_need]));
         };
@@ -87,10 +87,8 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
         }
         validate_request_response(&response, &request)?;
 
-        let invite_need = request_matchers::connection_invite_secret_need(
-            fact.id,
-            response.invite_secret_fact_id,
-        );
+        let invite_need =
+            request_keys::connection_invite_secret_need(fact.id, response.invite_secret_fact_id);
         let Some(invite_context) = projection_context.payload_for(&invite_need) else {
             return Ok(waiting_output([request_need, invite_need]));
         };
@@ -118,11 +116,11 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
             return Err("connection response handshake hash does not match transcript".to_string());
         }
 
-        let responder_ephemeral_need = ephemeral_matchers::connection_ephemeral_secret_need(
+        let responder_ephemeral_need = ephemeral_keys::connection_ephemeral_secret_need(
             fact.id,
             response.responder_ephemeral_secret_fact_id,
         );
-        let receive_need = receive_matchers::transit_received_need(fact.id, fact.id);
+        let receive_need = receive_keys::transit_received_need(fact.id, fact.id);
 
         if let Some(receive) = projection_context
             .matched_payloads_for(&receive_need)
@@ -138,7 +136,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
                     .to_string()
             })?;
             validate_receive_provenance(fact.id, &response, &received)?;
-            let initiator_ephemeral_need = ephemeral_matchers::connection_ephemeral_secret_need(
+            let initiator_ephemeral_need = ephemeral_keys::connection_ephemeral_secret_need(
                 fact.id,
                 response.initiator_ephemeral_secret_fact_id,
             );
@@ -342,6 +340,9 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::context_keys as ephemeral_context;
+    use topo::protocol::context_keys as received_context;
+    use topo::protocol::context_keys as request_context;
     use topo::protocol::facts::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
@@ -357,9 +358,6 @@ mod projector_tests {
         fact::{TransitReceivedFact, TRANSIT_KIND_CONNECTION_HANDSHAKE},
         layout as received_layout,
     };
-    use topo::protocol::matchers as ephemeral_context;
-    use topo::protocol::matchers as received_context;
-    use topo::protocol::matchers as request_context;
 
     struct Scenario {
         request_fact: Fact,
