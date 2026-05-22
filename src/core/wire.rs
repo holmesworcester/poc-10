@@ -21,6 +21,12 @@
 //! ranges such as "this timestamp is plausible" or "this id is non-empty".
 //! Owning fact and intent modules must layer those checks on top of these
 //! primitives after decoding.
+//!
+//! Use this file when a layout needs a reusable mechanical primitive: exact
+//! fixed bytes, bounded padded strings, big-endian counters, or sequential
+//! reader/writer plumbing. Do not add protocol payload structs here. A protocol
+//! fact or intent module should own its type, tag, validation, and test vectors,
+//! while calling these helpers for the byte-level work.
 
 use std::fmt;
 

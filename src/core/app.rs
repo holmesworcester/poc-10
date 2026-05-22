@@ -11,6 +11,17 @@
 //! registered function, and prints the returned `CliOutput`. The generic
 //! `assert eventually` wrapper repeats that same command path and compares only
 //! scalar `field: value` output lines.
+//!
+//! This file sits between `main.rs` and the protocol. The binary supplies argv;
+//! the protocol supplies declarations; this runner supplies the stable process
+//! shape: `--db`, daemon lifecycle commands, help, runtime opening, and command
+//! dispatch. Change this file when every protocol should gain a new hosting
+//! behavior. Change the protocol registry or command modules when only the
+//! concrete `match` protocol changes.
+//!
+//! The runner deliberately returns display lines only at the edge. Commands
+//! produce facts, intents, rows, or query output through their own modules; core
+//! does not inspect that domain data while routing the CLI.
 
 use crate::core::cli::{self, CliArgs, CliCommand, CliOutput};
 use crate::core::daemon::{self, DaemonDescription};

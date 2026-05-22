@@ -10,6 +10,16 @@
 //! bound parameters. If a caller needs richer validation, put it in the module
 //! that constructs the select and keep this file as the generic insert-select
 //! adapter.
+//!
+//! This is used where queue fanout belongs in SQLite rather than Rust loops:
+//! context matching wakes pending facts, and time-wake admission marks due
+//! owners pending with one checked `INSERT OR IGNORE ... SELECT`. The caller
+//! owns the meaning of the query, the destination table, and the expected
+//! columns. This module owns only the reusable safety checks around table names,
+//! destination columns, and parameter binding.
+//!
+//! Add capability here when several queue workers need the same checked SQL
+//! shape. Keep one-off scheduling rules in the worker that owns the queue.
 
 use crate::core::store::{quoted_identifier_list, quoted_table_name};
 use crate::core::store::{Store, TableName};

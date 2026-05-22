@@ -14,6 +14,17 @@
 //! while callers are still free to retry after crashes. If this module starts
 //! parsing payloads, naming protocol concepts, or deciding when a row should be
 //! produced, it has crossed out of core and into a fact module.
+//!
+//! Outbound rows are produced by protocol intent handlers and consumed by the
+//! TCP pump. Inbound rows are produced by the TCP pump and consumed by the
+//! daemon, which converts them into ephemeral protocol intents. This separation
+//! keeps socket readiness, backpressure, and partial writes out of protocol
+//! handlers while also keeping protocol admission out of the network loop.
+//!
+//! Change this file for frame transport mechanics: listener setup,
+//! length-prefix framing, queue idempotence, local row cleanup, or bounded IO.
+//! Change transport facts or intents when the bytes inside a frame need new
+//! protocol meaning.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};

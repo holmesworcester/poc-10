@@ -6,6 +6,18 @@
 //! they borrow read-only command context, submit fact/intent output when a
 //! command authors work, and drain only local projection/intent work that the
 //! CLI command itself is responsible for observing.
+//!
+//! This file is a command router, not a domain model. Each function should stay
+//! thin: parse through the owning fact module, build a `CommandContext` or use
+//! a query helper, submit `CommandOutput` when the command authors work, and
+//! format with the owning module's CLI helpers. If the code starts proving
+//! authority, constructing payload bytes, or interpreting projected rows, move
+//! that logic back to the fact, intent, or query module that owns it.
+//!
+//! The settling calls are intentional. CLI commands often need command-visible
+//! projection results before reporting or before reading dependent state, but
+//! they should not run daemon-only network handlers. `MatchCliContext` therefore
+//! asks runtime to drain the command-safe handler set declared in the registry.
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliArgs, CliOutput};
 use crate::core::clock;

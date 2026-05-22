@@ -3,6 +3,17 @@
 //! This is the one place that assembles the match protocol as an executable
 //! application: runtime declarations, daemon declarations, and command table.
 //! The binary selects this description; core consumes it generically.
+//!
+//! `protocol::registry` is the larger table of contents. This file chooses the
+//! pieces needed to run the protocol: schema sources, row mutation allowlist,
+//! projector, handler routes, command-excluded handlers, daemon time wakes, and
+//! inbound-network intent conversion. If a new protocol capability needs to be
+//! visible to core, it is usually declared in the registry and wired into the
+//! `MATCH_RUNTIME` or `MATCH_PROTOCOL` constants here.
+//!
+//! Keep executable protocol policy out of this file. The conversion from a TCP
+//! frame to an intent is a small adapter; the actual transport admission and
+//! frame interpretation live in transport intent and fact modules.
 
 use crate::core::app::ProtocolDescription;
 use crate::core::clock;

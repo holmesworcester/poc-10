@@ -6,6 +6,19 @@
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
 //! convert inbound bytes to ephemeral intents, process declared time wakes,
 //! then drain projection/intent/projection work.
+//!
+//! The daemon is the host for work that should keep happening without a user
+//! command on the stack. It does not decode transport frames or choose protocol
+//! actions itself. The protocol declaration turns inbound bytes into an
+//! ephemeral intent, declares which time-wake timelines should be admitted, and
+//! supplies the runtime handlers that consume queued work.
+//!
+//! The order inside `tick` is part of the runtime contract. Network input is
+//! staged first, inbound frames become local queued work, due time ranges wake
+//! facts, and then the runtime drains projection, intent dispatch, and
+//! projection again. Change that order here only if the whole daemon scheduling
+//! policy changes; protocol handlers should adapt by emitting facts, time
+//! wakes, or intents rather than calling daemon steps directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
