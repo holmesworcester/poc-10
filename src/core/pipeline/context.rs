@@ -1,9 +1,28 @@
 //! Standing context rows, projection context assembly, and context wake fanout.
 //!
-//! This module is where context becomes SQL. It stores each need or offer as a
-//! row owned by the projecting fact, reconstructs the standing context for a
-//! pending fact, loads matched offer payloads, and inserts newly woken owners
-//! into `pending_projection`.
+//! Context is core's dependency surface between facts. A projector can say
+//! "this fact needs another fact with this role, scope, and selector before it
+//! can finish" by emitting a `ContextNeed`, or "this fact provides payload for
+//! matching needs" by emitting a `ContextOffer`. Core does not know the
+//! protocol meaning of those relationships. It either matches the stable
+//! role/scope/selector tuple exactly, or asks a protocol `ContextMatcher` to do
+//! richer matching such as range, prefix, coverage, or visibility rules.
+//!
+//! This module is where that model becomes SQL. The public vocabulary lives in
+//! `core::context`: needs, offers, roles, selectors, scopes, and complete
+//! replacement `ContextSet`s. Protocol projectors in `core::projectors` produce
+//! those sets. The projection loop in `pipeline::project_pending_facts` calls
+//! this file to load a pending fact's previous standing context, assemble the
+//! matched `ProjectionContext` it should see for the next run, replace its
+//! stored needs and offers, and fan out wakeups to facts that may now make
+//! progress. The matcher registry in `core::matchers` says which roles use
+//! exact matching and which roles delegate to protocol-owned SQL.
+//!
+//! The stored shape is one `context_edges` row per standing need or offer. The
+//! `owner` column is always the fact whose projection emitted the row. For
+//! offers, that same owner is also the payload fact loaded into matched
+//! projection context. Needs and offers are standing state, not event history:
+//! when a fact projects again, its new output replaces the old rows it owned.
 //!
 //! The invariant is replacement by owner. Projection output is the complete
 //! context set for one fact, and wake fanout considers only added rows from the
