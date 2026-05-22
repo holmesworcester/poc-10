@@ -9,11 +9,12 @@
 //! visible together.
 //!
 //! Commit requests come from three places. `Runtime::submit_command_output`
-//! commits effects produced by a user-facing command. Fact projection commits
-//! projector effects after the projection layer has replaced that fact's
-//! context and time wakes. Intent dispatch commits handler effects in the same
-//! transaction that deletes the handled queue row. Those callers own their
-//! surrounding pipeline work; this file owns the shared effect language inside
+//! commits effects produced by a user-facing command. Fact projection owns a
+//! larger transaction that replaces that fact's context and time wakes, then
+//! calls this file to write the projector's shared effects. Intent dispatch
+//! owns a larger transaction that deletes the handled queue row, then calls
+//! this file to write the handler's shared effects. Those callers own their
+//! surrounding pipeline work; this file owns the common effect language inside
 //! that work.
 //!
 //! Committing effects changes the runtime in four ways. Purged facts remove the

@@ -1,15 +1,41 @@
 //! Pending fact projection orchestration.
 //!
+//! Core treats facts as immutable inputs and projection as the only path that
+//! turns a fact into derived runtime state. Commands, handlers, sync, and local
+//! submission may admit facts, but they do not update protocol tables, standing
+//! context, time schedules, or follow-up work themselves. They record the fact
+//! and place its id in `pending_projection`; this module later drains that queue
+//! and runs the protocol projector for each pending fact.
+//!
+//! This is the fact-side counterpart to intent dispatch. Dispatch consumes
+//! queued intents and commits handler effects. Pending projection consumes
+//! queued facts and commits projector effects. Both boundaries delay work until
+//! the required inputs can be loaded, keep retries simple by leaving the input
+//! row queued until success, and make output visible only in the transaction
+//! that consumes the input row.
+//!
+//! Projection determines how every durable fact participates in the rest of the
+//! runtime. A new fact enters the queue when commands, handlers, or sync admit
+//! it. An existing fact re-enters when context matching discovers an offer that
+//! may satisfy one of its needs, or when a due time wake gives it time-range
+//! context. This is why projection is separate from both command handling and
+//! intent dispatch: any source of new information can ask the same per-fact
+//! projector to run again.
+//!
 //! This module owns the SQL-backed projection loop. It admits facts into the
 //! pending queue, turns due time wakes into pending projection with time-range
-//! context, loads each pending fact's previous context and matched inputs, runs
-//! the protocol projector, and commits the replacement context plus pipeline
-//! effects in one transaction.
+//! context, loads each pending fact's previous standing context and matched
+//! inputs through `pipeline::context`, runs the protocol projector, and commits
+//! the replacement context plus projector `PipelineEffects` in one transaction.
+//! The shared effects are written by `commit_effects`; this file owns the
+//! projection-specific work around them.
 //!
 //! Projection is intentionally per fact. Everything before
 //! `commit_projection_effects` is calculation; that function is the single
-//! durable boundary. If scheduling or projection atomicity changes, make that
-//! change here rather than in individual protocol projectors.
+//! durable boundary that clears the pending row, replaces the fact's context
+//! and time wakes, wakes newly matched dependent facts, and commits the
+//! projector's shared effects. If scheduling or projection atomicity changes,
+//! make that change here rather than in individual protocol projectors.
 
 use super::commit_effects::validate_pipeline_effects;
 use super::commit_effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
@@ -347,7 +373,14 @@ struct ProjectionEffects {
     pipeline: PipelineEffects,
 }
 
-/// Commit all durable projection effects in one SQLite transaction.
+/// Commit one pending fact's complete projection result.
+///
+/// This is the projection boundary, the same way `commit_handler_output` is the
+/// dispatch boundary. The transaction consumes this fact's pending row and makes
+/// the projector's output visible: replacement context, replacement time wakes,
+/// newly woken dependent facts, protocol row mutations, and follow-up intents.
+/// If projection fails before this function, the pending row remains queued. If
+/// anything fails inside this transaction, SQLite rolls the whole boundary back.
 ///
 /// Transaction contents:
 ///

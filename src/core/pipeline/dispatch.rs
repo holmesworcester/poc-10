@@ -1,9 +1,25 @@
 //! Intent queue claiming, handler execution, and handler-output commit.
 //!
-//! Dispatch owns the lifecycle of one queued intent row. It claims the next
+//! Intents are how the runtime represents work that should happen after a fact
+//! has projected or after IO produced protocol input. Projection stays
+//! deterministic and local to one fact: when it discovers follow-up work, it
+//! emits an `Intent` instead of running that work inline. The runtime later
+//! dispatches the intent to the protocol handler registered for its kind. This
+//! keeps commands, projection, network IO, and background maintenance on the
+//! same idempotent queue model.
+//!
+//! Dispatch owns the lifecycle of one queued intent row. It chooses the next
 //! row for a registered kind, loads only the facts requested by the handler,
-//! calls the handler, and commits the row deletion plus handler effects in one
-//! transaction. Retry errors deliberately leave the row queued.
+//! and calls the handler. On success it opens the transaction that deletes the
+//! handled row, then delegates the handler's `PipelineEffects` to
+//! `commit_effects` inside that same transaction. Retry errors deliberately
+//! leave the row queued.
+//!
+//! This transaction boundary is why dispatch matters. A handler output is
+//! visible exactly when its input queue row is consumed: no output without
+//! deleting the work item, and no deletion without committing the output. That
+//! is the rule that makes handler retries safe after process crashes, missing
+//! dependencies, and temporary network failures.
 //!
 //! Durable and ephemeral queues share the same row shape. Durable work wins
 //! when both queues contain the same kind, and handling a durable row removes a
@@ -167,10 +183,15 @@ fn run_handler(
 
 /// Commit the complete output of one handled intent in a single transaction.
 ///
-/// This is the boundary for intent dispatch: deleting the handled queued intent,
-/// purging facts, admitting emitted facts, applying row mutations, and recording
-/// follow-up intents all happen together. If the handled row is already gone,
-/// nothing commits and the returned value is `false`.
+/// This is the boundary for intent dispatch, not a second implementation of
+/// effect commits. Dispatch owns deleting the handled queued intent and
+/// removing any shadowed ephemeral duplicate; `commit_effects` owns purging
+/// facts, admitting emitted facts, applying row mutations, and recording
+/// follow-up intents. Keeping those steps in one transaction means a handler
+/// output is visible exactly when its input queue row is consumed.
+///
+/// If the handled row is already gone, nothing commits and the returned value
+/// is `false`.
 fn commit_handler_output(
     store: &Store,
     handled: HandledIntent<'_>,
