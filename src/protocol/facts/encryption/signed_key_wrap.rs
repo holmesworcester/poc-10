@@ -82,9 +82,6 @@ pub(super) fn signed_key_wrap(
             scope.clone(),
             fact.id,
         ))
-        .offer(crate::protocol::matchers::key_wrap_offer(
-            fact.id, scope, fact.id,
-        ))
         .intent(share_fact_with_workspace_intent_for_fact(
             wrap.workspace_id,
             fact,

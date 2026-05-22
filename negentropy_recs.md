@@ -1,8 +1,16 @@
 # Dep-Aware Sync
 
-This note describes the target dep-aware sync model for poc-10. It replaces the
-old worker-queue design with facts, context needs/offers, and bounded sync
-handlers.
+This note describes future work, not the current poc-10 sync implementation.
+Current sync seeds a connection with a root `sync_compare` over the full
+connection-visible shareable set, then sends matching facts or live tail buckets
+through bounded transport intents. It does not implement dep-aware subrange
+closure, `sync_range_request`, encrypted-root range offers, or key-wrap
+availability facts.
+
+A future dep-aware sync model should replace the current full-range/progressive
+send behavior with facts, context needs/offers, and bounded sync handlers that
+can answer a requested range plus the out-of-range dependencies needed to
+project it.
 
 ## Goal
 

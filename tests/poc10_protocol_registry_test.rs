@@ -141,7 +141,6 @@ fn context_matcher_plumbing_is_centralized_by_matching_relation() {
     let expected = BTreeSet::from([
         "coverage".to_string(),
         "exact".to_string(),
-        "range".to_string(),
         "wrap_source".to_string(),
     ]);
 

@@ -424,15 +424,11 @@ pub const EXACT_CONTEXT_ROLES: &[&str] = &[
     matchers::REMOVAL_FRONTIER_ROLE,
     matchers::CONTENT_SIGNER_ROLE,
     matchers::SYNC_EXACT_FACT_ROLE,
-    matchers::SYNC_KEY_WRAP_ROLE,
     matchers::TRANSIT_RECEIVED_ROLE,
 ];
 
-pub const SQL_CONTEXT_ROLES: &[&str] = &[
-    matchers::SECRET_COVERAGE_ROLE,
-    matchers::SYNC_RANGE_FACT_ROLE,
-    matchers::WRAP_SOURCE_ROLE,
-];
+pub const SQL_CONTEXT_ROLES: &[&str] =
+    &[matchers::SECRET_COVERAGE_ROLE, matchers::WRAP_SOURCE_ROLE];
 
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
@@ -484,7 +480,6 @@ pub(crate) fn protocol_context_matchers() -> ContextMatchers {
             .map(matchers::protocol_role),
         vec![
             Box::new(matchers::SecretCoverageMatcher::new()) as Box<dyn ContextMatcher>,
-            Box::new(matchers::RangeFactMatcher::new()),
             Box::new(matchers::WrapSourceMatcher::new()),
         ],
     )
@@ -553,10 +548,7 @@ projector_routes! {
     project_admin => identity::admin::layout::TYPE_ADMIN, identity::admin::project::AdminProjector;
     project_invite_accepted => identity::invite_accepted::layout::TYPE_INVITE_ACCEPTED, identity::invite_accepted::project::InviteAcceptedProjector;
     project_disappearing_messages_setting => encryption::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING, encryption::disappearing_messages_setting::project::DisappearingMessagesSettingProjector;
-    project_sync_range_request => sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector;
-    project_sync_encrypted_root => sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT, sync::encrypted_root::project::SyncEncryptedRootProjector;
     project_sync_shared_fact => sync::shared_fact::layout::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector;
-    project_sync_key_wrap_available => sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE, sync::key_wrap_available::project::SyncKeyWrapAvailableProjector;
     project_sync_compare => sync::compare::layout::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector;
     project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector;
     project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector;

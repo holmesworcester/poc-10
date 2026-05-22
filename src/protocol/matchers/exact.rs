@@ -32,7 +32,6 @@ pub const RECIPIENT_SUPERSEDED_ROLE: &str = "recipient_superseded";
 pub const REMOVAL_FRONTIER_ROLE: &str = "encryption_removal_frontier";
 pub const CONTENT_SIGNER_ROLE: &str = "content_signer";
 pub const SYNC_EXACT_FACT_ROLE: &str = "sync_exact_fact";
-pub const SYNC_KEY_WRAP_ROLE: &str = "sync_key_wrap";
 pub const TRANSIT_RECEIVED_ROLE: &str = "transport_transit_received";
 
 pub fn protocol_role(name: &'static str) -> Role {
@@ -492,18 +491,6 @@ pub fn exact_fact_need(owner: FactId, scope: FactScope, fact_id: FactId) -> Cont
 
 pub fn exact_fact_offer(owner: FactId, scope: FactScope, fact_id: FactId) -> ContextOffer {
     exact_offer_for_selector(owner, exact_fact_role(), scope, fact_id)
-}
-
-pub fn key_wrap_role() -> Role {
-    protocol_role(SYNC_KEY_WRAP_ROLE)
-}
-
-pub fn key_wrap_need(owner: FactId, scope: FactScope, key_wrap_id: FactId) -> ContextNeed {
-    exact_need_for_selector(owner, key_wrap_role(), scope, key_wrap_id)
-}
-
-pub fn key_wrap_offer(owner: FactId, scope: FactScope, key_wrap_id: FactId) -> ContextOffer {
-    exact_offer_for_selector(owner, key_wrap_role(), scope, key_wrap_id)
 }
 
 #[cfg(test)]

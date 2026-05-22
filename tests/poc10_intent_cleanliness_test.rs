@@ -909,7 +909,6 @@ fn target_fact_child_files_use_narrow_slice_names() {
                 | "message.rs"
                 | "offers.rs"
                 | "project.rs"
-                | "range_request.rs"
                 | "receive.rs"
                 | "recipient_key.rs"
                 | "rows.rs"

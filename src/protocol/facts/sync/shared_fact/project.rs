@@ -5,15 +5,13 @@
 //!      workspace id.
 //!   2. CONTEXT. No incoming context is required; this fact advertises a shared
 //!      payload id that is already present.
-//!   3. MATERIALIZE. Publish an exact-fact offer for range-request dependency
-//!      matching.
+//!   3. MATERIALIZE. Publish an exact-fact offer for dependency matching.
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::facts::sync::encrypted_root::project::require_fact_scope;
 use crate::protocol::matchers;
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +42,9 @@ impl TypedProjector<super::Codec> for SyncSharedFactProjector {
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         let scope = matchers::workspace_scope(shared.workspace_id);
-        require_fact_scope(fact, &scope)?;
+        if fact.scope != scope {
+            return Err("sync shared_fact scope does not match body workspace".to_string());
+        }
         // 3. Materialize.
         Ok(ProjectionOutput::new().offer(matchers::exact_fact_offer(
             fact.id,

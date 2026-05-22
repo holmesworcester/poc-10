@@ -269,10 +269,12 @@ A fact module is one fact family. A directory that defines several durable
 fact types is a bundle and should be split before review, even when the facts
 are conceptually related. This rule applies to encryption and sync equally:
 `recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
-`sync_have_id`, `sync_need_id`, `sync_range_request`, `sync_encrypted_root`,
-`sync_shared_event`, and `sync_key_wrap_available` are separate fact-family
-modules. Shared helper code is allowed only when its file name states the
-specific invariant it owns, such as signer validation or range matching.
+`sync_have_id`, `sync_need_id`, and `sync_shared_fact` are separate fact-family
+modules. Dep-aware subrange sync is future work; if it returns, range requests,
+encrypted-root advertisements, and key-wrap availability should be added back as
+separate fact-family modules rather than bundled into the existing sync files.
+Shared helper code is allowed only when its file name states the specific
+invariant it owns, such as signer validation or range matching.
 
 `project.rs` is not a folder for sub-events. A `project/` subtree is acceptable
 only for fact-family-local helper slices named after validation steps or output
