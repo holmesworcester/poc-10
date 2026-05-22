@@ -317,7 +317,7 @@ mod projector_tests {
         assert!(waiting
             .needs
             .iter()
-            .any(|need| need.selector.as_bytes() == &[8u8; 32][..]));
+            .any(|need| need.start_key.as_bytes() == &[8u8; 32][..]));
     }
 
     fn frontier_fact(workspace_id: [u8; 32]) -> Fact {

@@ -23,16 +23,18 @@ pub(super) fn project_local_key_secret(
     };
     validate_local_key_frontier(frontier_fact, &secret)?;
 
-    Ok(ProjectionOutput::new()
-        .need(frontier_need)
-        .offer(matchers::frontier_root_wrap_source_offer(
-            fact.id,
-            scope.clone(),
-            secret.workspace_id,
-            secret.frontier_id,
-            secret.owner_endpoint_id,
-            secret.created_at_ms,
-        ))
+    let mut output = ProjectionOutput::new().need(frontier_need);
+    for offer in matchers::frontier_root_wrap_source_offers(
+        fact.id,
+        scope.clone(),
+        secret.workspace_id,
+        secret.frontier_id,
+        secret.owner_endpoint_id,
+        secret.created_at_ms,
+    ) {
+        output = output.offer(offer);
+    }
+    Ok(output
         .offer(history_matchers::source_secret_offer(fact.id, fact.id))
         .offer(crate::protocol::matchers::secret_offer(
             fact.id,
@@ -121,18 +123,21 @@ pub(super) fn project_local_history_node_secret(
     let prefix_bytes = (node.bit_depth / 8)
         .try_into()
         .map_err(|_| "history node prefix byte width overflow".to_string())?;
-    Ok(waiting
-        .offer(matchers::history_node_wrap_source_offer(
-            fact.id,
-            scope.clone(),
-            node.workspace_id,
-            node.frontier_id,
-            node.owner_endpoint_id,
-            node.range_start,
-            node.range_width,
-            node.bit_depth,
-            node.fact_id_prefix,
-        ))
+    let mut output = waiting;
+    for offer in matchers::history_node_wrap_source_offers(
+        fact.id,
+        scope.clone(),
+        node.workspace_id,
+        node.frontier_id,
+        node.owner_endpoint_id,
+        node.range_start,
+        node.range_width,
+        node.bit_depth,
+        node.fact_id_prefix,
+    ) {
+        output = output.offer(offer);
+    }
+    Ok(output
         .offer(history_matchers::source_secret_offer(fact.id, fact.id))
         .offer(crate::protocol::matchers::secret_offer(
             fact.id,

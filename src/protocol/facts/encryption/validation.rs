@@ -88,7 +88,7 @@ pub(super) fn has_matching_signer_public_key(
             else {
                 return false;
             };
-            endpoint.endpoint_id.as_slice() == need.selector.as_bytes()
+            endpoint.endpoint_id.as_slice() == need.start_key.as_bytes()
                 && endpoint.signing_public_key == *signer_public_key
         })
 }

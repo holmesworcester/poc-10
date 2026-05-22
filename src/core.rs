@@ -17,7 +17,6 @@ pub mod effects;
 pub(crate) mod fact_store;
 pub mod facts;
 pub mod intents;
-pub mod matchers;
 pub mod network;
 pub mod pipeline;
 pub mod projectors;

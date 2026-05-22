@@ -449,8 +449,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
             continue;
         }
         let relative = path.strip_prefix(root).unwrap();
-        if relative.starts_with("src/core/matchers.rs")
-            || relative.starts_with("src/core/pipeline.rs")
+        if relative.starts_with("src/core/pipeline.rs")
             || relative.starts_with("src/core/pipeline/")
             || relative.starts_with("src/core/fact_store.rs")
             || relative.starts_with("src/protocol/matchers")
@@ -463,7 +462,7 @@ fn context_matcher_logic_lives_under_protocol_matchers() {
 
     assert!(
         offenders.is_empty(),
-        "ContextMatcher implementations and relation-specific selector logic belong under src/protocol/matchers, with core-owned generic mechanics in src/core/matchers.rs and src/core/pipeline.rs:\n{}",
+        "relation-specific context key logic belongs under src/protocol/matchers, with core-owned byte-range overlap in src/core/pipeline.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -939,8 +938,6 @@ fn target_protocol_registry_owns_protocol_tables_without_runtime_io() {
         "pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>]",
         "pub(crate) const SCHEMA_SOURCES: &[SchemaSource]",
         "pub(crate) const ROW_MUTATION_TABLES: &[TableName]",
-        "pub const EXACT_CONTEXT_ROLES: &[&str]",
-        "pub const SQL_CONTEXT_ROLES: &[&str]",
         "pub(crate) const HANDLER_ROUTES: &[HandlerRoute]",
     ] {
         assert!(

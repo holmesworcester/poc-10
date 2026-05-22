@@ -1,71 +1,18 @@
-//! Wrap-source context matcher.
+//! Wrap-source context keys.
 //!
-//! A wrap source advertises local key material that can satisfy proactive
-//! rotation work or a specific remote key request. Matching remains candidate
-//! lookup; encryption projectors validate payloads and signer authority.
+//! Local key material can satisfy proactive recipient-key convergence or a
+//! specific remote key request. Core only matches byte ranges; this module
+//! encodes the two lookup coordinates and validates candidate overlaps.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope};
-use crate::core::select;
 
-use super::exact::protocol_role;
-use super::sql;
+use super::exact::{protocol_role, range_need_for_selector, range_offer_for_selector};
 
 pub const WRAP_SOURCE_ROLE: &str = "wrap_source";
 
-pub const WRAP_SOURCE_OFFERS_FOR_NEED_SQL: &str = "
-SELECT owner, selector
-FROM context_edges
-WHERE direction = 'offer'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND length(selector) = 156
-  AND substr(selector, 1, 1) = x'03'
-  AND substr(selector, 2, 32) = :workspace_id
-  AND (
-    (:need_kind = 1 AND substr(selector, 98, 8) >= :min_frontier_created_at_ms)
-    OR (:need_kind = 2 AND substr(selector, 34, 32) = :frontier_id)
-  )
-ORDER BY owner, selector";
-
-pub const WRAP_SOURCE_WAKE_FOR_NEED_SQL: &str = "
-SELECT :need_owner AS owner
-FROM context_edges
-WHERE direction = 'offer'
-  AND role = :role
-  AND scope_key = :scope_key
-  AND length(selector) = 156
-  AND substr(selector, 1, 1) = x'03'
-  AND substr(selector, 2, 32) = :workspace_id
-  AND (
-    (:need_kind = 1 AND substr(selector, 98, 8) >= :min_frontier_created_at_ms)
-    OR (:need_kind = 2 AND substr(selector, 34, 32) = :frontier_id)
-  )
-ORDER BY owner, selector";
-
-pub const WRAP_SOURCE_WAKE_FOR_OFFER_SQL: &str = "
-SELECT n.owner
-FROM context_edges n
-JOIN local_fact_admissions a ON a.fact_id = n.owner
-WHERE n.direction = 'need'
-  AND n.role = :role
-  AND n.scope_key = :scope_key
-  AND (
-    (
-      length(n.selector) = 41
-      AND substr(n.selector, 1, 1) = x'01'
-      AND substr(n.selector, 2, 32) = :workspace_id
-      AND substr(n.selector, 34, 8) <= :frontier_created_at_ms
-    )
-    OR
-    (
-      length(n.selector) = 65
-      AND substr(n.selector, 1, 1) = x'02'
-      AND substr(n.selector, 2, 32) = :workspace_id
-      AND substr(n.selector, 34, 32) = :frontier_id
-    )
-  )
-ORDER BY a.received_at, n.owner";
+const PROACTIVE_DOMAIN: u8 = 1;
+const REQUESTED_DOMAIN: u8 = 2;
 
 pub fn wrap_source_role() -> Role {
     protocol_role(WRAP_SOURCE_ROLE)
@@ -77,16 +24,10 @@ pub fn proactive_wrap_source_need(
     workspace_id: FactId,
     min_frontier_created_at_ms: u64,
 ) -> ContextNeed {
-    let mut selector = Vec::with_capacity(41);
-    selector.push(1);
-    selector.extend_from_slice(&workspace_id);
-    selector.extend_from_slice(&min_frontier_created_at_ms.to_be_bytes());
-    ContextNeed {
-        owner,
-        role: wrap_source_role(),
-        scope,
-        selector: Selector::from_bytes(selector),
-    }
+    let start = proactive_wrap_key_prefix(workspace_id, min_frontier_created_at_ms);
+    let mut end = proactive_wrap_key_prefix(workspace_id, u64::MAX);
+    end.extend_from_slice(&[0xff; ENCODED_WRAP_SOURCE_SELECTOR_LEN]);
+    range_need_for_selector(owner, wrap_source_role(), scope, start, end)
 }
 
 pub fn requested_wrap_source_need(
@@ -95,16 +36,10 @@ pub fn requested_wrap_source_need(
     workspace_id: FactId,
     frontier_id: FactId,
 ) -> ContextNeed {
-    let mut selector = Vec::with_capacity(65);
-    selector.push(2);
-    selector.extend_from_slice(&workspace_id);
-    selector.extend_from_slice(&frontier_id);
-    ContextNeed {
-        owner,
-        role: wrap_source_role(),
-        scope,
-        selector: Selector::from_bytes(selector),
-    }
+    let start = requested_wrap_key_prefix(workspace_id, frontier_id);
+    let mut end = start.clone();
+    end.extend_from_slice(&[0xff; ENCODED_WRAP_SOURCE_SELECTOR_LEN]);
+    range_need_for_selector(owner, wrap_source_role(), scope, start, end)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,15 +62,15 @@ pub struct WrapSourceSelector {
     pub kind: WrapSourceKind,
 }
 
-pub fn frontier_root_wrap_source_offer(
+pub fn frontier_root_wrap_source_offers(
     owner: FactId,
     scope: FactScope,
     workspace_id: FactId,
     frontier_id: FactId,
     owner_endpoint_id: FactId,
     frontier_created_at_ms: u64,
-) -> ContextOffer {
-    wrap_source_offer(
+) -> Vec<ContextOffer> {
+    wrap_source_offers(
         owner,
         scope,
         WrapSourceSelector {
@@ -148,7 +83,7 @@ pub fn frontier_root_wrap_source_offer(
     )
 }
 
-pub fn history_node_wrap_source_offer(
+pub fn history_node_wrap_source_offers(
     owner: FactId,
     scope: FactScope,
     workspace_id: FactId,
@@ -158,8 +93,8 @@ pub fn history_node_wrap_source_offer(
     range_width: u64,
     bit_depth: u16,
     fact_id_prefix: FactId,
-) -> ContextOffer {
-    wrap_source_offer(
+) -> Vec<ContextOffer> {
+    wrap_source_offers(
         owner,
         scope,
         WrapSourceSelector {
@@ -177,22 +112,82 @@ pub fn history_node_wrap_source_offer(
     )
 }
 
-pub fn wrap_source_offer(
+pub fn wrap_source_offers(
     owner: FactId,
     scope: FactScope,
     source: WrapSourceSelector,
-) -> ContextOffer {
-    ContextOffer {
+) -> Vec<ContextOffer> {
+    let metadata = encode_wrap_source_selector(&source).as_bytes().to_vec();
+    let proactive = point_offer(
         owner,
-        role: wrap_source_role(),
+        scope.clone(),
+        wrap_offer_key(PROACTIVE_DOMAIN, &source, &metadata),
+    );
+    let requested = point_offer(
+        owner,
         scope,
-        selector: encode_wrap_source_selector(&source),
+        wrap_offer_key(REQUESTED_DOMAIN, &source, &metadata),
+    );
+    vec![proactive, requested]
+}
+
+fn point_offer(owner: FactId, scope: FactScope, key: Vec<u8>) -> ContextOffer {
+    range_offer_for_selector(owner, wrap_source_role(), scope, key.clone(), key)
+}
+
+fn wrap_offer_key(domain: u8, source: &WrapSourceSelector, metadata: &[u8]) -> Vec<u8> {
+    let mut key = match domain {
+        PROACTIVE_DOMAIN => {
+            proactive_wrap_key_prefix(source.workspace_id, source.frontier_created_at_ms)
+        }
+        REQUESTED_DOMAIN => requested_wrap_key_prefix(source.workspace_id, source.frontier_id),
+        _ => unreachable!("wrap source domain is internal"),
+    };
+    key.extend_from_slice(metadata);
+    key
+}
+
+fn proactive_wrap_key_prefix(workspace_id: FactId, frontier_created_at_ms: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(41);
+    key.push(PROACTIVE_DOMAIN);
+    key.extend_from_slice(&workspace_id);
+    key.extend_from_slice(&frontier_created_at_ms.to_be_bytes());
+    key
+}
+
+fn requested_wrap_key_prefix(workspace_id: FactId, frontier_id: FactId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(65);
+    key.push(REQUESTED_DOMAIN);
+    key.extend_from_slice(&workspace_id);
+    key.extend_from_slice(&frontier_id);
+    key
+}
+
+const ENCODED_WRAP_SOURCE_SELECTOR_LEN: usize = 156;
+
+pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSelector> {
+    decode_wrap_source_metadata(selector.as_bytes())
+}
+
+fn decode_wrap_source_offer_key(key: &Selector) -> Option<(u8, WrapSourceSelector)> {
+    let bytes = key.as_bytes();
+    match bytes.first().copied()? {
+        PROACTIVE_DOMAIN => {
+            let metadata_start = 1 + 32 + 8;
+            let source = decode_wrap_source_metadata(bytes.get(metadata_start..)?)?;
+            Some((PROACTIVE_DOMAIN, source))
+        }
+        REQUESTED_DOMAIN => {
+            let metadata_start = 1 + 32 + 32;
+            let source = decode_wrap_source_metadata(bytes.get(metadata_start..)?)?;
+            Some((REQUESTED_DOMAIN, source))
+        }
+        _ => None,
     }
 }
 
-pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSelector> {
-    let bytes = selector.as_bytes();
-    if bytes.len() != 156 || bytes[0] != 3 {
+fn decode_wrap_source_metadata(bytes: &[u8]) -> Option<WrapSourceSelector> {
+    if bytes.len() != ENCODED_WRAP_SOURCE_SELECTOR_LEN || bytes[0] != 3 {
         return None;
     }
     let workspace_id = bytes[1..33].try_into().ok()?;
@@ -233,7 +228,7 @@ pub fn decode_wrap_source_selector(selector: &Selector) -> Option<WrapSourceSele
 }
 
 pub fn encode_wrap_source_selector(source: &WrapSourceSelector) -> Selector {
-    let mut bytes = Vec::with_capacity(156);
+    let mut bytes = Vec::with_capacity(ENCODED_WRAP_SOURCE_SELECTOR_LEN);
     bytes.push(3);
     bytes.extend_from_slice(&source.workspace_id);
     bytes.extend_from_slice(&source.frontier_id);
@@ -290,151 +285,69 @@ fn mask_prefix_to_depth(mut prefix: FactId, bit_depth: u16) -> FactId {
     prefix
 }
 
-pub fn decode_proactive_wrap_need(selector: &Selector) -> Option<(FactId, u64)> {
-    let bytes = selector.as_bytes();
-    if bytes.len() != 41 || bytes[0] != 1 {
+pub fn decode_proactive_wrap_need(need: &ContextNeed) -> Option<(FactId, u64)> {
+    let start = need.start_key.as_bytes();
+    let end = need.end_key.as_bytes();
+    if start.len() != 41 || start[0] != PROACTIVE_DOMAIN {
+        return None;
+    }
+    if end.len() != 41 + ENCODED_WRAP_SOURCE_SELECTOR_LEN || end[0] != PROACTIVE_DOMAIN {
+        return None;
+    }
+    let workspace_id: FactId = start[1..33].try_into().ok()?;
+    if end[1..33] != workspace_id {
         return None;
     }
     Some((
-        bytes[1..33].try_into().ok()?,
-        u64::from_be_bytes(bytes[33..41].try_into().ok()?),
+        workspace_id,
+        u64::from_be_bytes(start[33..41].try_into().ok()?),
     ))
 }
 
-pub fn decode_requested_wrap_need(selector: &Selector) -> Option<(FactId, FactId)> {
-    let bytes = selector.as_bytes();
-    if bytes.len() != 65 || bytes[0] != 2 {
+pub fn decode_requested_wrap_need(need: &ContextNeed) -> Option<(FactId, FactId)> {
+    let start = need.start_key.as_bytes();
+    let end = need.end_key.as_bytes();
+    if start.len() != 65 || start[0] != REQUESTED_DOMAIN {
         return None;
     }
-    Some((
-        bytes[1..33].try_into().ok()?,
-        bytes[33..65].try_into().ok()?,
-    ))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WrapSourceMatcher {
-    role: Role,
-}
-
-impl WrapSourceMatcher {
-    pub fn new() -> Self {
-        Self {
-            role: wrap_source_role(),
-        }
+    if end.len() != 65 + ENCODED_WRAP_SOURCE_SELECTOR_LEN || end[0] != REQUESTED_DOMAIN {
+        return None;
     }
-}
-
-impl Default for WrapSourceMatcher {
-    fn default() -> Self {
-        Self::new()
+    let workspace_id: FactId = start[1..33].try_into().ok()?;
+    let frontier_id: FactId = start[33..65].try_into().ok()?;
+    if end[1..33] != workspace_id || end[33..65] != frontier_id {
+        return None;
     }
-}
-
-sql::sql_backed_matcher! {
-    WrapSourceMatcher {
-        offers_for_need: WRAP_SOURCE_OFFERS_FOR_NEED_SQL => wrap_need_query_params,
-        wake_for_need: WRAP_SOURCE_WAKE_FOR_NEED_SQL => wrap_need_wake_params,
-        wake_for_offer: WRAP_SOURCE_WAKE_FOR_OFFER_SQL => wrap_offer_wake_params,
-    }
-}
-
-fn wrap_need_query_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
-    wrap_need_params(role, need, false)
-}
-
-fn wrap_need_wake_params(role: &Role, need: &ContextNeed) -> Option<Vec<select::Param>> {
-    wrap_need_params(role, need, true)
-}
-
-fn wrap_need_params(
-    role: &Role,
-    need: &ContextNeed,
-    include_owner: bool,
-) -> Option<Vec<select::Param>> {
-    let (need_kind, workspace_id, frontier_id, min_frontier_created_at_ms) =
-        wrap_need_selector_parts(&need.selector)?;
-    let mut params = Vec::new();
-    if include_owner {
-        params.push(select::Param::bytes(":need_owner", need.owner));
-    }
-    params.extend([
-        select::Param::text(":role", role.as_str()),
-        select::Param::bytes(":scope_key", sql::scope_key_for_sql(&need.scope)),
-        select::Param::i64(":need_kind", need_kind),
-        select::Param::bytes(":workspace_id", workspace_id),
-        select::Param::bytes(":frontier_id", frontier_id),
-        select::Param::bytes(":min_frontier_created_at_ms", min_frontier_created_at_ms),
-    ]);
-    Some(params)
-}
-
-fn wrap_need_selector_parts(selector: &Selector) -> Option<(i64, FactId, FactId, [u8; 8])> {
-    if let Some((workspace_id, min_frontier_created_at_ms)) = decode_proactive_wrap_need(selector) {
-        Some((
-            1,
-            workspace_id,
-            [0; 32],
-            min_frontier_created_at_ms.to_be_bytes(),
-        ))
-    } else {
-        decode_requested_wrap_need(selector)
-            .map(|(workspace_id, frontier_id)| (2, workspace_id, frontier_id, 0u64.to_be_bytes()))
-    }
-}
-
-fn wrap_offer_wake_params(role: &Role, offer: &ContextOffer) -> Option<Vec<select::Param>> {
-    let selector = decode_wrap_source_selector(&offer.selector)?;
-    Some(vec![
-        select::Param::text(":role", role.as_str()),
-        select::Param::bytes(":scope_key", sql::scope_key_for_sql(&offer.scope)),
-        select::Param::bytes(":workspace_id", selector.workspace_id),
-        select::Param::bytes(":frontier_id", selector.frontier_id),
-        select::Param::bytes(
-            ":frontier_created_at_ms",
-            selector.frontier_created_at_ms.to_be_bytes(),
-        ),
-    ])
+    Some((workspace_id, frontier_id))
 }
 
 pub fn wrap_source_offer_matches_need(
     need: &ContextNeed,
     offer: &ContextOffer,
 ) -> Option<WrapSourceSelector> {
-    if !wrap_source_match(need, offer) {
+    if need.role != offer.role || need.scope != offer.scope || offer.start_key != offer.end_key {
         return None;
     }
-    decode_wrap_source_selector(&offer.selector)
-}
-
-fn wrap_source_match(need: &ContextNeed, offer: &ContextOffer) -> bool {
-    if need.role != offer.role || need.scope != offer.scope {
-        return false;
-    }
-    let Some(source) = decode_wrap_source_selector(&offer.selector) else {
-        return false;
-    };
-    if let Some((workspace_id, min_frontier_created_at_ms)) =
-        decode_proactive_wrap_need(&need.selector)
-    {
-        source.workspace_id == workspace_id
-            && source.frontier_created_at_ms >= min_frontier_created_at_ms
-    } else if let Some((workspace_id, frontier_id)) = decode_requested_wrap_need(&need.selector) {
-        source.workspace_id == workspace_id && source.frontier_id == frontier_id
-    } else {
-        false
+    let (domain, source) = decode_wrap_source_offer_key(&offer.start_key)?;
+    match domain {
+        PROACTIVE_DOMAIN => {
+            let (workspace_id, min_frontier_created_at_ms) = decode_proactive_wrap_need(need)?;
+            (source.workspace_id == workspace_id
+                && source.frontier_created_at_ms >= min_frontier_created_at_ms)
+                .then_some(source)
+        }
+        REQUESTED_DOMAIN => {
+            let (workspace_id, frontier_id) = decode_requested_wrap_need(need)?;
+            (source.workspace_id == workspace_id && source.frontier_id == frontier_id)
+                .then_some(source)
+        }
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::matchers::ContextMatcher;
-    use crate::core::pipeline::context::{
-        insert_context_need_for_test, insert_context_offer_for_test,
-    };
-    use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
     use crate::protocol::matchers::workspace_scope;
 
     #[test]
@@ -442,12 +355,16 @@ mod tests {
         let scope = workspace_scope([1; 32]);
         let need = requested_wrap_source_need([2; 32], scope.clone(), [1; 32], [3; 32]);
         let matching =
-            frontier_root_wrap_source_offer([4; 32], scope.clone(), [1; 32], [3; 32], [5; 32], 50);
+            frontier_root_wrap_source_offers([4; 32], scope.clone(), [1; 32], [3; 32], [5; 32], 50);
         let other_frontier =
-            frontier_root_wrap_source_offer([6; 32], scope, [1; 32], [7; 32], [5; 32], 50);
+            frontier_root_wrap_source_offers([6; 32], scope, [1; 32], [7; 32], [5; 32], 50);
 
-        assert!(wrap_source_match(&need, &matching));
-        assert!(!wrap_source_match(&need, &other_frontier));
+        assert!(matching
+            .iter()
+            .any(|offer| wrap_source_offer_matches_need(&need, offer).is_some()));
+        assert!(!other_frontier
+            .iter()
+            .any(|offer| wrap_source_offer_matches_need(&need, offer).is_some()));
     }
 
     #[test]
@@ -455,34 +372,14 @@ mod tests {
         let scope = workspace_scope([1; 32]);
         let need = proactive_wrap_source_need([2; 32], scope.clone(), [1; 32], 50);
         let old =
-            frontier_root_wrap_source_offer([3; 32], scope.clone(), [1; 32], [4; 32], [5; 32], 49);
-        let new = frontier_root_wrap_source_offer([6; 32], scope, [1; 32], [7; 32], [8; 32], 50);
+            frontier_root_wrap_source_offers([3; 32], scope.clone(), [1; 32], [4; 32], [5; 32], 49);
+        let new = frontier_root_wrap_source_offers([6; 32], scope, [1; 32], [7; 32], [8; 32], 50);
 
-        assert!(!wrap_source_match(&need, &old));
-        assert!(wrap_source_match(&need, &new));
-    }
-
-    #[test]
-    fn wrap_source_matcher_uses_declared_sql_candidate_queries() {
-        let store =
-            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
-        let scope = workspace_scope([1; 32]);
-        let requested = requested_wrap_source_need([2; 32], scope.clone(), [1; 32], [3; 32]);
-        let proactive = proactive_wrap_source_need([4; 32], scope.clone(), [1; 32], 50);
-        let matching =
-            frontier_root_wrap_source_offer([5; 32], scope.clone(), [1; 32], [3; 32], [6; 32], 50);
-        let other_frontier =
-            frontier_root_wrap_source_offer([7; 32], scope.clone(), [1; 32], [8; 32], [6; 32], 50);
-        insert_context_need_for_test(&store, &requested).expect("insert requested need");
-        insert_context_need_for_test(&store, &proactive).expect("insert proactive need");
-        insert_context_offer_for_test(&store, &matching).expect("insert matching offer");
-        insert_context_offer_for_test(&store, &other_frontier)
-            .expect("insert other-frontier offer");
-
-        let matcher = WrapSourceMatcher::new();
-        let offers = matcher
-            .matching_offers_for_need_from_store(&store, &requested)
-            .expect("query offers");
-        assert_eq!(offers, vec![matching.clone()]);
+        assert!(!old
+            .iter()
+            .any(|offer| wrap_source_offer_matches_need(&need, offer).is_some()));
+        assert!(new
+            .iter()
+            .any(|offer| wrap_source_offer_matches_need(&need, offer).is_some()));
     }
 }

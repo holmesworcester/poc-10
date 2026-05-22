@@ -4,8 +4,8 @@
 //! protocol instance. Core owns the mechanics: open the store, submit facts and
 //! intents, run pending fact projection, admit due time wakes, and dispatch
 //! handler work through SQLite-backed queues. Protocol code supplies the schema
-//! sources, projector router, context matchers, handler registry, and row
-//! mutation allowlist that make those mechanics meaningful.
+//! sources, projector router, handler registry, and row mutation allowlist that
+//! make those mechanics meaningful.
 //!
 //! The runtime does not interpret protocol bytes. It schedules work and holds
 //! the transaction ordering rules: command effects commit before command
@@ -26,7 +26,6 @@ use crate::core::context::ContextOffer;
 use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
-use crate::core::matchers::ContextMatchers;
 use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
@@ -37,15 +36,12 @@ pub use crate::core::pipeline::WorkStatus;
 
 /// Factory for the protocol's projector implementation.
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
-/// Factory for the protocol's context matcher registry.
-pub type MatchersFactory = fn() -> ContextMatchers;
-
 /// Protocol-owned declarations needed by core's runtime engine.
 ///
 /// The description is static so a runtime instance cannot drift after opening
 /// its store. `schema_sources` declare protocol tables, `row_mutation_tables`
-/// is the allowlist for effects, `projector` and `matchers` define projection,
-/// and `handlers` define the queued work core may dispatch.
+/// is the allowlist for effects, `projector` defines projection, and `handlers`
+/// define the queued work core may dispatch.
 #[derive(Clone, Copy)]
 pub struct RuntimeDescription {
     /// Protocol table declarations appended after the core schema.
@@ -54,8 +50,6 @@ pub struct RuntimeDescription {
     pub row_mutation_tables: &'static [TableName],
     /// Factory for the projector router.
     pub projector: ProjectorFactory,
-    /// Factory for exact and custom context matchers.
-    pub matchers: MatchersFactory,
     /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
     /// Handler route names a synchronous command should not run.
@@ -169,7 +163,6 @@ pub struct Runtime {
     description: &'static RuntimeDescription,
     store: Store,
     projector: Box<dyn Projector>,
-    matchers: ContextMatchers,
     handlers: HandlerSet,
 }
 
@@ -198,7 +191,6 @@ impl Runtime {
             description,
             store,
             projector: (description.projector)(),
-            matchers: (description.matchers)(),
             handlers: HandlerSet::new(description.handlers),
         })
     }
@@ -271,12 +263,7 @@ impl Runtime {
         offers: &[ContextOffer],
         completed_fact_ids: &[FactId],
     ) -> Result<usize, String> {
-        pipeline::commit_projected_context_offers(
-            &self.store,
-            &self.matchers,
-            offers,
-            completed_fact_ids,
-        )
+        pipeline::commit_projected_context_offers(&self.store, offers, completed_fact_ids)
     }
 
     /// Queue durable idempotent work for the protocol handler registry.
@@ -314,7 +301,6 @@ impl Runtime {
     ) -> Result<pipeline::ProjectionProgress, String> {
         pipeline::drain_pending_projection(
             self.projector.as_ref(),
-            &self.matchers,
             &self.store,
             self.description.row_mutation_tables,
             limit,
@@ -464,15 +450,10 @@ mod tests {
         Box::new(NoopProjector)
     }
 
-    fn no_matchers() -> ContextMatchers {
-        ContextMatchers::empty()
-    }
-
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
         row_mutation_tables: &[],
         projector: noop_projector,
-        matchers: no_matchers,
         handlers: &[],
         command_excluded_handlers: &[],
     };

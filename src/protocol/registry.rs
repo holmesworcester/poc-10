@@ -1,17 +1,17 @@
 //! Declarative registry for the target protocol.
 //!
 //! This is the protocol's integration boundary. Core can run any protocol that
-//! supplies schema sources, projector routes, context matchers, handler routes,
-//! row mutation tables, and user-facing commands. This file assembles those
+//! supplies schema sources, projector routes, handler routes, row mutation
+//! tables, and user-facing commands. This file assembles those
 //! declarations for the poc-10 protocol and hands them to `protocol::app` and
 //! the generic runtime.
 //!
 //! The registry should read like a table of contents, not like an
 //! implementation file. Fact modules own layouts, projectors, rows, queries,
 //! and commands. Intent modules own payloads, idempotence keys, and handlers.
-//! Matcher modules own relationship semantics. The registry names those pieces
-//! once so core can route facts by tag, route intents by kind, apply schemas,
-//! and validate row mutation targets.
+//! Context helper modules own relationship semantics. The registry names those
+//! pieces once so core can route facts by tag, route intents by kind, apply
+//! schemas, and validate row mutation targets.
 //!
 //! Add a new fact family here after its module has supplied a layout tag,
 //! projector, schema rows, and any context roles it needs. Add a new intent
@@ -21,7 +21,6 @@
 
 use crate::core::cli::CliCommand;
 use crate::core::facts::Fact;
-use crate::core::matchers::{ContextMatcher, ContextMatchers};
 use crate::core::network;
 use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
@@ -33,7 +32,6 @@ use crate::protocol::intents::{
     connection as connection_intents, content as content_intents, encryption as encryption_intents,
     sync as sync_intents, transport as transport_intents,
 };
-use crate::protocol::matchers;
 use crate::protocol::{assertions, cli as command};
 
 pub use crate::protocol::cli::MatchCliContext;
@@ -412,40 +410,6 @@ pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "receive_transit_frame",
 ];
 
-pub const EXACT_CONTEXT_ROLES: &[&str] = &[
-    matchers::CONNECTION_EPHEMERAL_SECRET_ROLE,
-    matchers::CONNECTION_INVITE_SECRET_ROLE,
-    matchers::CONNECTION_REQUEST_ROLE,
-    matchers::CONTENT_FILE_ROLE,
-    matchers::CONTENT_MESSAGE_ROLE,
-    matchers::CONTENT_MESSAGE_META_ROLE,
-    matchers::CONTENT_DELETED_ROLE,
-    matchers::IDENTITY_ADMIN_ROLE,
-    matchers::IDENTITY_DEVICE_INVITE_ROLE,
-    matchers::IDENTITY_DEVICE_INVITE_KEY_ROLE,
-    matchers::IDENTITY_ENDPOINT_SHARED_ROLE,
-    matchers::IDENTITY_INVITE_SECRET_ROLE,
-    matchers::IDENTITY_INVITE_SERVER_ROLE,
-    matchers::IDENTITY_INVITE_SERVER_KEY_ROLE,
-    matchers::IDENTITY_USER_ROLE,
-    matchers::IDENTITY_USER_INVITE_ROLE,
-    matchers::IDENTITY_USER_INVITE_KEY_ROLE,
-    matchers::IDENTITY_WORKSPACE_ROLE,
-    matchers::LOCAL_RECIPIENT_KEY_ROLE,
-    matchers::LOCAL_SECRET_SOURCE_ROLE,
-    matchers::LOCAL_SIGNER_SECRET_ROLE,
-    matchers::RECIPIENT_KEY_ROLE,
-    matchers::RECIPIENT_SUPERSEDED_ROLE,
-    matchers::REMOVAL_FRONTIER_ROLE,
-    matchers::CONTENT_SIGNER_ROLE,
-    matchers::SYNC_EXACT_FACT_ROLE,
-    matchers::SYNC_KEY_WRAP_ROLE,
-    matchers::TRANSIT_RECEIVED_ROLE,
-];
-
-pub const SQL_CONTEXT_ROLES: &[&str] =
-    &[matchers::SECRET_COVERAGE_ROLE, matchers::WRAP_SOURCE_ROLE];
-
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
@@ -486,19 +450,6 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {
     Box::new(ProtocolProjector)
-}
-
-pub(crate) fn protocol_context_matchers() -> ContextMatchers {
-    ContextMatchers::new(
-        EXACT_CONTEXT_ROLES
-            .iter()
-            .copied()
-            .map(matchers::protocol_role),
-        vec![
-            Box::new(matchers::SecretCoverageMatcher::new()) as Box<dyn ContextMatcher>,
-            Box::new(matchers::WrapSourceMatcher::new()),
-        ],
-    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -689,33 +640,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-
-    #[test]
-    fn protocol_runtime_matchers_follow_registry_exact_roles() {
-        let runtime_matchers = protocol_context_matchers();
-        let runtime_roles = runtime_matchers
-            .exact_roles()
-            .iter()
-            .map(|role| role.as_str().to_string())
-            .collect::<BTreeSet<_>>();
-        let registry_roles = EXACT_CONTEXT_ROLES
-            .iter()
-            .map(|role| role.to_string())
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(runtime_roles, registry_roles);
-
-        let custom_roles = runtime_matchers
-            .custom()
-            .map(|matcher| matcher.role().as_str().to_string())
-            .collect::<BTreeSet<_>>();
-        let sql_roles = SQL_CONTEXT_ROLES
-            .iter()
-            .map(|role| role.to_string())
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(custom_roles, sql_roles);
-    }
 
     #[test]
     fn fact_route_tags_are_globally_unique() {

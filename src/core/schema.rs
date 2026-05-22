@@ -57,11 +57,14 @@ CREATE TABLE IF NOT EXISTS context_edges (
     direction TEXT NOT NULL,
     role TEXT NOT NULL,
     scope_key BLOB NOT NULL,
-    selector BLOB NOT NULL,
-    PRIMARY KEY (owner, direction, role, scope_key, selector)
+    start_key BLOB NOT NULL,
+    end_key BLOB NOT NULL,
+    PRIMARY KEY (owner, direction, role, scope_key, start_key, end_key)
 );
-CREATE INDEX IF NOT EXISTS context_edges_by_match
-    ON context_edges (direction, role, scope_key, selector);
+CREATE INDEX IF NOT EXISTS context_edges_by_range_start
+    ON context_edges (direction, role, scope_key, start_key);
+CREATE INDEX IF NOT EXISTS context_edges_by_range_end
+    ON context_edges (direction, role, scope_key, end_key);
 CREATE INDEX IF NOT EXISTS context_edges_by_owner
     ON context_edges (owner);
 

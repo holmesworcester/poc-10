@@ -507,21 +507,24 @@ Workspace remains a protocol concept, not a special core concept.
 ## Context
 
 Projectors do not issue arbitrary broad queries. Core supplies
-`ProjectionContext` from offers matched by registered `ContextMatcher`s:
+`ProjectionContext` from offers matched through one protocol-owned byte-range
+relation:
 
 ```rust
 struct ContextNeed {
     owner: FactId,
     role: Role,
     scope: FactScope,
-    selector: Selector,
+    start_key: Selector,
+    end_key: Selector,
 }
 
 struct ContextOffer {
     owner: FactId,
     role: Role,
     scope: FactScope,
-    selector: Selector,
+    start_key: Selector,
+    end_key: Selector,
 }
 ```
 
@@ -539,23 +542,22 @@ encrypted messages or deletions. The cost is that one pending fact can run its
 projector and matching SQL more than once; the loop is bounded and monotonic, and
 core still does not know which needs are required.
 
-The source of truth is the `ContextNeed` / `ContextOffer` / `ContextMatcher`
-model, not protocol helper files. A projector first inspects the supplied
-`ProjectionContext`. If required matched context is absent, it emits a stable
-`ContextNeed` and no materialized rows or intents for that branch. A fact emits
-`ContextOffer`s only after the projector has validated that the fact is valid
-context for that role.
+The source of truth is the `ContextNeed` / `ContextOffer` model, not protocol
+helper files. A projector first inspects the supplied `ProjectionContext`. If
+required matched context is absent, it emits a stable `ContextNeed` and no
+materialized rows or intents for that branch. A fact emits `ContextOffer`s only
+after the projector has validated that the fact is valid context for that role.
 
 Each projection pass owns the current context surface for its fact. Core stores
 that surface in one `context_edges` relation:
 
 ```text
-context_edges(owner, direction, role, scope_key, selector)
+context_edges(owner, direction, role, scope_key, start_key, end_key)
 ```
 
 `direction` is `need` or `offer`. The projection worker replaces the projected
-fact's current edges; exact selector roles and custom matcher roles wake facts
-with SQL immediately after the edge replacement:
+fact's current edges; new edges wake matching owners with SQL immediately after
+the edge replacement:
 
 ```text
 unchanged need/offer
@@ -574,58 +576,47 @@ removed need/offer
 This keeps needs stable. Re-emitting the same need does not wake the owner
 again unless matching offers change.
 
-## Context Matchers
+## Context Matching
 
-A `ContextMatcher` matches needs and offers for one protocol role. Core owns
-lifecycle; matcher modules under `src/protocol/matchers/` own efficient
-relation-specific lookup plus the generic need/offer constructors projectors
-emit.
+Core owns one candidate matcher for every context role:
 
-```rust
-trait ContextMatcher {
-    fn role(&self) -> Role;
-
-    fn match_need_to_offers(
-        &self,
-        need: &ContextNeed,
-        store: &Store,
-    ) -> Result<Vec<ContextOfferRef>, String>;
-
-    fn match_offer_to_needs(
-        &self,
-        offer: &ContextOffer,
-        store: &Store,
-    ) -> Result<Vec<FactId>, String>;
-}
+```text
+same role
+same scope_key
+need.start_key <= offer.end_key
+offer.start_key <= need.end_key
 ```
 
-The matcher owns both directions of candidate matching: new need against
-existing offers, and new offer against existing needs. A match only supplies
-candidate context. The target projector must still decode and validate matched
-facts semantically before emitting rows, offers, or intents.
+Exact dependencies are represented as degenerate ranges where `start_key ==
+end_key`. Broader selectors encode canonical bytes so ordinary lexicographic
+range overlap is enough to find candidates. The target projector must still
+decode and validate matched facts semantically before emitting rows, offers, or
+intents. This deliberately keeps workspace, frontier, signer, and authorization
+rules out of core.
 
 Standard matchers:
 
 ```text
 Exact fact matcher
-  Need(role="fact", selector=fact_id)
-  Offer(role="fact", selector=fact_id)
+  Need(role="fact", range=[fact_id, fact_id])
+  Offer(role="fact", range=[fact_id, fact_id])
 
 Secret coverage matcher
-  Need(role="secret_coverage", selector=(workspace, frontier, minute, leaf))
-  Offer(role="secret_coverage", selector=(workspace, frontier, range, prefix))
+  Need(role="secret_coverage", range=[workspace/frontier/minute/leaf, same])
+  Offer(role="secret_coverage", range=[workspace/frontier/minute-prefix-low,
+                                        workspace/frontier/minute-prefix-high])
 
 Receive provenance matcher
-  Need(role="transit_received", selector=received_fact_id)
-  Offer(role="transit_received", selector=received_fact_id)
+  Need(role="transit_received", range=[received_fact_id, received_fact_id])
+  Offer(role="transit_received", range=[received_fact_id, received_fact_id])
 
 Deletion/update matcher
-  Need(role="message_deletion", selector=message_id)
-  Offer(role="message_deletion", selector=message_id)
+  Need(role="message_deletion", range=[message_id, message_id])
+  Offer(role="message_deletion", range=[message_id, message_id])
 
 Recipient-key supersession matcher
-  Need(role="recipient_key_superseded", selector=recipient_key_id)
-  Offer(role="recipient_key_superseded", selector=recipient_key_id)
+  Need(role="recipient_key_superseded", range=[recipient_key_id, recipient_key_id])
+  Offer(role="recipient_key_superseded", range=[recipient_key_id, recipient_key_id])
 ```
 
 Scope is part of the match key. Projectors still validate semantic correctness,
@@ -1144,7 +1135,8 @@ Content facts that need a secret emit:
 ```text
 Need(
     role = "secret_coverage",
-    selector = (workspace, frontier, minute, event_id_in_minute),
+    range = [workspace/frontier/minute/event_id_in_minute,
+             workspace/frontier/minute/event_id_in_minute],
 )
 ```
 
@@ -1153,11 +1145,15 @@ Local key roots, retained history nodes, and accepted key wraps emit:
 ```text
 Offer(
     role = "secret_coverage",
-    selector = (workspace, frontier, range_start, range_width, bit_depth, prefix),
+    range = [workspace/frontier/minute-prefix-low,
+             workspace/frontier/minute-prefix-high],
 )
 ```
 
-The `SecretCoverageMatcher` wakes content facts when coverage appears.
+The generic byte-range matcher wakes content facts when coverage appears. The
+content projector treats the matched offer as a candidate and validates the
+workspace, frontier, time, hash prefix, key identity, and local key material
+before opening content.
 
 Projectors may decrypt/open content if the required key material is present in
 context. If a crypto operation needs broad search, private state not present as

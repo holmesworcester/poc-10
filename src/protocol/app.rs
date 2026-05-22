@@ -13,8 +13,8 @@ use crate::core::store::Store;
 use crate::protocol::facts::{content, transport};
 use crate::protocol::intents::transport as transport_intents;
 use crate::protocol::registry::{
-    protocol_context_matchers, protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES, HANDLER_ROUTES,
-    ROW_MUTATION_TABLES, SCHEMA_SOURCES,
+    protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES, HANDLER_ROUTES, ROW_MUTATION_TABLES,
+    SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
 
@@ -22,7 +22,6 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
     row_mutation_tables: ROW_MUTATION_TABLES,
     projector: protocol_projector,
-    matchers: protocol_context_matchers,
     handlers: HANDLER_ROUTES,
     command_excluded_handlers: COMMAND_EXCLUDED_HANDLER_ROUTES,
 };

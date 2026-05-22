@@ -1,22 +1,20 @@
 //! Standing context rows, projection context assembly, and context wake fanout.
 //!
 //! Context is core's dependency surface between facts. A projector can say
-//! "this fact needs another fact with this role, scope, and selector before it
+//! "this fact needs another fact with this role, scope, and byte range before it
 //! can finish" by emitting a `ContextNeed`, or "this fact provides payload for
 //! matching needs" by emitting a `ContextOffer`. Core does not know the
-//! protocol meaning of those relationships. It either matches the stable
-//! role/scope/selector tuple exactly, or asks a protocol `ContextMatcher` to do
-//! richer matching such as range, prefix, coverage, or visibility rules.
+//! protocol meaning of those relationships. It matches only stable role/scope
+//! partitions plus inclusive byte-range overlap.
 //!
 //! This module is where that model becomes SQL. The public vocabulary lives in
-//! `core::context`: needs, offers, roles, selectors, scopes, and complete
+//! `core::context`: needs, offers, roles, keys, scopes, and complete
 //! replacement `ContextSet`s. Protocol projectors in `core::projectors` produce
 //! those sets. The projection loop in `pipeline::project_pending_facts` calls
 //! this file to load a pending fact's previous standing context, assemble the
 //! matched `ProjectionContext` it should see for the next run, replace its
 //! stored needs and offers, and fan out wakeups to facts that may now make
-//! progress. The matcher registry in `core::matchers` says which roles use
-//! exact matching and which roles delegate to protocol-owned SQL.
+//! progress.
 //!
 //! The stored shape is one `context_edges` row per standing need or offer. The
 //! `owner` column is always the fact whose projection emitted the row. For
@@ -26,15 +24,14 @@
 //!
 //! The invariant is replacement by owner. Projection output is the complete
 //! context set for one fact, and wake fanout considers only added rows from the
-//! replacement delta. If matching semantics change, keep exact-equality SQL
-//! here and put non-exact semantics behind a protocol `ContextMatcher`.
+//! replacement delta. If protocol semantics change, keep the generic overlap
+//! matcher here and change the protocol-owned key encoders/validators.
 
 use crate::core::context::{
     scope_key, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
-use crate::core::matchers::{ContextMatcher, ContextMatchers};
 use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
 use crate::core::select;
@@ -81,7 +78,8 @@ pub(super) fn insert_context_need_in_tx(
         CONTEXT_NEED_DIRECTION,
         &need.role,
         &need.scope,
-        need.selector.as_bytes(),
+        need.start_key.as_bytes(),
+        need.end_key.as_bytes(),
     )
 }
 
@@ -96,18 +94,9 @@ pub(super) fn insert_context_offer_in_tx(
         CONTEXT_OFFER_DIRECTION,
         &offer.role,
         &offer.scope,
-        offer.selector.as_bytes(),
+        offer.start_key.as_bytes(),
+        offer.end_key.as_bytes(),
     )
-}
-
-#[cfg(test)]
-pub(crate) fn insert_context_need_for_test(
-    store: &Store,
-    need: &ContextNeed,
-) -> Result<(), String> {
-    store
-        .write_transaction(|tx| insert_context_need_in_tx(tx, need).map(|_| ()))
-        .map_err(|err| format!("insert context need: {err}"))
 }
 
 #[cfg(test)]
@@ -120,28 +109,29 @@ pub(crate) fn insert_context_offer_for_test(
         .map_err(|err| format!("insert context offer: {err}"))
 }
 
-/// Load exact context offers for a single match key.
-pub(super) fn stored_offers_for_exact_match(
+/// Load context offers whose range overlaps a single need range.
+pub(super) fn stored_overlapping_offers_for_need(
     store: &Store,
-    role: &Role,
-    scope_key: &[u8],
-    selector: &[u8],
+    need: &ContextNeed,
 ) -> Result<Vec<ContextOffer>, String> {
+    let scope_key = scope_key(&need.scope);
     select_context_offers(
         store,
         r#"
-        SELECT owner, role, scope_key, selector
+        SELECT owner, role, scope_key, start_key, end_key
         FROM context_edges
         WHERE direction = 'offer'
           AND role = :role
           AND scope_key = :scope_key
-          AND selector = :selector
-        ORDER BY owner
+          AND start_key <= :need_end
+          AND end_key >= :need_start
+        ORDER BY owner, start_key, end_key
         "#,
         &[
-            (":role", text(role.as_str())),
-            (":scope_key", bytes(scope_key)),
-            (":selector", bytes(selector)),
+            (":role", text(need.role.as_str())),
+            (":scope_key", bytes(&scope_key)),
+            (":need_start", bytes(need.start_key.as_bytes())),
+            (":need_end", bytes(need.end_key.as_bytes())),
         ],
     )
 }
@@ -151,11 +141,11 @@ fn stored_needs_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextNe
     select_context_needs(
         store,
         r#"
-        SELECT owner, role, scope_key, selector
+        SELECT owner, role, scope_key, start_key, end_key
         FROM context_edges
         WHERE owner = :owner
           AND direction = 'need'
-        ORDER BY owner, role, scope_key, selector
+        ORDER BY owner, role, scope_key, start_key, end_key
         "#,
         &[(":owner", bytes(owner))],
     )
@@ -166,11 +156,11 @@ fn stored_offers_for_owner(store: &Store, owner: &FactId) -> Result<Vec<ContextO
     select_context_offers(
         store,
         r#"
-        SELECT owner, role, scope_key, selector
+        SELECT owner, role, scope_key, start_key, end_key
         FROM context_edges
         WHERE owner = :owner
           AND direction = 'offer'
-        ORDER BY owner, role, scope_key, selector
+        ORDER BY owner, role, scope_key, start_key, end_key
         "#,
         &[(":owner", bytes(owner))],
     )
@@ -218,21 +208,23 @@ fn insert_context_edge_in_tx(
     direction: &str,
     role: &Role,
     scope: &FactScope,
-    selector: &[u8],
+    start_key: &[u8],
+    end_key: &[u8],
 ) -> rusqlite::Result<bool> {
     let scope_key = scope_key(scope);
     store
         .conn()
         .execute(
             "INSERT OR IGNORE INTO context_edges
-                (owner, direction, role, scope_key, selector)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                (owner, direction, role, scope_key, start_key, end_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 owner.as_slice(),
                 direction,
                 role.as_str(),
                 scope_key.as_slice(),
-                selector
+                start_key,
+                end_key
             ],
         )
         .map(|count| count > 0)
@@ -245,7 +237,8 @@ fn selected_context_need(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextNee
         role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
         scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
             .map_err(rusqlite::Error::InvalidParameterName)?,
-        selector: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        start_key: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        end_key: Selector::from_bytes(row.get::<_, Vec<u8>>(4)?),
     })
 }
 
@@ -256,7 +249,8 @@ fn selected_context_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextOf
         role: Role::new(row.get::<_, String>(1)?).map_err(rusqlite::Error::InvalidParameterName)?,
         scope: decode_scope_key(&row.get::<_, Vec<u8>>(2)?)
             .map_err(rusqlite::Error::InvalidParameterName)?,
-        selector: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        start_key: Selector::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        end_key: Selector::from_bytes(row.get::<_, Vec<u8>>(4)?),
     })
 }
 
@@ -320,103 +314,37 @@ impl<T> RowWireResult<T> for Result<T, WireError> {
     }
 }
 
-type ExactContextKey = (Role, FactScope, Selector);
-
 /// Find the offers that currently satisfy a set of needs.
 ///
 /// Projection uses this both for a pending fact's previously stored needs and
 /// for speculative needs emitted while preparing one projection. The input does
-/// not have to be persisted yet. Matching still reads only already-stored offers,
-/// and returned payloads are cached by offer owner so repeated matches do not
-/// repeatedly load the same fact.
+/// not have to be persisted yet. Matching still reads only already-stored
+/// offers, and returned payloads are cached by offer owner so repeated matches
+/// do not repeatedly load the same fact.
 pub(super) fn stored_matching_context(
     store: &Store,
     context: &ContextSet,
-    matchers: &ContextMatchers,
 ) -> Result<ProjectionContext, String> {
     if context.needs.is_empty() {
         return Ok(ProjectionContext::new(Vec::new()));
     }
 
-    let exact_roles = matchers.exact_roles();
-    let exact_offers = stored_exact_offers_for_needs(
-        store,
-        context
-            .needs
-            .iter()
-            .filter(|need| exact_roles.contains(&need.role)),
-    )?;
     let mut matched = Vec::new();
     let mut seen = BTreeSet::new();
     let mut payloads = BTreeMap::new();
     for need in &context.needs {
-        if exact_roles.contains(&need.role) {
-            let key = exact_context_key(&need.role, &need.scope, &need.selector);
-            for offer in exact_offers
-                .get(&key)
-                .into_iter()
-                .flat_map(|offers| offers.iter())
-            {
-                push_stored_matched_context(
-                    store,
-                    need,
-                    offer.clone(),
-                    &mut seen,
-                    &mut payloads,
-                    &mut matched,
-                )?;
-            }
-        }
-
-        for matcher in matchers.custom_for_role(&need.role) {
-            let candidate_offers = matcher.matching_offers_for_need_from_store(store, need)?;
-            for offer in candidate_offers {
-                push_stored_matched_context(
-                    store,
-                    need,
-                    offer,
-                    &mut seen,
-                    &mut payloads,
-                    &mut matched,
-                )?;
-            }
+        for offer in stored_overlapping_offers_for_need(store, need)? {
+            push_stored_matched_context(
+                store,
+                need,
+                offer,
+                &mut seen,
+                &mut payloads,
+                &mut matched,
+            )?;
         }
     }
     Ok(ProjectionContext::from_matches(matched))
-}
-
-fn exact_context_key(role: &Role, scope: &FactScope, selector: &Selector) -> ExactContextKey {
-    (role.clone(), scope.clone(), selector.clone())
-}
-
-fn stored_exact_offers_for_needs<'a>(
-    store: &Store,
-    needs: impl Iterator<Item = &'a ContextNeed>,
-) -> Result<BTreeMap<ExactContextKey, Vec<ContextOffer>>, String> {
-    let mut groups = BTreeMap::<(Role, Vec<u8>), BTreeSet<Vec<u8>>>::new();
-    for need in needs {
-        groups
-            .entry((need.role.clone(), scope_key(&need.scope)))
-            .or_default()
-            .insert(need.selector.as_bytes().to_vec());
-    }
-
-    let mut out = BTreeMap::<ExactContextKey, Vec<ContextOffer>>::new();
-    for ((role, scope_key), selectors) in groups {
-        for selector in selectors {
-            let offers = stored_offers_for_exact_match(store, &role, &scope_key, &selector)?;
-            for offer in offers {
-                out.entry(exact_context_key(
-                    &offer.role,
-                    &offer.scope,
-                    &offer.selector,
-                ))
-                .or_default()
-                .push(offer);
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Add a matched pair and load the offer owner's payload fact.
@@ -458,51 +386,26 @@ fn push_stored_matched_context(
 pub(super) fn wake_context_matches_in_tx(
     store: &Store,
     delta: &ContextSetDelta,
-    matchers: &ContextMatchers,
 ) -> Result<usize, String> {
     let mut inserted = 0usize;
-    for need in delta
-        .added_needs
-        .iter()
-        .filter(|need| matchers.has_exact_role(&need.role))
-    {
+    for need in &delta.added_needs {
         inserted += insert_pending_projection_from_select_in_tx(
             store,
-            &exact_offers_for_need_select(need),
+            &overlapping_offers_for_need_select(need),
             "need",
         )?;
     }
-    for offer in delta
-        .added_offers
-        .iter()
-        .filter(|offer| matchers.has_exact_role(&offer.role))
-    {
+    for offer in &delta.added_offers {
         inserted += insert_pending_projection_from_select_in_tx(
             store,
-            &exact_needs_for_offer_select(offer),
+            &overlapping_needs_for_offer_select(offer),
             "offer",
         )?;
-    }
-    for matcher in matchers.custom() {
-        for need in delta
-            .added_needs
-            .iter()
-            .filter(|need| matcher.role() == &need.role)
-        {
-            inserted += wake_need_in_tx(store, matcher, need)?;
-        }
-        for offer in delta
-            .added_offers
-            .iter()
-            .filter(|offer| matcher.role() == &offer.role)
-        {
-            inserted += wake_offer_in_tx(store, matcher, offer)?;
-        }
     }
     Ok(inserted)
 }
 
-fn exact_offers_for_need_select(need: &ContextNeed) -> select::Select {
+fn overlapping_offers_for_need_select(need: &ContextNeed) -> select::Select {
     let scope_key = scope_key(&need.scope);
     select::Select::new(
         r#"
@@ -513,7 +416,8 @@ fn exact_offers_for_need_select(need: &ContextNeed) -> select::Select {
             WHERE direction = 'offer'
               AND role = :role
               AND scope_key = :scope_key
-              AND selector = :selector
+              AND start_key <= :need_end
+              AND end_key >= :need_start
         )
         "#,
         &[CONTEXT_EDGES],
@@ -521,12 +425,13 @@ fn exact_offers_for_need_select(need: &ContextNeed) -> select::Select {
             select::Param::bytes(":need_owner", need.owner),
             select::Param::text(":role", need.role.as_str()),
             select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":selector", need.selector.as_bytes()),
+            select::Param::bytes(":need_start", need.start_key.as_bytes()),
+            select::Param::bytes(":need_end", need.end_key.as_bytes()),
         ],
     )
 }
 
-fn exact_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
+fn overlapping_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
     let scope_key = scope_key(&offer.scope);
     select::Select::new(
         r#"
@@ -536,34 +441,18 @@ fn exact_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
         WHERE n.direction = 'need'
           AND n.role = :role
           AND n.scope_key = :scope_key
-          AND n.selector = :selector
+          AND n.start_key <= :offer_end
+          AND n.end_key >= :offer_start
         ORDER BY a.received_at, n.owner
         "#,
         &[CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS],
         vec![
             select::Param::text(":role", offer.role.as_str()),
             select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":selector", offer.selector.as_bytes()),
+            select::Param::bytes(":offer_start", offer.start_key.as_bytes()),
+            select::Param::bytes(":offer_end", offer.end_key.as_bytes()),
         ],
     )
-}
-
-fn wake_need_in_tx(
-    store: &Store,
-    matcher: &dyn ContextMatcher,
-    need: &ContextNeed,
-) -> Result<usize, String> {
-    let select = matcher.wake_select_for_added_need(need)?;
-    insert_pending_projection_from_select_in_tx(store, &select, "need")
-}
-
-fn wake_offer_in_tx(
-    store: &Store,
-    matcher: &dyn ContextMatcher,
-    offer: &ContextOffer,
-) -> Result<usize, String> {
-    let select = matcher.wake_select_for_added_offer(offer)?;
-    insert_pending_projection_from_select_in_tx(store, &select, "offer")
 }
 
 fn insert_pending_projection_from_select_in_tx(

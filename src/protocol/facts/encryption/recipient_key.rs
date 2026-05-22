@@ -28,7 +28,9 @@ pub(super) fn recipient_key(
 
     let superseded_need = matchers::recipient_superseded_need(fact.id, scope.clone(), fact.id);
     let is_superseded = projection_context.offers().iter().any(|offer| {
-        offer.role == superseded_need.role && offer.selector == superseded_need.selector
+        offer.role == superseded_need.role
+            && offer.start_key == superseded_need.start_key
+            && offer.end_key == superseded_need.end_key
     });
     let mut output = ProjectionOutput::new().need(superseded_need);
 

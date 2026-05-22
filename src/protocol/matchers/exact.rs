@@ -1,7 +1,8 @@
-//! Exact context matching vocabulary for the concrete protocol.
+//! Context range vocabulary for the concrete protocol.
 //!
-//! This module owns the protocol need/offer constructors for exact
-//! role/scope/selector matching. The exact matcher itself lives in core.
+//! Most protocol relationships still match one exact byte key. They are encoded
+//! as degenerate ranges where `start_key == end_key`; broader relations use the
+//! same core-owned overlap matcher with protocol-owned byte layouts.
 
 use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
 use crate::core::facts::{FactId, FactScope, ScopeKind};
@@ -52,11 +53,13 @@ pub fn exact_need_for_selector(
     scope: FactScope,
     selector: impl Into<Vec<u8>>,
 ) -> ContextNeed {
+    let selector = selector.into();
     ContextNeed {
         owner,
         role,
         scope,
-        selector: Selector::from_bytes(selector),
+        start_key: Selector::from_bytes(selector.clone()),
+        end_key: Selector::from_bytes(selector),
     }
 }
 
@@ -66,11 +69,45 @@ pub fn exact_offer_for_selector(
     scope: FactScope,
     selector: impl Into<Vec<u8>>,
 ) -> ContextOffer {
+    let selector = selector.into();
     ContextOffer {
         owner,
         role,
         scope,
-        selector: Selector::from_bytes(selector),
+        start_key: Selector::from_bytes(selector.clone()),
+        end_key: Selector::from_bytes(selector),
+    }
+}
+
+pub fn range_need_for_selector(
+    owner: FactId,
+    role: Role,
+    scope: FactScope,
+    start_key: impl Into<Vec<u8>>,
+    end_key: impl Into<Vec<u8>>,
+) -> ContextNeed {
+    ContextNeed {
+        owner,
+        role,
+        scope,
+        start_key: Selector::from_bytes(start_key),
+        end_key: Selector::from_bytes(end_key),
+    }
+}
+
+pub fn range_offer_for_selector(
+    owner: FactId,
+    role: Role,
+    scope: FactScope,
+    start_key: impl Into<Vec<u8>>,
+    end_key: impl Into<Vec<u8>>,
+) -> ContextOffer {
+    ContextOffer {
+        owner,
+        role,
+        scope,
+        start_key: Selector::from_bytes(start_key),
+        end_key: Selector::from_bytes(end_key),
     }
 }
 
@@ -521,7 +558,8 @@ mod tests {
         assert_eq!(offer.role, exact_fact_role());
         assert_eq!(need.scope, scope);
         assert_eq!(offer.scope, scope);
-        assert_eq!(need.selector, offer.selector);
+        assert_eq!(need.start_key, offer.start_key);
+        assert_eq!(need.end_key, offer.end_key);
         assert_eq!(offer.owner, [4; 32]);
     }
 }

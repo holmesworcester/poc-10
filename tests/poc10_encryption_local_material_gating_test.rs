@@ -95,7 +95,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
     assert!(waiting_for_tombstone
         .needs
         .iter()
-        .any(|need| need.selector.as_bytes() == &[9u8; 32][..]));
+        .any(|need| need.start_key.as_bytes() == &[9u8; 32][..]));
 }
 
 fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at_ms: u64) -> Fact {

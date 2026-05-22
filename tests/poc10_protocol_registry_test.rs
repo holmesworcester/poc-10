@@ -2,11 +2,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
-use topo::protocol::registry::{EXACT_CONTEXT_ROLES, SQL_CONTEXT_ROLES};
-
-fn source_text(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -22,35 +17,6 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     files
-}
-
-fn role_names_declared_in(text: &str) -> Vec<String> {
-    let mut roles = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("Role::new(\"") {
-        let after_start = &rest[start + "Role::new(\"".len()..];
-        let Some(end) = after_start.find('"') else {
-            break;
-        };
-        roles.push(after_start[..end].to_string());
-        rest = &after_start[end + 1..];
-    }
-    let mut rest = text;
-    while let Some(start) = rest.find("_ROLE: &str = \"") {
-        let after_start = &rest[start + "_ROLE: &str = \"".len()..];
-        let Some(end) = after_start.find('"') else {
-            break;
-        };
-        roles.push(after_start[..end].to_string());
-        rest = &after_start[end + 1..];
-    }
-    roles
-}
-
-fn production_text_before_unit_tests(text: &str) -> &str {
-    text.find("#[cfg(test)]")
-        .map(|index| &text[..index])
-        .unwrap_or(text)
 }
 
 #[test]
@@ -70,40 +36,10 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .commands
         .iter()
         .any(|command| command.name == "assert"));
-    assert!(SQL_CONTEXT_ROLES
-        .iter()
-        .any(|role| *role == "secret_coverage"));
     assert!(MATCH_RUNTIME
         .handlers
         .iter()
         .any(|handler| handler.name == "receive_transit_frame"));
-}
-
-#[test]
-fn target_context_roles_are_registered() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let declared_roles = rust_files(&root.join("src/protocol/matchers"))
-        .into_iter()
-        .flat_map(|path| {
-            let text = source_text(&path);
-            role_names_declared_in(production_text_before_unit_tests(&text))
-        })
-        .collect::<BTreeSet<_>>();
-    let registered_roles = EXACT_CONTEXT_ROLES
-        .iter()
-        .chain(SQL_CONTEXT_ROLES.iter())
-        .map(|role| role.to_string())
-        .collect::<BTreeSet<_>>();
-
-    let missing = declared_roles
-        .difference(&registered_roles)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        missing.is_empty(),
-        "every target ContextNeed/ContextOffer role introduced by fact modules needs a protocol registry matcher:\n{}",
-        missing.join("\n")
-    );
 }
 
 #[test]
@@ -141,8 +77,6 @@ fn context_matcher_plumbing_is_centralized_by_matching_relation() {
     let expected = BTreeSet::from([
         "coverage".to_string(),
         "exact".to_string(),
-        "range".to_string(),
-        "sql".to_string(),
         "wrap_source".to_string(),
     ]);
 

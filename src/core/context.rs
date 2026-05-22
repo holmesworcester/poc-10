@@ -2,20 +2,20 @@
 //!
 //! Context is the durable matching surface between projectors; it is not a
 //! hidden dependency loader or a second projection queue. A projector writes
-//! the needs and offers it owns, and role-specific matchers report newly
-//! satisfiable relationships. The semantic meaning of a role or selector stays
-//! with the fact module that created it.
+//! the needs and offers it owns, and core reports newly satisfiable byte-range
+//! overlaps. The semantic meaning of a role or key range stays with the fact
+//! module that created it.
 //!
 //! Context is how one fact says "wake me when another fact matching this shape
 //! exists" without reaching directly into another module's tables. A need names
 //! the fact that should be reprojected. An offer names the fact that can be
-//! loaded as matched payload. Core stores both as durable rows and lets matcher
-//! modules decide which pairs satisfy each other.
+//! loaded as matched payload. Core stores both as durable rows and matches them
+//! by role, scope, and overlapping opaque byte ranges.
 //!
-//! `scope`, `role`, and `selector` form the match key. `owner` says which fact
-//! produced the row so later projection can replace that fact's context without
-//! deleting anyone else's rows; the same fact is loaded as the payload when the
-//! offer matches a need.
+//! `scope`, `role`, `start_key`, and `end_key` form the match surface. `owner`
+//! says which fact produced the row so later projection can replace that fact's
+//! context without deleting anyone else's rows; the same fact is loaded as the
+//! payload when the offer matches a need.
 //!
 //! Projection owns context by replacement, not append. When a fact projects, it
 //! emits the complete current set of needs and offers for that fact. Core diffs
@@ -54,16 +54,16 @@ impl Role {
     }
 }
 
-/// Opaque match selector within a context role and scope.
+/// Opaque byte key within a context role and scope.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Selector(Vec<u8>);
 
 impl Selector {
-    /// Build an opaque selector owned by one fact module.
+    /// Build an opaque range endpoint owned by one fact module.
     ///
-    /// Core stores and sorts these bytes, but never parses them. If matching
-    /// needs range, prefix, or version semantics, that logic belongs in the
-    /// module's `ContextMatcher`, not in this type.
+    /// Core stores, sorts, and compares these bytes, but never parses them.
+    /// Protocol code chooses a canonical byte layout and validates the matched
+    /// payload before giving the match any semantic authority.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
@@ -87,8 +87,10 @@ pub struct ContextNeed {
     pub role: Role,
     /// Matching scope.
     pub scope: FactScope,
-    /// Opaque selector interpreted by exact matching or a custom matcher.
-    pub selector: Selector,
+    /// Inclusive start of the opaque byte range this need asks for.
+    pub start_key: Selector,
+    /// Inclusive end of the opaque byte range this need asks for.
+    pub end_key: Selector,
 }
 
 /// A standing statement that one fact can provide context to matching needs.
@@ -103,8 +105,10 @@ pub struct ContextOffer {
     pub role: Role,
     /// Matching scope.
     pub scope: FactScope,
-    /// Opaque selector interpreted by exact matching or a custom matcher.
-    pub selector: Selector,
+    /// Inclusive start of the opaque byte range this offer provides.
+    pub start_key: Selector,
+    /// Inclusive end of the opaque byte range this offer provides.
+    pub end_key: Selector,
 }
 
 /// Encode a fact scope into the stable bytes used by context match indexes.
@@ -234,13 +238,15 @@ mod tests {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                selector: selector.clone(),
+                start_key: selector.clone(),
+                end_key: selector.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
                 role,
                 scope: FactScope::Global,
-                selector,
+                start_key: selector.clone(),
+                end_key: selector,
             });
 
         assert_eq!(set.needs.len(), 1);
@@ -255,7 +261,8 @@ mod tests {
             owner: id,
             role,
             scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
+            start_key: Selector::from_bytes([2; 32]),
+            end_key: Selector::from_bytes([2; 32]),
         };
 
         let set = ContextSet::new()
@@ -274,13 +281,15 @@ mod tests {
             owner: id,
             role: role.clone(),
             scope: FactScope::Global,
-            selector: Selector::from_bytes([2; 32]),
+            start_key: Selector::from_bytes([2; 32]),
+            end_key: Selector::from_bytes([2; 32]),
         };
         let added = ContextNeed {
             owner: id,
             role,
             scope: FactScope::Global,
-            selector: Selector::from_bytes([3; 32]),
+            start_key: Selector::from_bytes([3; 32]),
+            end_key: Selector::from_bytes([3; 32]),
         };
 
         let previous = ContextSet::new()
@@ -309,13 +318,15 @@ mod tests {
                 owner: id,
                 role: role.clone(),
                 scope: FactScope::Global,
-                selector: selector.clone(),
+                start_key: selector.clone(),
+                end_key: selector.clone(),
             })
             .offer(ContextOffer {
                 owner: id,
                 role,
                 scope: FactScope::Global,
-                selector,
+                start_key: selector.clone(),
+                end_key: selector,
             })
             .normalized();
 
