@@ -6,6 +6,21 @@
 //! the key deduplicates equivalent work of that kind; the payload is opaque
 //! bytes owned by the protocol module that registered the handler.
 //!
+//! Intents are the runtime's "do this later" language. Projection emits an
+//! intent when it discovers work that should not run inside a projector, such
+//! as sending network bytes, materializing a follow-up fact, or purging derived
+//! state. Commands can also emit intents when user input should enqueue
+//! asynchronous work. Dispatch later loads the handler, builds its narrow
+//! context, and commits the handler's `PipelineEffects` atomically with queue
+//! consumption.
+//!
+//! Durable and ephemeral intents share identity and payload rules. Durable
+//! intents survive process restarts and participate in replay. Ephemeral
+//! intents are connection-local work, useful for inbound frames and other
+//! process-scoped events that should disappear on restart. If the same durable
+//! identity is handled, dispatch removes the matching ephemeral duplicate so
+//! the local retry does not repeat accepted work.
+//!
 //! Handlers are reactive runtime code, not user-facing commands. They may ask
 //! core to load specific facts and may use query helpers through `Store`, then
 //! return `PipelineEffects` for the pipeline to commit atomically. If a handler

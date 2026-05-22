@@ -6,10 +6,21 @@
 //! satisfiable relationships. The semantic meaning of a role or selector stays
 //! with the fact module that created it.
 //!
+//! Context is how one fact says "wake me when another fact matching this shape
+//! exists" without reaching directly into another module's tables. A need names
+//! the fact that should be reprojected. An offer names the fact that can be
+//! loaded as matched payload. Core stores both as durable rows and lets matcher
+//! modules decide which pairs satisfy each other.
+//!
 //! `scope`, `role`, and `selector` form the match key. `owner` says which fact
 //! produced the row so later projection can replace that fact's context without
 //! deleting anyone else's rows; the same fact is loaded as the payload when the
 //! offer matches a need.
+//!
+//! Projection owns context by replacement, not append. When a fact projects, it
+//! emits the complete current set of needs and offers for that fact. Core diffs
+//! that set against the previous durable set, wakes only genuinely new matches,
+//! and avoids self-waking loops when stable unmet needs are re-emitted.
 
 use crate::core::facts::{FactId, FactScope};
 use crate::core::wire::Writer;

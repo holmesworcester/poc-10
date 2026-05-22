@@ -1,10 +1,17 @@
 //! A small SQLite-backed row store.
 //!
-//! This file is intentionally below the protocol. It knows how to apply SQL
-//! schema batches, run transactions, and read or write keyed byte rows. It does not
-//! know what any row means. Event admission, projection context, dependency
-//! edges, network targets, and sync work are all protocol or IO concepts layered
-//! on top of these primitives.
+//! Store is the lowest runtime layer above SQLite. It knows how to apply SQL
+//! schema batches, run transactions, and read or write keyed byte rows. It does
+//! not know what any row means. Fact admission, projection context, dependency
+//! edges, network targets, and sync work are all core pipeline, protocol, or IO
+//! concepts layered on top of these primitives.
+//!
+//! There are two row shapes in the project. Typed tables declare their own SQL
+//! columns and are queried directly by the module that owns them. Opaque row
+//! tables use the generic `(row_key, row_value)` shape and flow through the
+//! helpers in this file. `SchemaSource::row_tables` is the allowlist that tells
+//! store which opaque tables are safe for those helpers; it is not a semantic
+//! registry.
 //!
 //! The critical path is short:
 //! 1. Open a store with the SQL schema batches declared by core IO and the
@@ -12,6 +19,11 @@
 //! 2. Use `write_transaction` to group rows that must become visible together.
 //! 3. Use row helpers for opaque row tables. Query typed tables directly by
 //!    their declared SQLite columns.
+//!
+//! All atomicity comes from callers choosing the transaction closure. Store
+//! supplies `BEGIN IMMEDIATE`, rollback, quoting, allowlist checks, and
+//! idempotent opaque-row inserts. It should stay below projection, context
+//! matching, intent dispatch, and protocol validation.
 //!
 //! The only dynamic SQL in this file is table-name interpolation for row
 //! operations. Values are always bound parameters, and table names are accepted

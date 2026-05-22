@@ -1,10 +1,16 @@
 //! Protocol-neutral fact identity and visibility scope.
 //!
-//! Core treats a fact as immutable bytes plus local admission metadata. The id
-//! is the BLAKE3 hash of the bytes, so changing scope or timestamp does not
-//! change content identity; those fields describe how this store admitted and
-//! may expose the bytes. Protocol modules own the byte layout and validation
-//! rules for each fact kind.
+//! Facts are the immutable inputs to the runtime. Core gives every byte string
+//! a content id and records how this store admitted it; projection later turns
+//! that byte string into protocol rows, context, time wakes, and follow-up
+//! intents. This file deliberately stops before any protocol-specific meaning:
+//! a fact tag, signature, message body, key wrap, or sync frame is interpreted
+//! only by the protocol module that owns that layout.
+//!
+//! The id is the BLAKE3 hash of the bytes, so changing scope or timestamp does
+//! not change content identity. Scope and timestamp are local admission
+//! metadata. They describe how this store may expose the bytes and how pending
+//! projection should be ordered; they are not part of the protocol payload.
 //!
 //! Scope is deliberately small. `Global` can be synced, `Local` is private to
 //! the store, and `Scoped` gives a protocol-defined namespace plus id for data

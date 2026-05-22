@@ -6,6 +6,19 @@
 //! row mutations and intents to commit. The pipeline enforces that a projector
 //! only owns context and time wakes for the fact being projected.
 //!
+//! Projectors are where protocol facts become protocol state. They decode the
+//! fact payload, check scope and context proofs, decide whether enough input is
+//! available, and emit rows, needs, offers, time wakes, or follow-up intents.
+//! They do not decide when projection runs and they do not write SQL directly;
+//! `pipeline::project_pending_facts` supplies the scheduling and commit
+//! boundary.
+//!
+//! The replacement model is central. `ProjectionOutput` is not "patch these
+//! needs" or "add these time wakes"; it is the complete standing context and
+//! schedule for the projected fact after this run. If a fact stops needing some
+//! context or no longer needs a wake, the projector simply stops emitting it and
+//! the projection commit removes the old row.
+//!
 //! Protocol projector implementations own admission policy: scope checks,
 //! context proof checks, derived rows, offers, needs, time wakes, and follow-up
 //! intents. This file defines the contract they implement. Keep byte decoding

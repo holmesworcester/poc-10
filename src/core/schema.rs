@@ -6,6 +6,19 @@
 //! executable `SchemaSource` plus typed `TableName` constants so the rest of
 //! core does not repeat string literals.
 //!
+//! These tables are the shared substrate behind the pipeline documentation.
+//! `facts` and `local_fact_admissions` store immutable inputs and their local
+//! visibility metadata. `context_edges`, `time_wakes`, and `pending_projection`
+//! drive fact projection. `intents` and `local_intents` drive handler dispatch.
+//! The clock table is store-local runtime state used by command hosts, not a
+//! protocol fact.
+//!
+//! Core schema is deliberately small and mechanical. It records the runtime
+//! queues and indexes needed to move work; it does not encode protocol policy
+//! such as what makes a message valid, which key can decrypt content, or which
+//! sync range should be requested. That policy belongs beside the fact, query,
+//! matcher, and projector modules that understand it.
+//!
 //! Add a table here when the table is part of core's runtime mechanics. Add it
 //! in a protocol module when it stores protocol meaning, even if core commits
 //! the row mutation.

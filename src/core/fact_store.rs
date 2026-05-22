@@ -4,11 +4,24 @@
 //! purging, and reading those rows; pipeline workers decide when those
 //! operations should happen.
 //!
+//! This is the storage companion to `facts.rs` and the entry point used by the
+//! projection pipeline. Inserting a new fact writes both the durable byte row
+//! and the local admission row, then marks the fact pending so projection can
+//! derive runtime state from it. Reading a fact reconstructs the protocol bytes
+//! together with the local scope and timestamp that this store recorded at
+//! admission time.
+//!
 //! The important split is `facts` versus `local_fact_admissions`. `facts`
 //! stores bytes by content id. `local_fact_admissions` records how this store
 //! first admitted those bytes: scope, admission timestamp, and the derived
 //! local admission id used for ordering. That admission record is local
 //! runtime metadata, not a protocol fact to sync.
+//!
+//! Purge is the reverse boundary. It removes the byte row and every core-owned
+//! row keyed by the fact id: local admission, standing context, time wakes,
+//! pending time ranges, and pending projection. Protocol-owned rows that refer
+//! to the fact are removed by emitted row mutations or protocol handlers, not
+//! by this generic storage module.
 //!
 //! If the content-addressing rule, admission ordering, or purge fanout changes,
 //! change it here. If a protocol wants to interpret the fact bytes, that logic

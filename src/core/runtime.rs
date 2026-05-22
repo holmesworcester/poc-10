@@ -1,16 +1,25 @@
 //! Generic target runtime.
 //!
-//! Core owns the mechanics: open the store, submit facts and intents, run
-//! pending fact projection, and dispatch handler work through SQLite-backed
-//! intent queues.
-//! Protocol code supplies the projector router, context matchers, handler
-//! registry, schema sources, and row mutation tables.
+//! Runtime is the place where the generic core engine becomes an executable
+//! protocol instance. Core owns the mechanics: open the store, submit facts and
+//! intents, run pending fact projection, admit due time wakes, and dispatch
+//! handler work through SQLite-backed queues. Protocol code supplies the schema
+//! sources, projector router, context matchers, handler registry, and row
+//! mutation allowlist that make those mechanics meaningful.
+//!
+//! The runtime does not interpret protocol bytes. It schedules work and holds
+//! the transaction ordering rules: command effects commit before command
+//! receipts are returned, projection drains before intent dispatch when queues
+//! are being settled, and handler output commits only through the dispatch
+//! boundary. Those rules make facts, context, rows, and queued work visible in
+//! a predictable order regardless of whether work came from a CLI command, a
+//! daemon tick, sync, or a protocol handler.
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. If code wants to change projection scheduling, intent queue
-//! dispatch, command-safe handler filtering, or due-time processing, this file
-//! is the place that composes those pieces. The pieces themselves stay in
-//! `pipeline`, `fact_store`, and protocol modules.
+//! dispatch, command-safe handler filtering, daemon queue draining, or due-time
+//! processing, this file is the place that composes those pieces. The pieces
+//! themselves stay in `pipeline`, `fact_store`, `store`, and protocol modules.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
 use crate::core::context::ContextOffer;

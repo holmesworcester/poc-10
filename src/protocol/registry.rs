@@ -1,8 +1,23 @@
 //! Declarative registry for the target protocol.
 //!
-//! This file names the executable command, matcher, projector, handler, and
-//! schema tables that make up the poc-10 protocol. It is intentionally a table
-//! of contents; behavior stays in the fact, intent, and core runtime modules.
+//! This is the protocol's integration boundary. Core can run any protocol that
+//! supplies schema sources, projector routes, context matchers, handler routes,
+//! row mutation tables, and user-facing commands. This file assembles those
+//! declarations for the poc-10 protocol and hands them to `protocol::app` and
+//! the generic runtime.
+//!
+//! The registry should read like a table of contents, not like an
+//! implementation file. Fact modules own layouts, projectors, rows, queries,
+//! and commands. Intent modules own payloads, idempotence keys, and handlers.
+//! Matcher modules own relationship semantics. The registry names those pieces
+//! once so core can route facts by tag, route intents by kind, apply schemas,
+//! and validate row mutation targets.
+//!
+//! Add a new fact family here after its module has supplied a layout tag,
+//! projector, schema rows, and any context roles it needs. Add a new intent
+//! here after its module has supplied the payload layout and handler. If this
+//! file starts needing protocol policy branches, move that logic back to the
+//! module that owns the policy and keep this file declarative.
 
 use crate::core::cli::CliCommand;
 use crate::core::facts::Fact;
