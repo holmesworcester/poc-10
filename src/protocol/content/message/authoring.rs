@@ -69,11 +69,11 @@ impl IdentityVault for ContentMessageVault {
 fn latest_local_key_secret(
     runtime: &Runtime,
     workspace_id: [u8; 32],
-) -> Result<encryption::fact::LocalKeySecretFact, String> {
+) -> Result<encryption::local_key_secret::fact::LocalKeySecretFact, String> {
     runtime
         .facts()
         .filter_map(|fact| {
-            encryption::layout::decode_local_key_secret(fact.body())
+            encryption::local_key_secret::layout::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == workspace_id)
         })

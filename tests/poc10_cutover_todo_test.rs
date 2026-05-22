@@ -634,46 +634,53 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 #[test]
 fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
     let root = root();
-    let required_family_slices = [
-        "src/protocol/encryption/recipient_key.rs",
-        "src/protocol/encryption/local_recipient_key.rs",
-        "src/protocol/encryption/removal_frontier.rs",
-        "src/protocol/encryption/local_history_node_secret.rs",
-        "src/protocol/encryption/key_request.rs",
-        "src/protocol/encryption/local_material.rs",
-        "src/protocol/encryption/signed_key_wrap.rs",
+    // Each encryption fact family is its own module: a `<family>.rs` manifest
+    // plus a `<family>/` directory that owns the family's layout and projector.
+    let required_families = [
+        "recipient_key",
+        "local_recipient_key",
+        "removal_frontier",
+        "local_history_node_secret",
+        "local_key_secret",
+        "key_request",
+        "key_wrap",
     ];
-    let missing = required_family_slices
-        .into_iter()
-        .filter(|path| !root.join(path).exists())
-        .collect::<Vec<_>>();
+    let mut missing = Vec::new();
+    for family in required_families {
+        for path in [
+            format!("src/protocol/encryption/{family}.rs"),
+            format!("src/protocol/encryption/{family}/project.rs"),
+            format!("src/protocol/encryption/{family}/layout.rs"),
+        ] {
+            if !root.join(&path).exists() {
+                missing.push(path);
+            }
+        }
+    }
     assert!(
         missing.is_empty(),
-        "encryption fact-family behavior must live in named slices, not one undifferentiated projector:\n{}",
+        "encryption fact-family behavior must live in named family modules, not one undifferentiated projector:\n{}",
         missing.join("\n")
     );
 
-    let project = source_text(&root.join("src/protocol/encryption/project.rs"));
-    let required = [
-        "recipient_key(fact, context, recipient)",
-        "removal_frontier(fact, context, frontier)",
-        "project_local_key_secret(fact, context, secret)",
-        "project_local_history_node_secret(fact, context, node)",
-        "local_recipient_key(fact, context, local)",
-        "key_request(fact, context, request)",
-        "signed_key_wrap(fact, context, signed)",
+    // There is no shared facade projector: each family registers its own.
+    assert!(
+        !root.join("src/protocol/encryption/project.rs").exists(),
+        "encryption must not have a shared facade projector module"
+    );
+
+    // The removal-frontier projector authority-gates its owner endpoint.
+    let removal_frontier =
+        source_text(&root.join("src/protocol/encryption/removal_frontier/project.rs"));
+    for needle in [
         "validate_frontier_endpoint_shared_owner",
         "validate_frontier_local_owner",
-    ];
-    let missing = required
-        .into_iter()
-        .filter(|needle| !project.contains(needle))
-        .collect::<Vec<_>>();
-    assert!(
-        missing.is_empty(),
-        "encryption facade must delegate to family-local policy and authority-gate removal frontiers:\n{}",
-        missing.join("\n")
-    );
+    ] {
+        assert!(
+            removal_frontier.contains(needle),
+            "removal frontier projector must authority-gate its owner endpoint: missing {needle}"
+        );
+    }
 }
 
 #[test]
@@ -830,8 +837,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
 #[test]
 fn cutover_context_predicates_replace_manual_payload_matching() {
     let root = root();
-    let mut paths = project_files(&root);
-    paths.push(root.join("src/protocol/encryption/validation.rs"));
+    let paths = project_files(&root);
 
     let offenders = matching_code_lines(
         &root,

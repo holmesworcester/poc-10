@@ -4,10 +4,6 @@
 //! removal frontiers, history nodes, key wraps, and retention chops. They read
 //! projected identity and encryption state, construct facts or local effects,
 //! and return receipts suitable for CLI output.
-//!
-//! Keep orchestration that requires local store state here. Encoding belongs in
-//! `layout`, pure fact construction belongs in `create`, and projection remains
-//! responsible for validating facts that arrive later through sync.
 
 use crate::core::clock;
 use crate::core::command_context::{
@@ -17,14 +13,27 @@ use crate::core::command_context::{
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::runtime::Runtime;
+use crate::protocol::content;
+use crate::protocol::encryption::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
+use crate::protocol::encryption::local_history_node_secret::{
+    fact::LocalHistoryNodeSecretFact, layout as local_history_layout,
+};
+use crate::protocol::encryption::local_key_secret::{
+    fact::LocalKeySecretFact, layout as local_key_secret_layout,
+};
+use crate::protocol::encryption::local_recipient_key::{
+    fact::LocalRecipientKeyFact, layout as local_recipient_layout,
+};
+use crate::protocol::encryption::recipient_key::{
+    fact::RecipientKeyFact, layout as recipient_key_layout,
+};
+use crate::protocol::encryption::removal_frontier::{
+    fact::RemovalFrontierFact, layout as removal_frontier_layout,
+};
 use crate::protocol::identity;
-use crate::protocol::{content, encryption};
 use rusqlite::params;
 use std::collections::BTreeSet;
 
-use super::fact::{
-    LocalKeySecretFact, LocalRecipientKeyFact, RecipientKeyFact, RemovalFrontierFact,
-};
 use super::layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,7 +184,7 @@ pub fn create_recipient_key(
     let recipient_fact = Fact::new(
         crate::protocol::identity::workspace::scope(input.workspace_id),
         input.created_at_ms,
-        layout::encode_recipient_key(&recipient)?,
+        recipient_key_layout::encode_recipient_key(&recipient)?,
     );
     let local = LocalRecipientKeyFact {
         workspace_id: input.workspace_id,
@@ -186,7 +195,7 @@ pub fn create_recipient_key(
     let local_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        layout::encode_local_recipient_key(&local)?,
+        local_recipient_layout::encode_local_recipient_key(&local)?,
     );
     Ok(CommandOutput::new(CreateRecipientKeyReceipt {
         local_recipient_key_id: local_fact.id,
@@ -216,7 +225,7 @@ pub fn create_key_frontier(
     let frontier_fact = Fact::new(
         crate::protocol::identity::workspace::scope(input.workspace_id),
         input.created_at_ms,
-        layout::encode_removal_frontier(&frontier)?,
+        removal_frontier_layout::encode_removal_frontier(&frontier)?,
     );
     let local_secret = LocalKeySecretFact {
         workspace_id: input.workspace_id,
@@ -228,7 +237,7 @@ pub fn create_key_frontier(
     let local_secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        layout::encode_local_key_secret(&local_secret)?,
+        local_key_secret_layout::encode_local_key_secret(&local_secret)?,
     );
     let signer = identity::signed_fact::fact::LocalSignerSecretFact {
         workspace_id: input.workspace_id,
@@ -256,7 +265,7 @@ pub fn latest_local_recipient_key(
 ) -> Result<Option<FactId>, String> {
     let mut latest = None;
     for fact in runtime.facts() {
-        let Ok(local) = layout::decode_local_recipient_key(fact.body()) else {
+        let Ok(local) = local_recipient_layout::decode_local_recipient_key(fact.body()) else {
             continue;
         };
         if local.workspace_id != workspace_id {
@@ -305,7 +314,7 @@ pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrap
 
 pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessStatus, String> {
     let access = runtime.facts().any(|fact| {
-        layout::decode_local_key_secret(fact.body())
+        local_key_secret_layout::decode_local_key_secret(fact.body())
             .map(|secret| {
                 secret.workspace_id == query.workspace_id
                     && secret.frontier_id == query.removal_frontier_id
@@ -322,14 +331,14 @@ pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessS
 pub fn local_key_secret_count(runtime: &Runtime) -> usize {
     runtime
         .facts()
-        .filter(|fact| layout::decode_local_key_secret(fact.body()).is_ok())
+        .filter(|fact| local_key_secret_layout::decode_local_key_secret(fact.body()).is_ok())
         .count()
 }
 
 pub fn local_key_secret_frontiers(runtime: &Runtime, workspace_id: FactId) -> Vec<FactId> {
     runtime
         .facts()
-        .filter_map(|fact| layout::decode_local_key_secret(fact.body()).ok())
+        .filter_map(|fact| local_key_secret_layout::decode_local_key_secret(fact.body()).ok())
         .filter(|secret| secret.workspace_id == workspace_id)
         .map(|secret| secret.frontier_id)
         .collect()
@@ -360,13 +369,6 @@ pub fn key_status_report(
 ) -> Result<KeyStatusReport, String> {
     let store = runtime.store();
     let leaves = history_leaf_rows(store, workspace_id)?;
-    let local_history_rows = store
-        .table_rows_with_key_prefix(
-            encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load local history rows: {err}"))?;
     let message_tombstones =
         content::message::queries::message_tombstone_count(store, workspace_id)?;
     let file_tombstones = store
@@ -380,18 +382,18 @@ pub fn key_status_report(
     let local_key_secret_frontiers = local_key_secret_frontiers(runtime, workspace_id);
     let recipient_keys = runtime
         .facts()
-        .filter_map(|fact| layout::decode_recipient_key(&fact.bytes).ok())
+        .filter_map(|fact| recipient_key_layout::decode_recipient_key(&fact.bytes).ok())
         .filter(|key| key.workspace_id == workspace_id)
         .count();
     let local_recipient_keys = runtime
         .facts()
-        .filter_map(|fact| layout::decode_local_recipient_key(&fact.bytes).ok())
+        .filter_map(|fact| local_recipient_layout::decode_local_recipient_key(&fact.bytes).ok())
         .filter(|key| key.workspace_id == workspace_id)
         .count();
     let removal_frontiers = runtime
         .facts()
         .filter_map(|fact| {
-            layout::decode_removal_frontier(&fact.bytes)
+            removal_frontier_layout::decode_removal_frontier(&fact.bytes)
                 .ok()
                 .map(|frontier| (fact.id, frontier))
         })
@@ -410,7 +412,7 @@ pub fn key_status_report(
         removal_frontiers,
         key_wraps,
         local_key_secrets: local_key_secret_frontiers.len(),
-        local_history_node_secrets: local_history_rows.len() + leaves.len(),
+        local_history_node_secrets: leaves.len(),
         local_history_leaves: leaves.len(),
         local_history_node_tombstones: message_tombstones + file_tombstones,
         message_tombstones,
@@ -447,7 +449,9 @@ fn history_leaf_rows(
         .iter()
         .map(|message| message.message_id)
         .collect::<BTreeSet<_>>();
-    let default_frontier = first_removal_frontier_id(store, workspace_id)?.unwrap_or([0; 32]);
+    // No live projector writes removal-frontier rows, so the default frontier
+    // for status display is always the zero id.
+    let default_frontier = [0; 32];
     let mut leaves = messages
         .into_iter()
         .map(|message| HistoryLeafRow {
@@ -470,26 +474,6 @@ fn history_leaf_rows(
     }
     leaves.sort_by_key(|leaf| (leaf.minute, leaf.node_id));
     Ok(leaves)
-}
-
-fn first_removal_frontier_id(
-    store: &crate::core::store::Store,
-    workspace_id: FactId,
-) -> Result<Option<FactId>, String> {
-    let mut rows = store
-        .table_rows_with_key_prefix(
-            encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
-            &workspace_id,
-            usize::MAX,
-        )
-        .map_err(|err| format!("load removal frontier rows: {err}"))?
-        .into_iter()
-        .filter_map(|(key, value)| {
-            encryption::removal_frontier::rows::decode_removal_frontier_row(&key, &value).ok()
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|row| (row.created_at_ms, row.removal_frontier_id));
-    Ok(rows.first().map(|row| row.removal_frontier_id))
 }
 
 fn nonzero_or(value: FactId, fallback: FactId) -> FactId {
@@ -528,7 +512,7 @@ pub fn create_history_node(
             .facts()
             .find(|fact| fact.id == input.tombstone_node_id)
             .ok_or_else(|| "history node tombstone event is missing".to_string())?;
-        layout::decode_local_history_node_secret(&tombstone.bytes)
+        local_history_layout::decode_local_history_node_secret(&tombstone.bytes)
             .map_err(|_| "history node tombstone event is not a history node".to_string())?;
     }
     let mut info = Vec::with_capacity(32 + 32 + 8 + 8 + 32);
@@ -539,14 +523,14 @@ pub fn create_history_node(
     info.extend_from_slice(&input.tombstone_node_id);
     let node_secret =
         crate::core::crypto::blake3_keyed_hash(&source_secret, b"topo:key-node:v1", &info);
-    let node = super::fact::LocalHistoryNodeSecretFact {
+    let node = LocalHistoryNodeSecretFact {
         workspace_id: input.workspace_id,
         frontier_id: input.removal_frontier_id,
         owner_endpoint_id,
         source_secret_id: input.source_secret_id,
         range_start: input.range_start,
         range_width: input.range_width,
-        bit_depth: encryption::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH,
+        bit_depth: TIME_TREE_BIT_DEPTH,
         fact_id_prefix: [0; 32],
         tombstone_node_id: input.tombstone_node_id,
         node_secret,
@@ -554,7 +538,7 @@ pub fn create_history_node(
     let fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        layout::encode_local_history_node_secret(&node)?,
+        local_history_layout::encode_local_history_node_secret(&node)?,
     );
     Ok(CommandOutput::new(CreateHistoryNodeReceipt {
         workspace_id: input.workspace_id,
@@ -590,7 +574,7 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
     let local_key_secret_ids = runtime
         .facts()
         .filter_map(|fact| {
-            layout::decode_local_key_secret(fact.body())
+            local_key_secret_layout::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == input.workspace_id)
                 .map(|_| fact.id)
@@ -622,7 +606,7 @@ fn recipient_key_is_superseded(
         if fact.id != recipient_key_id {
             continue;
         }
-        let recipient = layout::decode_recipient_key(fact.body())?;
+        let recipient = recipient_key_layout::decode_recipient_key(fact.body())?;
         if recipient.workspace_id == workspace_id {
             target_endpoint = Some(recipient.endpoint_id);
         }
@@ -631,7 +615,7 @@ fn recipient_key_is_superseded(
         return Ok(false);
     };
     for fact in runtime.facts() {
-        let Ok(recipient) = layout::decode_recipient_key(fact.body()) else {
+        let Ok(recipient) = recipient_key_layout::decode_recipient_key(fact.body()) else {
             continue;
         };
         if recipient.workspace_id == workspace_id
@@ -649,13 +633,13 @@ fn history_source_material(
     workspace_id: FactId,
     frontier_id: FactId,
 ) -> Result<(FactId, [u8; 32]), String> {
-    if let Ok(root) = layout::decode_local_key_secret(fact.body()) {
+    if let Ok(root) = local_key_secret_layout::decode_local_key_secret(fact.body()) {
         if root.workspace_id != workspace_id || root.frontier_id != frontier_id {
             return Err("history node source workspace or frontier mismatch".to_string());
         }
         return Ok((root.owner_endpoint_id, root.key_secret));
     }
-    let node = layout::decode_local_history_node_secret(fact.body())
+    let node = local_history_layout::decode_local_history_node_secret(fact.body())
         .map_err(|_| "history node source event is missing".to_string())?;
     if node.workspace_id != workspace_id || node.frontier_id != frontier_id {
         return Err("history node source workspace or frontier mismatch".to_string());
@@ -668,7 +652,7 @@ fn history_source_is_tombstoned(
     source_secret_id: FactId,
 ) -> Result<bool, String> {
     for fact in runtime.facts() {
-        let Ok(node) = layout::decode_local_history_node_secret(fact.body()) else {
+        let Ok(node) = local_history_layout::decode_local_history_node_secret(fact.body()) else {
             continue;
         };
         if node.tombstone_node_id == source_secret_id {

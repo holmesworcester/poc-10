@@ -88,9 +88,9 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
     let (connection_fact, _) = connection_fact();
     for private_tag in [
         identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET,
-        encryption::layout::TYPE_LOCAL_KEY_SECRET,
-        encryption::layout::TYPE_LOCAL_HISTORY_NODE_SECRET,
-        encryption::layout::TYPE_LOCAL_RECIPIENT_KEY,
+        encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET,
+        encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET,
+        encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
             topo::protocol::identity::workspace::scope([7; 32]),

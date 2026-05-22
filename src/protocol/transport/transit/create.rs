@@ -62,11 +62,10 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::response::layout::TYPE_CONNECTION_RESPONSE
             | identity::endpoint::layout::TYPE_LOCAL_ENDPOINT
             | identity::invite::layout::TYPE_INVITE_SECRET
-            | encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
-            | encryption::layout::TYPE_LOCAL_KEY_SECRET
-            | encryption::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
-            | encryption::layout::TYPE_LOCAL_RECIPIENT_KEY
+            | encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
+            | encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
+            | encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
             | transport::transit_received::layout::TYPE_TRANSIT_RECEIVED
     )
 }

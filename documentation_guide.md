@@ -1,8 +1,9 @@
 # Documentation Guide
 
-This project should document core code in the style used by the Stellar core
-tree: concise prose that tells the reader what a component is for, how it works,
-what invariants it relies on or provides, and where a future change belongs.
+This project should document core and protocol code in the style used by the
+Stellar core tree: concise prose that tells the reader what a component is for,
+how it works, what invariants it relies on or provides, and where a future
+change belongs.
 
 The goal is not to make comments longer. The goal is to make ownership and
 mechanism explicit enough that a maintainer can change the right file without
@@ -58,10 +59,10 @@ write some adaptor code...
 Use the same directness in core files. Say where a change belongs:
 
 ```rust
-//! If a new relationship can be expressed as exact equality, add its role to
-//! `ContextMatchers::new`. If the relationship needs range, prefix, visibility,
-//! or other protocol semantics, implement `ContextMatcher` in the module that
-//! owns those semantics.
+//! Use `ContextNeed::for_key_parts` for exact composite dependencies. If a
+//! relationship needs prefix, range, visibility, or other protocol semantics,
+//! build the low/high range endpoints and candidate validation beside the
+//! module that owns those semantics.
 ```
 
 This is the "realm of responsibility" sentence. Every core file should have
@@ -114,6 +115,11 @@ For public structs, traits, and important helpers:
 2. Name the atomicity, idempotence, ordering, or ownership rule if there is one.
 3. Say what the caller still owns.
 
+For projector files, use this guide together with `projector_style.md`. The
+general documentation standard still applies, but projector prose also has to
+make admission policy, context proof shape, parking behavior, and materialized
+row ownership visible.
+
 Examples:
 
 ```rust
@@ -124,8 +130,8 @@ Examples:
 
 ```rust
 /// Core stores and sorts these bytes, but never parses them. If matching needs
-/// range, prefix, or version semantics, that logic belongs in the module's
-/// `ContextMatcher`, not in this type.
+/// range, prefix, or version semantics, that logic belongs in the protocol
+/// module's range helper and matched-payload validator, not in this type.
 ```
 
 ## Review Checklist

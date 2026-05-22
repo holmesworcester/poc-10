@@ -332,13 +332,11 @@ CREATE TABLE IF NOT EXISTS file_deletion_rows (
 CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
     ON file_deletion_rows (deletion_id);
 
-CREATE TABLE IF NOT EXISTS removal_frontier_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS local_history_node_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 "#,
     row_tables: &[
         identity::workspace::rows::WORKSPACE_ROWS,
-        encryption::rows::KEY_WRAP_ROWS,
+        encryption::key_wrap::rows::KEY_WRAP_ROWS,
         identity::user::rows::USER_ROWS,
         identity::endpoint::rows::LOCAL_ENDPOINT_ROWS,
         identity::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
@@ -359,8 +357,6 @@ CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIM
         sync::have_id::rows::SYNC_HAVE_ID_ROWS,
         sync::need_id::rows::SYNC_NEED_ID_ROWS,
         sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
-        encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
-        encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
         encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     ],
 };
@@ -418,25 +414,25 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("users", identity::user::cli::USERS_USAGE, users),
     cli_command!(
         "key-recipient",
-        encryption::cli::KEY_RECIPIENT_USAGE,
+        encryption::key_wrap::cli::KEY_RECIPIENT_USAGE,
         key_recipient
     ),
     cli_command!(
         "key-rotate-recipient",
-        encryption::cli::KEY_ROTATE_RECIPIENT_USAGE,
+        encryption::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE,
         key_recipient_rotation
     ),
     cli_command!(
         "key-frontier",
-        encryption::cli::KEY_FRONTIER_USAGE,
+        encryption::key_wrap::cli::KEY_FRONTIER_USAGE,
         key_frontier
     ),
-    cli_command!("key-wrap", encryption::cli::KEY_WRAP_USAGE, key_wrap),
-    cli_command!("key-access", encryption::cli::KEY_ACCESS_USAGE, key_access),
-    cli_command!("key-derive", encryption::cli::KEY_DERIVE_USAGE, key_derive),
-    cli_command!("key-node", encryption::cli::KEY_NODE_USAGE, key_node),
-    cli_command!("keys", encryption::cli::KEYS_USAGE, keys),
-    cli_command!("chop-now", encryption::cli::CHOP_NOW_USAGE, chop_now),
+    cli_command!("key-wrap", encryption::key_wrap::cli::KEY_WRAP_USAGE, key_wrap),
+    cli_command!("key-access", encryption::key_wrap::cli::KEY_ACCESS_USAGE, key_access),
+    cli_command!("key-derive", encryption::key_wrap::cli::KEY_DERIVE_USAGE, key_derive),
+    cli_command!("key-node", encryption::key_wrap::cli::KEY_NODE_USAGE, key_node),
+    cli_command!("keys", encryption::key_wrap::cli::KEYS_USAGE, keys),
+    cli_command!("chop-now", encryption::key_wrap::cli::CHOP_NOW_USAGE, chop_now),
     cli_command!(
         "disappearing-set",
         encryption::disappearing_messages_setting::cli::DISAPPEARING_SET_USAGE,
@@ -538,7 +534,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     read_models::MESSAGE_DELETION_ROWS,
     read_models::REACTION_ROWS,
     encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
-    encryption::rows::KEY_WRAP_ROWS,
+    encryption::key_wrap::rows::KEY_WRAP_ROWS,
     identity::admin::rows::ADMIN_ROWS,
     identity::device_invite::rows::DEVICE_INVITE_ROWS,
     identity::endpoint::rows::LOCAL_ENDPOINT_ROWS,
@@ -552,8 +548,6 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     identity::user::rows::USER_ROWS,
     identity::user_invite::rows::USER_INVITE_ROWS,
     identity::workspace::rows::WORKSPACE_ROWS,
-    encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
-    encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
     read_models::OPENED_MESSAGE_ROWS,
     read_models::MESSAGE_TOMBSTONE_ROWS,
     sync::compare::rows::SYNC_COMPARE_ROWS,
@@ -611,13 +605,13 @@ projector_routes! {
     project_content_message => content::message::layout::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector;
     project_content_message_deletion => content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector;
     project_content_reaction => content::reaction::layout::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector;
-    project_encryption_recipient_key => encryption::layout::TYPE_RECIPIENT_KEY, encryption::project::EncryptionProjector;
-    project_encryption_removal_frontier => encryption::layout::TYPE_REMOVAL_FRONTIER, encryption::project::EncryptionProjector;
-    project_encryption_local_key_secret => encryption::layout::TYPE_LOCAL_KEY_SECRET, encryption::project::EncryptionProjector;
-    project_encryption_local_history_node_secret => encryption::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, encryption::project::EncryptionProjector;
-    project_encryption_key_request => encryption::layout::TYPE_KEY_REQUEST, encryption::project::EncryptionProjector;
-    project_encryption_key_wrap => encryption::layout::TYPE_KEY_WRAP, encryption::project::EncryptionProjector;
-    project_encryption_local_recipient_key => encryption::layout::TYPE_LOCAL_RECIPIENT_KEY, encryption::project::EncryptionProjector;
+    project_encryption_recipient_key => encryption::recipient_key::layout::TYPE_RECIPIENT_KEY, encryption::recipient_key::project::RecipientKeyProjector;
+    project_encryption_removal_frontier => encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER, encryption::removal_frontier::project::RemovalFrontierProjector;
+    project_encryption_local_key_secret => encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET, encryption::local_key_secret::project::LocalKeySecretProjector;
+    project_encryption_local_history_node_secret => encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, encryption::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
+    project_encryption_key_request => encryption::key_request::layout::TYPE_KEY_REQUEST, encryption::key_request::project::KeyRequestProjector;
+    project_encryption_key_wrap => encryption::key_wrap::layout::TYPE_KEY_WRAP, encryption::key_wrap::project::KeyWrapProjector;
+    project_encryption_local_recipient_key => encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY, encryption::local_recipient_key::project::LocalRecipientKeyProjector;
     project_endpoint => identity::endpoint::layout::TYPE_LOCAL_ENDPOINT, identity::endpoint::project::EndpointProjector;
     project_invite => identity::invite::layout::TYPE_INVITE_SECRET, identity::invite::project::InviteSecretProjector;
     project_workspace => identity::workspace::layout::TYPE_WORKSPACE, identity::workspace::project::WorkspaceProjector;
@@ -638,8 +632,6 @@ projector_routes! {
     project_transit_received => transport::transit_received::layout::TYPE_TRANSIT_RECEIVED, transport::transit_received::project::TransitReceivedProjector;
     project_user_invite => identity::user_invite::layout::TYPE_USER_INVITE, identity::user_invite::project::UserInviteProjector;
     project_user => identity::user::layout::TYPE_USER, identity::user::project::UserProjector;
-    project_local_history_node_secret => encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, encryption::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
-    project_removal_frontier => encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER, encryption::removal_frontier::project::RemovalFrontierProjector;
 }
 
 fn signed_effective_tag(fact: &Fact) -> Result<u8, String> {
@@ -699,17 +691,17 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     ),
     handler_route!(
         "create_key_wrap",
-        encryption::intent::CREATE_KEY_WRAP,
+        encryption::create_key_wrap::CREATE_KEY_WRAP,
         encryption::create_key_wrap::CreateKeyWrapHandler
     ),
     handler_route!(
         "purge_retired_recipient_material",
-        encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL,
+        encryption::purge_retired_recipient_material::PURGE_RETIRED_RECIPIENT_MATERIAL,
         encryption::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler
     ),
     handler_route!(
         "unwrap_key_wrap",
-        encryption::intent::UNWRAP_KEY_WRAP,
+        encryption::unwrap_key_wrap::UNWRAP_KEY_WRAP,
         encryption::unwrap_key_wrap::UnwrapKeyWrapHandler
     ),
     handler_route!(

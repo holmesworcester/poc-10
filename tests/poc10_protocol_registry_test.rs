@@ -84,13 +84,28 @@ fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
         "central protocol context-key directories recreate a matcher namespace; use core ranges and domain-owned encoders"
     );
 
-    for required in [
-        "src/protocol/encryption/coverage.rs",
-        "src/protocol/encryption/wrap_source.rs",
+    // Nontrivial protocol range encoders live with the domain that validates
+    // them: secret-coverage ranges in the local-history-node-secret family and
+    // wrap-source ranges in the key-wrap family, both inside their `project.rs`.
+    for (required, marker) in [
+        (
+            "src/protocol/encryption/local_history_node_secret/project.rs",
+            "secret coverage coordinate scheme",
+        ),
+        (
+            "src/protocol/encryption/key_wrap/project.rs",
+            "wrap-source coordinate scheme",
+        ),
     ] {
+        let path = root.join(required);
         assert!(
-            root.join(required).is_file(),
-            "nontrivial protocol range encoders should live with the domain that validates them: {required}"
+            path.is_file(),
+            "domain-owned protocol range encoder is missing: {required}"
+        );
+        let text = std::fs::read_to_string(&path).expect("read range encoder module");
+        assert!(
+            text.to_lowercase().contains(marker),
+            "range encoder module {required} should document its {marker}"
         );
     }
 }

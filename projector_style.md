@@ -9,13 +9,17 @@ Inline documentation is part of the projector. Use it freely when it explains a
 security invariant, wake-loop invariant, authority path, or context dependency.
 Avoid comments that restate syntax.
 
+Use this with `documentation_guide.md`: the general guide explains the expected
+file-level prose, while this guide names the extra proof structure every
+projector should make visible.
+
 ## Recommendation
 
 Write each projector as:
 
 1. A numbered top-of-file policy.
 2. A `Projector::project()` body that immediately delegates through
-   `core::projection::project_typed::<ModuleCodec, _>()`.
+   `core::projectors::project_typed::<ModuleCodec, _>()`.
 3. A `TypedProjector<ModuleCodec>::project_typed()` body whose major sections
    use matching `// 1.`, `// 2.` markers.
 4. Named context needs, read through `ProjectionContext` helpers.
@@ -103,8 +107,9 @@ Use:
   transit receive provenance or range roots.
 
 Do not call `matched_context()` from protocol projectors. Do not scan
-`context.offers()` to infer whether a declared need is satisfied. Do not inspect
-`ContextOffer::payload_ref` in projectors.
+`context.offers()` to infer whether a declared need is satisfied. A matched
+offer's payload is the offer owner's fact; projectors should reach it only
+through the `ProjectionContext` helper anchored to the need they emitted.
 
 Good:
 
@@ -135,7 +140,7 @@ through core's typed adapter. The owning fact module supplies a small codec:
 ```rust
 pub(crate) struct Codec;
 
-impl crate::core::projection::FactCodec for Codec {
+impl crate::core::projectors::FactCodec for Codec {
     type Payload = identity::signed_fact::SignedPayload<fact::DeviceInviteFact>;
 
     fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
@@ -270,10 +275,14 @@ the call site under the numbered policy section.
 Projectors may decide when a row should be materialized. They do not own the row
 shape.
 
-- Durable table ownership belongs in the schema DSL files.
-- Opaque keyed byte tables use explicit `row_table name;`.
-- Queryable read-model tables should be typed `table` declarations with
-  columns, indexes, uniqueness, and byte lengths in the DSL.
+- Durable table ownership belongs in the explicit SQL schema declarations in
+  the module that owns the rows, currently `core::schema`, `core::network`, or
+  `protocol::registry`.
+- Opaque keyed byte tables should still have module-owned row helper functions
+  that name the table and validate key/value bytes.
+- Queryable read-model tables should have named columns, indexes, uniqueness,
+  and byte-length expectations in schema plus typed row helpers in the owning
+  module.
 - Projectors emit row mutations through module row helpers.
 
 Good:
@@ -312,7 +321,7 @@ in a projector file.
 
 - `matched_context()` in protocol projectors.
 - `context.offers()` scans to decide whether a declared need is satisfied.
-- `ContextOffer::payload_ref` in projector code.
+- Direct matched-offer field inspection in projector code.
 - Positional `needs[0]` / `needs[1]` contracts.
 - Generic `validate_authority` helpers that hide branch-specific policy.
 - Hidden-state context wrappers that auto-track consulted needs.
@@ -327,20 +336,22 @@ in a projector file.
 The current active guardrails live in
 `tests/poc10_intent_cleanliness_test.rs`:
 
+- `target_projectors_stay_pure_context_to_intents`
 - `target_projectors_use_typed_context_lookups_not_direct_match_scans`
 - `target_projectors_do_not_read_raw_context_offer_storage_fields`
 - `target_projectors_use_named_needs_not_positional_authority_flows`
 - `target_projectors_document_policy_narratives`
+- `target_projectors_route_primary_decode_through_core_typed_adapter`
 - `target_projectors_do_not_decode_foreign_fact_layouts_inline`
+- `target_projectors_do_not_define_intent_payloads_or_handler_logic`
+- `target_projectors_do_not_define_row_tables_or_row_shapes`
 
-When a projector is modernized, remove it from the failing output by satisfying
-the rule. Do not add allowlist entries unless the exception is permanent and
-documented.
+Architecture boundary tests also enforce that target projectors emit only
+needs, offers, and intents, and that they do not write store rows directly.
 
-## Historical Note
+When a projector changes, satisfy the rule directly. Do not add allowlist
+entries unless the exception is permanent and documented next to the code that
+needs it.
 
-This style started from an experiment branch that compared many projector
-shapes against the same invariant battery. The production rules above supersede
-that branch. The experiment is still useful provenance, but the source of truth
-is now the production guardrails, the schema DSL, and the model projectors in
-`src/protocol/facts`.
+The source of truth is the production guardrails, explicit schema declarations,
+and the model projectors in `src/protocol/facts`.

@@ -1,11 +1,13 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::protocol::encryption::fact::{
-    LocalKeySecretFact, RecipientKeyFact, WrappedSecretKind, NO_PREVIOUS_RECIPIENT_KEY,
-};
-use topo::protocol::encryption::intent;
-use topo::protocol::encryption::layout;
-use topo::protocol::encryption::wrap_source::{WrapSourceDescriptor, WrapSourceKind};
+use topo::protocol::encryption::create_key_wrap as intent;
+use topo::protocol::encryption::key_wrap::fact::WrappedSecretKind;
+use topo::protocol::encryption::key_wrap::layout as key_wrap_layout;
+use topo::protocol::encryption::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
+use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
+use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::encryption::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
+use topo::protocol::encryption::recipient_key::layout as recipient_key_layout;
 use topo::protocol::identity;
 use topo::protocol::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::identity::workspace::scope as workspace_scope;
@@ -43,8 +45,8 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
     let envelope = identity::signed_fact::layout::decode_signed_fact(&first.facts[0].bytes)
         .expect("decode signed key wrap");
     assert_eq!(envelope.signer_id, endpoint);
-    assert_eq!(envelope.inner_type, layout::TYPE_KEY_WRAP);
-    let wrap = layout::decode_key_wrap(&envelope.payload).expect("decode key wrap");
+    assert_eq!(envelope.inner_type, key_wrap_layout::TYPE_KEY_WRAP);
+    let wrap = key_wrap_layout::decode_key_wrap(&envelope.payload).expect("decode key wrap");
     assert_eq!(wrap.workspace_id, workspace);
     assert_eq!(wrap.signer_endpoint_id, endpoint);
     assert_eq!(wrap.frontier_id, frontier);
@@ -63,7 +65,7 @@ fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key:
     Fact::new(
         workspace_scope(workspace_id),
         10,
-        layout::encode_recipient_key(&RecipientKeyFact {
+        recipient_key_layout::encode_recipient_key(&RecipientKeyFact {
             workspace_id,
             endpoint_id,
             recipient_key: public_key,
@@ -83,7 +85,7 @@ fn local_root_fact(
     Fact::new(
         FactScope::Local,
         20,
-        layout::encode_local_key_secret(&LocalKeySecretFact {
+        local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
             frontier_id,
             owner_endpoint_id,

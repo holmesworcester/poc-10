@@ -268,21 +268,34 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
-        encryption::layout::TYPE_RECIPIENT_KEY
-        | encryption::layout::TYPE_REMOVAL_FRONTIER
-        | encryption::layout::TYPE_KEY_REQUEST => return admit_encryption_fact(bytes),
-        encryption::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
-            return Err(
-                "received transport::transit payload is local history-node secret".to_string(),
-            );
+        encryption::recipient_key::layout::TYPE_RECIPIENT_KEY => {
+            return admit_with_codec::<encryption::recipient_key::Codec>(bytes, |recipient| {
+                Ok(Admission::workspace(
+                    recipient.workspace_id,
+                    recipient.created_at_ms,
+                ))
+            });
         }
-        encryption::removal_frontier::TYPE_REMOVAL_FRONTIER => {
+        encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
             return admit_with_codec::<encryption::removal_frontier::Codec>(bytes, |frontier| {
                 Ok(Admission::workspace(
                     frontier.workspace_id,
                     frontier.created_at_ms,
                 ))
             });
+        }
+        encryption::key_request::layout::TYPE_KEY_REQUEST => {
+            return admit_with_codec::<encryption::key_request::Codec>(bytes, |request| {
+                Ok(Admission::workspace(
+                    request.workspace_id,
+                    request.created_at_ms,
+                ))
+            });
+        }
+        encryption::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+            return Err(
+                "received transport::transit payload is local history-node secret".to_string(),
+            );
         }
         sync::compare::TYPE_SYNC_COMPARE => {
             return admit_with_codec::<sync::compare::Codec>(bytes, |_| Ok(Admission::global(0)));
@@ -355,24 +368,6 @@ fn admit_with_decoder<T>(
     Ok(Fact::new(admission.scope, admission.timestamp, bytes))
 }
 
-fn admit_encryption_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    admit_with_codec::<encryption::fact::Codec>(bytes, |payload| match payload {
-        encryption::fact::ProjectionPayload::RecipientKey(recipient) => Ok(Admission::workspace(
-            recipient.workspace_id,
-            recipient.created_at_ms,
-        )),
-        encryption::fact::ProjectionPayload::RemovalFrontier(frontier) => Ok(Admission::workspace(
-            frontier.workspace_id,
-            frontier.created_at_ms,
-        )),
-        encryption::fact::ProjectionPayload::KeyRequest(request) => Ok(Admission::workspace(
-            request.workspace_id,
-            request.created_at_ms,
-        )),
-        _ => unreachable!("dispatch only routes shareable encryption facts"),
-    })
-}
-
 fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
     let envelope = identity::signed_fact::layout::decode_signed_fact(&bytes)?;
     match envelope.inner_type {
@@ -404,7 +399,7 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 Ok(Admission::global(signed.payload.created_at_ms))
             })
         }
-        encryption::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
+        encryption::key_wrap::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
         content::message::TYPE_CONTENT_MESSAGE => {
             admit_with_codec::<content::message::Codec>(bytes, |signed| {
                 Ok(Admission::workspace(
@@ -428,10 +423,7 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
 }
 
 fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    admit_with_codec::<encryption::fact::Codec>(bytes, |payload| {
-        let encryption::fact::ProjectionPayload::SignedKeyWrap(signed) = payload else {
-            return Err("signed fact does not contain an encryption key wrap".to_string());
-        };
+    admit_with_codec::<encryption::key_wrap::Codec>(bytes, |signed| {
         let envelope = signed.envelope;
         let wrap = signed.payload;
         if envelope.signer_id != wrap.signer_endpoint_id {

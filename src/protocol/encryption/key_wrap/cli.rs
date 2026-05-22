@@ -31,7 +31,7 @@ pub fn key_recipient(
             created_at_ms: ctx.next_timestamp(),
             workspace_id: decode_hex_32(workspace)?,
             previous_recipient_key_id:
-                crate::protocol::encryption::fact::NO_PREVIOUS_RECIPIENT_KEY,
+                crate::protocol::encryption::recipient_key::fact::NO_PREVIOUS_RECIPIENT_KEY,
         },
     )
 }

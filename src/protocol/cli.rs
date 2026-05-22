@@ -234,10 +234,10 @@ pub(crate) fn key_recipient(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        encryption::cli::key_recipient(command_context, args)
+        encryption::key_wrap::cli::key_recipient(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(encryption::cli::key_recipient_output(&receipt))
+    Ok(encryption::key_wrap::cli::key_recipient_output(&receipt))
 }
 
 pub(crate) fn key_recipient_rotation(
@@ -246,16 +246,16 @@ pub(crate) fn key_recipient_rotation(
 ) -> Result<CliOutput, String> {
     let workspace_id = args
         .get(0)
-        .ok_or_else(|| encryption::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
+        .ok_or_else(|| encryption::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     ctx.settle_local_command_work()?;
-    let previous = encryption::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
+    let previous = encryption::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
         .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
     let output = ctx.with_command_context(|command_context| {
-        encryption::cli::key_recipient_rotation(command_context, args, previous)
+        encryption::key_wrap::cli::key_recipient_rotation(command_context, args, previous)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    let mut output = encryption::cli::key_recipient_output(&receipt);
+    let mut output = encryption::key_wrap::cli::key_recipient_output(&receipt);
     output
         .lines
         .push("old_active_recipient_keys: 1".to_string());
@@ -270,39 +270,39 @@ pub(crate) fn key_frontier(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        encryption::cli::key_frontier(command_context, args)
+        encryption::key_wrap::cli::key_frontier(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(encryption::cli::key_frontier_output(&receipt))
+    Ok(encryption::key_wrap::cli::key_frontier_output(&receipt))
 }
 
 pub(crate) fn key_wrap(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let query = encryption::cli::key_wrap_args(args)?;
+    let query = encryption::key_wrap::cli::key_wrap_args(args)?;
     ctx.settle_local_command_work()?;
-    let lookup = encryption::commands::lookup_key_wrap(ctx.runtime(), query)?;
-    Ok(encryption::cli::key_wrap_lookup_output(&lookup))
+    let lookup = encryption::key_wrap::commands::lookup_key_wrap(ctx.runtime(), query)?;
+    Ok(encryption::key_wrap::cli::key_wrap_lookup_output(&lookup))
 }
 
 pub(crate) fn key_access(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let query = encryption::cli::key_access_args(args)?;
+    let query = encryption::key_wrap::cli::key_access_args(args)?;
     ctx.settle_local_command_work()?;
-    let status = encryption::commands::key_access(ctx.runtime(), query)?;
-    Ok(encryption::cli::key_access_status_output(&status))
+    let status = encryption::key_wrap::commands::key_access(ctx.runtime(), query)?;
+    Ok(encryption::key_wrap::cli::key_access_status_output(&status))
 }
 
 pub(crate) fn key_derive(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let limit = encryption::cli::key_derive_limit(args)?;
-    let before = encryption::commands::local_key_secret_count(ctx.runtime());
-    let scanned_key_wraps = encryption::commands::key_wrap_count(ctx.runtime())?;
+    let limit = encryption::key_wrap::cli::key_derive_limit(args)?;
+    let before = encryption::key_wrap::commands::local_key_secret_count(ctx.runtime());
+    let scanned_key_wraps = encryption::key_wrap::commands::key_wrap_count(ctx.runtime())?;
     ctx.runtime_mut()
         .process_command_work_until_idle(4, limit)?;
-    let after = encryption::commands::local_key_secret_count(ctx.runtime());
+    let after = encryption::key_wrap::commands::local_key_secret_count(ctx.runtime());
     Ok(CliOutput::lines(vec![
         format!("scanned_key_wraps: {scanned_key_wraps}"),
         format!("derived_key_secrets: {}", after.saturating_sub(before)),
@@ -312,11 +312,11 @@ pub(crate) fn key_derive(
 }
 
 pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let args = encryption::cli::key_node_args(args)?;
+    let args = encryption::key_wrap::cli::key_node_args(args)?;
     ctx.settle_local_command_work()?;
-    let output = encryption::commands::create_history_node(
+    let output = encryption::key_wrap::commands::create_history_node(
         ctx.runtime(),
-        encryption::commands::CreateHistoryNode {
+        encryption::key_wrap::commands::CreateHistoryNode {
             created_at_ms: SystemClock.next_timestamp(),
             workspace_id: args.workspace_id,
             removal_frontier_id: args.removal_frontier_id,
@@ -327,28 +327,28 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
         },
     )?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(encryption::cli::history_node_output(&receipt))
+    Ok(encryption::key_wrap::cli::history_node_output(&receipt))
 }
 
 pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let workspace_id = encryption::cli::keys_workspace_id(args)?;
+    let workspace_id = encryption::key_wrap::cli::keys_workspace_id(args)?;
     ctx.settle_local_command_work()?;
-    let report = encryption::commands::key_status_report(ctx.runtime(), workspace_id)?;
-    Ok(encryption::cli::keys_output(&report))
+    let report = encryption::key_wrap::commands::key_status_report(ctx.runtime(), workspace_id)?;
+    Ok(encryption::key_wrap::cli::keys_output(&report))
 }
 
 pub(crate) fn chop_now(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let args = encryption::cli::chop_now_args(args)?;
+    let args = encryption::key_wrap::cli::chop_now_args(args)?;
     ctx.settle_local_command_work()?;
-    let receipt = encryption::commands::chop_now(
+    let receipt = encryption::key_wrap::commands::chop_now(
         ctx.runtime_mut(),
-        encryption::commands::ChopNow {
+        encryption::key_wrap::commands::ChopNow {
             workspace_id: args.workspace_id,
             floor_minute: args.floor_minute,
             created_at_ms: SystemClock.next_timestamp(),
         },
     )?;
-    Ok(encryption::cli::chop_now_output(&receipt))
+    Ok(encryption::key_wrap::cli::chop_now_output(&receipt))
 }
 
 pub(crate) fn disappearing_set(

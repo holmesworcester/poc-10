@@ -20,7 +20,7 @@ use crate::core::projectors::{
 };
 use crate::protocol::content::message_deletion;
 use crate::protocol::encryption;
-use crate::protocol::encryption::coverage;
+use crate::protocol::encryption::local_history_node_secret::project as coverage;
 use crate::protocol::identity;
 use crate::protocol::identity::user;
 use crate::protocol::content::purge_deleted_message::{
@@ -290,8 +290,8 @@ fn matched_secret_payload<'a>(
         if !coverage::secret_coverage_offer_valid_for_need(need, offer) {
             return Err("content message secret context offer does not match need".to_string());
         }
-        if encryption::layout::decode_local_key_secret(payload.body()).is_ok()
-            || encryption::layout::decode_local_history_node_secret(payload.body()).is_ok()
+        if encryption::local_key_secret::layout::decode_local_key_secret(payload.body()).is_ok()
+            || encryption::local_history_node_secret::layout::decode_local_history_node_secret(payload.body()).is_ok()
         {
             return Ok(Some(payload));
         }
@@ -303,7 +303,7 @@ fn decrypt_text(
     message: &super::fact::ContentMessageFact,
     secret_payload: &Fact,
 ) -> Result<String, String> {
-    let key = if let Ok(secret) = encryption::layout::decode_local_key_secret(secret_payload.body())
+    let key = if let Ok(secret) = encryption::local_key_secret::layout::decode_local_key_secret(secret_payload.body())
     {
         if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
         {
@@ -311,7 +311,7 @@ fn decrypt_text(
         }
         secret.key_secret
     } else {
-        let node = encryption::layout::decode_local_history_node_secret(secret_payload.body())
+        let node = encryption::local_history_node_secret::layout::decode_local_history_node_secret(secret_payload.body())
             .map_err(|_| "content message secret context is not local key material".to_string())?;
         if node.workspace_id != message.workspace_id || node.frontier_id != message.frontier_id {
             return Err("content message history secret does not match message".to_string());
@@ -459,8 +459,8 @@ mod projector_tests {
     use topo::protocol::content::message::{layout, project, rows};
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::layout as deletion_layout;
-    use topo::protocol::encryption::coverage;
-    use topo::protocol::encryption::{
+    use topo::protocol::encryption::local_history_node_secret::project as coverage;
+    use topo::protocol::encryption::local_key_secret::{
         fact::LocalKeySecretFact, layout as encryption_layout,
     };
     use topo::protocol::identity::endpoint_shared::{

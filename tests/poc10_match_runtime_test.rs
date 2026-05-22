@@ -10,10 +10,10 @@ use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::content::message as content_message;
-use topo::protocol::encryption::{
-    fact::{LocalKeySecretFact, RemovalFrontierFact},
-    layout as encryption_layout,
-};
+use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
+use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::encryption::removal_frontier::fact::RemovalFrontierFact;
+use topo::protocol::encryption::removal_frontier::layout as removal_frontier_layout;
 use topo::protocol::identity::signed_fact::create as signed_fact_create;
 use topo::protocol::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
@@ -162,7 +162,7 @@ fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) ->
     Fact::new(
         workspace_scope(workspace_id),
         1,
-        encryption_layout::encode_removal_frontier(&body).expect("encode removal frontier"),
+        removal_frontier_layout::encode_removal_frontier(&body).expect("encode removal frontier"),
     )
 }
 
@@ -175,7 +175,7 @@ fn local_key_secret_fact(
     Fact::new(
         FactScope::Local,
         1,
-        encryption_layout::encode_local_key_secret(&LocalKeySecretFact {
+        local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
             frontier_id,
             owner_endpoint_id,

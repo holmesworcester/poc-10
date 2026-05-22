@@ -1,11 +1,13 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-use topo::protocol::encryption::fact::{
-    LocalHistoryNodeSecretFact, LocalKeySecretFact, RemovalFrontierFact,
-};
-use topo::protocol::encryption::{
-    layout as encryption_layout, project::EncryptionProjector,
-};
+use topo::protocol::encryption::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
+use topo::protocol::encryption::local_history_node_secret::layout as local_history_layout;
+use topo::protocol::encryption::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
+use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
+use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::encryption::local_key_secret::project::LocalKeySecretProjector;
+use topo::protocol::encryption::removal_frontier::fact::RemovalFrontierFact;
+use topo::protocol::encryption::removal_frontier::layout as removal_frontier_layout;
 
 #[test]
 fn local_key_secret_waits_for_frontier_then_offers_root_material() {
@@ -13,7 +15,7 @@ fn local_key_secret_waits_for_frontier_then_offers_root_material() {
     let owner = [2; 32];
     let frontier = frontier_fact(workspace, owner, 10);
     let root = local_key_secret_fact(workspace, frontier.id, owner, 11);
-    let projector = EncryptionProjector::new();
+    let projector = LocalKeySecretProjector::new();
 
     let waiting = projector
         .project(&root, &ProjectionContext::default())
@@ -50,7 +52,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
     let frontier = frontier_fact(workspace, owner, 20);
     let root = local_key_secret_fact(workspace, frontier.id, owner, 21);
     let node = history_node_fact(workspace, frontier.id, owner, root.id, [0; 32], 30, 1);
-    let projector = EncryptionProjector::new();
+    let projector = LocalHistoryNodeSecretProjector::new();
 
     let waiting = projector
         .project(&node, &ProjectionContext::default())
@@ -99,7 +101,7 @@ fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at
     Fact::new(
         topo::protocol::identity::workspace::scope(workspace_id),
         created_at_ms,
-        encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
+        removal_frontier_layout::encode_removal_frontier(&RemovalFrontierFact {
             workspace_id,
             owner_endpoint_id,
             created_at_ms,
@@ -117,7 +119,7 @@ fn local_key_secret_fact(
     Fact::new(
         FactScope::Local,
         created_at_ms,
-        encryption_layout::encode_local_key_secret(&LocalKeySecretFact {
+        local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id,
             frontier_id,
             owner_endpoint_id,
@@ -140,7 +142,7 @@ fn history_node_fact(
     Fact::new(
         FactScope::Local,
         31,
-        encryption_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
+        local_history_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id,
             frontier_id,
             owner_endpoint_id,

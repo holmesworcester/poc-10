@@ -2,12 +2,7 @@
 //!
 //! Projected key-wrap rows index signed wraps by the coordinate that later
 //! wrap creation and unwrapping need: workspace, frontier, recipient, source
-//! kind, and history address. The row stores the accepted wrap plus signer
-//! public key so later work can avoid re-running broad fact scans.
-//!
-//! Keep durable lookup shape here. Signature verification and frontier
-//! authority belong to projection; encryption commands and intent handlers read
-//! these rows as already-admitted state.
+//! kind, and history address.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
@@ -59,7 +54,7 @@ pub fn decode_key_wrap_row(key: &[u8], value: &[u8]) -> Result<KeyWrapRow, Strin
 mod tests {
     use super::*;
 
-    use crate::protocol::encryption::fact::{KeyWrapFact, WrappedSecretKind};
+    use crate::protocol::encryption::key_wrap::fact::{KeyWrapFact, WrappedSecretKind};
 
     #[test]
     fn accepted_key_wrap_row_round_trips_by_coordinate() {

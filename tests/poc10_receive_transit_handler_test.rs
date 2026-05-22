@@ -10,10 +10,11 @@ use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
-use topo::protocol::encryption::fact::{
+use topo::protocol::encryption::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::protocol::encryption::{create as encryption_create, layout as encryption_layout};
+use topo::protocol::encryption::key_wrap::create as encryption_create;
+use topo::protocol::encryption::key_wrap::layout as encryption_layout;
 use topo::protocol::identity;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;

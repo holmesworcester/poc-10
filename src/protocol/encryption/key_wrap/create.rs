@@ -1,30 +1,29 @@
-//! Pure constructors and validators for derived encryption facts.
+//! Pure constructors and validators for derived key-wrap facts.
 //!
 //! Projection and intent handlers use this module when context has already
 //! supplied the exact facts needed to create or admit a key wrap, unwrap a key
-//! wrap into local secret material, or purge retired recipient material. The
-//! functions here should remain deterministic: the same intent and context
-//! facts produce the same output fact ids.
-//!
-//! Keep cryptographic binding and coordinate validation here. Command code may
-//! choose when to ask for work, and intent handlers may choose when inputs are
-//! available, but this module owns the invariants that ciphertext associated
-//! data, signer identity, frontier ownership, recipient keys, and unwrapped
-//! target ids all match.
+//! wrap into local secret material, or purge retired recipient material.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::protocol::identity::signed_fact;
 
-use super::fact::{
-    KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
-    RecipientKeyFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
-};
-use super::intent::{
-    CreateKeyWrapIntent, PurgeRetiredRecipientMaterialIntent, UnwrapKeyWrapIntent,
-};
+use crate::protocol::encryption::create_key_wrap::CreateKeyWrapIntent;
+use crate::protocol::encryption::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
+use crate::protocol::encryption::local_history_node_secret::layout as local_history_layout;
+use crate::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
+use crate::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
+use crate::protocol::encryption::local_recipient_key::fact::LocalRecipientKeyFact;
+use crate::protocol::encryption::local_recipient_key::layout as local_recipient_layout;
+use crate::protocol::encryption::purge_retired_recipient_material::PurgeRetiredRecipientMaterialIntent;
+use crate::protocol::encryption::recipient_key::fact::RecipientKeyFact;
+use crate::protocol::encryption::recipient_key::layout as recipient_key_layout;
+use crate::protocol::encryption::removal_frontier::layout as removal_frontier_layout;
+use crate::protocol::encryption::unwrap_key_wrap::UnwrapKeyWrapIntent;
+
+use super::fact::{KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES};
 use super::layout;
-use crate::protocol::encryption::wrap_source;
+use super::project::WrapSourceKind;
 
 pub const KEY_WRAP_PURPOSE: &[u8] = b"topo key wrap v1";
 
@@ -48,7 +47,7 @@ pub fn create_key_wrap_fact(
     recipient_fact: &Fact,
     source_fact: &Fact,
 ) -> Result<Fact, String> {
-    let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
+    let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
     if recipient_fact.id != intent.recipient_key_id {
         return Err("recipient fact id does not match create_key_wrap intent".to_string());
     }
@@ -127,18 +126,18 @@ pub fn unwrap_key_wrap_fact(
     let wrap = layout::decode_key_wrap(&envelope.payload)?;
     require_unwrap_coordinate(intent, &wrap)?;
 
-    let recipient = layout::decode_recipient_key(&recipient_fact.bytes)?;
+    let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
     if recipient.workspace_id != intent.workspace_id {
         return Err("recipient key workspace does not match unwrap intent".to_string());
     }
-    let frontier = layout::decode_removal_frontier(&frontier_fact.bytes)?;
+    let frontier = removal_frontier_layout::decode_removal_frontier(&frontier_fact.bytes)?;
     if frontier.workspace_id != intent.workspace_id {
         return Err("removal frontier workspace does not match unwrap intent".to_string());
     }
     if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not own unwrap frontier".to_string());
     }
-    let local = layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
+    let local = local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
     require_local_recipient_key(intent, &recipient, &local)?;
 
     let plaintext = crypto::x25519_xchacha20poly1305_decrypt(
@@ -212,7 +211,7 @@ pub fn validate_retired_recipient_material(
     if local_recipient_key_fact.scope != FactScope::Local {
         return Err("retired recipient material is not local".to_string());
     }
-    let local = layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
+    let local = local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
     if local.workspace_id != intent.workspace_id {
         return Err("retired recipient material workspace mismatch".to_string());
     }
@@ -227,18 +226,19 @@ fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<Wra
         return Err("source fact id does not match create_key_wrap intent".to_string());
     }
     match intent.source {
-        wrap_source::WrapSourceKind::FrontierRoot => {
-            let source = layout::decode_local_key_secret(&source_fact.bytes)?;
+        WrapSourceKind::FrontierRoot => {
+            let source = local_key_secret_layout::decode_local_key_secret(&source_fact.bytes)?;
             require_source_workspace_and_frontier(intent, source.workspace_id, source.frontier_id)?;
             Ok(root_material(source_fact.id, source))
         }
-        wrap_source::WrapSourceKind::HistoryNode {
+        WrapSourceKind::HistoryNode {
             range_start,
             range_width,
             bit_depth,
             fact_id_prefix,
         } => {
-            let source = layout::decode_local_history_node_secret(&source_fact.bytes)?;
+            let source =
+                local_history_layout::decode_local_history_node_secret(&source_fact.bytes)?;
             require_source_workspace_and_frontier(intent, source.workspace_id, source.frontier_id)?;
             if source.range_start != range_start
                 || source.range_width != range_width
@@ -249,11 +249,7 @@ fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<Wra
                     "history source coordinate does not match create_key_wrap intent".to_string(),
                 );
             }
-            Ok(history_material(
-                source_fact.id,
-                source_fact.timestamp,
-                source,
-            ))
+            Ok(history_material(source_fact.id, source_fact.timestamp, source))
         }
     }
 }
@@ -332,9 +328,9 @@ fn root_secret_fact(
     key_secret: crypto::XChaCha20Poly1305Key,
 ) -> Result<Fact, String> {
     Ok(Fact::new(
-        crate::core::facts::FactScope::Local,
+        FactScope::Local,
         wrap.created_at_ms,
-        layout::encode_local_key_secret(&LocalKeySecretFact {
+        local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
             workspace_id: wrap.workspace_id,
             frontier_id: wrap.frontier_id,
             owner_endpoint_id: wrap.signer_endpoint_id,
@@ -349,9 +345,9 @@ fn history_secret_fact(
     node_secret: crypto::XChaCha20Poly1305Key,
 ) -> Result<Fact, String> {
     Ok(Fact::new(
-        crate::core::facts::FactScope::Local,
+        FactScope::Local,
         wrap.created_at_ms,
-        layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
+        local_history_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id: wrap.workspace_id,
             frontier_id: wrap.frontier_id,
             owner_endpoint_id: wrap.signer_endpoint_id,
@@ -451,6 +447,8 @@ fn associated_data(wrap: &KeyWrapFact) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::encryption::recipient_key::fact::RecipientKeyFact;
+    use crate::protocol::encryption::recipient_key::layout as recipient_key_layout;
 
     fn signed_key_wrap_bytes() -> (Vec<u8>, KeyWrapFact) {
         let signer_private_key = [9; 32];
@@ -498,7 +496,7 @@ mod tests {
     fn admit_signed_key_wrap_rejects_other_signed_payloads() {
         let signer_private_key = [9; 32];
         let signer_id = [2; 32];
-        let payload = layout::encode_recipient_key(&RecipientKeyFact {
+        let payload = recipient_key_layout::encode_recipient_key(&RecipientKeyFact {
             workspace_id: [1; 32],
             endpoint_id: signer_id,
             recipient_key: [3; 32],

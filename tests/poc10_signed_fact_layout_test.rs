@@ -1,11 +1,14 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{ProjectionContext, Projector};
-use topo::protocol::encryption::fact::{
-    KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
-    WrappedSecretKind,
-};
-use topo::protocol::encryption::layout as key_wrap_layout;
+use topo::protocol::encryption::key_wrap::fact::{KeyWrapFact, WrappedSecretKind};
+use topo::protocol::encryption::key_wrap::layout as key_wrap_layout;
+use topo::protocol::encryption::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
+use topo::protocol::encryption::local_history_node_secret::layout as local_history_layout;
+use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
+use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::encryption::local_recipient_key::fact::LocalRecipientKeyFact;
+use topo::protocol::encryption::local_recipient_key::layout as local_recipient_layout;
 use topo::protocol::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::identity::signed_fact::project::SignedFactProjector;
 use topo::protocol::identity::signed_fact::{create, layout};
@@ -146,7 +149,7 @@ fn signed_fact_rejects_private_payload_tags() {
         private_key,
     })
     .expect("encode local signer secret");
-    let local_root_payload = key_wrap_layout::encode_local_key_secret(&LocalKeySecretFact {
+    let local_root_payload = local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
         workspace_id: [1; 32],
         frontier_id: [3; 32],
         owner_endpoint_id: signer_id,
@@ -155,7 +158,7 @@ fn signed_fact_rejects_private_payload_tags() {
     })
     .expect("encode local root");
     let local_history_payload =
-        key_wrap_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
+        local_history_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id: [1; 32],
             frontier_id: [3; 32],
             owner_endpoint_id: signer_id,
@@ -169,7 +172,7 @@ fn signed_fact_rejects_private_payload_tags() {
         })
         .expect("encode local history");
     let local_recipient_payload =
-        key_wrap_layout::encode_local_recipient_key(&LocalRecipientKeyFact {
+        local_recipient_layout::encode_local_recipient_key(&LocalRecipientKeyFact {
             workspace_id: [1; 32],
             recipient_key_id: [3; 32],
             recipient_key: crypto::x25519_public_key(&[4; 32]),
