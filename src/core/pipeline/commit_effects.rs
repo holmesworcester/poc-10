@@ -27,9 +27,21 @@
 //! checks failures that do not need SQL: conflicting duplicate intents inside a
 //! batch and row mutations aimed at tables outside the runtime allowlist. The
 //! commit functions then rely on the store for the state-dependent checks:
-//! content-addressed facts must match their ids, row-table inserts must be
-//! exact duplicates if they already exist, typed-table inserts must match the
-//! full supplied row, and intent queue inserts must keep `(kind, key)` stable.
+//! content-addressed facts must match their ids, opaque row-table `PutRow`
+//! effects must be new rows or exact duplicates, typed-table inserts must match
+//! the full supplied row, and intent queue inserts must keep `(kind, key)`
+//! stable.
+//!
+//! That row-table rule is not the rule for all projection state. Context rows
+//! and time wakes are replaced by owner in `pipeline::context` and
+//! `pipeline::project_pending_facts` before this helper commits shared effects.
+//! Typed-table projections can also change visible state by emitting explicit
+//! `DeleteWhere` and `InsertValues` mutations in the desired order. The opaque
+//! `PutRow` path is narrower: it is for facts whose derived row key should
+//! continue to name the same bytes across retries and later context wakeups. If
+//! new context should change the value for an existing logical row, the protocol
+//! should model that as typed-table delete/insert state or choose a different
+//! row key, not rely on `PutRow` as an upsert.
 //!
 //! The commit order is part of the contract. Purges run first so stale
 //! core-owned rows disappear before new facts and derived rows become visible.
@@ -139,6 +151,11 @@ fn validate_row_mutations(
 /// columns and predicates rather than the generic `row_key/row_value` shape.
 /// The split keeps the store's opaque-row API narrow while letting this file
 /// apply all row effects in one ordered commit pass.
+///
+/// This also means opaque `PutRow` is not an update primitive. Inserts run
+/// before deletes, so a same-batch delete and put for the same key is not a
+/// replacement operation. Use typed-table mutations when projection needs
+/// explicit delete-then-insert state changes.
 fn row_mutation_rows(
     mutations: &[RowMutation],
     allowed_tables: &[TableName],
@@ -272,6 +289,11 @@ pub(crate) fn commit_pipeline_effects_in_tx(
 /// idempotence check. If SQLite ignores the insert because a primary key or
 /// unique index already exists, the existing row must match every supplied
 /// column or the effect is rejected as a conflict.
+///
+/// A typed table can still express changing projection state: emit a
+/// `DeleteWhere` for the old logical row before an `InsertValues` for the new
+/// row. The typed mutation loop preserves the order chosen by the protocol
+/// module.
 fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<usize> {
     validate_columns_and_values(insert.columns, &insert.values, "insert")?;
     let table = quoted_table_name(insert.table)?;

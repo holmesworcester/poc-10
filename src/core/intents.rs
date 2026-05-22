@@ -85,7 +85,8 @@ pub struct TableDelete {
 ///
 /// This is for schema-declared tables whose key is not the generic
 /// `row_key/row_value` shape. The insert is idempotent only when an existing
-/// row has exactly the same column values.
+/// row has exactly the same column values. To change typed projection state,
+/// emit a matching `DeleteWhere` before the replacement insert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInsert {
     /// Typed table to insert into.
@@ -112,6 +113,11 @@ pub struct TableDeleteWhere {
 /// Core validates the target table against the runtime description before any
 /// mutation commits. The module that constructs the mutation owns the row
 /// layout and semantic meaning.
+///
+/// `PutRow` is an idempotent insert into an opaque key/value row table, not an
+/// upsert. Re-emitting the same key with different bytes is a conflict. Use
+/// typed-table mutations when projection needs explicit delete-then-insert
+/// state changes for the same logical row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowMutation {
     PutRow(TableRow),
