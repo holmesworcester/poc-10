@@ -19,7 +19,6 @@ use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_
 
 use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 
-
 #[derive(Debug, Clone, Default)]
 pub struct RecipientKeyProjector;
 

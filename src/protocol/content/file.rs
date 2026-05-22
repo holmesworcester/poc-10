@@ -33,8 +33,7 @@ pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<fact::ContentF
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload =
-        crate::protocol::content::message::project::DecodedFact<fact::ContentFileFact>;
+    type Payload = crate::protocol::content::message::project::DecodedFact<fact::ContentFileFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         crate::protocol::content::message::project::decode_raw_or_signed_fact(

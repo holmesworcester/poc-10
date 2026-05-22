@@ -149,14 +149,15 @@ fn signed_fact_rejects_private_payload_tags() {
         private_key,
     })
     .expect("encode local signer secret");
-    let local_root_payload = local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
-        workspace_id: [1; 32],
-        frontier_id: [3; 32],
-        owner_endpoint_id: signer_id,
-        created_at_ms: 10,
-        key_secret: [4; 32],
-    })
-    .expect("encode local root");
+    let local_root_payload =
+        local_key_secret_layout::encode_local_key_secret(&LocalKeySecretFact {
+            workspace_id: [1; 32],
+            frontier_id: [3; 32],
+            owner_endpoint_id: signer_id,
+            created_at_ms: 10,
+            key_secret: [4; 32],
+        })
+        .expect("encode local root");
     let local_history_payload =
         local_history_layout::encode_local_history_node_secret(&LocalHistoryNodeSecretFact {
             workspace_id: [1; 32],

@@ -19,14 +19,14 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
 use crate::protocol::content::message_deletion;
-use crate::protocol::encryption;
-use crate::protocol::encryption::local_history_node_secret::project as coverage;
-use crate::protocol::identity;
-use crate::protocol::identity::user;
 use crate::protocol::content::purge_deleted_message::{
     self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
 };
 use crate::protocol::content::purge_expired_message::{self, PurgeExpiredMessage};
+use crate::protocol::encryption;
+use crate::protocol::encryption::local_history_node_secret::project as coverage;
+use crate::protocol::identity;
+use crate::protocol::identity::user;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{
@@ -233,9 +233,8 @@ fn validate_author_user(
         return Err("message author context payload id mismatch".to_string());
     }
     let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "message author context")?;
-    let author =
-        crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
-            .map_err(|_| "message author context is not an identity user".to_string())?;
+    let author = crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
+        .map_err(|_| "message author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("message author workspace does not match message".to_string());
     }
@@ -281,7 +280,10 @@ fn matched_secret_payload<'a>(
             return Err("content message secret context offer does not match need".to_string());
         }
         if encryption::local_key_secret::layout::decode_local_key_secret(payload.body()).is_ok()
-            || encryption::local_history_node_secret::layout::decode_local_history_node_secret(payload.body()).is_ok()
+            || encryption::local_history_node_secret::layout::decode_local_history_node_secret(
+                payload.body(),
+            )
+            .is_ok()
         {
             return Ok(Some(payload));
         }
@@ -293,7 +295,8 @@ fn decrypt_text(
     message: &super::fact::ContentMessageFact,
     secret_payload: &Fact,
 ) -> Result<String, String> {
-    let key = if let Ok(secret) = encryption::local_key_secret::layout::decode_local_key_secret(secret_payload.body())
+    let key = if let Ok(secret) =
+        encryption::local_key_secret::layout::decode_local_key_secret(secret_payload.body())
     {
         if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
         {
@@ -301,8 +304,10 @@ fn decrypt_text(
         }
         secret.key_secret
     } else {
-        let node = encryption::local_history_node_secret::layout::decode_local_history_node_secret(secret_payload.body())
-            .map_err(|_| "content message secret context is not local key material".to_string())?;
+        let node = encryption::local_history_node_secret::layout::decode_local_history_node_secret(
+            secret_payload.body(),
+        )
+        .map_err(|_| "content message secret context is not local key material".to_string())?;
         if node.workspace_id != message.workspace_id || node.frontier_id != message.frontier_id {
             return Err("content message history secret does not match message".to_string());
         }
@@ -593,7 +598,6 @@ pub fn context_payload<'a>(
     context.payload_for_checked(need, label)
 }
 
-
 #[cfg(test)]
 mod projector_tests {
     use crate as topo;
@@ -826,9 +830,8 @@ mod projector_tests {
         let frontier_id = [3; 32];
         let minute = 3;
         let nonce = [7; crate::protocol::content::message::fact::NONCE_BYTES];
-        let plaintext =
-            topo::protocol::content::message::create::pad_plaintext(text.as_bytes())
-                .expect("pad plaintext");
+        let plaintext = topo::protocol::content::message::create::pad_plaintext(text.as_bytes())
+            .expect("pad plaintext");
         let ciphertext = crypto::xchacha20poly1305_encrypt(
             &key,
             &topo::protocol::content::message::create::associated_data(

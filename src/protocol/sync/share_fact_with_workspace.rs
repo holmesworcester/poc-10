@@ -9,9 +9,9 @@ use crate::core::{
     facts::{Fact, FactId},
     intents::{HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind},
 };
-use crate::protocol::sync::shared_fact;
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::sync::seed_connection;
+use crate::protocol::sync::shared_fact;
 
 pub const SHARE_FACT_WITH_WORKSPACE: &str = "share_fact_with_workspace";
 

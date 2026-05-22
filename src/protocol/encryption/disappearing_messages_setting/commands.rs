@@ -12,10 +12,10 @@ use crate::core::intents::RowMutation;
 use crate::core::pipeline::commit_pipeline_effects_to_store;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
-use crate::protocol::{content, identity};
 use crate::protocol::content::purge_below_retention_floor::{
     purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
 };
+use crate::protocol::{content, identity};
 use std::collections::BTreeSet;
 
 use super::fact::{DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE};

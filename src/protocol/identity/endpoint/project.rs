@@ -6,7 +6,8 @@
 //!   2. CONTEXT. No remote context is accepted; this is local identity secret
 //!      material.
 //!   3. MATERIALIZE. Write the four local endpoint rows for public/secret and
-//!      signing public/secret material.
+//!      signing public/secret material, and publish local endpoint context keyed
+//!      by the endpoint id for bootstrap receive projection.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -49,6 +50,13 @@ impl TypedProjector<super::Codec> for EndpointProjector {
 
         // 3. Materialize.
         let mut output = ProjectionOutput::new();
+        output = output.offer(crate::core::context::ContextOffer::range(
+            fact.id,
+            "identity_local_endpoint",
+            crate::core::facts::FactScope::Local,
+            endpoint.endpoint,
+            endpoint.endpoint,
+        ));
         for row in endpoint_rows(&endpoint) {
             output = output.row_mutation(RowMutation::PutRow(row));
         }

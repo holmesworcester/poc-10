@@ -9,14 +9,14 @@ use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::transport::transit::frame as transit_frame;
 use topo::protocol::transport::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use topo::protocol::transport::send_network_frame;
-use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
+use topo::protocol::transport::transit::frame as transit_frame;
 
 fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
     let connection = ConnectionResponseFact {

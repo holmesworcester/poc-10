@@ -32,8 +32,7 @@ pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<MessageDeletio
             semantic_message_deletion(layout::decode_fact(fact.body())?)
         }
         Some(crate::protocol::identity::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope =
-                crate::protocol::identity::signed_fact::decode_envelope(fact.body())?;
+            let envelope = crate::protocol::identity::signed_fact::decode_envelope(fact.body())?;
             match envelope.inner_type {
                 layout::TYPE_CONTENT_MESSAGE_DELETION => {
                     semantic_message_deletion(layout::decode_fact(&envelope.payload)?)
@@ -58,9 +57,8 @@ fn semantic_message_deletion(
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = crate::protocol::content::message::project::DecodedFact<
-        fact::ContentMessageDeletionFact,
-    >;
+    type Payload =
+        crate::protocol::content::message::project::DecodedFact<fact::ContentMessageDeletionFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         crate::protocol::content::message::project::decode_raw_or_signed_fact(

@@ -59,7 +59,9 @@
 //! modules.
 
 use crate::core::effects::PipelineEffects;
-use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
+use crate::core::fact_store::{
+    insert_ephemeral_fact_in_tx, insert_fact_and_pending_in_tx, purge_fact_in_tx,
+};
 use crate::core::intents::{Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert};
 use crate::core::schema::LOCAL_INTENTS;
 use crate::core::select::Value as SqlValue;
@@ -242,6 +244,10 @@ pub(crate) fn commit_pipeline_effects_in_tx(
         if insert_fact_and_pending_in_tx(tx, fact)? {
             facts += 1;
         }
+    }
+
+    for fact in &effects.ephemeral_facts {
+        insert_ephemeral_fact_in_tx(tx, fact)?;
     }
 
     let (rows, deletes) =

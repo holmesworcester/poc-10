@@ -3,8 +3,9 @@
 //! Commands, projection, and intent handlers all reduce to this structure
 //! before the SQL pipeline commits their output. The structure is intentionally
 //! mechanical: it names facts to admit, facts to purge, row mutations, durable
-//! intents, and ephemeral intents. It does not contain callbacks, open
-//! sockets, command receipts, or protocol-specific execution state.
+//! intents, ephemeral intents, and ephemeral projection inputs. It does not
+//! contain callbacks, open sockets, command receipts, or protocol-specific
+//! execution state.
 //!
 //! If a new kind of runtime effect needs atomic commit with projection or
 //! intent dispatch, add it here and teach `pipeline::commit_effects` how to
@@ -18,6 +19,8 @@ use crate::core::intents::{Intent, RowMutation};
 pub struct PipelineEffects {
     /// New facts to admit and mark pending for projection.
     pub facts: Vec<Fact>,
+    /// Runtime-local projectable inputs that should not enter durable facts.
+    pub ephemeral_facts: Vec<Fact>,
     /// Existing facts to remove with their derived core-owned rows.
     pub purged_facts: Vec<FactId>,
     /// Protocol or core table mutations validated against the runtime allowlist.
@@ -35,6 +38,11 @@ impl PipelineEffects {
 
     pub fn fact(mut self, fact: Fact) -> Self {
         self.facts.push(fact);
+        self
+    }
+
+    pub fn ephemeral_fact(mut self, fact: Fact) -> Self {
+        self.ephemeral_facts.push(fact);
         self
     }
 
@@ -56,5 +64,14 @@ impl PipelineEffects {
     pub fn local_intent(mut self, intent: Intent) -> Self {
         self.local_intents.push(intent);
         self
+    }
+
+    pub(crate) fn effects_are_empty(&self) -> bool {
+        self.facts.is_empty()
+            && self.ephemeral_facts.is_empty()
+            && self.purged_facts.is_empty()
+            && self.row_mutations.is_empty()
+            && self.intents.is_empty()
+            && self.local_intents.is_empty()
     }
 }

@@ -28,6 +28,7 @@
 //! belongs in the protocol fact module and its projector.
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
+use crate::core::schema::EPHEMERAL_PROJECTION_INPUTS;
 use crate::core::store::Store;
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
@@ -53,6 +54,45 @@ pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqli
         "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
         params![owner.as_slice()],
     )
+}
+
+/// Insert a runtime-local projectable input.
+///
+/// Ephemeral inputs use the `Fact` container for id, scope, timestamp, and
+/// bytes, but they are not inserted into durable `facts` or
+/// `local_fact_admissions`. Projection may read durable context and emit durable
+/// facts, then the input row is removed according to the projection decision.
+pub(crate) fn insert_ephemeral_fact_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
+    let (scope, scope_kind, scope_id) = fact_scope_columns(&fact.scope);
+    let changed = store.conn().execute(
+        "INSERT OR IGNORE INTO ephemeral_projection_inputs
+            (id, scope, scope_kind, scope_id, received_at, bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            fact.id.as_slice(),
+            scope,
+            scope_kind,
+            scope_id.as_slice(),
+            sqlite_u64(fact.timestamp, "ephemeral fact received_at")?,
+            fact.bytes.as_slice()
+        ],
+    )?;
+    if changed == 0 {
+        let existing = ephemeral_fact_by_id_in_tx(store, &fact.id)?;
+        if existing.as_ref() != Some(fact) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "conflicting row for ephemeral projection input".to_string(),
+            ));
+        }
+    }
+    Ok(changed > 0)
+}
+
+pub(crate) fn delete_ephemeral_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
+    Ok(store.conn().execute(
+        "DELETE FROM ephemeral_projection_inputs WHERE id = ?1",
+        params![owner.as_slice()],
+    )? > 0)
 }
 
 /// Remove a fact and every durable row keyed to it.
@@ -172,6 +212,33 @@ pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
         .map_err(|err| format!("load fact rows: {err}"))
 }
 
+pub(crate) fn ephemeral_pending_fact_ids(
+    store: &Store,
+    limit: usize,
+) -> Result<Vec<FactId>, String> {
+    let limit =
+        i64::try_from(limit).map_err(|_| "ephemeral projection limit exceeds i64".to_string())?;
+    let mut stmt = store
+        .conn()
+        .prepare(&format!(
+            "SELECT id FROM {} ORDER BY received_at, id LIMIT ?1",
+            EPHEMERAL_PROJECTION_INPUTS.as_str()
+        ))
+        .map_err(|err| format!("load ephemeral projection inputs: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            fact_id_column(row.get::<_, Vec<u8>>(0)?, "ephemeral id")
+        })
+        .map_err(|err| format!("load ephemeral projection inputs: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load ephemeral projection inputs: {err}"))
+}
+
+pub(crate) fn ephemeral_fact_by_id(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
+    ephemeral_fact_by_id_in_tx(store, id)
+        .map_err(|err| format!("load ephemeral projection input: {err}"))
+}
+
 fn fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
     store
         .conn()
@@ -180,6 +247,20 @@ fn fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>
              FROM facts f
              JOIN local_fact_admissions m ON m.fact_id = f.id
              WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_sql_row,
+        )
+        .optional()
+}
+
+fn ephemeral_fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
+    store
+        .conn()
+        .query_row(
+            "SELECT id, scope, scope_kind, scope_id, received_at, bytes
+             FROM ephemeral_projection_inputs
+             WHERE id = ?1
              LIMIT 1",
             params![id.as_slice()],
             fact_from_sql_row,

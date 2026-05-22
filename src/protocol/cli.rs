@@ -249,8 +249,9 @@ pub(crate) fn key_recipient_rotation(
         .ok_or_else(|| encryption::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     ctx.settle_local_command_work()?;
-    let previous = encryption::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
-        .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
+    let previous =
+        encryption::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
+            .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
     let output = ctx.with_command_context(|command_context| {
         encryption::key_wrap::cli::key_recipient_rotation(command_context, args, previous)
     })?;

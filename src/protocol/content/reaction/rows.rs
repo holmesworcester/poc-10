@@ -35,14 +35,14 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableInsert, String> {
         return Err("reaction row ciphertext exceeds fixed slot".to_string());
     }
     Ok(read_models::CONTENT_REACTIONS.insert(vec![
-            Value::Bytes(input.workspace_id.to_vec()),
-            Value::Bytes(input.reaction_id.to_vec()),
-            Value::Bytes(input.target_message_id.to_vec()),
-            Value::Bytes(input.author_user_id.to_vec()),
-            Value::U64(input.created_at_ms),
-            Value::Bytes(input.nonce.to_vec()),
-            Value::Bytes(input.ciphertext),
-            Value::Bool(false),
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.reaction_id.to_vec()),
+        Value::Bytes(input.target_message_id.to_vec()),
+        Value::Bytes(input.author_user_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.nonce.to_vec()),
+        Value::Bytes(input.ciphertext),
+        Value::Bool(false),
     ]))
 }
 

@@ -212,9 +212,8 @@ fn validate_author_user(
         return Err("reaction author context payload id mismatch".to_string());
     }
     let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "reaction author")?;
-    let author =
-        crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
-            .map_err(|_| "reaction author context is not an identity user".to_string())?;
+    let author = crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
+        .map_err(|_| "reaction author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
     }

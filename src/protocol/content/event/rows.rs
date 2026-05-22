@@ -25,9 +25,9 @@ pub struct ContentEventRow {
 pub fn content_event_row(fact_id: [u8; 32], fact: &ContentEventFact) -> TableInsert {
     let payload_bytes: u64 = fact.payload.len() as u64;
     read_models::CONTENT_EVENTS.insert(vec![
-            Value::Bytes(fact.workspace_id.to_vec()),
-            Value::Bytes(fact_id.to_vec()),
-            Value::U64(fact.timestamp),
-            Value::U64(payload_bytes),
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(fact_id.to_vec()),
+        Value::U64(fact.timestamp),
+        Value::U64(payload_bytes),
     ])
 }

@@ -15,6 +15,8 @@ use crate::core::intents::{
 };
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::{effects::PipelineEffects, facts::Fact};
+use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::protocol::transport::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::{
     connection::response,
     identity::endpoint,
@@ -25,8 +27,6 @@ use crate::protocol::{
         layout::TRANSIT_LARGE_PLAINTEXT_BYTES,
     },
 };
-use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
-use crate::protocol::transport::send_network_frame::{self, SendNetworkFrame};
 
 pub type HandlerId = [u8; 32];
 
@@ -219,8 +219,8 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         }
         let batches = fact_batches(facts_for_work(work, context)?)?;
 
-        let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
-            .ok_or_else(|| {
+        let local_endpoint =
+            endpoint::create::local_endpoint(context.store()?)?.ok_or_else(|| {
                 HandlerError::fatal("send_facts_on_connection requires local endpoint state")
             })?;
         let (sender_endpoint, receiver_endpoint) = if local_endpoint.endpoint

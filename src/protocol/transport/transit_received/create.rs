@@ -1,4 +1,4 @@
-//! Canonical receive-origin address handling.
+//! Canonical receive-origin address construction.
 //!
 //! Receive provenance stores the observed peer socket address as canonical
 //! `SocketAddr::to_string()` bytes. Ingress can accept the invite-link-friendly
@@ -8,10 +8,13 @@ use std::net::SocketAddr;
 use std::str;
 use std::str::FromStr;
 
+/// Encode an observed socket address in the one representation admitted by the
+/// provenance fact layout.
 pub fn canonical_origin_addr_bytes(addr: SocketAddr) -> Vec<u8> {
     addr.to_string().into_bytes()
 }
 
+/// Normalize boundary input to canonical socket-address bytes.
 pub fn normalize_origin_addr_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let value = str::from_utf8(bytes)
         .map_err(|_| "transport::transit receive origin addr must be utf-8".to_string())?

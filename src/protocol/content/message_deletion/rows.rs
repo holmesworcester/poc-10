@@ -28,11 +28,11 @@ pub struct MessageDeletionRow {
 
 pub fn message_deletion_row(input: MessageDeletionRow) -> TableInsert {
     read_models::MESSAGE_DELETIONS.insert(vec![
-            Value::Bytes(input.workspace_id.to_vec()),
-            Value::Bytes(input.target_message_id.to_vec()),
-            Value::Bytes(input.deletion_id.to_vec()),
-            Value::U64(input.created_at_ms),
-            Value::Bytes(input.author_user_id.to_vec()),
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.target_message_id.to_vec()),
+        Value::Bytes(input.deletion_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.author_user_id.to_vec()),
     ])
 }
 

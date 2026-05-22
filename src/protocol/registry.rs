@@ -427,12 +427,32 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         encryption::key_wrap::cli::KEY_FRONTIER_USAGE,
         key_frontier
     ),
-    cli_command!("key-wrap", encryption::key_wrap::cli::KEY_WRAP_USAGE, key_wrap),
-    cli_command!("key-access", encryption::key_wrap::cli::KEY_ACCESS_USAGE, key_access),
-    cli_command!("key-derive", encryption::key_wrap::cli::KEY_DERIVE_USAGE, key_derive),
-    cli_command!("key-node", encryption::key_wrap::cli::KEY_NODE_USAGE, key_node),
+    cli_command!(
+        "key-wrap",
+        encryption::key_wrap::cli::KEY_WRAP_USAGE,
+        key_wrap
+    ),
+    cli_command!(
+        "key-access",
+        encryption::key_wrap::cli::KEY_ACCESS_USAGE,
+        key_access
+    ),
+    cli_command!(
+        "key-derive",
+        encryption::key_wrap::cli::KEY_DERIVE_USAGE,
+        key_derive
+    ),
+    cli_command!(
+        "key-node",
+        encryption::key_wrap::cli::KEY_NODE_USAGE,
+        key_node
+    ),
     cli_command!("keys", encryption::key_wrap::cli::KEYS_USAGE, keys),
-    cli_command!("chop-now", encryption::key_wrap::cli::CHOP_NOW_USAGE, chop_now),
+    cli_command!(
+        "chop-now",
+        encryption::key_wrap::cli::CHOP_NOW_USAGE,
+        chop_now
+    ),
     cli_command!(
         "disappearing-set",
         encryption::disappearing_messages_setting::cli::DISAPPEARING_SET_USAGE,
@@ -629,6 +649,7 @@ projector_routes! {
     project_sync_compare => sync::compare::layout::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector;
     project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector;
     project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector;
+    project_transit_input => transport::transit::layout::TYPE_TRANSIT_INPUT, transport::transit::project::TransitProjector;
     project_transit_received => transport::transit_received::layout::TYPE_TRANSIT_RECEIVED, transport::transit_received::project::TransitReceivedProjector;
     project_user_invite => identity::user_invite::layout::TYPE_USER_INVITE, identity::user_invite::project::UserInviteProjector;
     project_user => identity::user::layout::TYPE_USER, identity::user::project::UserProjector;

@@ -14,11 +14,11 @@ use crate::core::{
     },
     store::Store,
 };
-use crate::protocol::{connection, sync};
 use crate::protocol::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, send_shareable_bucket_on_connection_intent,
     SendFactsOnConnection,
 };
+use crate::protocol::{connection, sync};
 
 pub const SEED_CONNECTION_SYNC: &str = "seed_connection_sync";
 
@@ -128,8 +128,8 @@ mod tests {
     use crate::core::facts::{FactScope, ScopeKind};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
-    use crate::protocol::sync::shared_fact;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+    use crate::protocol::sync::shared_fact;
 
     #[test]
     fn seed_connection_sync_intent_round_trips() {

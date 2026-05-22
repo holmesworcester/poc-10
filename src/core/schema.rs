@@ -2,9 +2,9 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, intent queues, and the store-local clock. It exposes one
-//! executable `SchemaSource` plus typed `TableName` constants so the rest of
-//! core does not repeat string literals.
+//! projection, ephemeral projection inputs, intent queues, and the store-local
+//! clock. It exposes one executable `SchemaSource` plus typed `TableName`
+//! constants so the rest of core does not repeat string literals.
 //!
 //! These tables are the shared substrate behind the pipeline documentation.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
@@ -104,6 +104,17 @@ CREATE TEMP TABLE IF NOT EXISTS local_intents (
     PRIMARY KEY (kind, idempotence_key)
 );
 
+CREATE TEMP TABLE IF NOT EXISTS ephemeral_projection_inputs (
+    id BLOB PRIMARY KEY NOT NULL,
+    scope TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_id BLOB NOT NULL,
+    received_at INTEGER NOT NULL,
+    bytes BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ephemeral_projection_inputs_by_received_at
+    ON ephemeral_projection_inputs (received_at, id);
+
 CREATE TABLE IF NOT EXISTS clock (
     key TEXT PRIMARY KEY NOT NULL,
     timestamp INTEGER NOT NULL
@@ -126,3 +137,6 @@ pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_r
 pub(crate) const INTENTS: TableName = TableName::new("intents");
 /// Ephemeral intent queue table.
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
+/// Ephemeral projectable-input queue table.
+pub(crate) const EPHEMERAL_PROJECTION_INPUTS: TableName =
+    TableName::new("ephemeral_projection_inputs");

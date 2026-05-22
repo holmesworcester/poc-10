@@ -8,10 +8,10 @@
 //!
 //! Projectors are where protocol facts become protocol state. They decode the
 //! fact payload, check scope and context proofs, decide whether enough input is
-//! available, and emit rows, needs, offers, time wakes, or follow-up intents.
-//! They do not decide when projection runs and they do not write SQL directly;
-//! `pipeline::project_pending_facts` supplies the scheduling and commit
-//! boundary.
+//! available, and emit rows, needs, offers, time wakes, child facts, or follow-up
+//! intents. They do not decide when projection runs and they do not write SQL
+//! directly; `pipeline::project_pending_facts` supplies the scheduling and
+//! commit boundary.
 //!
 //! The replacement model is central. `ProjectionOutput` is not "patch these
 //! needs" or "add these time wakes"; it is the complete standing context and
@@ -312,7 +312,7 @@ pub struct ProjectionOutput {
     pub offers: Vec<ContextOffer>,
     /// Complete replacement time wakes for the projected fact.
     pub time_wakes: Vec<TimeWake>,
-    /// Row mutations and intents to commit with this projection.
+    /// Child facts, row mutations, and intents to commit with this projection.
     pub effects: PipelineEffects,
 }
 
@@ -338,6 +338,11 @@ impl ProjectionOutput {
 
     pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
         self.effects.row_mutations.push(mutation);
+        self
+    }
+
+    pub fn fact(mut self, fact: Fact) -> Self {
+        self.effects.facts.push(fact);
         self
     }
 

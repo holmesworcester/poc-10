@@ -9,7 +9,7 @@
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};
 
-use super::addr::normalize_origin_addr_bytes;
+use super::create::normalize_origin_addr_bytes;
 use super::fact::{
     TransitReceivedFact, ORIGIN_ADDR_BYTES, TRANSIT_KIND_BOOTSTRAP, TRANSIT_KIND_CONNECTION,
     TRANSIT_KIND_CONNECTION_HANDSHAKE,

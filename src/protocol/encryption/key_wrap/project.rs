@@ -15,11 +15,11 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::encryption::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
-use crate::protocol::encryption::local_key_secret;
 use crate::protocol::encryption::local_history_node_secret;
+use crate::protocol::encryption::local_key_secret;
 use crate::protocol::encryption::recipient_key;
 use crate::protocol::encryption::removal_frontier;
+use crate::protocol::encryption::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
 use crate::protocol::identity::{self, signed_fact};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 

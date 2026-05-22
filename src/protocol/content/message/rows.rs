@@ -48,26 +48,26 @@ pub struct OpenedMessageRow {
 
 pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableInsert {
     read_models::CONTENT_MESSAGES.insert(vec![
-            Value::Bytes(fact.workspace_id.to_vec()),
-            Value::Bytes(message_id.to_vec()),
-            Value::Bytes(fact.author_user_id.to_vec()),
-            Value::U64(fact.created_at_ms),
-            Value::Bytes(fact.signer_id.to_vec()),
-            Value::Bytes(fact.frontier_id.to_vec()),
-            Value::U64(fact.minute),
-            Value::Bytes(fact.leaf_id.to_vec()),
-            Value::Bool(false),
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(message_id.to_vec()),
+        Value::Bytes(fact.author_user_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.signer_id.to_vec()),
+        Value::Bytes(fact.frontier_id.to_vec()),
+        Value::U64(fact.minute),
+        Value::Bytes(fact.leaf_id.to_vec()),
+        Value::Bool(false),
     ])
 }
 
 pub fn opened_message_row(input: OpenedMessageRow) -> TableInsert {
     read_models::OPENED_MESSAGES.insert(vec![
-            Value::Bytes(input.workspace_id.to_vec()),
-            Value::Bytes(input.message_id.to_vec()),
-            Value::U64(input.created_at_ms),
-            Value::Bytes(input.author_user_id.to_vec()),
-            Value::Bytes(input.signer_id.to_vec()),
-            Value::Bytes(input.text.into_bytes()),
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.message_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.author_user_id.to_vec()),
+        Value::Bytes(input.signer_id.to_vec()),
+        Value::Bytes(input.text.into_bytes()),
     ])
 }
 
@@ -78,10 +78,10 @@ pub fn message_tombstone_row(
     created_at_ms: u64,
 ) -> TableInsert {
     read_models::MESSAGE_TOMBSTONES.insert(vec![
-            Value::Bytes(workspace_id.to_vec()),
-            Value::Bytes(message_id.to_vec()),
-            Value::Bytes(author_user_id.to_vec()),
-            Value::U64(created_at_ms / UNIX_MINUTE_MS),
+        Value::Bytes(workspace_id.to_vec()),
+        Value::Bytes(message_id.to_vec()),
+        Value::Bytes(author_user_id.to_vec()),
+        Value::U64(created_at_ms / UNIX_MINUTE_MS),
     ])
 }
 

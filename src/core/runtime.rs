@@ -28,7 +28,9 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
-use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION};
+use crate::core::schema::{
+    CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
+};
 use crate::core::store::{SchemaSource, Store, TableName};
 use std::path::Path;
 
@@ -217,6 +219,10 @@ impl Runtime {
         self.store
             .table_row_count(PENDING_PROJECTION)
             .expect("runtime pending fact count should load from store")
+            + self
+                .store
+                .table_row_count(EPHEMERAL_PROJECTION_INPUTS)
+                .expect("runtime ephemeral projection count should load from store")
     }
 
     /// Count durable plus ephemeral queued intents.

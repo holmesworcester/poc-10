@@ -224,9 +224,7 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactId, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-    use topo::protocol::content::message::{
-        fact::ContentMessageFact, layout as message_layout,
-    };
+    use topo::protocol::content::message::{fact::ContentMessageFact, layout as message_layout};
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::{layout, project, rows};
 

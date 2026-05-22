@@ -29,12 +29,12 @@ pub struct ContentFileSliceRow {
 
 pub fn content_file_slice_row(slice_fact_id: FactId, fact: &ContentFileSliceFact) -> TableInsert {
     read_models::FILE_SLICES.insert(vec![
-            Value::Bytes(fact.workspace_id.to_vec()),
-            Value::Bytes(fact.file_id.to_vec()),
-            Value::U64(u64::from(fact.slice_index)),
-            Value::Bytes(slice_fact_id.to_vec()),
-            Value::U64(fact.created_at_ms),
-            Value::Bytes(fact.ciphertext.clone()),
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(fact.file_id.to_vec()),
+        Value::U64(u64::from(fact.slice_index)),
+        Value::Bytes(slice_fact_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.ciphertext.clone()),
     ])
 }
 

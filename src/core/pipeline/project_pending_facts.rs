@@ -46,7 +46,10 @@ use super::context::{
 use super::WorkStatus;
 use crate::core::context::{diff_context_sets, ContextOffer, ContextSet, ContextSetDelta};
 use crate::core::effects::PipelineEffects;
-use crate::core::fact_store::{insert_fact_and_pending_in_tx, persisted_fact, purge_fact_in_tx};
+use crate::core::fact_store::{
+    delete_ephemeral_fact_in_tx, ephemeral_fact_by_id, ephemeral_pending_fact_ids,
+    insert_fact_and_pending_in_tx, persisted_fact, purge_fact_in_tx,
+};
 use crate::core::facts::{Fact, FactId};
 use crate::core::projectors::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
@@ -271,8 +274,8 @@ pub(crate) fn drain_pending_projection(
     Ok(total)
 }
 
-/// Process pending facts from SQLite one at a time until there is no work or
-/// `limit` facts have completed projection.
+/// Process pending durable facts and ephemeral inputs from SQLite one at a time
+/// until there is no work or `limit` inputs have completed projection.
 ///
 /// This is the readable entry point for the SQL-backed projection path:
 ///
@@ -294,7 +297,8 @@ fn process_pending_projection_batch(
         if progress.projected >= limit {
             break;
         }
-        let Some(pending_fact) = load_pending_fact(store, fact_id)? else {
+        let Some(pending_fact) = load_pending_fact(store, ProjectionSource::Durable, fact_id)?
+        else {
             store
                 .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
                 .map_err(|err| format!("purge stale pending fact: {err}"))?;
@@ -307,6 +311,29 @@ fn process_pending_projection_batch(
             allowed_tables,
             &mut progress,
         )?;
+    }
+
+    if progress.projected < limit {
+        for fact_id in ephemeral_pending_fact_ids(store, limit - progress.projected)? {
+            if progress.projected >= limit {
+                break;
+            }
+            let Some(pending_fact) =
+                load_pending_fact(store, ProjectionSource::Ephemeral, fact_id)?
+            else {
+                store
+                    .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
+                    .map_err(|err| format!("purge stale ephemeral projection input: {err}"))?;
+                continue;
+            };
+            process_pending_fact(
+                pending_fact,
+                projector,
+                store,
+                allowed_tables,
+                &mut progress,
+            )?;
+        }
     }
 
     Ok(progress)
@@ -325,7 +352,7 @@ fn process_pending_fact(
     progress: &mut ProjectionProgress,
 ) -> Result<(), String> {
     let effects = prepare_projection_effects(projector, pending_fact, store, allowed_tables)?;
-    commit_projection_effects(store, &effects, allowed_tables)?;
+    commit_projection_effects(store, &effects, projector, allowed_tables)?;
     progress.projected += 1;
     progress.status.progressed = true;
     Ok(())
@@ -351,6 +378,7 @@ fn prepare_projection_effects(
     allowed_tables: &[TableName],
 ) -> Result<ProjectionEffects, String> {
     let PendingFact {
+        source,
         fact_id,
         fact,
         previous_context,
@@ -365,6 +393,7 @@ fn prepare_projection_effects(
         allowed_tables,
     )?;
     Ok(ProjectionEffects {
+        source,
         fact_id,
         next_context: run.context,
         next_time_wakes: run.time_wakes,
@@ -404,11 +433,18 @@ fn run_projection_to_context_fixed_point(
 
 /// The uncommitted output of projecting one pending fact.
 struct ProjectionEffects {
+    source: ProjectionSource,
     fact_id: FactId,
     next_context: ContextSet,
     next_time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
     pipeline: PipelineEffects,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionSource {
+    Durable,
+    Ephemeral,
 }
 
 /// Commit one pending fact's complete projection result.
@@ -419,6 +455,11 @@ struct ProjectionEffects {
 /// newly woken dependent facts, protocol row mutations, and follow-up intents.
 /// If projection fails before this function, the pending row remains queued. If
 /// anything fails inside this transaction, SQLite rolls the whole boundary back.
+///
+/// Projector-emitted child facts are admitted and projected immediately inside
+/// this same transaction before residual row mutations and intents are written.
+/// That gives a projector one atomic decision: either the child can be stored,
+/// parked on durable context, or the whole projection fails and remains queued.
 ///
 /// Transaction contents:
 ///
@@ -432,10 +473,28 @@ struct ProjectionEffects {
 fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,
+    projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
 ) -> Result<(), String> {
     store
         .write_transaction(|tx| {
+            commit_projection_effects_in_tx(tx, effects, projector, allowed_tables, 0)?;
+            Ok(())
+        })
+        .map_err(|err| format!("commit projection effects: {err}"))
+}
+
+const CHILD_PROJECTION_DEPTH_LIMIT: usize = 16;
+
+fn commit_projection_effects_in_tx(
+    tx: &Store,
+    effects: &ProjectionEffects,
+    projector: &(impl Projector + ?Sized),
+    allowed_tables: &[TableName],
+    depth: usize,
+) -> rusqlite::Result<()> {
+    match effects.source {
+        ProjectionSource::Durable => {
             tx.conn().execute(
                 "DELETE FROM pending_projection WHERE owner = ?1",
                 params![effects.fact_id.as_slice()],
@@ -443,12 +502,72 @@ fn commit_projection_effects(
             delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
-
             wake_context_matches_in_tx(tx, &effects.context_delta).map_err(sqlite_string_error)?;
-            commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables)?;
-            Ok(())
-        })
-        .map_err(|err| format!("commit projection effects: {err}"))
+        }
+        ProjectionSource::Ephemeral => {
+            validate_ephemeral_projection(effects).map_err(sqlite_string_error)?;
+            delete_ephemeral_fact_in_tx(tx, effects.fact_id)?;
+        }
+    }
+
+    commit_projector_pipeline_effects_in_tx(tx, projector, allowed_tables, &effects.pipeline, depth)
+}
+
+fn validate_ephemeral_projection(effects: &ProjectionEffects) -> Result<(), String> {
+    if !effects.next_context.offers.is_empty() {
+        return Err("ephemeral projection input cannot emit durable offers".to_string());
+    }
+    if !effects.next_time_wakes.is_empty() {
+        return Err("ephemeral projection input cannot emit time wakes".to_string());
+    }
+    if !effects.next_context.needs.is_empty() && !effects.pipeline.effects_are_empty() {
+        return Err(
+            "ephemeral projection input cannot emit effects while unresolved needs remain"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn commit_projector_pipeline_effects_in_tx(
+    tx: &Store,
+    projector: &(impl Projector + ?Sized),
+    allowed_tables: &[TableName],
+    pipeline: &PipelineEffects,
+    depth: usize,
+) -> rusqlite::Result<()> {
+    if depth >= CHILD_PROJECTION_DEPTH_LIMIT {
+        return Err(sqlite_string_error(format!(
+            "child fact projection exceeded depth limit {CHILD_PROJECTION_DEPTH_LIMIT}"
+        )));
+    }
+
+    for fact in &pipeline.facts {
+        project_child_fact_in_tx(tx, projector, allowed_tables, fact, depth + 1)?;
+    }
+
+    let mut residual = pipeline.clone();
+    residual.facts.clear();
+    commit_pipeline_effects_in_tx(tx, &residual, allowed_tables)?;
+    Ok(())
+}
+
+fn project_child_fact_in_tx(
+    tx: &Store,
+    projector: &(impl Projector + ?Sized),
+    allowed_tables: &[TableName],
+    fact: &Fact,
+    depth: usize,
+) -> rusqlite::Result<()> {
+    if !insert_fact_and_pending_in_tx(tx, fact)? {
+        return Ok(());
+    }
+    let pending = load_pending_fact(tx, ProjectionSource::Durable, fact.id)
+        .map_err(sqlite_string_error)?
+        .ok_or_else(|| sqlite_string_error("inserted child fact did not load".to_string()))?;
+    let effects = prepare_projection_effects(projector, pending, tx, allowed_tables)
+        .map_err(sqlite_string_error)?;
+    commit_projection_effects_in_tx(tx, &effects, projector, allowed_tables, depth)
 }
 
 /// Clear due time ranges after the owner consumes them.
@@ -523,6 +642,7 @@ fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
 
 /// A fact that has been claimed from the pending queue and is ready to project.
 struct PendingFact {
+    source: ProjectionSource,
     fact_id: FactId,
     fact: Fact,
     previous_context: ContextSet,
@@ -562,15 +682,31 @@ fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, Strin
 /// `previous_context` is the fact's standing context before this run.
 /// `projection_context` is the matched input context exposed to the projector
 /// for this run, including any due time ranges.
-fn load_pending_fact(store: &Store, fact_id: FactId) -> Result<Option<PendingFact>, String> {
-    let Some(fact) = persisted_fact(store, &fact_id)? else {
+fn load_pending_fact(
+    store: &Store,
+    source: ProjectionSource,
+    fact_id: FactId,
+) -> Result<Option<PendingFact>, String> {
+    let fact = match source {
+        ProjectionSource::Durable => persisted_fact(store, &fact_id)?,
+        ProjectionSource::Ephemeral => ephemeral_fact_by_id(store, &fact_id)?,
+    };
+    let Some(fact) = fact else {
         return Ok(None);
     };
-    let previous_context = stored_context_for_owner(store, &fact_id)?;
-    let time_ranges = pending_time_ranges_for_owner(store, &fact_id)?;
-    let projection_context =
-        stored_matching_context(store, &previous_context)?.with_time_ranges(time_ranges);
+    let previous_context = match source {
+        ProjectionSource::Durable => stored_context_for_owner(store, &fact_id)?,
+        ProjectionSource::Ephemeral => ContextSet::new(),
+    };
+    let projection_context = match source {
+        ProjectionSource::Durable => {
+            let time_ranges = pending_time_ranges_for_owner(store, &fact_id)?;
+            stored_matching_context(store, &previous_context)?.with_time_ranges(time_ranges)
+        }
+        ProjectionSource::Ephemeral => ProjectionContext::default(),
+    };
     Ok(Some(PendingFact {
+        source,
         fact_id,
         fact,
         previous_context,
@@ -665,8 +801,8 @@ fn run_projection_with_context(
 /// Reject any projected need, offer, or time wake whose `owner` is not the fact
 /// being projected.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    if !output.effects.facts.is_empty() || !output.effects.purged_facts.is_empty() {
-        return Err("projector output cannot emit or purge facts".to_string());
+    if !output.effects.purged_facts.is_empty() {
+        return Err("projector output cannot purge facts".to_string());
     }
     for need in &output.needs {
         if need.owner != fact.id {
@@ -699,7 +835,7 @@ fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), S
 mod tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
-    use crate::core::facts::FactScope;
+    use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
 
     #[test]
@@ -815,6 +951,7 @@ mod tests {
             key: key.clone(),
         };
         let pending = PendingFact {
+            source: ProjectionSource::Durable,
             fact_id: target.id,
             fact: target,
             previous_context: ContextSet::new(),
@@ -852,6 +989,7 @@ mod tests {
             .expect("insert stored offer");
 
         let pending = PendingFact {
+            source: ProjectionSource::Durable,
             fact_id: target.id,
             fact: target,
             previous_context: ContextSet::new(),
@@ -892,6 +1030,7 @@ mod tests {
             .expect("insert stored offer");
 
         let pending = PendingFact {
+            source: ProjectionSource::Durable,
             fact_id: target.id,
             fact: target,
             previous_context: ContextSet::new(),
@@ -930,6 +1069,7 @@ mod tests {
         }
 
         let pending = PendingFact {
+            source: ProjectionSource::Durable,
             fact_id: target.id,
             fact: target,
             previous_context: ContextSet::new(),
@@ -946,6 +1086,237 @@ mod tests {
         };
 
         assert!(err.contains("did not settle"));
+    }
+
+    #[test]
+    fn ephemeral_input_projects_child_fact_immediately() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"child-offer".to_vec());
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let progress = drain_pending_projection(
+            &ParentChildProjector {
+                parent_id: parent.id,
+                child: child.clone(),
+                child_mode: ChildMode::Offer,
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 1);
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_none()
+        );
+        assert_eq!(
+            crate::core::fact_store::persisted_fact(&store, &child.id)
+                .expect("load child")
+                .as_ref(),
+            Some(&child)
+        );
+        let child_context = stored_context_for_owner(&store, &child.id).expect("child context");
+        assert_eq!(child_context.offers.len(), 1);
+        assert!(child_context.needs.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_input_missing_context_is_discarded_without_standing_need() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-need".to_vec());
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([7; 32]);
+        let progress = drain_pending_projection(
+            &EphemeralNeedOnly {
+                role: role.clone(),
+                key: key.clone(),
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 1);
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_none()
+        );
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert!(context.needs.is_empty());
+        assert!(context.offers.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_input_can_use_existing_durable_context() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-context".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
+        submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([8; 32]);
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: parent.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let progress = drain_pending_projection(
+            &EphemeralIntentAfterContext {
+                role: role.clone(),
+                key: key.clone(),
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 1);
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_none()
+        );
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert!(context.needs.is_empty());
+        assert!(context.offers.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_input_cannot_emit_durable_offers() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-offer".to_vec());
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let err = drain_pending_projection(&EphemeralOfferProjector, &store, &[], 10)
+            .expect_err("ephemeral offers should fail");
+
+        assert!(err.contains("ephemeral projection input cannot emit durable offers"));
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn child_fact_parking_counts_as_successful_parent_projection() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"child-need".to_vec());
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let progress = drain_pending_projection(
+            &ParentChildProjector {
+                parent_id: parent.id,
+                child: child.clone(),
+                child_mode: ChildMode::Need,
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 1);
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_none()
+        );
+        assert!(crate::core::fact_store::persisted_fact(&store, &child.id)
+            .expect("load child")
+            .is_some());
+        let child_context = stored_context_for_owner(&store, &child.id).expect("child context");
+        assert_eq!(child_context.needs.len(), 1);
+        assert!(child_context.offers.is_empty());
+    }
+
+    #[test]
+    fn child_fact_projection_error_rolls_back_parent_projection() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"child-error".to_vec());
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let err = drain_pending_projection(
+            &ParentChildProjector {
+                parent_id: parent.id,
+                child: child.clone(),
+                child_mode: ChildMode::Error,
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect_err("child projection should fail");
+
+        assert!(err.contains("child projection failed"));
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_some()
+        );
+        assert!(crate::core::fact_store::persisted_fact(&store, &child.id)
+            .expect("load child")
+            .is_none());
     }
 
     fn run_projection(
@@ -1130,6 +1501,119 @@ mod tests {
                 owner: [9; 32],
                 timeline: Timeline::new("test").unwrap(),
                 at: 1,
+            }))
+        }
+    }
+
+    enum ChildMode {
+        Offer,
+        Need,
+        Error,
+    }
+
+    struct ParentChildProjector {
+        parent_id: FactId,
+        child: Fact,
+        child_mode: ChildMode,
+    }
+
+    impl Projector for ParentChildProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.parent_id {
+                return Ok(ProjectionOutput::new().fact(self.child.clone()));
+            }
+            if fact.id != self.child.id {
+                return Ok(ProjectionOutput::new());
+            }
+            match self.child_mode {
+                ChildMode::Offer => Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: Role::new("child_ready").unwrap(),
+                    scope: fact.scope.clone(),
+                    start_key: ContextKey::from_bytes(fact.id),
+                    end_key: ContextKey::from_bytes(fact.id),
+                })),
+                ChildMode::Need => Ok(ProjectionOutput::new().need(ContextNeed {
+                    owner: fact.id,
+                    role: Role::new("missing_child_context").unwrap(),
+                    scope: fact.scope.clone(),
+                    start_key: ContextKey::from_bytes(fact.id),
+                    end_key: ContextKey::from_bytes(fact.id),
+                })),
+                ChildMode::Error => Err("child projection failed".to_string()),
+            }
+        }
+    }
+
+    struct EphemeralNeedOnly {
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for EphemeralNeedOnly {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                start_key: self.key.clone(),
+                end_key: self.key.clone(),
+            }))
+        }
+    }
+
+    struct EphemeralIntentAfterContext {
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for EphemeralIntentAfterContext {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            let need = ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                start_key: self.key.clone(),
+                end_key: self.key.clone(),
+            };
+            if let Some(payload) = context.payload_for(&need) {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("ephemeral_ready").unwrap(),
+                    fact.id,
+                    payload.id,
+                )))
+            } else {
+                Ok(ProjectionOutput::new().need(need))
+            }
+        }
+    }
+
+    struct EphemeralOfferProjector;
+
+    impl Projector for EphemeralOfferProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: fact.id,
+                role: Role::new("ephemeral_offer").unwrap(),
+                scope: fact.scope.clone(),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
             }))
         }
     }

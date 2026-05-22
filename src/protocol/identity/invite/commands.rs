@@ -190,12 +190,11 @@ pub fn create_device_link(
         user_invite_fact_id: None,
         public_key: crypto::ed25519_public_key(&invite_private_key),
     };
-    let device_invite_bytes =
-        crate::protocol::identity::signed_fact::create::sign_payload_bytes(
-            membership.endpoint_shared_id,
-            &local.signing_secret,
-            identity::device_invite::layout::encode_fact(&device_invite)?,
-        )?;
+    let device_invite_bytes = crate::protocol::identity::signed_fact::create::sign_payload_bytes(
+        membership.endpoint_shared_id,
+        &local.signing_secret,
+        identity::device_invite::layout::encode_fact(&device_invite)?,
+    )?;
     let device_invite_fact = Fact::new(
         FactScope::Global,
         device_invite.created_at_ms,
@@ -250,12 +249,11 @@ pub fn create_invite_server(
         workspace_id: input.workspace_id,
         authority_fact_id: authority.admin_id,
     };
-    let invite_server_bytes =
-        crate::protocol::identity::signed_fact::create::sign_payload_bytes(
-            authority.signer_id,
-            &local.signing_secret,
-            identity::invite_server::layout::encode_fact(&invite_server)?,
-        )?;
+    let invite_server_bytes = crate::protocol::identity::signed_fact::create::sign_payload_bytes(
+        authority.signer_id,
+        &local.signing_secret,
+        identity::invite_server::layout::encode_fact(&invite_server)?,
+    )?;
     let invite_server_fact = Fact::new(
         FactScope::Global,
         invite_server.created_at_ms,

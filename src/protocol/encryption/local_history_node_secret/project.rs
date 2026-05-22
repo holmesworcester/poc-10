@@ -19,7 +19,9 @@ use crate::protocol::encryption::key_wrap::project::{
 use crate::protocol::encryption::local_key_secret;
 use crate::protocol::encryption::removal_frontier;
 
-use super::fact::{mask_prefix_to_depth, LocalHistoryNodeSecretFact, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH};
+use super::fact::{
+    mask_prefix_to_depth, LocalHistoryNodeSecretFact, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
+};
 
 // ---------------------------------------------------------------------------
 // Secret coverage coordinate scheme.
@@ -385,10 +387,9 @@ fn validate_history_frontier(
     if frontier_fact.id != node.frontier_id {
         return Err("local history node frontier context payload id mismatch".to_string());
     }
-    let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)
-        .map_err(|_| {
-            "local history node frontier context must be a removal frontier".to_string()
-        })?;
+    let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes).map_err(|_| {
+        "local history node frontier context must be a removal frontier".to_string()
+    })?;
     if frontier.workspace_id != node.workspace_id {
         return Err("local history node frontier workspace mismatch".to_string());
     }

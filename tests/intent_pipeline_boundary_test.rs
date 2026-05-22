@@ -32,6 +32,7 @@ fn intent_pipeline_output_boundary_is_facts_and_followup_intents_only() {
 
     let PipelineEffects {
         facts,
+        ephemeral_facts,
         purged_facts,
         row_mutations,
         intents,
@@ -39,6 +40,7 @@ fn intent_pipeline_output_boundary_is_facts_and_followup_intents_only() {
     } = output;
 
     assert_eq!(facts.len(), 1);
+    assert!(ephemeral_facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(local_intents.is_empty());

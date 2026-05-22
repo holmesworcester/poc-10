@@ -22,8 +22,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::EndpointSharedFact, Str
 pub fn decode_raw_or_signed_fact(
     fact: &crate::core::facts::Fact,
 ) -> Result<fact::EndpointSharedFact, String> {
-    if fact.bytes.first().copied()
-        != Some(crate::protocol::identity::signed_fact::TYPE_SIGNED_FACT)
+    if fact.bytes.first().copied() != Some(crate::protocol::identity::signed_fact::TYPE_SIGNED_FACT)
     {
         return decode_fact_payload(fact.body());
     }
@@ -39,8 +38,7 @@ pub fn decode_raw_or_signed_fact(
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload =
-        crate::protocol::identity::signed_fact::SignedPayload<fact::EndpointSharedFact>;
+    type Payload = crate::protocol::identity::signed_fact::SignedPayload<fact::EndpointSharedFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         crate::protocol::identity::signed_fact::decode_signed_fact_payload(

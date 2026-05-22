@@ -12,9 +12,7 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::sync::send_requested_fact::{
-    send_requested_fact_intent, SendRequestedFact,
-};
+use crate::protocol::sync::send_requested_fact::{send_requested_fact_intent, SendRequestedFact};
 
 use super::rows::sync_need_id_row;
 

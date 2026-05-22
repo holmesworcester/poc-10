@@ -13,8 +13,8 @@ use crate::core::intents::{
 };
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
-use crate::protocol::connection::request::layout;
 use crate::protocol::connection::request::create as addr;
+use crate::protocol::connection::request::layout;
 
 pub const SEND_BOOTSTRAP_CONNECTION_REQUEST: &str = "send_bootstrap_connection_request";
 

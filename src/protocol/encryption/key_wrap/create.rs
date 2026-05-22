@@ -137,7 +137,8 @@ pub fn unwrap_key_wrap_fact(
     if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not own unwrap frontier".to_string());
     }
-    let local = local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
+    let local =
+        local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
     require_local_recipient_key(intent, &recipient, &local)?;
 
     let plaintext = crypto::x25519_xchacha20poly1305_decrypt(
@@ -211,7 +212,8 @@ pub fn validate_retired_recipient_material(
     if local_recipient_key_fact.scope != FactScope::Local {
         return Err("retired recipient material is not local".to_string());
     }
-    let local = local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
+    let local =
+        local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
     if local.workspace_id != intent.workspace_id {
         return Err("retired recipient material workspace mismatch".to_string());
     }
@@ -249,7 +251,11 @@ fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<Wra
                     "history source coordinate does not match create_key_wrap intent".to_string(),
                 );
             }
-            Ok(history_material(source_fact.id, source_fact.timestamp, source))
+            Ok(history_material(
+                source_fact.id,
+                source_fact.timestamp,
+                source,
+            ))
         }
     }
 }

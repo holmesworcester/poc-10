@@ -13,7 +13,7 @@ use crate::core::projectors::{
 use crate::protocol::encryption::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::encryption::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
-    require_fact_scope, requested_wrap_source_need,
+    requested_wrap_source_need, require_fact_scope,
 };
 use crate::protocol::encryption::recipient_key;
 use crate::protocol::encryption::removal_frontier;
@@ -75,12 +75,8 @@ fn key_request(
         request.frontier_id,
         request.frontier_id,
     );
-    let source_need = requested_wrap_source_need(
-        fact.id,
-        scope,
-        request.workspace_id,
-        request.frontier_id,
-    );
+    let source_need =
+        requested_wrap_source_need(fact.id, scope, request.workspace_id, request.frontier_id);
 
     let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
     let frontier_fact = matched_payload_fact(projection_context, &frontier_need);

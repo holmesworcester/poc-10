@@ -423,7 +423,6 @@ fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let paths = vec![
         root.join("src/protocol/transport/send_facts_on_connection.rs"),
         root.join("src/protocol/transport/send_network_frame.rs"),
-        root.join("src/protocol/transport/transit/frame.rs"),
         root.join("src/protocol/transport/transit/create.rs"),
         root.join("src/protocol/transport/transit/layout.rs"),
     ];
@@ -810,7 +809,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
     paths.extend(intent_handler_files(&root));
-    paths.push(root.join("src/protocol/transport/transit/receive.rs"));
+    paths.push(root.join("src/protocol/transport/transit/create.rs"));
 
     let offenders = matching_code_lines(
         &root,
@@ -1065,8 +1064,7 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
         pipeline.push_str(&source_text(&path));
     }
     let core_schema = source_text(&root.join("src/core/schema.rs"));
-    let request_projector =
-        source_text(&root.join("src/protocol/connection/request/project.rs"));
+    let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
     let send_facts_handler =
         source_text(&root.join("src/protocol/transport/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));

@@ -357,6 +357,7 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 fn poc10_pipeline_effects_names_the_common_commit_shape() {
     let topo::core::effects::PipelineEffects {
         facts,
+        ephemeral_facts,
         purged_facts,
         row_mutations,
         intents,
@@ -364,6 +365,7 @@ fn poc10_pipeline_effects_names_the_common_commit_shape() {
     } = topo::core::effects::PipelineEffects::new();
 
     assert!(facts.is_empty());
+    assert!(ephemeral_facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
@@ -529,7 +531,11 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "updates",
     ];
     let target_paths = std::iter::once("src/core".to_string())
-        .chain(PROTOCOL_SCOPES.iter().map(|scope| format!("src/protocol/{scope}")))
+        .chain(
+            PROTOCOL_SCOPES
+                .iter()
+                .map(|scope| format!("src/protocol/{scope}")),
+        )
         .flat_map(|path| source_files(&root.join(path)))
         .collect::<Vec<_>>();
     // Legacy worker-queue/event-status names are removal vocabulary that the
@@ -569,7 +575,11 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "pending_connection_responses",
     ];
     let target_paths = std::iter::once("src/core".to_string())
-        .chain(PROTOCOL_SCOPES.iter().map(|scope| format!("src/protocol/{scope}")))
+        .chain(
+            PROTOCOL_SCOPES
+                .iter()
+                .map(|scope| format!("src/protocol/{scope}")),
+        )
         .flat_map(|path| source_files(&root.join(path)))
         .collect::<Vec<_>>();
     let offenders = source_code_matches_in_paths(root, target_paths, &forbidden);
@@ -752,7 +762,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
-    let receive = source_text(&root.join("src/protocol/transport/transit/receive.rs"));
+    let receive = source_text(&root.join("src/protocol/transport/transit/create.rs"));
 
     for required in [
         "content::message",
@@ -896,7 +906,11 @@ fn poc10_target_root_manifests_are_declarations_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifests = ["src/lib.rs".to_string(), "src/core.rs".to_string()]
         .into_iter()
-        .chain(PROTOCOL_SCOPES.iter().map(|scope| format!("src/protocol/{scope}.rs")));
+        .chain(
+            PROTOCOL_SCOPES
+                .iter()
+                .map(|scope| format!("src/protocol/{scope}.rs")),
+        );
 
     for manifest in manifests {
         let path = root.join(&manifest);

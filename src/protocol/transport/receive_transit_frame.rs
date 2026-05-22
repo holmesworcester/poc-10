@@ -1,14 +1,14 @@
 //! Receive transit frame intent layout.
 //!
-//! Receive-transit handlers own decoding an inbound transit frame, verifying
-//! the public envelope, and emitting the recovered inner fact for admission.
-//! The intent payload carries the opaque outer frame bytes plus normalized local
-//! receive metadata; cryptographic material is loaded from fact context.
+//! Receive-transit handlers own decoding inbound network metadata into a
+//! transient projectable input. The intent payload carries the opaque outer
+//! frame bytes plus normalized local receive metadata; frame classification and
+//! cryptographic opening happen in the transit projector where durable context
+//! is available.
 
-use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::transport::transit_received::addr::normalize_origin_addr_bytes;
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::protocol::transport::transit_received::create::normalize_origin_addr_bytes;
 
 pub const RECEIVE_TRANSIT_FRAME: &str = "receive_transit_frame";
 
@@ -86,23 +86,12 @@ fn payload_error(err: PayloadError) -> String {
 
 // Handler for inbound transit frame admission.
 //
-// Decodes the receive intent, asks the transport::transit fact module which exact
-// connection fact is needed, and returns the opened shared/local facts that
-// core should admit.
+// Decodes the receive intent and emits one ephemeral transit input. Projection
+// owns the one-shot context check and any durable child facts recovered from the
+// frame.
 
-use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
-};
-use crate::protocol::{
-    identity::endpoint,
-    transport::transit::{
-        frame,
-        receive::{
-            self, BootstrapFrameKind, OpenBootstrapRequest, OpenBootstrapResponse,
-            OpenReceivedFrame,
-        },
-    },
-};
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
+use crate::protocol::transport::transit::{create as transit_create, fact::TransitInputFact};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveTransitFrameHandler;
@@ -115,62 +104,16 @@ impl ReceiveTransitFrameHandler {
 
 impl IntentHandler for ReceiveTransitFrameHandler {
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        let input = decode_receive_transit_frame(intent)?;
-        match receive::bootstrap_frame_kind(&input.frame)? {
-            BootstrapFrameKind::ConnectionRequest(request) => {
-                Ok(vec![request.invite_secret_fact_id])
-            }
-            BootstrapFrameKind::ConnectionResponse(response) => Ok(vec![
-                response.request_id,
-                response.invite_secret_fact_id,
-                response.initiator_ephemeral_secret_fact_id,
-            ]),
-            BootstrapFrameKind::ConnectionFrame => {
-                Ok(vec![frame::received_connection_fact_id(&input.frame)?])
-            }
-        }
+        decode_receive_transit_frame(intent)?;
+        Ok(Vec::new())
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
+    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_transit_frame(intent)?;
-        let facts = match receive::bootstrap_frame_kind(&input.frame)? {
-            BootstrapFrameKind::ConnectionRequest(request) => {
-                let invite_fact = context.require_fact(&request.invite_secret_fact_id)?;
-                let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
-                    .ok_or_else(|| {
-                        HandlerError::fatal("bootstrap request receiver has no local endpoint")
-                    })?;
-                let opened = receive::open_bootstrap_request(OpenBootstrapRequest {
-                    frame: &input.frame,
-                    invite_fact,
-                    local_endpoint: &local_endpoint,
-                    origin_addr: &input.origin_addr,
-                    received_at_local_ms: input.received_at_local_ms,
-                })?;
-                opened.facts
-            }
-            BootstrapFrameKind::ConnectionResponse(_) => {
-                receive::open_bootstrap_response(OpenBootstrapResponse {
-                    frame: &input.frame,
-                    origin_addr: &input.origin_addr,
-                    received_at_local_ms: input.received_at_local_ms,
-                })?
-            }
-            BootstrapFrameKind::ConnectionFrame => {
-                let connection_id = frame::received_connection_fact_id(&input.frame)?;
-                let connection_fact = context.require_fact(&connection_id)?;
-                receive::open_received_frame(OpenReceivedFrame {
-                    frame: &input.frame,
-                    connection_fact,
-                    origin_addr: &input.origin_addr,
-                    received_at_local_ms: input.received_at_local_ms,
-                })?
-            }
-        };
-        let mut output = PipelineEffects::new();
-        for fact in facts {
-            output = output.fact(fact);
-        }
-        Ok(output)
+        Ok(transit_create::received_input_effect(TransitInputFact {
+            frame: input.frame,
+            origin_addr: input.origin_addr,
+            received_at_local_ms: input.received_at_local_ms,
+        })?)
     }
 }

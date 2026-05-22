@@ -28,11 +28,11 @@ pub struct FileDeletionRow {
 
 pub fn file_deletion_row(input: FileDeletionRow) -> TableInsert {
     read_models::FILE_DELETIONS.insert(vec![
-            Value::Bytes(input.workspace_id.to_vec()),
-            Value::Bytes(input.target_file_id.to_vec()),
-            Value::Bytes(input.deletion_id.to_vec()),
-            Value::U64(input.created_at_ms),
-            Value::Bytes(input.author_user_id.to_vec()),
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.target_file_id.to_vec()),
+        Value::Bytes(input.deletion_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.author_user_id.to_vec()),
     ])
 }
 

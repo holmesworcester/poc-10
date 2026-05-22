@@ -15,9 +15,7 @@ use topo::protocol::encryption::local_key_secret::layout as local_key_secret_lay
 use topo::protocol::encryption::removal_frontier::fact::RemovalFrontierFact;
 use topo::protocol::encryption::removal_frontier::layout as removal_frontier_layout;
 use topo::protocol::identity::signed_fact::create as signed_fact_create;
-use topo::protocol::identity::workspace::{
-    commands::create_workspace, rows as workspace_rows,
-};
+use topo::protocol::identity::workspace::{commands::create_workspace, rows as workspace_rows};
 
 struct FixedClock(Cell<u64>);
 

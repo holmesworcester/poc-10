@@ -16,15 +16,15 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::connection::ephemeral_secret;
-use crate::protocol::identity::invite;
-use crate::protocol::transport::transit_received;
 use crate::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse,
 };
+use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::send_bootstrap_request::{
     send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
 };
+use crate::protocol::identity::invite;
+use crate::protocol::transport::transit_received;
 
 use super::create::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
@@ -298,22 +298,18 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::connection::create_response::{
+        decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
+    };
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
     use topo::protocol::connection::request::create::encode_optional_addr;
-    use topo::protocol::connection::request::{
-        fact::ConnectionRequestFact, layout, project, rows,
-    };
-    use topo::protocol::identity::invite::{
-        fact::InviteSecretFact, layout as invite_layout,
-    };
+    use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
+    use topo::protocol::identity::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::transport::transit_received::{
         fact::{TransitReceivedFact, TRANSIT_KIND_BOOTSTRAP},
         layout as received_layout,
-    };
-    use topo::protocol::connection::create_response::{
-        decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
     };
 
     fn invite_fact() -> (InviteSecretFact, Fact) {

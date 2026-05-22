@@ -119,10 +119,7 @@ fn scope_manifests(root: &Path) -> Vec<PathBuf> {
 /// no intent handlers.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     const HANDLERS: &[(&str, &[&str])] = &[
-        (
-            "connection",
-            &["create_response", "send_bootstrap_request"],
-        ),
+        ("connection", &["create_response", "send_bootstrap_request"]),
         (
             "content",
             &[
@@ -652,14 +649,10 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     files.extend(fact_family_files_named(root, "project.rs"));
-    files.extend(
-        fact_family_files(root)
-            .into_iter()
-            .filter(|path| {
-                path.components()
-                    .any(|component| component.as_os_str() == "project")
-            }),
-    );
+    files.extend(fact_family_files(root).into_iter().filter(|path| {
+        path.components()
+            .any(|component| component.as_os_str() == "project")
+    }));
     files.extend(intent_handler_files(root));
 
     let mut offenders = Vec::new();
@@ -969,10 +962,8 @@ const STANDARD_FAMILY_FILES: [&str; 8] = [
     "cli.rs",
 ];
 
-/// Fact families that do not yet meet the standard-role-file rule because they
-/// are pending the transit/connection redesign (see
-/// `transit_connection_redesign.md`). Remove these entries when that lands.
-const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 2] = ["transport/transit", "transport/transit_received"];
+/// Fact families that do not yet meet the standard-role-file rule.
+const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {

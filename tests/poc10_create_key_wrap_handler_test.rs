@@ -1,17 +1,19 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::protocol::encryption::create_key_wrap as intent;
+use topo::protocol::encryption::create_key_wrap::CreateKeyWrapHandler;
 use topo::protocol::encryption::key_wrap::fact::WrappedSecretKind;
 use topo::protocol::encryption::key_wrap::layout as key_wrap_layout;
 use topo::protocol::encryption::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
 use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
-use topo::protocol::encryption::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
+use topo::protocol::encryption::recipient_key::fact::{
+    RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY,
+};
 use topo::protocol::encryption::recipient_key::layout as recipient_key_layout;
 use topo::protocol::identity;
 use topo::protocol::identity::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::identity::workspace::scope as workspace_scope;
-use topo::protocol::encryption::create_key_wrap::CreateKeyWrapHandler;
 
 #[test]
 fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {

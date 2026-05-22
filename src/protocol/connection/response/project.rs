@@ -6,8 +6,8 @@
 //!   2. CONTEXT. Projection validates exact request and invite-secret context.
 //!      Received responses additionally require transit provenance plus local
 //!      initiator secret; local responses require responder secret.
-//!   3. MATERIALIZE. Valid responses write the connection_response row. Network
-//!      effects stay in intent handlers.
+//!   3. MATERIALIZE. Valid responses write the connection_response row, publish
+//!      local connection context, and seed sync for the materialized connection.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -18,12 +18,8 @@ use crate::core::projectors::{
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::request;
 use crate::protocol::identity::invite;
-use crate::protocol::transport::transit_received::{
-    self, fact::TRANSIT_KIND_CONNECTION_HANDSHAKE,
-};
-use crate::protocol::sync::seed_connection::{
-    seed_connection_sync_intent, SeedConnectionSync,
-};
+use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
+use crate::protocol::transport::transit_received::{self, fact::TRANSIT_KIND_CONNECTION_HANDSHAKE};
 
 use super::create;
 use super::fact::ConnectionResponseFact;
@@ -333,6 +329,13 @@ fn materialized_output(
     response: &ConnectionResponseFact,
 ) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
+        .offer(crate::core::context::ContextOffer::range(
+            response_id,
+            "connection_response",
+            crate::core::facts::FactScope::Local,
+            response_id,
+            response_id,
+        ))
         .row_mutation(RowMutation::PutRow(connection_response_row(
             response_id,
             response,
@@ -369,9 +372,7 @@ mod projector_tests {
     };
     use topo::protocol::connection::response::{create, layout, project, rows};
     use topo::protocol::identity::endpoint::fact::EndpointFact;
-    use topo::protocol::identity::invite::{
-        fact::InviteSecretFact, layout as invite_layout,
-    };
+    use topo::protocol::identity::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::transport::transit_received::{
         fact::{TransitReceivedFact, TRANSIT_KIND_CONNECTION_HANDSHAKE},
         layout as received_layout,

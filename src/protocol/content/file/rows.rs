@@ -35,18 +35,18 @@ pub struct ContentFileRow {
 
 pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableInsert {
     read_models::CONTENT_FILES.insert(vec![
-            Value::Bytes(fact.workspace_id.to_vec()),
-            Value::Bytes(file_fact_id.to_vec()),
-            Value::Bytes(fact.message_id.to_vec()),
-            Value::Bytes(fact.file_id.to_vec()),
-            Value::Bytes(fact.author_user_id.to_vec()),
-            Value::U64(fact.created_at_ms),
-            Value::Bytes(fact.root_hash.to_vec()),
-            Value::U64(fact.blob_bytes),
-            Value::U64(u64::from(fact.total_slices)),
-            Value::U64(u64::from(fact.slice_bytes)),
-            Value::Bytes(fact.sealed_metadata.clone()),
-            Value::Bool(false),
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(file_fact_id.to_vec()),
+        Value::Bytes(fact.message_id.to_vec()),
+        Value::Bytes(fact.file_id.to_vec()),
+        Value::Bytes(fact.author_user_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.root_hash.to_vec()),
+        Value::U64(fact.blob_bytes),
+        Value::U64(u64::from(fact.total_slices)),
+        Value::U64(u64::from(fact.slice_bytes)),
+        Value::Bytes(fact.sealed_metadata.clone()),
+        Value::Bool(false),
     ])
 }
 
@@ -56,8 +56,7 @@ mod tests {
 
     #[test]
     fn content_file_row_round_trips_workspace_keyed_value() {
-        const ROOT_HASH_BYTES: usize =
-            crate::protocol::content::file::fact::FILE_ROOT_HASH_BYTES;
+        const ROOT_HASH_BYTES: usize = crate::protocol::content::file::fact::FILE_ROOT_HASH_BYTES;
         let fact = ContentFileFact {
             workspace_id: [1; 32],
             created_at_ms: 99,

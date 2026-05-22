@@ -10,8 +10,8 @@ use topo::protocol::encryption;
 use topo::protocol::identity;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::transport::transit::frame as transit_frame;
 use topo::protocol::transport::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
@@ -19,7 +19,7 @@ use topo::protocol::transport::send_facts_on_connection::{
 use topo::protocol::transport::send_network_frame::{
     decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
-use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
+use topo::protocol::transport::transit::frame as transit_frame;
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
     let local_endpoint = local_endpoint();
@@ -160,10 +160,7 @@ fn intent_kind_names_keep_transport_boundaries_clear() {
     }
 
     assert!(SEND_FACTS_ON_CONNECTION.starts_with("send_"));
-    assert!(
-        topo::protocol::transport::send_network_frame::SEND_NETWORK_FRAME
-            .starts_with("send_")
-    );
+    assert!(topo::protocol::transport::send_network_frame::SEND_NETWORK_FRAME.starts_with("send_"));
 }
 
 #[test]

@@ -20,8 +20,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::UserInviteFact, String>
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload =
-        crate::protocol::identity::signed_fact::SignedPayload<fact::UserInviteFact>;
+    type Payload = crate::protocol::identity::signed_fact::SignedPayload<fact::UserInviteFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         crate::protocol::identity::signed_fact::decode_signed_fact_payload(

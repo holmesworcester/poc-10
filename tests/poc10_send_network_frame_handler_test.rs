@@ -18,10 +18,10 @@ use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::transport::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame, SendNetworkFrameHandler, SEND_NETWORK_FRAME,
 };
-use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
 fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
