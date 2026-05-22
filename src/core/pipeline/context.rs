@@ -33,7 +33,7 @@ use crate::core::context::{
     scope_key, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role, Selector,
 };
 use crate::core::fact_store::persisted_fact;
-use crate::core::facts::{FactId, FactScope, ScopeKind};
+use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use crate::core::matchers::{ContextMatcher, ContextMatchers};
 use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
@@ -322,7 +322,13 @@ impl<T> RowWireResult<T> for Result<T, WireError> {
 
 type ExactContextKey = (Role, FactScope, Selector);
 
-/// Find the offers that currently satisfy a fact's needs.
+/// Find the offers that currently satisfy a set of needs.
+///
+/// Projection uses this both for a pending fact's previously stored needs and
+/// for speculative needs emitted while preparing one projection. The input does
+/// not have to be persisted yet. Matching still reads only already-stored offers,
+/// and returned payloads are cached by offer owner so repeated matches do not
+/// repeatedly load the same fact.
 pub(super) fn stored_matching_context(
     store: &Store,
     context: &ContextSet,
@@ -342,6 +348,7 @@ pub(super) fn stored_matching_context(
     )?;
     let mut matched = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut payloads = BTreeMap::new();
     for need in &context.needs {
         if exact_roles.contains(&need.role) {
             let key = exact_context_key(&need.role, &need.scope, &need.selector);
@@ -350,14 +357,28 @@ pub(super) fn stored_matching_context(
                 .into_iter()
                 .flat_map(|offers| offers.iter())
             {
-                push_stored_matched_context(store, need, offer.clone(), &mut seen, &mut matched)?;
+                push_stored_matched_context(
+                    store,
+                    need,
+                    offer.clone(),
+                    &mut seen,
+                    &mut payloads,
+                    &mut matched,
+                )?;
             }
         }
 
         for matcher in matchers.custom_for_role(&need.role) {
             let candidate_offers = matcher.matching_offers_for_need_from_store(store, need)?;
             for offer in candidate_offers {
-                push_stored_matched_context(store, need, offer, &mut seen, &mut matched)?;
+                push_stored_matched_context(
+                    store,
+                    need,
+                    offer,
+                    &mut seen,
+                    &mut payloads,
+                    &mut matched,
+                )?;
             }
         }
     }
@@ -407,13 +428,20 @@ fn push_stored_matched_context(
     need: &ContextNeed,
     offer: ContextOffer,
     seen: &mut BTreeSet<(ContextNeed, ContextOffer)>,
+    payloads: &mut BTreeMap<FactId, Fact>,
     matched: &mut Vec<MatchedContext>,
 ) -> Result<(), String> {
     if !seen.insert((need.clone(), offer.clone())) {
         return Ok(());
     }
-    let payload = persisted_fact(store, &offer.owner)?
-        .ok_or_else(|| "context offer owner references unknown fact".to_string())?;
+    let payload = if let Some(payload) = payloads.get(&offer.owner) {
+        payload.clone()
+    } else {
+        let payload = persisted_fact(store, &offer.owner)?
+            .ok_or_else(|| "context offer owner references unknown fact".to_string())?;
+        payloads.insert(offer.owner, payload.clone());
+        payload
+    };
     matched.push(MatchedContext {
         need: need.clone(),
         offer,

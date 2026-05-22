@@ -58,6 +58,7 @@ use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
 const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
+const PROJECTION_CONTEXT_FIXPOINT_LIMIT: usize = 8;
 
 const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
 SELECT owner
@@ -331,7 +332,8 @@ fn process_pending_fact(
     allowed_tables: &[TableName],
     progress: &mut ProjectionProgress,
 ) -> Result<(), String> {
-    let effects = prepare_projection_effects(projector, pending_fact, allowed_tables)?;
+    let effects =
+        prepare_projection_effects(projector, pending_fact, store, matchers, allowed_tables)?;
     commit_projection_effects(store, &effects, matchers, allowed_tables)?;
     progress.projected += 1;
     progress.status.progressed = true;
@@ -342,19 +344,37 @@ fn process_pending_fact(
 ///
 /// No rows are written here. The result is an uncommitted `ProjectionEffects`
 /// value that says what should happen if the projection commits.
+///
+/// This preparation step deliberately runs a small monotonic fixed point before
+/// the transaction. Projectors own the decision about whether context is
+/// required, optional, or just a wake trigger, so core does not interpret any
+/// need. It only asks: "given the needs this run emitted, are there already
+/// stored offers that should be visible to this same projection?" If yes, core
+/// adds those matches to the in-memory projection context and reruns before any
+/// rows, intents, or replacement context are committed. Only the final run below
+/// becomes durable.
 fn prepare_projection_effects(
     projector: &(impl Projector + ?Sized),
     pending_fact: PendingFact,
+    store: &Store,
+    matchers: &ContextMatchers,
     allowed_tables: &[TableName],
 ) -> Result<ProjectionEffects, String> {
     let PendingFact {
         fact_id,
         fact,
         previous_context,
-        projection_context,
+        mut projection_context,
     } = pending_fact;
-    let run = run_projection_with_context(projector, &fact, &previous_context, projection_context)?;
-    validate_pipeline_effects(&run.pipeline, allowed_tables)?;
+    let run = run_projection_to_context_fixed_point(
+        projector,
+        &fact,
+        &previous_context,
+        &mut projection_context,
+        store,
+        matchers,
+        allowed_tables,
+    )?;
     Ok(ProjectionEffects {
         fact_id,
         next_context: run.context,
@@ -362,6 +382,36 @@ fn prepare_projection_effects(
         context_delta: run.context_delta,
         pipeline: run.pipeline,
     })
+}
+
+fn run_projection_to_context_fixed_point(
+    projector: &(impl Projector + ?Sized),
+    fact: &Fact,
+    previous_context: &ContextSet,
+    projection_context: &mut ProjectionContext,
+    store: &Store,
+    matchers: &ContextMatchers,
+    allowed_tables: &[TableName],
+) -> Result<ProjectionRun, String> {
+    for _ in 0..PROJECTION_CONTEXT_FIXPOINT_LIMIT {
+        let run = run_projection_with_context(
+            projector,
+            fact,
+            previous_context,
+            projection_context.clone(),
+        )?;
+        validate_pipeline_effects(&run.pipeline, allowed_tables)?;
+
+        let matched_context = stored_matching_context(store, &run.context, matchers)?;
+        if !projection_context.extend_with_matches(matched_context) {
+            return Ok(run);
+        }
+    }
+
+    Err(format!(
+        "projection context for fact {:x?} did not settle after {PROJECTION_CONTEXT_FIXPOINT_LIMIT} runs",
+        fact.id
+    ))
 }
 
 /// The uncommitted output of projecting one pending fact.
@@ -669,6 +719,7 @@ mod tests {
     use crate::core::context::{ContextNeed, ContextOffer, Role, Selector};
     use crate::core::facts::FactScope;
     use crate::core::intents::{Intent, IntentKind};
+    use crate::core::matchers::ContextMatcher;
 
     #[test]
     fn projection_run_rejects_offer_owned_by_another_fact() {
@@ -756,6 +807,181 @@ mod tests {
         assert_eq!(next.pipeline.intents[0].kind.as_str(), "followup");
     }
 
+    #[test]
+    fn prepare_projection_reruns_on_existing_matches_before_commit() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
+        submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([7; 32]);
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            selector: selector.clone(),
+        };
+        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let projector = PrematureNeedUntilPayload {
+            role: role.clone(),
+            selector: selector.clone(),
+        };
+        let pending = PendingFact {
+            fact_id: target.id,
+            fact: target,
+            previous_context: ContextSet::new(),
+            projection_context: ProjectionContext::default(),
+        };
+        let matchers = ContextMatchers::new([role], Vec::new());
+
+        let effects = prepare_projection_effects(&projector, pending, &store, &matchers, &[])
+            .expect("prepare projection");
+
+        assert!(effects.next_context.needs.is_empty());
+        assert!(effects.context_delta.is_empty());
+        assert_eq!(effects.pipeline.intents.len(), 1);
+        assert_eq!(effects.pipeline.intents[0].kind.as_str(), "ready");
+        assert_eq!(effects.pipeline.intents[0].payload, offered.id.to_vec());
+    }
+
+    #[test]
+    fn prepare_projection_reruns_through_custom_matcher() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
+        submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+
+        let role = Role::new("custom").unwrap();
+        let selector = Selector::from_bytes(b"any");
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            selector: Selector::from_bytes(b"covered"),
+        };
+        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let pending = PendingFact {
+            fact_id: target.id,
+            fact: target,
+            previous_context: ContextSet::new(),
+            projection_context: ProjectionContext::default(),
+        };
+        let projector = PrematureNeedUntilPayload {
+            role: role.clone(),
+            selector,
+        };
+        let matchers = ContextMatchers::new(
+            [],
+            vec![Box::new(StaticMatcher {
+                role,
+                offer: offer.clone(),
+            })],
+        );
+
+        let effects = prepare_projection_effects(&projector, pending, &store, &matchers, &[])
+            .expect("prepare projection");
+
+        assert!(effects.next_context.needs.is_empty());
+        assert_eq!(effects.pipeline.intents.len(), 1);
+        assert_eq!(effects.pipeline.intents[0].kind.as_str(), "ready");
+        assert_eq!(effects.pipeline.intents[0].payload, offered.id.to_vec());
+    }
+
+    #[test]
+    fn prepare_projection_leaves_watch_need_in_projector_output() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let target = Fact::new(FactScope::Global, 1, b"watcher".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"watched".to_vec());
+        submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+
+        let role = Role::new("exact").unwrap();
+        let selector = Selector::from_bytes([8; 32]);
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            selector: selector.clone(),
+        };
+        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let pending = PendingFact {
+            fact_id: target.id,
+            fact: target,
+            previous_context: ContextSet::new(),
+            projection_context: ProjectionContext::default(),
+        };
+        let matchers = ContextMatchers::new([role.clone()], Vec::new());
+
+        let effects = prepare_projection_effects(
+            &WatchNeedProjector { role, selector },
+            pending,
+            &store,
+            &matchers,
+            &[],
+        )
+        .expect("prepare projection");
+
+        assert_eq!(effects.next_context.needs.len(), 1);
+        assert_eq!(effects.context_delta.added_needs.len(), 1);
+        assert_eq!(effects.pipeline.intents.len(), 1);
+        assert_eq!(effects.pipeline.intents[0].kind.as_str(), "observed");
+    }
+
+    #[test]
+    fn prepare_projection_errors_when_context_keeps_growing() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let target = Fact::new(FactScope::Global, 1, b"unbounded".to_vec());
+        let role = Role::new("exact").unwrap();
+
+        for index in 0..=PROJECTION_CONTEXT_FIXPOINT_LIMIT {
+            let offered = Fact::new(FactScope::Global, index as u64 + 2, vec![index as u8]);
+            submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+            let offer = ContextOffer {
+                owner: offered.id,
+                role: role.clone(),
+                scope: target.scope.clone(),
+                selector: Selector::from_bytes(vec![index as u8]),
+            };
+            crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+                .expect("insert stored offer");
+        }
+
+        let pending = PendingFact {
+            fact_id: target.id,
+            fact: target,
+            previous_context: ContextSet::new(),
+            projection_context: ProjectionContext::default(),
+        };
+        let matchers = ContextMatchers::new([role.clone()], Vec::new());
+
+        let err = match prepare_projection_effects(
+            &GrowingNeedProjector { role },
+            pending,
+            &store,
+            &matchers,
+            &[],
+        ) {
+            Ok(_) => panic!("projection should hit fixed-point bound"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("did not settle"));
+    }
+
     fn run_projection(
         projector: &impl Projector,
         fact: &Fact,
@@ -800,6 +1026,111 @@ mod tests {
                         .unwrap_or(fact.id),
                 )))
             }
+        }
+    }
+
+    struct PrematureNeedUntilPayload {
+        role: Role,
+        selector: Selector,
+    }
+
+    impl Projector for PrematureNeedUntilPayload {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            let need = ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                selector: self.selector.clone(),
+            };
+
+            if let Some(payload) = context.payload_for(&need) {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("ready").unwrap(),
+                    fact.id,
+                    payload.id,
+                )))
+            } else {
+                Ok(ProjectionOutput::new().need(need).intent(Intent::new(
+                    IntentKind::new("premature").unwrap(),
+                    fact.id,
+                    b"missing".to_vec(),
+                )))
+            }
+        }
+    }
+
+    struct WatchNeedProjector {
+        role: Role,
+        selector: Selector,
+    }
+
+    impl Projector for WatchNeedProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            let need = ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                selector: self.selector.clone(),
+            };
+            let mut output = ProjectionOutput::new().need(need.clone());
+            if context.payload_for(&need).is_some() {
+                output = output.intent(Intent::new(
+                    IntentKind::new("observed").unwrap(),
+                    fact.id,
+                    b"watched".to_vec(),
+                ));
+            }
+            Ok(output)
+        }
+    }
+
+    struct GrowingNeedProjector {
+        role: Role,
+    }
+
+    impl Projector for GrowingNeedProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            let next_selector = vec![context.offers().len() as u8];
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                selector: Selector::from_bytes(next_selector),
+            }))
+        }
+    }
+
+    struct StaticMatcher {
+        role: Role,
+        offer: ContextOffer,
+    }
+
+    impl ContextMatcher for StaticMatcher {
+        fn role(&self) -> &Role {
+            &self.role
+        }
+
+        fn matching_offers_for_need_from_store(
+            &self,
+            _store: &Store,
+            need: &ContextNeed,
+        ) -> Result<Vec<ContextOffer>, String> {
+            Ok((need.role == self.role)
+                .then(|| self.offer.clone())
+                .into_iter()
+                .collect())
         }
     }
 

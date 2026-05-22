@@ -529,6 +529,16 @@ Core does not decide whether a need is required or optional. The projector
 decides that by whether it emits rows, offers, or intents when the context is
 missing.
 
+**Projection fixed-point tradeoff:** when a projector emits needs, core matches
+those needs against already stored offers before committing any rows, intents, or
+replacement context. If new matched context appears, core reruns the projector
+immediately with the larger `ProjectionContext`. Only the settled final output is
+committed. This keeps required-vs-watch policy inside the projector and avoids a
+transient "project once without already-available context" state for facts such as
+encrypted messages or deletions. The cost is that one pending fact can run its
+projector and matching SQL more than once; the loop is bounded and monotonic, and
+core still does not know which needs are required.
+
 The source of truth is the `ContextNeed` / `ContextOffer` / `ContextMatcher`
 model, not protocol helper files. A projector first inspects the supplied
 `ProjectionContext`. If required matched context is absent, it emits a stable
@@ -707,11 +717,12 @@ context surface and is allowed only as an explicitly documented compatibility
 exception.
 
 The `waiting` output is not a blocked state. It is the fact's current standing
-context surface. If either matching offer already exists from an earlier pass,
-the matcher will wake this fact and core will supply that matched context on
-the next projection. If the output can be affected by future update/about facts
-such as deletions or key coverage, the projector keeps those stable needs in
-the successful output too.
+context surface. If a matching offer already exists, the projection preparation
+loop adds that matched context and reruns before committing the waiting output.
+If a matching offer arrives later, the matcher wakes this fact and core supplies
+that matched context on the next projection. If the output can be affected by
+future update/about facts such as deletions or key coverage, the projector keeps
+those stable needs in the successful output too.
 
 Projector rules:
 
@@ -898,6 +909,8 @@ submit fact
 pending projection worker
   load matched context from current context_edges
   run projector
+  match newly emitted needs against already stored offers
+  rerun with larger ProjectionContext until it settles or hits the bound
   apply row mutations
   replace the fact's context_edges
   wake context matches with SQL

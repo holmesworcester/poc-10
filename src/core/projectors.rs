@@ -19,6 +19,12 @@
 //! context or no longer needs a wake, the projector simply stops emitting it and
 //! the projection commit removes the old row.
 //!
+//! Core may run a projector more than once before committing. If an uncommitted
+//! run emits needs that already match stored offers, the projection pipeline grows
+//! the supplied `ProjectionContext` and reruns the same projector. Only the final
+//! output commits. This deliberately keeps required-vs-watch policy here in the
+//! projector instead of moving dependency groups or blockers into core.
+//!
 //! Protocol projector implementations own admission policy: scope checks,
 //! context proof checks, derived rows, offers, needs, time wakes, and follow-up
 //! intents. This file defines the contract they implement. Keep byte decoding
@@ -29,7 +35,7 @@ use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Matched context and due time ranges visible while projecting one fact.
 ///
@@ -87,6 +93,44 @@ impl ProjectionContext {
             matched_by_need,
             time_ranges: Vec::new(),
         }
+    }
+
+    /// Add newly matched context discovered while preparing one projection.
+    ///
+    /// This is crate-visible because only core should grow projection context.
+    /// Projectors receive the resulting snapshot but do not query storage or run
+    /// matchers themselves.
+    pub(crate) fn extend_with_matches(&mut self, other: ProjectionContext) -> bool {
+        let mut changed = false;
+
+        let mut seen_offers = self.offers.iter().cloned().collect::<BTreeSet<_>>();
+        for offer in other.offers {
+            if seen_offers.insert(offer.clone()) {
+                self.offers.push(offer);
+                changed = true;
+            }
+        }
+        if changed {
+            self.offers.sort();
+            self.offers.dedup();
+        }
+
+        let mut seen_matches = self
+            .matched
+            .iter()
+            .map(|matched| (matched.need.clone(), matched.offer.clone()))
+            .collect::<BTreeSet<_>>();
+        for matched in other.matched {
+            if seen_matches.insert((matched.need.clone(), matched.offer.clone())) {
+                self.matched.push(matched);
+                changed = true;
+            }
+        }
+        if changed {
+            self.matched_by_need = index_matches_by_need(&self.matched);
+        }
+
+        changed
     }
 
     /// Return all distinct offers visible to this projection run.
