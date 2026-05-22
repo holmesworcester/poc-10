@@ -1,14 +1,49 @@
-//! Atomic commit path for `PipelineEffects`.
+//! Atomic commit path for shared runtime effects.
 //!
-//! Projection, command submission, and intent dispatch all arrive here after
-//! producing the same side-effect language. This module validates that row
-//! mutations target tables the runtime registered, then writes purges, new
-//! facts, row mutations, durable intents, and restart-local intents inside the
-//! caller's transaction.
+//! Core is built around a simple rule: runtime work describes what should
+//! change, then one commit boundary makes that description durable. Commands,
+//! projectors, and intent handlers do not directly mutate all of core state.
+//! They return `PipelineEffects`: facts to admit, facts to purge, row
+//! mutations, durable intents, and restart-local intents. A commit is the
+//! moment those pending effects are validated, written to SQLite, and made
+//! visible together.
 //!
-//! Add new effect kinds here only when they need the same atomicity as the
-//! existing pipeline effects. The module should stay unaware of protocol
-//! semantics: it validates table ownership and idempotence, not payload meaning.
+//! Commit requests come from three places. `Runtime::submit_command_output`
+//! commits effects produced by a user-facing command. Fact projection commits
+//! projector effects after the projection layer has replaced that fact's
+//! context and time wakes. Intent dispatch commits handler effects in the same
+//! transaction that deletes the handled queue row. Those callers own their
+//! surrounding pipeline work; this file owns the shared effect language inside
+//! that work.
+//!
+//! Committing effects changes the runtime in four ways. Purged facts remove the
+//! fact and its core-owned derived rows. New facts enter `facts`,
+//! `local_fact_admissions`, and `pending_projection`. Row mutations update
+//! protocol or core IO tables the runtime explicitly allowed. Follow-up intents
+//! are recorded after the data they depend on, so later handler passes never see
+//! queued work for state that failed to commit.
+//!
+//! The mechanism is deliberately split in two. `validate_pipeline_effects`
+//! checks failures that do not need SQL: conflicting duplicate intents inside a
+//! batch and row mutations aimed at tables outside the runtime allowlist. The
+//! commit functions then rely on the store for the state-dependent checks:
+//! content-addressed facts must match their ids, row-table inserts must be
+//! exact duplicates if they already exist, typed-table inserts must match the
+//! full supplied row, and intent queue inserts must keep `(kind, key)` stable.
+//!
+//! The commit order is part of the contract. Purges run first so stale
+//! core-owned rows disappear before new facts and derived rows become visible.
+//! New facts are admitted and marked pending for projection. Row mutations
+//! apply next. Follow-up durable and restart-local intents are recorded last, so
+//! downstream work is not queued until the data it depends on has committed.
+//!
+//! Keep this file protocol-neutral. It may decide whether an effect is allowed
+//! to touch a registered table and whether an idempotent write conflicts with
+//! existing SQL state. It must not interpret payload bytes, decide which facts
+//! are valid, or know why a protocol table row matters. Add a new effect kind
+//! here only when it needs this same all-or-nothing commit boundary; display
+//! receipts, command-only output, and protocol policy belong in their owner
+//! modules.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::{insert_fact_and_pending_in_tx, purge_fact_in_tx};
@@ -23,7 +58,11 @@ use std::collections::BTreeMap;
 
 use super::dispatch::{record_intent_in_table_in_tx, record_intent_in_tx};
 
-/// Counts of newly inserted work after an effect commit.
+/// Counts of newly inserted follow-up work after an effect commit.
+///
+/// These counts are not a full change report. Purges, row mutations, and
+/// idempotent duplicates are intentionally omitted because callers use this as
+/// a scheduling signal for new facts and intents, not as an audit log.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PipelineEffectCounts {
     /// Facts newly admitted.
@@ -34,10 +73,11 @@ pub(crate) struct PipelineEffectCounts {
     pub local_intents: usize,
 }
 
-/// Validate effect batches before opening a transaction.
+/// Validate the stateless parts of an effect batch before opening a transaction.
 ///
-/// This catches pure conflicts first, so callers fail with a useful error
-/// before any SQL writes are attempted.
+/// This catches pure conflicts first, so callers fail with a useful error before
+/// any SQL writes are attempted. Existing-row conflicts are still checked at
+/// write time because they depend on the transaction's current view of SQLite.
 pub(crate) fn validate_pipeline_effects(
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
@@ -48,10 +88,12 @@ pub(crate) fn validate_pipeline_effects(
     Ok(())
 }
 
-/// Validate that a batch can be written to a single intent queue.
+/// Validate that a batch can be written to one intent queue.
 ///
 /// Intent durability is owned by the destination table. This check only rejects
-/// conflicting duplicates within one destination queue.
+/// conflicting duplicates within that one destination queue; the durable and
+/// restart-local queues are allowed to carry the same `(kind, key)` because
+/// dispatch defines how durable work shadows local work.
 fn validate_intents(intents: &[Intent]) -> Result<(), String> {
     let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();
     for intent in intents {
@@ -76,6 +118,11 @@ fn intent_validation_key(intent: &Intent) -> Vec<u8> {
 }
 
 /// Reject any row mutation targeting a table this runtime has not registered.
+///
+/// The allowlist is the ownership boundary between core and protocol storage.
+/// A row mutation can only name tables declared by the runtime description; the
+/// module that constructed the mutation still owns column meaning and payload
+/// validation.
 fn validate_row_mutations(
     mutations: &[RowMutation],
     allowed_tables: &[TableName],
@@ -86,7 +133,12 @@ fn validate_row_mutations(
     Ok(())
 }
 
-/// Split row mutations into inserts and deletes so a commit can apply them.
+/// Split opaque row-table mutations into inserts and deletes for the store.
+///
+/// Typed-table mutations stay in `row_mutations` because they need declared
+/// columns and predicates rather than the generic `row_key/row_value` shape.
+/// The split keeps the store's opaque-row API narrow while letting this file
+/// apply all row effects in one ordered commit pass.
 fn row_mutation_rows(
     mutations: &[RowMutation],
     allowed_tables: &[TableName],
@@ -130,7 +182,12 @@ pub(super) fn sqlite_string_error(err: String) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(err)
 }
 
-/// Validate and commit pipeline effects in a new transaction.
+/// Validate and commit effects in a new transaction owned by this helper.
+///
+/// Use this for command submission and other callers that do not already have a
+/// larger atomic unit. Projection and intent dispatch usually call
+/// `commit_pipeline_effects_in_tx` instead so their own queue/context changes
+/// commit with the shared effects.
 pub(crate) fn commit_pipeline_effects_to_store(
     store: &Store,
     effects: &PipelineEffects,
@@ -148,6 +205,11 @@ pub(crate) fn commit_pipeline_effects_to_store(
 /// The order is intentional: purges remove stale core-owned rows first, new
 /// facts become pending, rows mutate, and follow-up intents are recorded last.
 /// If any step fails, the caller's transaction rolls the whole batch back.
+///
+/// This function does not open or close the transaction. The caller owns the
+/// larger atomic boundary, which is why projection can replace context and time
+/// wakes before committing these effects, and dispatch can delete the handled
+/// intent row in the same SQL unit.
 pub(crate) fn commit_pipeline_effects_in_tx(
     tx: &Store,
     effects: &PipelineEffects,
@@ -207,7 +269,9 @@ pub(crate) fn commit_pipeline_effects_in_tx(
 ///
 /// Unlike row tables, typed tables do not have a generic key/value shape. The
 /// complete supplied column set is therefore both the insert data and the
-/// idempotence check.
+/// idempotence check. If SQLite ignores the insert because a primary key or
+/// unique index already exists, the existing row must match every supplied
+/// column or the effect is rejected as a conflict.
 fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<usize> {
     validate_columns_and_values(insert.columns, &insert.values, "insert")?;
     let table = quoted_table_name(insert.table)?;
@@ -228,6 +292,11 @@ fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<
 }
 
 /// Check whether an ignored typed insert was an exact duplicate.
+///
+/// This is intentionally stricter than "the key already exists": callers that
+/// emit typed rows must be able to retry the exact same effect without changing
+/// meaning, and must fail if the same database identity already names different
+/// column values.
 fn insert_values_match(
     store: &Store,
     insert: &TableInsert,
@@ -247,6 +316,10 @@ fn insert_values_match(
 }
 
 /// Delete typed-table rows by an exact column predicate.
+///
+/// Deletes are idempotent absence requests. Deleting zero rows is successful
+/// because callers are asking the commit boundary to make matching rows absent,
+/// not asserting that a row must already exist.
 fn delete_where_in_tx(store: &Store, delete: &TableDeleteWhere) -> rusqlite::Result<usize> {
     validate_columns_and_values(delete.columns, &delete.values, "delete")?;
     let table = quoted_table_name(delete.table)?;
