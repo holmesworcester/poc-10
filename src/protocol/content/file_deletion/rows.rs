@@ -10,18 +10,12 @@ use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;
 use crate::core::select::Value;
 use crate::core::store::TableName;
+use crate::protocol::registry::read_models;
 
 use super::fact::{AuthorId, WorkspaceId};
 
-pub const FILE_DELETION_ROWS: TableName = TableName::new("file_deletion_rows");
-
-const FILE_DELETION_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "target_file_id",
-    "deletion_id",
-    "created_at_ms",
-    "author_user_id",
-];
+pub const FILE_DELETION_ROWS: TableName = read_models::FILE_DELETION_ROWS;
+const FILE_DELETION_COLUMNS: &[&str] = read_models::FILE_DELETIONS.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDeletionRow {
@@ -33,17 +27,13 @@ pub struct FileDeletionRow {
 }
 
 pub fn file_deletion_row(input: FileDeletionRow) -> TableInsert {
-    TableInsert {
-        table: FILE_DELETION_ROWS,
-        columns: FILE_DELETION_COLUMNS,
-        values: vec![
+    read_models::FILE_DELETIONS.insert(vec![
             Value::Bytes(input.workspace_id.to_vec()),
             Value::Bytes(input.target_file_id.to_vec()),
             Value::Bytes(input.deletion_id.to_vec()),
             Value::U64(input.created_at_ms),
             Value::Bytes(input.author_user_id.to_vec()),
-        ],
-    }
+    ])
 }
 
 #[cfg(test)]

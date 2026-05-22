@@ -10,25 +10,13 @@ use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;
 use crate::core::select::Value;
 use crate::core::store::TableName;
+use crate::protocol::registry::read_models;
 
 use super::fact::{AuthorId, ContentFileFact, RootHash, WorkspaceId};
 
-pub const FILE_ROWS: TableName = TableName::new("content_files");
-pub(crate) const FILE_KEY_COLUMNS: &[&str] = &["workspace_id", "file_fact_id"];
-const FILE_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "file_fact_id",
-    "message_id",
-    "file_id",
-    "author_user_id",
-    "created_at_ms",
-    "root_hash",
-    "byte_len",
-    "total_slices",
-    "slice_bytes",
-    "sealed_metadata",
-    "deleted",
-];
+pub const FILE_ROWS: TableName = read_models::FILE_ROWS;
+pub(crate) const FILE_KEY_COLUMNS: &[&str] = read_models::CONTENT_FILES.key_columns;
+const FILE_COLUMNS: &[&str] = read_models::CONTENT_FILES.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileRow {
@@ -46,10 +34,7 @@ pub struct ContentFileRow {
 }
 
 pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableInsert {
-    TableInsert {
-        table: FILE_ROWS,
-        columns: FILE_COLUMNS,
-        values: vec![
+    read_models::CONTENT_FILES.insert(vec![
             Value::Bytes(fact.workspace_id.to_vec()),
             Value::Bytes(file_fact_id.to_vec()),
             Value::Bytes(fact.message_id.to_vec()),
@@ -62,8 +47,7 @@ pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableIn
             Value::U64(u64::from(fact.slice_bytes)),
             Value::Bytes(fact.sealed_metadata.clone()),
             Value::Bool(false),
-        ],
-    }
+    ])
 }
 
 #[cfg(test)]

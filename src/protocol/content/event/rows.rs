@@ -7,11 +7,12 @@
 use crate::core::intents::TableInsert;
 use crate::core::select::Value;
 use crate::core::store::TableName;
+use crate::protocol::registry::read_models;
 
 use super::fact::{ContentEventFact, WorkspaceId};
 
-pub const CONTENT_EVENT_ROWS: TableName = TableName::new("content_event_rows");
-const CONTENT_EVENT_COLUMNS: &[&str] = &["workspace_id", "fact_id", "timestamp", "payload_bytes"];
+pub const CONTENT_EVENT_ROWS: TableName = read_models::CONTENT_EVENT_ROWS;
+const CONTENT_EVENT_COLUMNS: &[&str] = read_models::CONTENT_EVENTS.columns;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentEventRow {
@@ -23,14 +24,10 @@ pub struct ContentEventRow {
 
 pub fn content_event_row(fact_id: [u8; 32], fact: &ContentEventFact) -> TableInsert {
     let payload_bytes: u64 = fact.payload.len() as u64;
-    TableInsert {
-        table: CONTENT_EVENT_ROWS,
-        columns: CONTENT_EVENT_COLUMNS,
-        values: vec![
+    read_models::CONTENT_EVENTS.insert(vec![
             Value::Bytes(fact.workspace_id.to_vec()),
             Value::Bytes(fact_id.to_vec()),
             Value::U64(fact.timestamp),
             Value::U64(payload_bytes),
-        ],
-    }
+    ])
 }

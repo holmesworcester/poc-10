@@ -10,23 +10,14 @@ use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;
 use crate::core::select::Value;
 use crate::core::store::{Store, TableName};
+use crate::protocol::registry::read_models;
 use rusqlite::params;
 
 use super::fact::{AuthorId, WorkspaceId, REACTION_CIPHERTEXT_BYTES, REACTION_NONCE_BYTES};
 
-pub const REACTION_ROWS: TableName = TableName::new("content_reactions");
-
-pub(crate) const REACTION_KEY_COLUMNS: &[&str] = &["workspace_id", "reaction_id"];
-const REACTION_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "reaction_id",
-    "message_id",
-    "author_user_id",
-    "created_at_ms",
-    "nonce",
-    "ciphertext",
-    "deleted",
-];
+pub const REACTION_ROWS: TableName = read_models::REACTION_ROWS;
+pub(crate) const REACTION_KEY_COLUMNS: &[&str] = read_models::CONTENT_REACTIONS.key_columns;
+const REACTION_COLUMNS: &[&str] = read_models::CONTENT_REACTIONS.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionRow {
@@ -43,10 +34,7 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableInsert, String> {
     if input.ciphertext.len() > REACTION_CIPHERTEXT_BYTES {
         return Err("reaction row ciphertext exceeds fixed slot".to_string());
     }
-    Ok(TableInsert {
-        table: REACTION_ROWS,
-        columns: REACTION_COLUMNS,
-        values: vec![
+    Ok(read_models::CONTENT_REACTIONS.insert(vec![
             Value::Bytes(input.workspace_id.to_vec()),
             Value::Bytes(input.reaction_id.to_vec()),
             Value::Bytes(input.target_message_id.to_vec()),
@@ -55,8 +43,7 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableInsert, String> {
             Value::Bytes(input.nonce.to_vec()),
             Value::Bytes(input.ciphertext),
             Value::Bool(false),
-        ],
-    })
+    ]))
 }
 
 pub fn reaction_rows_for_workspace(

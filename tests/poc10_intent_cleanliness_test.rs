@@ -1138,6 +1138,119 @@ fn target_intents_are_self_contained_handler_files_without_driver_or_intent_subm
     );
 }
 
+/// The canonical intent verb vocabulary. Intent handler files are named
+/// `<verb>_<object>`; this set is deliberately small, and growing it is a
+/// deliberate act — add a verb here only when no existing verb fits.
+const INTENT_VERBS: [&str; 7] = [
+    "create", "send", "receive", "purge", "share", "seed", "unwrap",
+];
+
+/// A name is verb-first when it begins with `<verb>_` for a canonical intent
+/// verb. `shared_fact` is a noun and correctly does not match `share_`.
+fn is_verb_first(name: &str) -> bool {
+    INTENT_VERBS
+        .iter()
+        .any(|verb| name.starts_with(&format!("{verb}_")))
+}
+
+/// Rust files sitting directly inside `dir` (non-recursive).
+fn immediate_rust_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Subdirectories sitting directly inside `dir`.
+fn immediate_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs
+}
+
+#[test]
+fn intent_handler_files_are_verb_first() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let offenders = intent_handler_files(root)
+        .into_iter()
+        .filter(|path| !is_verb_first(path.file_stem().unwrap().to_str().unwrap()))
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "intent handler files must be named `<verb>_<object>` using a canonical \
+         verb {INTENT_VERBS:?}; these are not verb-first:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn verb_named_scope_files_are_registered_intents() {
+    // The "bare-noun smell" guardrail, stated as its testable invariant: a
+    // `.rs` file directly inside a scope directory is a registered intent
+    // handler if and only if its name is verb-first. A verb-named file that is
+    // not a registered intent is the smell; a fact-module file must stay
+    // noun-named so facts and intents are distinguishable by name alone.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let intents = intent_handler_file_set(root);
+    let mut offenders = Vec::new();
+    for scope_dir in scope_dirs(root) {
+        for file in immediate_rust_files(&scope_dir) {
+            let verb_first = is_verb_first(file.file_stem().unwrap().to_str().unwrap());
+            let shown = file.strip_prefix(root).unwrap().display().to_string();
+            match (verb_first, intents.contains(&file)) {
+                (true, false) => offenders.push(format!(
+                    "{shown} is verb-named but is not a registered intent handler"
+                )),
+                (false, true) => offenders.push(format!(
+                    "{shown} is a registered intent handler but is not verb-first"
+                )),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "directly under a scope directory, a verb-named `.rs` file must be a \
+         registered intent and a fact-module file must stay noun-named:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn fact_family_directories_are_noun_named() {
+    // Fact families are noun-named directories; an intent is never a directory.
+    // A verb-first subdirectory means an intent was wrongly given a submodule
+    // tree, or a fact family was misnamed like a verb.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for scope_dir in scope_dirs(root) {
+        for sub in immediate_subdirs(&scope_dir) {
+            if is_verb_first(sub.file_name().unwrap().to_str().unwrap()) {
+                offenders.push(sub.strip_prefix(root).unwrap().display().to_string());
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "fact-family directories under a scope must be noun-named, not verb-first:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -9,41 +9,20 @@ use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;
 use crate::core::select::Value;
 use crate::core::store::TableName;
+use crate::protocol::registry::read_models;
 
 use super::fact::{
     AuthorId, ContentMessageFact, FrontierId, SignerId, WorkspaceId, UNIX_MINUTE_MS,
 };
 
-pub const CONTENT_MESSAGE_ROWS: TableName = TableName::new("content_messages");
-pub const OPENED_MESSAGE_ROWS: TableName = TableName::new("opened_message_rows");
-pub const MESSAGE_TOMBSTONE_ROWS: TableName = TableName::new("message_tombstone_rows");
+pub const CONTENT_MESSAGE_ROWS: TableName = read_models::CONTENT_MESSAGE_ROWS;
+pub const OPENED_MESSAGE_ROWS: TableName = read_models::OPENED_MESSAGE_ROWS;
+pub const MESSAGE_TOMBSTONE_ROWS: TableName = read_models::MESSAGE_TOMBSTONE_ROWS;
 
-pub(crate) const MESSAGE_KEY_COLUMNS: &[&str] = &["workspace_id", "message_id"];
-const CONTENT_MESSAGE_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "message_id",
-    "author_user_id",
-    "created_at_ms",
-    "signer_id",
-    "frontier_id",
-    "minute",
-    "leaf_id",
-    "deleted",
-];
-const OPENED_MESSAGE_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "message_id",
-    "created_at_ms",
-    "author_user_id",
-    "signer_id",
-    "text",
-];
-const MESSAGE_TOMBSTONE_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "message_id",
-    "author_user_id",
-    "authored_minute",
-];
+pub(crate) const MESSAGE_KEY_COLUMNS: &[&str] = read_models::CONTENT_MESSAGES.key_columns;
+const CONTENT_MESSAGE_COLUMNS: &[&str] = read_models::CONTENT_MESSAGES.columns;
+const OPENED_MESSAGE_COLUMNS: &[&str] = read_models::OPENED_MESSAGES.columns;
+const MESSAGE_TOMBSTONE_COLUMNS: &[&str] = read_models::MESSAGE_TOMBSTONES.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageRow {
@@ -68,10 +47,7 @@ pub struct OpenedMessageRow {
 }
 
 pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableInsert {
-    TableInsert {
-        table: CONTENT_MESSAGE_ROWS,
-        columns: CONTENT_MESSAGE_COLUMNS,
-        values: vec![
+    read_models::CONTENT_MESSAGES.insert(vec![
             Value::Bytes(fact.workspace_id.to_vec()),
             Value::Bytes(message_id.to_vec()),
             Value::Bytes(fact.author_user_id.to_vec()),
@@ -81,23 +57,18 @@ pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> Tab
             Value::U64(fact.minute),
             Value::Bytes(fact.leaf_id.to_vec()),
             Value::Bool(false),
-        ],
-    }
+    ])
 }
 
 pub fn opened_message_row(input: OpenedMessageRow) -> TableInsert {
-    TableInsert {
-        table: OPENED_MESSAGE_ROWS,
-        columns: OPENED_MESSAGE_COLUMNS,
-        values: vec![
+    read_models::OPENED_MESSAGES.insert(vec![
             Value::Bytes(input.workspace_id.to_vec()),
             Value::Bytes(input.message_id.to_vec()),
             Value::U64(input.created_at_ms),
             Value::Bytes(input.author_user_id.to_vec()),
             Value::Bytes(input.signer_id.to_vec()),
             Value::Bytes(input.text.into_bytes()),
-        ],
-    }
+    ])
 }
 
 pub fn message_tombstone_row(
@@ -106,16 +77,12 @@ pub fn message_tombstone_row(
     author_user_id: AuthorId,
     created_at_ms: u64,
 ) -> TableInsert {
-    TableInsert {
-        table: MESSAGE_TOMBSTONE_ROWS,
-        columns: MESSAGE_TOMBSTONE_COLUMNS,
-        values: vec![
+    read_models::MESSAGE_TOMBSTONES.insert(vec![
             Value::Bytes(workspace_id.to_vec()),
             Value::Bytes(message_id.to_vec()),
             Value::Bytes(author_user_id.to_vec()),
             Value::U64(created_at_ms / UNIX_MINUTE_MS),
-        ],
-    }
+    ])
 }
 
 #[cfg(test)]

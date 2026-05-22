@@ -8,20 +8,14 @@ use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;
 use crate::core::select::Value;
 use crate::core::store::{Store, TableName};
+use crate::protocol::registry::read_models;
 use rusqlite::params;
 
 use super::fact::{ContentFileSliceFact, WorkspaceId};
 
-pub const FILE_SLICE_ROWS: TableName = TableName::new("file_slice_rows");
-pub(crate) const FILE_SLICE_KEY_COLUMNS: &[&str] = &["workspace_id", "file_id", "slice_index"];
-const FILE_SLICE_COLUMNS: &[&str] = &[
-    "workspace_id",
-    "file_id",
-    "slice_index",
-    "slice_fact_id",
-    "created_at_ms",
-    "ciphertext",
-];
+pub const FILE_SLICE_ROWS: TableName = read_models::FILE_SLICE_ROWS;
+pub(crate) const FILE_SLICE_KEY_COLUMNS: &[&str] = read_models::FILE_SLICES.key_columns;
+const FILE_SLICE_COLUMNS: &[&str] = read_models::FILE_SLICES.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileSliceRow {
@@ -34,18 +28,14 @@ pub struct ContentFileSliceRow {
 }
 
 pub fn content_file_slice_row(slice_fact_id: FactId, fact: &ContentFileSliceFact) -> TableInsert {
-    TableInsert {
-        table: FILE_SLICE_ROWS,
-        columns: FILE_SLICE_COLUMNS,
-        values: vec![
+    read_models::FILE_SLICES.insert(vec![
             Value::Bytes(fact.workspace_id.to_vec()),
             Value::Bytes(fact.file_id.to_vec()),
             Value::U64(u64::from(fact.slice_index)),
             Value::Bytes(slice_fact_id.to_vec()),
             Value::U64(fact.created_at_ms),
             Value::Bytes(fact.ciphertext.clone()),
-        ],
-    }
+    ])
 }
 
 pub fn file_slice_rows_for_file(

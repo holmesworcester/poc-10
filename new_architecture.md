@@ -252,6 +252,17 @@ only for fact-family-local helper slices named after validation steps or output
 families. If a `project/` child corresponds to a different fact tag, the module
 is bundled incorrectly and must be split.
 
+Within a scope, names tell facts and intents apart. Fact families are
+noun-named: a directory, or a single noun-named `.rs` file. Intent handlers are
+verb-named `<verb>_<object>.rs` files using a small canonical verb vocabulary:
+`create`, `send`, `receive`, `purge`, `share`, `seed`, `unwrap`. Growing that
+vocabulary is a deliberate act, not a default. Directly under a scope
+directory, a verb-named `.rs` file must be a registered intent handler, and a
+fact-module file must stay noun-named. A verb-named file that is not a
+registered intent, or a verb-first fact-family directory, is a smell: it breaks
+the rule that a reader can tell facts from intents by name alone. Boundary
+tests enforce this.
+
 `src/lib.rs`, `src/core.rs`, `src/protocol.rs`, and each scope manifest
 `src/protocol/<scope>.rs` are
 manifests. They declare modules and may re-export narrow APIs; they should not
@@ -1261,6 +1272,8 @@ new compatibility layers:
 - Keep root manifests declaration-only.
 - Keep every handler as a verb-named, self-contained file under its scope
   directory `src/protocol/<scope>/`.
+- Name intent handlers `<verb>_<object>` with a canonical verb, and keep fact
+  families noun-named, so facts and intents are distinguishable by name alone.
 - Register fact types, intent kinds, handlers, and wire layouts in visible
   manifests.
 - Generate row and wire boilerplate from the three schema declaration files.

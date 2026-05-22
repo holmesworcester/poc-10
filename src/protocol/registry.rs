@@ -21,6 +21,7 @@
 
 use crate::core::cli::CliCommand;
 use crate::core::facts::Fact;
+use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::projectors::{
     EnvelopeRoute, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
@@ -31,6 +32,163 @@ use crate::protocol::cli as command;
 use crate::protocol::{connection, content, encryption, identity, sync, transport};
 
 pub use crate::protocol::cli::MatchCliContext;
+
+pub(crate) mod read_models {
+    use super::{TableName, TypedTableSchema};
+
+    macro_rules! typed_table {
+        (
+            $schema:ident,
+            $table_const:ident,
+            $table_name:literal,
+            columns [$($column:literal),+ $(,)?],
+            key [$($key_column:literal),+ $(,)?]
+        ) => {
+            pub const $schema: TypedTableSchema = TypedTableSchema {
+                table: TableName::new($table_name),
+                columns: &[$($column),+],
+                key_columns: &[$($key_column),+],
+            };
+
+            pub const $table_const: TableName = $schema.table;
+        };
+    }
+
+    typed_table!(
+        OPENED_MESSAGES,
+        OPENED_MESSAGE_ROWS,
+        "opened_message_rows",
+        columns [
+            "workspace_id",
+            "message_id",
+            "created_at_ms",
+            "author_user_id",
+            "signer_id",
+            "text",
+        ],
+        key ["workspace_id", "message_id"]
+    );
+
+    typed_table!(
+        MESSAGE_TOMBSTONES,
+        MESSAGE_TOMBSTONE_ROWS,
+        "message_tombstone_rows",
+        columns [
+            "workspace_id",
+            "message_id",
+            "author_user_id",
+            "authored_minute",
+        ],
+        key ["workspace_id", "message_id"]
+    );
+
+    typed_table!(
+        FILE_SLICES,
+        FILE_SLICE_ROWS,
+        "file_slice_rows",
+        columns [
+            "workspace_id",
+            "file_id",
+            "slice_index",
+            "slice_fact_id",
+            "created_at_ms",
+            "ciphertext",
+        ],
+        key ["workspace_id", "file_id", "slice_index"]
+    );
+
+    typed_table!(
+        CONTENT_EVENTS,
+        CONTENT_EVENT_ROWS,
+        "content_event_rows",
+        columns ["workspace_id", "fact_id", "timestamp", "payload_bytes"],
+        key ["workspace_id", "fact_id"]
+    );
+
+    typed_table!(
+        CONTENT_MESSAGES,
+        CONTENT_MESSAGE_ROWS,
+        "content_messages",
+        columns [
+            "workspace_id",
+            "message_id",
+            "author_user_id",
+            "created_at_ms",
+            "signer_id",
+            "frontier_id",
+            "minute",
+            "leaf_id",
+            "deleted",
+        ],
+        key ["workspace_id", "message_id"]
+    );
+
+    typed_table!(
+        CONTENT_REACTIONS,
+        REACTION_ROWS,
+        "content_reactions",
+        columns [
+            "workspace_id",
+            "reaction_id",
+            "message_id",
+            "author_user_id",
+            "created_at_ms",
+            "nonce",
+            "ciphertext",
+            "deleted",
+        ],
+        key ["workspace_id", "reaction_id"]
+    );
+
+    typed_table!(
+        CONTENT_FILES,
+        FILE_ROWS,
+        "content_files",
+        columns [
+            "workspace_id",
+            "file_fact_id",
+            "message_id",
+            "file_id",
+            "author_user_id",
+            "created_at_ms",
+            "root_hash",
+            "byte_len",
+            "total_slices",
+            "slice_bytes",
+            "sealed_metadata",
+            "deleted",
+        ],
+        key ["workspace_id", "file_fact_id"]
+    );
+
+    typed_table!(
+        MESSAGE_DELETIONS,
+        MESSAGE_DELETION_ROWS,
+        "message_deletion_rows",
+        columns [
+            "workspace_id",
+            "target_message_id",
+            "deletion_id",
+            "created_at_ms",
+            "author_user_id",
+        ],
+        key ["workspace_id", "target_message_id"]
+    );
+
+    typed_table!(
+        FILE_DELETIONS,
+        FILE_DELETION_ROWS,
+        "file_deletion_rows",
+        columns [
+            "workspace_id",
+            "target_file_id",
+            "deletion_id",
+            "created_at_ms",
+            "author_user_id",
+        ],
+        key ["workspace_id", "target_file_id"]
+    );
+}
 
 pub const FACTS_SCHEMA_SOURCE: SchemaSource = SchemaSource {
     ddl: r#"
@@ -372,13 +530,13 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,
     connection::response::rows::CONNECTION_RESPONSE_ROWS,
-    content::event::rows::CONTENT_EVENT_ROWS,
-    content::file::rows::FILE_ROWS,
-    content::file_deletion::rows::FILE_DELETION_ROWS,
-    content::file_slice::rows::FILE_SLICE_ROWS,
-    content::message::rows::CONTENT_MESSAGE_ROWS,
-    content::message_deletion::rows::MESSAGE_DELETION_ROWS,
-    content::reaction::rows::REACTION_ROWS,
+    read_models::CONTENT_EVENT_ROWS,
+    read_models::FILE_ROWS,
+    read_models::FILE_DELETION_ROWS,
+    read_models::FILE_SLICE_ROWS,
+    read_models::CONTENT_MESSAGE_ROWS,
+    read_models::MESSAGE_DELETION_ROWS,
+    read_models::REACTION_ROWS,
     encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     encryption::rows::KEY_WRAP_ROWS,
     identity::admin::rows::ADMIN_ROWS,
@@ -396,8 +554,8 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     identity::workspace::rows::WORKSPACE_ROWS,
     encryption::local_history_node_secret::rows::LOCAL_HISTORY_NODE_SECRET_ROWS,
     encryption::removal_frontier::rows::REMOVAL_FRONTIER_ROWS,
-    content::message::rows::OPENED_MESSAGE_ROWS,
-    content::message::rows::MESSAGE_TOMBSTONE_ROWS,
+    read_models::OPENED_MESSAGE_ROWS,
+    read_models::MESSAGE_TOMBSTONE_ROWS,
     sync::compare::rows::SYNC_COMPARE_ROWS,
     sync::have_id::rows::SYNC_HAVE_ID_ROWS,
     sync::need_id::rows::SYNC_NEED_ID_ROWS,

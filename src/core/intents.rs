@@ -123,6 +123,55 @@ pub struct TableDeleteWhere {
     pub values: Vec<SqlValue>,
 }
 
+/// Protocol-owned typed table declaration.
+///
+/// This is the narrow schema surface shared by projection code and the runtime
+/// commit path. Protocol registry code owns the SQL DDL; row builders use this
+/// value to avoid re-declaring table names and column order beside every
+/// materialized read model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedTableSchema {
+    /// Typed table name.
+    pub table: TableName,
+    /// Full insert column order for this table's materialized row.
+    pub columns: &'static [&'static str],
+    /// Logical key columns used for delete/replacement mutations.
+    pub key_columns: &'static [&'static str],
+}
+
+impl TypedTableSchema {
+    /// Build an insert mutation using this schema's declared column order.
+    pub fn insert(self, values: Vec<SqlValue>) -> TableInsert {
+        TableInsert {
+            table: self.table,
+            columns: self.columns,
+            values,
+        }
+    }
+
+    /// Build a delete mutation against this schema's logical key columns.
+    pub fn delete_by_key(self, values: Vec<SqlValue>) -> TableDeleteWhere {
+        TableDeleteWhere {
+            table: self.table,
+            columns: self.key_columns,
+            values,
+        }
+    }
+
+    /// Build a delete mutation against an explicit predicate.
+    pub fn delete_where(
+        self,
+        columns: &'static [&'static str],
+        values: Vec<SqlValue>,
+    ) -> TableDeleteWhere {
+        TableDeleteWhere {
+            table: self.table,
+            columns,
+            values,
+        }
+    }
+}
+
 /// Row-level mutations a command, projector, or handler can request.
 ///
 /// Core validates the target table against the runtime description before any
