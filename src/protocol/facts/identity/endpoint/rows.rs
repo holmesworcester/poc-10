@@ -1,8 +1,9 @@
 //! Projection row layouts for local endpoint state.
 //!
 //! State is module-owned and keyed under the stable `b"local"` key. The
-//! separation across four tables mirrors the legacy module and keeps row
-//! meanings explicit for queries and tests.
+//! separation across four tables keeps endpoint id, transport secret, signing
+//! public key, and signing secret independently addressable by queries and
+//! tests without giving core semantic knowledge of the values.
 
 use crate::core::store::{TableName, TableRow};
 

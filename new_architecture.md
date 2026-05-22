@@ -1,7 +1,7 @@
 # New Architecture
 
-This document describes the poc-10 target architecture and the current
-migration checkpoint. The target vocabulary is deliberately small:
+This document describes the current poc-10 architecture. The vocabulary is
+deliberately small:
 
 ```text
 facts
@@ -14,22 +14,13 @@ intent handlers
 runtime pipelines
 ```
 
-The design is not a wrapper around the old worker/blocking model. The end state
-has one fact store, one context matching surface, one projection scheduler, and
-one intent scheduling surface.
+The system has one fact store, one context matching surface, one projection
+scheduler, and one intent scheduling surface.
 
-## Poc-10 Success Criteria
+## Architecture Criteria
 
-`poc-10` starts from the merged `poc-8` behavior, but the implementation target
-is this architecture.
+The architecture holds when:
 
-The migration succeeds when:
-
-- Every non-ignored `poc-8` test passes in `poc-10`, with the same user-facing
-  behavior.
-- The old mechanisms are gone, not wrapped: label stores, blocked tables,
-  ready queues, pending reprojection queues, worker-specific domain queues, and
-  receive metadata side channels.
 - Core owns facts, context, command context, byte-range context matching, generic runtime/app mechanics,
   pending fact processing, context wake fanout, intent dispatch, storage mechanics, wire
   field primitives, and crypto helpers.
@@ -70,51 +61,39 @@ The migration succeeds when:
   slots.
 - Transit frames use the same fixed-layout wire machinery and support only the
   two configured frame sizes.
-- Boundary tests fail if new dumping-ground files, ad hoc SQL, ad hoc codecs,
+- Boundary tests fail if dumping-ground files, ad hoc SQL, ad hoc codecs,
   broad projector reads, direct handler calls, or direct network/store side
   effects appear.
 
-The first milestone is not feature expansion. It is a structural switch-over
-with the `poc-8` behavior still green.
-
-## Current Migration Checkpoint
-
-As of the 2026-05-18 checkpoint on branch `main`, the repo is in a cutover
-state with target code active and the normal poc-10 cutover guardrails running
-without ignores. The only ignored behavior tests are explicit manual perf
-fixtures and the deferred partial-download-progress content tests.
+## Current Runtime Shape
 
 - `src/main.rs` delegates to the product-facing `match` entrypoint.
-- Product commands are being cut over to a generic core runtime/app facade
-  configured by `src/protocol/registry.rs`. Any product-specific runtime facade is
-  temporary cutover debt, not the target architecture.
+- Product commands run through the generic core runtime/app facade configured
+  by `src/protocol/registry.rs`.
 - Smoke behavior is tested through black-box CLI tests on the real `match`
   binary, not through a demo command or demo source file.
-- The old source island has been removed; new behavior belongs in target
-  modules only.
 - The runtime calls SQL-backed core pipeline workers under
-  `src/core/pipeline/`: `projection.rs` projects pending facts,
-  `projection_commit.rs` wakes context dependents,
-  `fact_context.rs` runs the single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
-  durable and ephemeral intents.
-- Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
+  `src/core/pipeline/`: `project_pending_facts.rs` projects pending facts and
+  admits time wakes, `context.rs` stores range context and wakes dependents,
+  `dispatch.rs` claims durable or ephemeral intents, and `commit_effects.rs`
+  commits shared facts, purges, row mutations, and queued work.
+- Fact modules under `src/protocol/facts/` are exercised by poc-10 tests
   and route production `match` behavior through the target runtime.
-- Target intent handlers under `src/protocol/intents/` are themed files and
-  are registered from `src/protocol/intents.rs`.
-- Broad handler driver submodules have been removed.
-- Target receive transit can open fixed transit frames that carry signed
-  key-wrap facts, admit the opened fact, and record local receive provenance.
+- Intent handlers under `src/protocol/intents/` are themed files and are
+  registered from `src/protocol/intents.rs`.
+- Receive transit can open fixed transit frames that carry signed key-wrap
+  facts, admit the opened fact, and record local receive provenance.
   Send-side flow emits send-on-connection and network-send intents and writes a
   bounded TCP frame when route context is present.
-- Target purge can remove exact retained target facts through handler output;
+- Purge can remove exact retained facts through handler output;
   child-message purge, expiry, retention-floor purge, deleted-message purge,
   retired-recipient material purge, and sync shareability recording are bounded
-  target handlers.
+  handlers.
 - Removal-frontier projection is authority-gated: a frontier does not publish
   frontier context until the owner endpoint is proven by workspace signer
   context or the matching local signer secret.
 
-Implemented target slices:
+Implemented slices:
 
 - Core fact/context/intent/projector contracts.
 - Context needs/offers for exact fact ids, secret coverage, receive provenance,
@@ -140,7 +119,7 @@ Implemented target slices:
   daemon tick, and dispatches registered protocol commands without knowing
   their names or behavior.
 
-Current follow-up work outside the active cutover guard:
+Current follow-up work:
 
 - Generate more row and wire boilerplate from the schema declarations instead
   of hand-written module codecs.
@@ -150,12 +129,12 @@ Current follow-up work outside the active cutover guard:
 - Keep network/perf coverage honest while preserving the simple transport
   contract: TCP stream delivery, memory-local byte queues, and idempotent
   regenerated sends.
-- Revisit command-host boundaries for accept/listen flows: accepting an invite
-  currently needs daemon listen-address context, and that should stay visibly
-  owned by core/daemon rather than becoming protocol CLI orchestration.
-- Revisit whether thin protocol command wrappers should explicitly drain local
-  projection/intent work, or whether core should expose a command-host policy
-  that makes those transaction and effect boundaries obvious.
+- Keep command-host boundaries visible for accept/listen flows: accepting an
+  invite needs daemon listen-address context, and that state belongs to
+  core/daemon rather than protocol payload construction.
+- Keep command-visible settling explicit in the protocol CLI host. Commands
+  that author facts call the runtime's command-safe drain path before querying
+  projected results, while daemon-only network handlers stay out of that drain.
 
 ## File Organization
 
@@ -186,16 +165,10 @@ src/
     intents.rs
     pipeline.rs
     pipeline/
-      admission.rs
-      fact_context.rs
-      projection.rs
-      projection_commit.rs
-      projection_queue.rs
-      context_rows.rs
-      context_matching.rs
+      commit_effects.rs
+      context.rs
       dispatch.rs
-      effects.rs
-      intent_queue.rs
+      project_pending_facts.rs
     store.rs
     store/
       sql.rs
@@ -270,7 +243,7 @@ fact types is a bundle and should be split before review, even when the facts
 are conceptually related. This rule applies to encryption and sync equally:
 `recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
 `sync_have_id`, `sync_need_id`, `sync_range_request`, `sync_encrypted_root`,
-`sync_shared_event`, and `sync_key_wrap_available` are separate fact-family
+`sync_shared_fact`, and `sync_key_wrap_available` are separate fact-family
 modules. Shared helper code is allowed only when its file name states the
 specific invariant it owns, such as signer validation or range matching.
 
@@ -287,8 +260,8 @@ accumulate behavior. Public concrete protocol namespaces live under
 dumping-ground files.
 
 `src/protocol/registry.rs` is the target protocol registry. It is the table of
-contents across CLI commands, schema sources, fact registrations, context
-context roles, intent kinds, handlers, and the projector/handler route
+contents across CLI commands, schema sources, fact registrations, row mutation
+tables, intent kinds, handlers, and the projector/handler route
 factories that bind those declarations to core runtime traits. It is allowed
 to name protocol factories, but not to own runtime lifecycle, storage opening,
 network IO loops, or daemon policy.
@@ -327,9 +300,8 @@ projectors, and intent handlers. For example, accepting an invite creates a
 local `connection_request` fact; projecting that fact schedules the bootstrap
 network intent, so the running daemon owns the network effect.
 
-The old source island has been removed. Do not recreate compatibility
-bridges; port behavior into the target runtime, fact modules, intent handlers,
-and queries instead.
+Do not create compatibility bridges around the runtime. Behavior belongs in
+the runtime, fact modules, intent handlers, and queries.
 
 ### No `mod.rs`
 
@@ -352,7 +324,7 @@ fact.rs
   protocol data types and semantic field names
 
 layout.rs
-  current migration checkpoint for fixed-length fact wire layout
+  fixed-length fact wire layout
 
 create.rs
   deterministic constructors from explicit parameters to proposed facts or
@@ -383,7 +355,7 @@ queries.rs
   project, dispatch handlers, or replace context.
 
 rows.rs
-  current migration checkpoint for read-model row shapes
+  read-model row shapes
 
 facts/<domain>/<range-helper>.rs
   nontrivial context range encoders live beside the domain that validates their
@@ -412,12 +384,12 @@ call module query for the displayed result
 ```
 
 That post-command query is valid only because the runtime step establishes the
-previous state in the local store. If a later step cannot know that prior state
-has projected, it must not query optimistically; it should emit or retain a
-context need and let the runtime pipelines re-run the owning projector when the
-matching offer exists. Commands that hand work to a running daemon should stop after
-durably submitting their facts; the daemon pipeline should perform projection,
-intent dispatch, and network effects.
+command's projected state in the local store. If a later step cannot know that
+its dependencies have projected, it must not query optimistically; it should
+emit or retain a context need and let the runtime pipelines re-run the owning
+projector when the matching offer exists. Commands that hand work to a running
+daemon should stop after durably submitting their facts; the daemon pipeline
+should perform projection, intent dispatch, and network effects.
 
 Avoid broad names such as `utils`, `helpers`, `common`, `misc`, `manager`, and
 `service`. If a helper is real, its file should name the invariant it enforces
@@ -1247,52 +1219,28 @@ PurgeRetiredRecipientMaterial
 Destructive steps are atomic when they run. The full workflow is intentionally
 multi-step and retryable through intents.
 
-## Removed Mechanisms
+## Runtime Surfaces
 
-These removed names must not reappear in target code paths except in tests or
-documentation that explicitly describes the old mechanism being deleted:
-
-```text
-ready event queues
-blocked-by-missing-dependency maps
-missing-dependencies-by-blocked-event maps
-dependent-by-dependency maps
-dependency-by-dependent maps
-label stores
-recently-valid event caches
-pending reprojection queues
-applied shared event sets
-event receive context side tables
-canonical.in
-content.purge_instructions
-encryption.pending_key_requests
-encryption.pending_key_unwraps
-encryption.pending_wrap_reconcile
-connection.pending_connection_attempts
-connection.pending_connection_responses
-sync.in
-transit.out
-encryption.negentropy_pending_purges
-```
-
-They are replaced by:
+The active queue and state surfaces are:
 
 ```text
 core.facts
-core.needs
-core.offers
-core.pending_projection as an internal pending-fact checkpoint
+core.context_edges
+core.pending_projection
 core.intents
-core.inbox
+core.local_intents
+core.inbound_network
+core.outbound_network
+protocol projection rows
 local receive facts
 context ranges
 flat intent handlers
 ```
 
-## Remaining Migration Cuts
+## Remaining Work
 
-The next cuts should move live behavior onto the target architecture without
-adding new compatibility layers:
+The next work should keep using the current architecture rather than adding
+new compatibility layers:
 
 ```text
 1. Generate row and wire boilerplate from the schema declarations.

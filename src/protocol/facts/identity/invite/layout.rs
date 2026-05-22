@@ -1,9 +1,9 @@
 //! Fixed-width invite-secret fact and projection-row layout.
 //!
-//! The legacy invite-secret event also carried an optional dial `SocketAddr`
-//! used by the bootstrap intent. The target tree skips that field because the
-//! `SendBootstrapRequest` intent has not been wired into transport::transit handlers yet
-//! (see `project.rs` for the deferred-intent note).
+//! Invite secrets are local bootstrap capabilities. Their durable bytes store
+//! only the bootstrap hash, secret material, and optional scoped workspace and
+//! invite ids. Network route information comes from daemon listen-address state
+//! and connection/request facts, not from this payload.
 
 use crate::core::wire;
 

@@ -103,7 +103,7 @@ impl<'a> CreateWorkspaceArgs<'a> {
         };
         if identity.is_some() && public_key.is_some() {
             return Err(
-                "create-workspace legacy identity form derives its own public key".to_string(),
+                "create-workspace bootstrap identity form derives its own public key".to_string(),
             );
         }
         Ok(Self {

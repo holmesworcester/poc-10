@@ -1,8 +1,8 @@
 //! Projector for local signing capability facts.
 //!
 //! POLICY. A signed-fact helper is admitted iff:
-//!   1. DISPATCH. The first byte selects a known helper payload, currently only
-//!      local signer-secret.
+//!   1. DISPATCH. The first byte selects the local signer-secret helper
+//!      payload.
 //!   2. CONTEXT. No remote context is accepted; remote signed envelopes validate
 //!      signatures in their owning fact modules.
 //!   3. MATERIALIZE. Local signer secrets publish local signer context under

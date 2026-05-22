@@ -1,10 +1,10 @@
 //! Build a `connection::response` fact from validated handshake inputs.
 //!
-//! This module owns the responder-side native key schedule that the legacy
-//! `connection.rs` worker used to run inline. It produces the same canonical
-//! fact bytes via `layout::encode_fact`. Handlers call into here so the
-//! `Fact::new` construction and crypto helpers stay outside `src/protocol/intents/`
-//! per the intent-cleanliness guardrail.
+//! This module owns the responder-side native key schedule and canonical
+//! response fact construction. Handlers call into here after projection has
+//! supplied the validated request, invite, endpoint, and ephemeral secret, so
+//! `Fact::new` construction and crypto helpers stay outside
+//! `src/protocol/intents/` per the intent-cleanliness guardrail.
 
 use crate::core::crypto::{
     self, x25519_diffie_hellman, x25519_public_key, X25519PrivateKey, X25519PublicKey,

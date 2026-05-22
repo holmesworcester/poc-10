@@ -3,8 +3,8 @@
 //! POLICY. A sync range_request fact is admitted iff:
 //!   1. STRUCTURAL. The request payload decodes and its fact scope matches the
 //!      requested workspace.
-//!   2. MATERIALIZE. Range matching is currently disabled; full-range connect
-//!      sync and progressive send own transfer until subrange sync is real again.
+//!   2. MATERIALIZE. The fact records no rows; full-range connect sync and
+//!      progressive send own transfer for this protocol slice.
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{

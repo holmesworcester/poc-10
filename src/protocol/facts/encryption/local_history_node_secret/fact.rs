@@ -12,12 +12,11 @@
 //!     bits in `fact_id_prefix`; leaves sit at `bit_depth = 256` and store
 //!     the full event id.
 //!
-//! Most coordinates are never materialised — a row is written only when the
-//! node is a frontier root, a retained sibling at a split or a per-event leaf.
-//! Legacy parity gap (intentional): the legacy projector validated parent
-//! coordinates against full dependency closures; the target projector here
-//! validates fact shape only and defers structural parent/child checks until
-//! the local key-secret family is also ported.
+//! Most coordinates are never materialised: a row is written only when the node
+//! is a frontier root, a retained sibling at a split, or a per-event leaf.
+//! Projection validates the node against its frontier, source secret, optional
+//! tombstone node, and parent/child coordinate rules before publishing the
+//! secret as usable local key context.
 
 use crate::core::crypto::{XChaCha20Poly1305Key, XCHACHA20_POLY1305_KEY_BYTES};
 use crate::core::facts::FactId;

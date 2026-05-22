@@ -3,7 +3,7 @@
 //! Message projection splits the durable view into live opened messages,
 //! authored message rows, and tombstones. This file gathers those rows for UI,
 //! CLI, retention, and sync helpers without changing state. Keep it as the
-//! place to ask "what messages does the store currently expose?" rather than
+//! place to ask "what messages does the store expose?" rather than
 //! "should this message be admitted?"
 
 use crate::core::facts::FactId;

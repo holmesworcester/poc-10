@@ -1,14 +1,14 @@
-//! Target create_connection_response handler.
+//! Create-connection-response intent handler and payload.
 //!
 //! Drives the responder side of the connection handshake: given a validated
 //! inbound connection request fact, invite secret, receive provenance, and the
 //! local endpoint capability, create fresh responder ephemeral material and
-//! produce the canonical connection response fact using the legacy native key
-//! schedule (DH(eph_r, eph_i), DH(static_r, eph_i), invite bootstrap secret,
-//! transcript-bound HKDF). The response bytes are sent back over the bootstrap
+//! produce the canonical connection response fact using the native key schedule:
+//! `DH(eph_r, eph_i)`, `DH(static_r, eph_i)`, invite bootstrap secret, and
+//! transcript-bound HKDF. The response bytes are sent back over the bootstrap
 //! return route; the emitted facts are admitted through the usual fact pipeline.
 
-//! Intent codec for the target `create_connection_response` handler.
+//! Intent codec for the `create_connection_response` handler.
 //!
 //! Payload layout (fixed-width, with each id explicitly tagged by position):
 //! three 32-byte fields concatenated in order:

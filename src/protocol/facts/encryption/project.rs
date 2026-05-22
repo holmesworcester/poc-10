@@ -81,13 +81,12 @@ fn removal_frontier(
 
     // 2. Authority.
     //
-    // The legacy-shaped removal frontier names the endpoint that owns the
-    // root key secret. That endpoint must be proven either by a workspace
-    // endpoint_shared signer offer (the normal received/public path) or by the
-    // local signer secret for the same endpoint (the local authoring path)
-    // before this fact can become usable frontier context. Otherwise an
-    // unauthenticated workspace-scoped byte string could advertise a key
-    // frontier.
+    // A removal frontier names the endpoint that owns the root key secret.
+    // That endpoint must be proven either by a workspace endpoint_shared signer
+    // offer (the received/public path) or by the local signer secret for the
+    // same endpoint (the local authoring path) before this fact can become
+    // usable frontier context. Otherwise an unauthenticated workspace-scoped
+    // byte string could advertise a key frontier.
     let owner_signer_need = crate::core::context::ContextNeed::range(
         fact.id,
         "content_signer",

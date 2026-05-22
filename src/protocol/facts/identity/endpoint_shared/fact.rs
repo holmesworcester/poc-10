@@ -1,11 +1,11 @@
-//! Endpoint-shared fact shape for the poc-10 target tree.
+//! Endpoint-shared fact shape.
 //!
 //! Endpoint-shared facts describe peer-visible endpoint identity bindings: an
 //! endpoint id (X25519 public key) and its signing public key are bound to a
-//! workspace and a user authority. In the legacy protocol the payload is the
-//! inner event of a signed envelope produced by a device invite or invite
-//! server. The target tree ports the public payload shape only; signed
-//! envelope and dependency validation are deferred until those modules land.
+//! workspace and a user authority. Projection receives this payload inside a
+//! signed envelope, validates the signer against device-invite or invite-server
+//! authority, and then publishes signer context for content, admin, connection,
+//! and encryption projectors.
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;

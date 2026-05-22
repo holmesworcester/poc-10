@@ -1,6 +1,6 @@
 //! Fixed-width endpoint-shared fact and projection-row layout.
 //!
-//! Wire shape mirrors the legacy inner payload:
+//! Inner payload layout:
 //!
 //! ```text
 //! type(1) || created_at_ms(8) || workspace_id(32)
@@ -9,8 +9,9 @@
 //!   || device_name_utf8_zero_padded(64)
 //! ```
 //!
-//! The signed envelope wrapper is not modeled here; payload bytes are accepted
-//! as the raw fact body until the signed-envelope module ports forward.
+//! The signed envelope wrapper is modeled by `identity::signed_fact`; this
+//! module owns only the canonical inner endpoint_shared payload and projected
+//! row value.
 
 use crate::core::wire;
 use crate::core::wire::FixedSlot;
