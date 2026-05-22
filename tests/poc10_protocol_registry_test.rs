@@ -45,8 +45,17 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 #[test]
 fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden_fact_module_files = rust_files(&root.join("src/protocol/facts"))
-        .into_iter()
+    let scopes = [
+        "connection",
+        "content",
+        "encryption",
+        "identity",
+        "sync",
+        "transport",
+    ];
+    let forbidden_fact_module_files = scopes
+        .iter()
+        .flat_map(|scope| rust_files(&root.join("src/protocol").join(scope)))
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -76,8 +85,8 @@ fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
     );
 
     for required in [
-        "src/protocol/facts/encryption/coverage.rs",
-        "src/protocol/facts/encryption/wrap_source.rs",
+        "src/protocol/encryption/coverage.rs",
+        "src/protocol/encryption/wrap_source.rs",
     ] {
         assert!(
             root.join(required).is_file(),

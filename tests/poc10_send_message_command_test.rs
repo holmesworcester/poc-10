@@ -16,11 +16,11 @@ use topo::core::command_context::{
 use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::facts::content::message::create::{
+use topo::protocol::content::message::create::{
     associated_data, recover_text, send_message,
 };
-use topo::protocol::facts::content::message::layout::{decode_fact, TYPE_CONTENT_MESSAGE};
-use topo::protocol::facts::identity::signed_fact::layout::decode_signed_fact;
+use topo::protocol::content::message::layout::{decode_fact, TYPE_CONTENT_MESSAGE};
+use topo::protocol::identity::signed_fact::layout::decode_signed_fact;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 struct FixedClock(Cell<u64>);

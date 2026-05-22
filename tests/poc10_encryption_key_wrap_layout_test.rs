@@ -1,8 +1,8 @@
 use topo::core::crypto::{self, XCHACHA20_POLY1305_NONCE_BYTES};
-use topo::protocol::facts::encryption::fact::{
+use topo::protocol::encryption::fact::{
     KeyWrapFact, LocalRecipientKeyFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::protocol::facts::encryption::layout::{
+use topo::protocol::encryption::layout::{
     decode_key_wrap, decode_local_recipient_key, encode_key_wrap, encode_local_recipient_key,
     frontier_root_key_wrap_coordinate_key, history_node_key_wrap_coordinate_key,
     key_wrap_coordinate_key, KEY_WRAP_BYTES, KEY_WRAP_COORDINATE_KEY_BYTES,

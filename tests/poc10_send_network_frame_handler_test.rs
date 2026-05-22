@@ -12,13 +12,13 @@ use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
-use topo::protocol::facts::connection::request::layout as connection_request_layout;
-use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::facts::connection::response::layout as connection_response_layout;
-use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
-use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
-use topo::protocol::intents::transport::send_network_frame::{
+use topo::protocol::connection::request::fact::ConnectionRequestFact;
+use topo::protocol::connection::request::layout as connection_request_layout;
+use topo::protocol::connection::response::fact::ConnectionResponseFact;
+use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::identity::endpoint::fact::EndpointFact;
+use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::transport::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame, SendNetworkFrameHandler, SEND_NETWORK_FRAME,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;

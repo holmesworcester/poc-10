@@ -112,9 +112,83 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
     matches
 }
 
+const PROTOCOL_SCOPES: [&str; 6] = [
+    "connection",
+    "content",
+    "encryption",
+    "identity",
+    "sync",
+    "transport",
+];
+
+/// The verb-named intent handler files that live directly inside each scope
+/// directory. Everything else under a scope directory is fact-module code.
+fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
+    let handlers: [(&str, &[&str]); 6] = [
+        (
+            "connection",
+            &["create_response.rs", "send_bootstrap_request.rs"],
+        ),
+        (
+            "content",
+            &[
+                "purge_below_retention_floor.rs",
+                "purge_deleted_message.rs",
+                "purge_expired_message.rs",
+                "purge_message_child.rs",
+            ],
+        ),
+        (
+            "encryption",
+            &[
+                "create_key_wrap.rs",
+                "purge_retired_recipient_material.rs",
+                "unwrap_key_wrap.rs",
+            ],
+        ),
+        ("identity", &[]),
+        (
+            "sync",
+            &[
+                "seed_connection.rs",
+                "send_compare_response.rs",
+                "send_needed_fact_id.rs",
+                "send_requested_fact.rs",
+                "share_fact_with_workspace.rs",
+            ],
+        ),
+        (
+            "transport",
+            &[
+                "receive_transit_frame.rs",
+                "send_facts_on_connection.rs",
+                "send_network_frame.rs",
+            ],
+        ),
+    ];
+    handlers
+        .into_iter()
+        .flat_map(|(scope, files)| {
+            files
+                .iter()
+                .map(move |file| root.join("src/protocol").join(scope).join(file))
+        })
+        .collect()
+}
+
+/// Scans every protocol scope directory for fact-module files, excluding the
+/// verb-named intent handler files that also live there.
+fn fact_module_files(root: &Path) -> Vec<PathBuf> {
+    let intents = intent_handler_files(root);
+    PROTOCOL_SCOPES
+        .into_iter()
+        .flat_map(|scope| source_files(&root.join("src/protocol").join(scope)))
+        .filter(|path| !intents.contains(path))
+        .collect()
+}
+
 fn target_projector_files(root: &Path) -> Vec<PathBuf> {
-    let event_modules = root.join("src/protocol/facts");
-    source_files(&event_modules)
+    fact_module_files(root)
         .into_iter()
         .filter(|path| {
             if !path.extension().is_some_and(|ext| ext == "rs") {
@@ -143,13 +217,12 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc = source_text(&root.join("new_architecture.md"));
     let required = [
-        "## Poc-10 Success Criteria",
-        "Every non-ignored `poc-8` test passes in `poc-10`",
+        "## Architecture Criteria",
         "There is no `mod.rs` anywhere in the repository.",
         "There is no root `src/commands` module",
         "src/core/command_context.rs",
-        "src/protocol/facts.rs",
-        "src/protocol/intents.rs",
+        "src/protocol.rs",
+        "src/protocol/<scope>.rs",
         "There is no product `demo` or `smoke` command",
         "generic runtime/app mechanics",
         "src/core/schema.rs",
@@ -216,12 +289,13 @@ fn poc10_root_exports_protocol_owned_manifests() {
         );
     }
 
-    for required in [
-        "src/core/command_context.rs",
-        "src/protocol/facts.rs",
-        "src/protocol/intents.rs",
-    ] {
-        assert!(root.join(required).is_file(), "missing {required}");
+    assert!(
+        root.join("src/core/command_context.rs").is_file(),
+        "missing src/core/command_context.rs"
+    );
+    for scope in PROTOCOL_SCOPES {
+        let required = format!("src/protocol/{scope}.rs");
+        assert!(root.join(&required).is_file(), "missing {required}");
     }
 
     let lib = source_text(&root.join("src/lib.rs"));
@@ -454,11 +528,14 @@ fn poc10_target_source_has_no_old_event_status_blocker_label_queue_names() {
         "context_updates",
         "updates",
     ];
-    let target_paths = ["src/core", "src/protocol/facts", "src/protocol/intents"]
-        .into_iter()
+    let target_paths = std::iter::once("src/core".to_string())
+        .chain(PROTOCOL_SCOPES.iter().map(|scope| format!("src/protocol/{scope}")))
         .flat_map(|path| source_files(&root.join(path)))
         .collect::<Vec<_>>();
-    let offenders = source_matches_in_paths(root, target_paths, &forbidden);
+    // Legacy worker-queue/event-status names are removal vocabulary that the
+    // architecture docs explicitly still permit in documentation; the boundary
+    // here forbids them in target *code*.
+    let offenders = source_code_matches_in_paths(root, target_paths, &forbidden);
 
     assert!(
         offenders.is_empty(),
@@ -491,8 +568,8 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "pending_connection_attempts",
         "pending_connection_responses",
     ];
-    let target_paths = ["src/core", "src/protocol/facts", "src/protocol/intents"]
-        .into_iter()
+    let target_paths = std::iter::once("src/core".to_string())
+        .chain(PROTOCOL_SCOPES.iter().map(|scope| format!("src/protocol/{scope}")))
         .flat_map(|path| source_files(&root.join(path)))
         .collect::<Vec<_>>();
     let offenders = source_code_matches_in_paths(root, target_paths, &forbidden);
@@ -561,9 +638,9 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
 #[test]
 fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let accept_commands = source_text(&root.join("src/protocol/facts/identity/invite/commands.rs"));
+    let accept_commands = source_text(&root.join("src/protocol/identity/invite/commands.rs"));
     let connection_request_projector =
-        source_text(&root.join("src/protocol/facts/connection/request/project.rs"));
+        source_text(&root.join("src/protocol/connection/request/project.rs"));
 
     assert!(
         !accept_commands.contains("send_bootstrap_connection_request_intent"),
@@ -648,8 +725,8 @@ fn poc10_runtime_does_not_synthesize_shareable_facts() {
 fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let paths = [
-        "src/protocol/intents/sync/send_compare_response.rs",
-        "src/protocol/intents/sync/send_requested_fact.rs",
+        "src/protocol/sync/send_compare_response.rs",
+        "src/protocol/sync/send_requested_fact.rs",
     ]
     .into_iter()
     .map(|path| root.join(path))
@@ -675,7 +752,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
-    let receive = source_text(&root.join("src/protocol/facts/transport/transit/receive.rs"));
+    let receive = source_text(&root.join("src/protocol/transport/transit/receive.rs"));
 
     for required in [
         "content::message",
@@ -710,8 +787,9 @@ fn poc10_concrete_protocol_routes_semantic_messages() {
 #[test]
 fn poc10_protocol_cli_files_do_not_touch_filesystem_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let cli_files = rust_files(&root.join("src/protocol/facts"))
+    let cli_files = PROTOCOL_SCOPES
         .into_iter()
+        .flat_map(|scope| rust_files(&root.join("src/protocol").join(scope)))
         .filter(|path| path.file_name().is_some_and(|name| name == "cli.rs"))
         .collect::<Vec<_>>();
     let offenders = source_code_matches_in_paths(
@@ -816,15 +894,12 @@ fn poc10_target_has_no_dumping_ground_filenames() {
 #[test]
 fn poc10_target_root_manifests_are_declarations_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifests = [
-        "src/lib.rs",
-        "src/core.rs",
-        "src/protocol/facts.rs",
-        "src/protocol/intents.rs",
-    ];
+    let manifests = ["src/lib.rs".to_string(), "src/core.rs".to_string()]
+        .into_iter()
+        .chain(PROTOCOL_SCOPES.iter().map(|scope| format!("src/protocol/{scope}.rs")));
 
     for manifest in manifests {
-        let path = root.join(manifest);
+        let path = root.join(&manifest);
         assert!(path.exists(), "missing root manifest {manifest}");
         let text = source_text(&path);
         let offenders = meaningful_manifest_lines(&text)

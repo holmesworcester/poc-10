@@ -21,8 +21,8 @@ use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame
 use crate::core::intents::Intent;
 use crate::core::runtime::RuntimeDescription;
 use crate::core::store::Store;
-use crate::protocol::facts::{content, transport};
-use crate::protocol::intents::transport as transport_intents;
+use crate::protocol::{content, transport};
+use crate::protocol::transport as transport_intents;
 use crate::protocol::registry::{
     protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES, HANDLER_ROUTES, ROW_MUTATION_TABLES,
     SCHEMA_SOURCES,

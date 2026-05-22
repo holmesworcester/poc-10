@@ -4,19 +4,19 @@ use topo::core::intents::IntentKind;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::facts::connection::response::layout as connection_response_layout;
-use topo::protocol::facts::encryption;
-use topo::protocol::facts::identity;
-use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
-use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
-use topo::protocol::facts::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::facts::transport::transit::frame as transit_frame;
-use topo::protocol::intents::transport::send_facts_on_connection::{
+use topo::protocol::connection::response::fact::ConnectionResponseFact;
+use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::encryption;
+use topo::protocol::identity;
+use topo::protocol::identity::endpoint::fact::EndpointFact;
+use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
+use topo::protocol::transport::transit::frame as transit_frame;
+use topo::protocol::transport::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
 };
-use topo::protocol::intents::transport::send_network_frame::{
+use topo::protocol::transport::send_network_frame::{
     decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -93,7 +93,7 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
         encryption::layout::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
-            topo::protocol::facts::identity::workspace::scope([7; 32]),
+            topo::protocol::identity::workspace::scope([7; 32]),
             1,
             vec![private_tag, 1, 2, 3],
         );
@@ -119,7 +119,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
     let store = store_with_local_endpoint();
     let (connection_fact, connection) = connection_fact();
     let fact = Fact::new(
-        topo::protocol::facts::identity::workspace::scope([7; 32]),
+        topo::protocol::identity::workspace::scope([7; 32]),
         1,
         shared_fact_layout::encode_fact(&SharedFact {
             workspace_id: [7; 32],
@@ -154,14 +154,14 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
 fn intent_kind_names_keep_transport_boundaries_clear() {
     for kind in [
         SEND_FACTS_ON_CONNECTION,
-        topo::protocol::intents::transport::send_network_frame::SEND_NETWORK_FRAME,
+        topo::protocol::transport::send_network_frame::SEND_NETWORK_FRAME,
     ] {
         IntentKind::new(kind).expect("intent kind is registry-safe");
     }
 
     assert!(SEND_FACTS_ON_CONNECTION.starts_with("send_"));
     assert!(
-        topo::protocol::intents::transport::send_network_frame::SEND_NETWORK_FRAME
+        topo::protocol::transport::send_network_frame::SEND_NETWORK_FRAME
             .starts_with("send_")
     );
 }

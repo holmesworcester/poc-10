@@ -1,15 +1,15 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{ProjectionContext, Projector};
-use topo::protocol::facts::encryption::fact::{
+use topo::protocol::encryption::fact::{
     KeyWrapFact, LocalHistoryNodeSecretFact, LocalKeySecretFact, LocalRecipientKeyFact,
     WrappedSecretKind,
 };
-use topo::protocol::facts::encryption::layout as key_wrap_layout;
-use topo::protocol::facts::identity::signed_fact::fact::LocalSignerSecretFact;
-use topo::protocol::facts::identity::signed_fact::project::SignedFactProjector;
-use topo::protocol::facts::identity::signed_fact::{create, layout};
-use topo::protocol::facts::identity::workspace::scope as workspace_scope;
+use topo::protocol::encryption::layout as key_wrap_layout;
+use topo::protocol::identity::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::identity::signed_fact::project::SignedFactProjector;
+use topo::protocol::identity::signed_fact::{create, layout};
+use topo::protocol::identity::workspace::scope as workspace_scope;
 
 #[test]
 fn signed_fact_round_trips_and_verifies_key_wrap_payload() {
@@ -74,7 +74,7 @@ fn signed_fact_uses_fixed_payload_slot_with_canonical_padding() {
     let private_key = [9; 32];
     let oversized = vec![
         key_wrap_layout::TYPE_KEY_WRAP;
-        topo::protocol::facts::identity::signed_fact::SIGNED_FACT_PAYLOAD_BYTES + 1
+        topo::protocol::identity::signed_fact::SIGNED_FACT_PAYLOAD_BYTES + 1
     ];
     assert!(create::sign_payload_bytes(signer_id, &private_key, oversized).is_err());
 

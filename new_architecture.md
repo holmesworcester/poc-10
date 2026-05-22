@@ -42,11 +42,14 @@ The architecture holds when:
   product-specific runtime logic.
 - There is no product `demo` or `smoke` command. Smoke coverage belongs in
   black-box CLI tests against the real `match` binary.
-- Intent handlers are themed files under `src/protocol/intents/<theme>/...`
-  and declared from `src/protocol/intents.rs`; broad driver or catch-all
-  intent submodules are not part of the target.
-- Fact and intent manifests live under `src/protocol/` as `facts.rs` and
-  `intents.rs`.
+- Protocol state is organized by scope, not by layer. Each scope is one
+  module: `src/protocol/<scope>.rs` is the scope manifest and
+  `src/protocol/<scope>/` holds that scope's fact families and intent handlers
+  together. Intent handlers are verb-named files directly under the scope
+  directory; broad driver or catch-all intent submodules are not part of the
+  target.
+- A scope manifest declares its fact families and its intent handlers in one
+  file; there is no separate `facts/` or `intents/` layer.
 - There is no root `src/commands` module. The command context lives in
   `src/core/command_context.rs` as `core::command_context`.
 - There is no `mod.rs` anywhere in the repository.
@@ -77,10 +80,10 @@ The architecture holds when:
   admits time wakes, `context.rs` stores range context and wakes dependents,
   `dispatch.rs` claims durable or ephemeral intents, and `commit_effects.rs`
   commits shared facts, purges, row mutations, and queued work.
-- Fact modules under `src/protocol/facts/` are exercised by poc-10 tests
-  and route production `match` behavior through the target runtime.
-- Intent handlers under `src/protocol/intents/` are themed files and are
-  registered from `src/protocol/intents.rs`.
+- Scope modules under `src/protocol/<scope>/` own both fact families and intent
+  handlers; they are exercised by poc-10 tests and route production `match`
+  behavior through the target runtime. Each scope manifest
+  `src/protocol/<scope>.rs` declares its fact families and intent handlers.
 - Receive transit can open fixed transit frames that carry signed key-wrap
   facts, admit the opened fact, and record local receive provenance.
   Send-side flow emits send-on-connection and network-send intents and writes a
@@ -147,11 +150,6 @@ src/
   match_app.rs
   core.rs
   protocol.rs
-  protocol/
-    facts/
-      encryption/
-        coverage.rs
-        wrap_source.rs
 
   core/
     schema.rs
@@ -179,11 +177,14 @@ src/
   protocol/
     app.rs
     cli.rs
-    facts.rs
+    payload.rs
     registry.rs
-    facts/
-      <module>.rs
-      <module>/
+
+    <scope>.rs                one manifest per scope; declares fact
+                              families and intent handlers together
+    <scope>/
+      <fact-family>.rs        single-file fact family
+      <fact-family>/          multi-file fact family
         fact.rs
         layout.rs
         create.rs
@@ -192,35 +193,34 @@ src/
         project.rs
         queries.rs
         rows.rs
-    intents.rs
-    intents/
-      payload.rs
-      connection.rs
-      connection/
-        create_response.rs
-        send_bootstrap_request.rs
-      content.rs
-      content/
-        purge_below_retention_floor.rs
-        purge_deleted_message.rs
-        purge_expired_message.rs
-        purge_message_child.rs
-      encryption.rs
-      encryption/
-        create_key_wrap.rs
-        purge_retired_recipient_material.rs
-        unwrap_key_wrap.rs
-      sync.rs
-      sync/
-        share_fact_with_workspace.rs
-        send_compare_response.rs
-        send_needed_fact_id.rs
-        send_requested_fact.rs
-      transport.rs
-      transport/
-        receive_transit_frame.rs
-        send_facts_on_connection.rs
-        send_network_frame.rs
+      <verb_object>.rs        intent handler, one self-contained file
+
+    content.rs
+    content/
+      message/                fact family
+      event/
+      file/
+      file_deletion/
+      file_slice/
+      message_deletion/
+      reaction/
+      purge_below_retention_floor.rs   intent handler
+      purge_deleted_message.rs
+      purge_expired_message.rs
+      purge_message_child.rs
+
+    transport.rs
+    transport/
+      transit/
+      transit_received/
+      receive_transit_frame.rs
+      send_facts_on_connection.rs
+      send_network_frame.rs
+
+    connection.rs   connection/
+    encryption.rs   encryption/
+    identity.rs     identity/
+    sync.rs         sync/
 
 ```
 
@@ -233,7 +233,7 @@ role strings they validate and emit `ContextNeed::range` /
 `ContextOffer::range` directly when the key is a simple fact id or composite
 id. Nontrivial protocol byte layouts and candidate validation belong beside the
 domain that owns the semantics, such as encryption secret coverage and
-wrap-source ranges under `src/protocol/facts/encryption/`. Fact modules must
+wrap-source ranges under `src/protocol/encryption/`. Fact modules must
 not define their own `matchers.rs`, `context.rs`, or `selectors.rs` files.
 Core only stores, indexes, overlaps, and wakes; projectors must decode and
 validate matched payloads before giving candidates semantic authority.
@@ -252,12 +252,11 @@ only for fact-family-local helper slices named after validation steps or output
 families. If a `project/` child corresponds to a different fact tag, the module
 is bundled incorrectly and must be split.
 
-`src/lib.rs`, `src/core.rs`, `src/protocol.rs`, `src/protocol/facts.rs`, and
-`src/protocol/intents.rs` are
+`src/lib.rs`, `src/core.rs`, `src/protocol.rs`, and each scope manifest
+`src/protocol/<scope>.rs` are
 manifests. They declare modules and may re-export narrow APIs; they should not
 accumulate behavior. Public concrete protocol namespaces live under
-`topo::protocol::facts` and `topo::protocol::intents` without top-level
-dumping-ground files.
+`topo::protocol::<scope>` without top-level dumping-ground files.
 
 `src/protocol/registry.rs` is the target protocol registry. It is the table of
 contents across CLI commands, schema sources, fact registrations, row mutation
@@ -309,8 +308,8 @@ Rust module declarations live in manifest files:
 
 ```text
 src/core.rs
-src/protocol/facts.rs
-src/protocol/intents.rs
+src/protocol.rs
+src/protocol/<scope>.rs
 ```
 
 Those files should contain declarations and narrow re-exports only.
@@ -855,7 +854,8 @@ Handler rules:
 
 ```text
 - One handler owns each durable or ephemeral intent kind.
-- Handlers are themed, self-contained files under src/protocol/intents/.
+- Handlers are verb-named, self-contained files under their scope directory
+  src/protocol/<scope>/.
 - Handlers declare exact fact inputs when they need fact context.
 - Handlers do bounded work per call.
 - Handlers are idempotent by intent key.
@@ -1259,8 +1259,8 @@ new compatibility layers:
 
 - Add boundary tests before broad rewrites.
 - Keep root manifests declaration-only.
-- Keep every handler as a themed, self-contained file under
-  `src/protocol/intents/`.
+- Keep every handler as a verb-named, self-contained file under its scope
+  directory `src/protocol/<scope>/`.
 - Register fact types, intent kinds, handlers, and wire layouts in visible
   manifests.
 - Generate row and wire boilerplate from the three schema declaration files.

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::{SchemaSource, Store, TableName, TableRow};
-use topo::protocol::facts::content::{file, reaction};
+use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");

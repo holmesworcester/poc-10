@@ -1,8 +1,8 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId, FactScope};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-use topo::protocol::facts::content;
-use topo::protocol::facts::identity;
+use topo::protocol::content;
+use topo::protocol::identity;
 
 const WORKSPACE: FactId = [7; 32];
 const CONTENT_SIGNING_KEY: [u8; 32] = [9; 32];
@@ -371,7 +371,7 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
     };
     Fact::new(
-        topo::protocol::facts::identity::workspace::scope(workspace_id),
+        topo::protocol::identity::workspace::scope(workspace_id),
         message.created_at_ms,
         content::message::layout::encode_fact(&message).expect("encode message"),
     )
@@ -391,7 +391,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         sealed_metadata: b"sealed".to_vec(),
     };
     Fact::new(
-        topo::protocol::facts::identity::workspace::scope(workspace_id),
+        topo::protocol::identity::workspace::scope(workspace_id),
         file.created_at_ms,
         content::file::layout::encode_fact(&file).expect("encode file"),
     )
@@ -404,7 +404,7 @@ fn signed_fact_in_workspace(
     timestamp: u64,
 ) -> Fact {
     Fact::new(
-        topo::protocol::facts::identity::workspace::scope(WORKSPACE),
+        topo::protocol::identity::workspace::scope(WORKSPACE),
         timestamp,
         identity::signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
             .expect("sign content fact"),
@@ -449,14 +449,14 @@ fn message_signer_match(
         need: topo::core::context::ContextNeed::range(
             owner.id,
             "content_signer",
-            topo::protocol::facts::identity::workspace::scope(message.workspace_id),
+            topo::protocol::identity::workspace::scope(message.workspace_id),
             message.signer_id,
             message.signer_id,
         ),
         offer: topo::core::context::ContextOffer::range(
             signer.id,
             "content_signer",
-            topo::protocol::facts::identity::workspace::scope(message.workspace_id),
+            topo::protocol::identity::workspace::scope(message.workspace_id),
             message.signer_id,
             message.signer_id,
         ),
@@ -489,14 +489,14 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
         need: topo::core::context::ContextNeed::range(
             owner.id,
             "content_message",
-            topo::protocol::facts::identity::workspace::scope(WORKSPACE),
+            topo::protocol::identity::workspace::scope(WORKSPACE),
             message.id,
             message.id,
         ),
         offer: topo::core::context::ContextOffer::range(
             message.id,
             "content_message",
-            topo::protocol::facts::identity::workspace::scope(WORKSPACE),
+            topo::protocol::identity::workspace::scope(WORKSPACE),
             message.id,
             message.id,
         ),

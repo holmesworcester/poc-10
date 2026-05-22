@@ -28,11 +28,7 @@ use crate::core::projectors::{
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
-use crate::protocol::facts::{connection, content, encryption, identity, sync, transport};
-use crate::protocol::intents::{
-    connection as connection_intents, content as content_intents, encryption as encryption_intents,
-    sync as sync_intents, transport as transport_intents,
-};
+use crate::protocol::{connection, content, encryption, identity, sync, transport};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -510,88 +506,88 @@ macro_rules! handler_route {
 pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     handler_route!(
         "send_bootstrap_connection_request",
-        connection_intents::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
-        connection_intents::send_bootstrap_request::SendBootstrapConnectionRequestHandler
+        connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
+        connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler
     ),
     handler_route!(
         "create_connection_response",
-        connection_intents::create_response::CREATE_CONNECTION_RESPONSE,
-        connection_intents::create_response::CreateConnectionResponseHandler
+        connection::create_response::CREATE_CONNECTION_RESPONSE,
+        connection::create_response::CreateConnectionResponseHandler
     ),
     handler_route!(
         "send_sync_compare_response",
-        sync_intents::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
-        sync_intents::send_compare_response::SendSyncCompareResponseHandler
+        sync::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
+        sync::send_compare_response::SendSyncCompareResponseHandler
     ),
     handler_route!(
         "send_needed_fact_id",
-        sync_intents::send_needed_fact_id::SEND_NEEDED_FACT_ID,
-        sync_intents::send_needed_fact_id::SendNeededFactIdHandler
+        sync::send_needed_fact_id::SEND_NEEDED_FACT_ID,
+        sync::send_needed_fact_id::SendNeededFactIdHandler
     ),
     handler_route!(
         "send_requested_fact",
-        sync_intents::send_requested_fact::SEND_REQUESTED_FACT,
-        sync_intents::send_requested_fact::SendRequestedFactHandler
+        sync::send_requested_fact::SEND_REQUESTED_FACT,
+        sync::send_requested_fact::SendRequestedFactHandler
     ),
     handler_route!(
         "share_fact_with_workspace",
-        sync_intents::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
-        sync_intents::share_fact_with_workspace::ShareFactWithWorkspaceHandler
+        sync::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
+        sync::share_fact_with_workspace::ShareFactWithWorkspaceHandler
     ),
     handler_route!(
         "seed_connection_sync",
-        sync_intents::seed_connection::SEED_CONNECTION_SYNC,
-        sync_intents::seed_connection::SeedConnectionSyncHandler
+        sync::seed_connection::SEED_CONNECTION_SYNC,
+        sync::seed_connection::SeedConnectionSyncHandler
     ),
     handler_route!(
         "create_key_wrap",
         encryption::intent::CREATE_KEY_WRAP,
-        encryption_intents::create_key_wrap::CreateKeyWrapHandler
+        encryption::create_key_wrap::CreateKeyWrapHandler
     ),
     handler_route!(
         "purge_retired_recipient_material",
         encryption::intent::PURGE_RETIRED_RECIPIENT_MATERIAL,
-        encryption_intents::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler
+        encryption::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler
     ),
     handler_route!(
         "unwrap_key_wrap",
         encryption::intent::UNWRAP_KEY_WRAP,
-        encryption_intents::unwrap_key_wrap::UnwrapKeyWrapHandler
+        encryption::unwrap_key_wrap::UnwrapKeyWrapHandler
     ),
     handler_route!(
         "purge_deleted_message",
-        content_intents::purge_deleted_message::PURGE_DELETED_MESSAGE,
-        content_intents::purge_deleted_message::PurgeDeletedMessageHandler
+        content::purge_deleted_message::PURGE_DELETED_MESSAGE,
+        content::purge_deleted_message::PurgeDeletedMessageHandler
     ),
     handler_route!(
         "purge_message_child",
-        content_intents::purge_message_child::PURGE_MESSAGE_CHILD,
-        content_intents::purge_message_child::PurgeMessageChildHandler
+        content::purge_message_child::PURGE_MESSAGE_CHILD,
+        content::purge_message_child::PurgeMessageChildHandler
     ),
     handler_route!(
         "purge_expired_message",
-        content_intents::purge_expired_message::PURGE_EXPIRED_MESSAGE,
-        content_intents::purge_expired_message::PurgeExpiredMessageHandler
+        content::purge_expired_message::PURGE_EXPIRED_MESSAGE,
+        content::purge_expired_message::PurgeExpiredMessageHandler
     ),
     handler_route!(
         "purge_below_retention_floor",
-        content_intents::purge_below_retention_floor::PURGE_BELOW_RETENTION_FLOOR,
-        content_intents::purge_below_retention_floor::PurgeBelowRetentionFloorHandler
+        content::purge_below_retention_floor::PURGE_BELOW_RETENTION_FLOOR,
+        content::purge_below_retention_floor::PurgeBelowRetentionFloorHandler
     ),
     handler_route!(
         "send_facts_on_connection",
-        transport_intents::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
-        transport_intents::send_facts_on_connection::SendFactsOnConnectionHandler
+        transport::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
+        transport::send_facts_on_connection::SendFactsOnConnectionHandler
     ),
     handler_route!(
         "send_network_frame",
-        transport_intents::send_network_frame::SEND_NETWORK_FRAME,
-        transport_intents::send_network_frame::SendNetworkFrameHandler
+        transport::send_network_frame::SEND_NETWORK_FRAME,
+        transport::send_network_frame::SendNetworkFrameHandler
     ),
     handler_route!(
         "receive_transit_frame",
-        transport_intents::receive_transit_frame::RECEIVE_TRANSIT_FRAME,
-        transport_intents::receive_transit_frame::ReceiveTransitFrameHandler
+        transport::receive_transit_frame::RECEIVE_TRANSIT_FRAME,
+        transport::receive_transit_frame::ReceiveTransitFrameHandler
     ),
 ];
 

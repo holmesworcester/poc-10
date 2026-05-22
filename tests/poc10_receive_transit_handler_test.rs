@@ -6,29 +6,29 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::core::wire::FixedBytes;
-use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
-use topo::protocol::facts::connection::request::layout as connection_request_layout;
-use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::facts::connection::response::layout as connection_response_layout;
-use topo::protocol::facts::encryption::fact::{
+use topo::protocol::connection::request::fact::ConnectionRequestFact;
+use topo::protocol::connection::request::layout as connection_request_layout;
+use topo::protocol::connection::response::fact::ConnectionResponseFact;
+use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::encryption::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::protocol::facts::encryption::{create as encryption_create, layout as encryption_layout};
-use topo::protocol::facts::identity;
-use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
-use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
-use topo::protocol::facts::identity::invite::fact::InviteSecretFact;
-use topo::protocol::facts::identity::invite::layout as invite_layout;
-use topo::protocol::facts::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
-use topo::protocol::facts::sync::compare::layout as sync_compare_layout;
-use topo::protocol::facts::transport;
-use topo::protocol::facts::transport::transit::frame::{
+use topo::protocol::encryption::{create as encryption_create, layout as encryption_layout};
+use topo::protocol::identity;
+use topo::protocol::identity::endpoint::fact::EndpointFact;
+use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::identity::invite::fact::InviteSecretFact;
+use topo::protocol::identity::invite::layout as invite_layout;
+use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
+use topo::protocol::sync::compare::layout as sync_compare_layout;
+use topo::protocol::transport;
+use topo::protocol::transport::transit::frame::{
     self as transit_frame, SealConnectionFrame, TransitFactBundle,
 };
-use topo::protocol::facts::transport::transit::layout::{
+use topo::protocol::transport::transit::layout::{
     self as transit_layout, TRANSIT_FRAME_SIZE_CLASS_LARGE,
 };
-use topo::protocol::intents::transport::receive_transit_frame::{
+use topo::protocol::transport::receive_transit_frame::{
     receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitFrameHandler,
     RECEIVE_TRANSIT_FRAME,
 };
@@ -142,7 +142,7 @@ fn bootstrap_request_receive_admits_request_and_provenance_only() {
     };
     request.invite_signature = crypto::ed25519_sign(
         &invite.bootstrap_secret,
-        &topo::protocol::facts::connection::request::create::invite_signing_transcript(&request)
+        &topo::protocol::connection::request::create::invite_signing_transcript(&request)
             .expect("request transcript"),
     );
     let frame = connection_request_layout::encode_fact(&request).expect("request");
@@ -162,7 +162,7 @@ fn bootstrap_request_receive_admits_request_and_provenance_only() {
         !matches!(
             fact.body().first().copied(),
             Some(connection_response_layout::TYPE_CONNECTION_RESPONSE)
-                | Some(topo::protocol::facts::connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
+                | Some(topo::protocol::connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
         )
     }));
     let provenance_fact = output

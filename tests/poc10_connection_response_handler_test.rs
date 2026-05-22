@@ -15,19 +15,19 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::facts::connection::ephemeral_secret::layout as ephemeral_layout;
-use topo::protocol::facts::connection::request::fact::ConnectionRequestFact;
-use topo::protocol::facts::connection::request::layout as request_layout;
-use topo::protocol::facts::connection::response::layout as response_layout;
-use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
-use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
-use topo::protocol::facts::identity::invite::fact::InviteSecretFact;
-use topo::protocol::facts::identity::invite::layout as invite_layout;
-use topo::protocol::facts::transport::transit_received::fact::{
+use topo::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
+use topo::protocol::connection::request::fact::ConnectionRequestFact;
+use topo::protocol::connection::request::layout as request_layout;
+use topo::protocol::connection::response::layout as response_layout;
+use topo::protocol::identity::endpoint::fact::EndpointFact;
+use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::identity::invite::fact::InviteSecretFact;
+use topo::protocol::identity::invite::layout as invite_layout;
+use topo::protocol::transport::transit_received::fact::{
     TransitReceivedFact, TRANSIT_KIND_BOOTSTRAP,
 };
-use topo::protocol::facts::transport::transit_received::layout as received_layout;
-use topo::protocol::intents::connection::create_response::{
+use topo::protocol::transport::transit_received::layout as received_layout;
+use topo::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -187,7 +187,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     };
     request.invite_signature = crypto::ed25519_sign(
         &invite.bootstrap_secret,
-        &topo::protocol::facts::connection::request::create::invite_signing_transcript(&request)
+        &topo::protocol::connection::request::create::invite_signing_transcript(&request)
             .expect("transcript"),
     );
     let request_fact = Fact::new(

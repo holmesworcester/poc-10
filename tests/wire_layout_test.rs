@@ -6,7 +6,7 @@ use topo::core::wire::{
     take_u32be, take_u64be, take_u8, Ciphertext, FixedBytes, FixedLayout, FixedSlot, Id32, Nonce24,
     Tag, WireError, U16_BYTES, U32_BYTES, U64_BYTES, U8_BYTES,
 };
-use topo::protocol::facts::transport::transit::layout::{
+use topo::protocol::transport::transit::layout::{
     TRANSIT_LARGE_CIPHERTEXT_BYTES, TRANSIT_LARGE_PLAINTEXT_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES,
     TRANSIT_SMALL_PLAINTEXT_BYTES,
 };

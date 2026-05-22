@@ -113,8 +113,69 @@ fn matching_lines_with_comment_mode(
     matches
 }
 
+const SCOPE_NAMES: [&str; 6] = [
+    "connection",
+    "content",
+    "encryption",
+    "identity",
+    "sync",
+    "transport",
+];
+
+/// Verb-named intent handler files that live directly inside each scope dir.
+const INTENT_HANDLER_FILES: [&str; 17] = [
+    "src/protocol/connection/create_response.rs",
+    "src/protocol/connection/send_bootstrap_request.rs",
+    "src/protocol/content/purge_below_retention_floor.rs",
+    "src/protocol/content/purge_deleted_message.rs",
+    "src/protocol/content/purge_expired_message.rs",
+    "src/protocol/content/purge_message_child.rs",
+    "src/protocol/encryption/create_key_wrap.rs",
+    "src/protocol/encryption/purge_retired_recipient_material.rs",
+    "src/protocol/encryption/unwrap_key_wrap.rs",
+    "src/protocol/sync/seed_connection.rs",
+    "src/protocol/sync/send_compare_response.rs",
+    "src/protocol/sync/send_needed_fact_id.rs",
+    "src/protocol/sync/send_requested_fact.rs",
+    "src/protocol/sync/share_fact_with_workspace.rs",
+    "src/protocol/transport/receive_transit_frame.rs",
+    "src/protocol/transport/send_facts_on_connection.rs",
+    "src/protocol/transport/send_network_frame.rs",
+];
+
+/// Absolute paths of every verb-named intent handler file in the new
+/// package-by-scope layout (was: everything under src/protocol/intents).
+fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
+    INTENT_HANDLER_FILES
+        .into_iter()
+        .map(|path| root.join(path))
+        .collect()
+}
+
+/// Absolute paths of the 6 scope directories under src/protocol.
+fn scope_dirs(root: &Path) -> Vec<PathBuf> {
+    SCOPE_NAMES
+        .into_iter()
+        .map(|scope| root.join("src/protocol").join(scope))
+        .collect()
+}
+
+/// Every fact-module Rust file under the 6 protocol scope directories
+/// (replaces walking the retired src/protocol/facts tree). Verb-named
+/// intent handler files at the top level of each scope dir are excluded:
+/// they were previously housed under src/protocol/intents and were never
+/// part of the fact tree.
+fn scope_rust_files(root: &Path) -> Vec<PathBuf> {
+    let handlers = intent_handler_files(root);
+    scope_dirs(root)
+        .into_iter()
+        .flat_map(|dir| rust_files_under(&dir))
+        .filter(|path| !handlers.contains(path))
+        .collect()
+}
+
 fn project_files(root: &Path) -> Vec<PathBuf> {
-    rust_files_under(&root.join("src/protocol/facts"))
+    scope_rust_files(root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "project.rs"))
         .collect()
@@ -348,7 +409,7 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
     let body = &test[start..];
     assert!(
         body.contains("project.rs"),
-        "{fn_name} must scan target src/protocol/facts/**/project.rs files"
+        "{fn_name} must scan target src/protocol/<scope>/**/project.rs files"
     );
     assert!(
         !body.contains("projector.rs"),
@@ -360,11 +421,11 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let root = root();
     let paths = vec![
-        root.join("src/protocol/intents/transport/send_facts_on_connection.rs"),
-        root.join("src/protocol/intents/transport/send_network_frame.rs"),
-        root.join("src/protocol/facts/transport/transit/frame.rs"),
-        root.join("src/protocol/facts/transport/transit/create.rs"),
-        root.join("src/protocol/facts/transport/transit/layout.rs"),
+        root.join("src/protocol/transport/send_facts_on_connection.rs"),
+        root.join("src/protocol/transport/send_network_frame.rs"),
+        root.join("src/protocol/transport/transit/frame.rs"),
+        root.join("src/protocol/transport/transit/create.rs"),
+        root.join("src/protocol/transport/transit/layout.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -387,13 +448,20 @@ fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
 #[test]
 fn cutover_sync_has_no_legacy_sync_index_escape_hatch() {
     let root = root();
-    let mut paths = rust_files_under(&root.join("src/protocol/intents"));
+    let mut paths = intent_handler_files(&root);
     paths.extend(
-        rust_files_under(&root.join("src/protocol/facts"))
+        rust_files_under(&root.join("src/protocol/sync"))
             .into_iter()
             .filter(|path| {
-                path.components()
-                    .any(|component| component.as_os_str().to_string_lossy().starts_with("sync"))
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        // Exclude the verb-named intent handler files already
+                        // covered above; keep only sync fact-module code.
+                        !INTENT_HANDLER_FILES
+                            .iter()
+                            .any(|handler| handler.ends_with(name))
+                    })
             }),
     );
     let offenders = matching_lines_including_comments(
@@ -420,7 +488,7 @@ fn cutover_sync_compare_response_uses_bounded_durable_range_index() {
     let root = root();
     let offenders = matching_lines_including_comments(
         &root,
-        vec![root.join("src/protocol/intents/sync/send_compare_response.rs")],
+        vec![root.join("src/protocol/sync/send_compare_response.rs")],
         &[
             "SYNC_COMPARE_RANGE_INDEX_NOT_READY",
             "sync_compare_range_index_not_ready",
@@ -457,7 +525,7 @@ fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
 #[test]
 fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
     let root = root();
-    let handlers = files_under(&root.join("src/protocol/intents"))
+    let handlers = intent_handler_files(&root)
         .into_iter()
         .filter_map(|path| {
             path.file_stem()
@@ -567,13 +635,13 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
     let root = root();
     let required_family_slices = [
-        "src/protocol/facts/encryption/recipient_key.rs",
-        "src/protocol/facts/encryption/local_recipient_key.rs",
-        "src/protocol/facts/encryption/removal_frontier.rs",
-        "src/protocol/facts/encryption/local_history_node_secret.rs",
-        "src/protocol/facts/encryption/key_request.rs",
-        "src/protocol/facts/encryption/local_material.rs",
-        "src/protocol/facts/encryption/signed_key_wrap.rs",
+        "src/protocol/encryption/recipient_key.rs",
+        "src/protocol/encryption/local_recipient_key.rs",
+        "src/protocol/encryption/removal_frontier.rs",
+        "src/protocol/encryption/local_history_node_secret.rs",
+        "src/protocol/encryption/key_request.rs",
+        "src/protocol/encryption/local_material.rs",
+        "src/protocol/encryption/signed_key_wrap.rs",
     ];
     let missing = required_family_slices
         .into_iter()
@@ -585,7 +653,7 @@ fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
         missing.join("\n")
     );
 
-    let project = source_text(&root.join("src/protocol/facts/encryption/project.rs"));
+    let project = source_text(&root.join("src/protocol/encryption/project.rs"));
     let required = [
         "recipient_key(fact, context, recipient)",
         "removal_frontier(fact, context, frontier)",
@@ -611,7 +679,7 @@ fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
 #[test]
 fn cutover_sync_is_not_a_multi_fact_project_bundle() {
     let root = root();
-    let sync_dir = root.join("src/protocol/facts/sync");
+    let sync_dir = root.join("src/protocol/sync");
     let project_subdir = sync_dir.join("project");
     let fact_file = sync_dir.join("fact.rs");
 
@@ -632,7 +700,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
             .collect::<Vec<_>>();
         if fact_structs.len() > 1 {
             offenders.push(format!(
-                "src/protocol/facts/sync/fact.rs defines multiple fact families: {}",
+                "src/protocol/sync/fact.rs defines multiple fact families: {}",
                 fact_structs.join(", ")
             ));
         }
@@ -648,7 +716,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
 #[test]
 fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() {
     let root = root();
-    let query_files = rust_files_under(&root.join("src/protocol/facts"))
+    let query_files = scope_rust_files(&root)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "queries.rs"))
         .collect::<Vec<_>>();
@@ -676,7 +744,7 @@ fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() 
     for path in query_files {
         let relative = path.strip_prefix(&root).unwrap().display().to_string();
         let text = source_text(&path);
-        if relative.ends_with("queries.rs") && text.contains("crate::protocol::facts::{") {
+        if relative.ends_with("queries.rs") && text.contains("crate::protocol::{") {
             offenders.push(format!(
                 "{relative} imports a grouped cross-module event_modules namespace"
             ));
@@ -734,8 +802,8 @@ fn cutover_match_app_does_not_own_command_business_logic() {
 fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
-    paths.extend(rust_files_under(&root.join("src/protocol/intents")));
-    paths.push(root.join("src/protocol/facts/transport/transit/receive.rs"));
+    paths.extend(intent_handler_files(&root));
+    paths.push(root.join("src/protocol/transport/transit/receive.rs"));
 
     let offenders = matching_code_lines(
         &root,
@@ -763,7 +831,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
 fn cutover_context_predicates_replace_manual_payload_matching() {
     let root = root();
     let mut paths = project_files(&root);
-    paths.push(root.join("src/protocol/facts/encryption/validation.rs"));
+    paths.push(root.join("src/protocol/encryption/validation.rs"));
 
     let offenders = matching_code_lines(
         &root,
@@ -786,17 +854,17 @@ fn cutover_context_predicates_replace_manual_payload_matching() {
 fn cutover_content_wire_layouts_use_central_schema_codec() {
     let root = root();
     let paths = [
-        "src/protocol/facts/content/event/layout.rs",
-        "src/protocol/facts/content/file/layout.rs",
-        "src/protocol/facts/content/file/rows.rs",
-        "src/protocol/facts/content/file_deletion/layout.rs",
-        "src/protocol/facts/content/file_slice/layout.rs",
-        "src/protocol/facts/content/file_slice/rows.rs",
-        "src/protocol/facts/content/message/layout.rs",
-        "src/protocol/facts/content/message/rows.rs",
-        "src/protocol/facts/content/message_deletion/layout.rs",
-        "src/protocol/facts/content/reaction/layout.rs",
-        "src/protocol/facts/content/reaction/rows.rs",
+        "src/protocol/content/event/layout.rs",
+        "src/protocol/content/file/layout.rs",
+        "src/protocol/content/file/rows.rs",
+        "src/protocol/content/file_deletion/layout.rs",
+        "src/protocol/content/file_slice/layout.rs",
+        "src/protocol/content/file_slice/rows.rs",
+        "src/protocol/content/message/layout.rs",
+        "src/protocol/content/message/rows.rs",
+        "src/protocol/content/message_deletion/layout.rs",
+        "src/protocol/content/reaction/layout.rs",
+        "src/protocol/content/reaction/rows.rs",
     ]
     .into_iter()
     .map(|path| root.join(path))
@@ -887,7 +955,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
     let pipeline = source_text(&root.join("src/core/pipeline.rs"));
     let core_daemon = source_text(&root.join("src/core/daemon.rs"));
     let send_network_frame =
-        source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"));
+        source_text(&root.join("src/protocol/transport/send_network_frame.rs"));
 
     let mut offenders = Vec::new();
     if pipeline.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
@@ -921,13 +989,13 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
         && send_network_frame.contains("return Ok(PipelineEffects::new())")
     {
         offenders.push(
-            "src/protocol/intents/transport/send_network_frame.rs swallows TCP send failures as an empty successful handler output"
+            "src/protocol/transport/send_network_frame.rs swallows TCP send failures as an empty successful handler output"
                 .to_string(),
         );
     }
     if send_network_frame.contains("fn frame_digest(") {
         offenders.push(
-            "src/protocol/intents/transport/send_network_frame.rs still carries cursor/ack digest scaffolding"
+            "src/protocol/transport/send_network_frame.rs still carries cursor/ack digest scaffolding"
                 .to_string(),
         );
     }
@@ -964,7 +1032,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
             "network declares memory schemas, but Runtime does not load network::SCHEMA_SOURCE",
         );
     }
-    if source_text(&root.join("src/protocol/intents/transport/send_network_frame.rs"))
+    if source_text(&root.join("src/protocol/transport/send_network_frame.rs"))
         .contains("fn frame_digest")
     {
         offenders.push(
@@ -992,14 +1060,14 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
     }
     let core_schema = source_text(&root.join("src/core/schema.rs"));
     let request_projector =
-        source_text(&root.join("src/protocol/facts/connection/request/project.rs"));
+        source_text(&root.join("src/protocol/connection/request/project.rs"));
     let send_facts_handler =
-        source_text(&root.join("src/protocol/intents/transport/send_facts_on_connection.rs"));
+        source_text(&root.join("src/protocol/transport/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
     let network_io_files = [
-        "src/protocol/intents/connection/send_bootstrap_request.rs",
-        "src/protocol/intents/transport/send_network_frame.rs",
-        "src/protocol/intents/transport/receive_transit_frame.rs",
+        "src/protocol/connection/send_bootstrap_request.rs",
+        "src/protocol/transport/send_network_frame.rs",
+        "src/protocol/transport/receive_transit_frame.rs",
     ];
 
     let mut offenders = Vec::new();
@@ -1049,19 +1117,12 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
 #[test]
 fn cutover_scope_projectors_do_not_import_foreign_fact_layouts_or_rows() {
     let root = root();
-    let facts_root = root.join("src/protocol/facts");
-    let scope_names = [
-        "connection",
-        "content",
-        "encryption",
-        "identity",
-        "sync",
-        "transport",
-    ];
+    let protocol_root = root.join("src/protocol");
+    let scope_names = SCOPE_NAMES;
     let mut offenders = Vec::new();
 
-    for path in rust_files_under(&facts_root) {
-        let relative = path.strip_prefix(&facts_root).unwrap();
+    for path in scope_rust_files(&root) {
+        let relative = path.strip_prefix(&protocol_root).unwrap();
         let current_scope = relative
             .components()
             .next()
@@ -1081,7 +1142,7 @@ fn cutover_scope_projectors_do_not_import_foreign_fact_layouts_or_rows() {
             if !(code.contains("::layout") || code.contains("::rows")) {
                 continue;
             }
-            for prefix in ["crate::protocol::facts::", "topo::protocol::facts::"] {
+            for prefix in ["crate::protocol::", "topo::protocol::"] {
                 let Some(rest) = code.split(prefix).nth(1) else {
                     continue;
                 };

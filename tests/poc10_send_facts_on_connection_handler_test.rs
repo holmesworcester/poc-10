@@ -5,17 +5,17 @@ use topo::core::facts::Fact;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::facts::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::facts::connection::response::layout as connection_response_layout;
-use topo::protocol::facts::identity::endpoint::fact::EndpointFact;
-use topo::protocol::facts::identity::endpoint::rows as endpoint_rows;
-use topo::protocol::facts::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::facts::transport::transit::frame as transit_frame;
-use topo::protocol::intents::transport::send_facts_on_connection::SendFactsOnConnectionHandler;
-use topo::protocol::intents::transport::send_facts_on_connection::{
+use topo::protocol::connection::response::fact::ConnectionResponseFact;
+use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::identity::endpoint::fact::EndpointFact;
+use topo::protocol::identity::endpoint::rows as endpoint_rows;
+use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
+use topo::protocol::transport::transit::frame as transit_frame;
+use topo::protocol::transport::send_facts_on_connection::SendFactsOnConnectionHandler;
+use topo::protocol::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
-use topo::protocol::intents::transport::send_network_frame;
+use topo::protocol::transport::send_network_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
@@ -44,7 +44,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     let local_endpoint = local_endpoint();
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
     let fact = Fact::new(
-        topo::protocol::facts::identity::workspace::scope([7; 32]),
+        topo::protocol::identity::workspace::scope([7; 32]),
         1,
         shared_fact_layout::encode_fact(&SharedFact {
             workspace_id: [7; 32],

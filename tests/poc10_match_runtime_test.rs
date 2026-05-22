@@ -9,13 +9,13 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
-use topo::protocol::facts::content::message as content_message;
-use topo::protocol::facts::encryption::{
+use topo::protocol::content::message as content_message;
+use topo::protocol::encryption::{
     fact::{LocalKeySecretFact, RemovalFrontierFact},
     layout as encryption_layout,
 };
-use topo::protocol::facts::identity::signed_fact::create as signed_fact_create;
-use topo::protocol::facts::identity::workspace::{
+use topo::protocol::identity::signed_fact::create as signed_fact_create;
+use topo::protocol::identity::workspace::{
     commands::create_workspace, rows as workspace_rows,
 };
 

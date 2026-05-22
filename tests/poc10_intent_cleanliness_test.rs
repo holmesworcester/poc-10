@@ -21,13 +21,6 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn rust_files_named(root: &Path, name: &str) -> Vec<PathBuf> {
-    rust_files(root)
-        .into_iter()
-        .filter(|path| path.file_name().is_some_and(|file_name| file_name == name))
-        .collect()
-}
-
 fn meaningful_source_lines(text: &str) -> Vec<&str> {
     text.lines()
         .map(str::trim)
@@ -93,16 +86,121 @@ fn strip_line_comments(text: &str) -> String {
         .join("\n")
 }
 
+/// The six protocol scope directories. Since the package-by-scope migration
+/// each scope directory holds BOTH fact-family modules and verb-named intent
+/// handler files, replacing the old `src/protocol/facts` and
+/// `src/protocol/intents` layer roots.
+const SCOPES: [&str; 6] = [
+    "connection",
+    "content",
+    "encryption",
+    "identity",
+    "sync",
+    "transport",
+];
+
+fn scope_dirs(root: &Path) -> Vec<PathBuf> {
+    SCOPES
+        .into_iter()
+        .map(|scope| root.join("src/protocol").join(scope))
+        .collect()
+}
+
+fn scope_manifests(root: &Path) -> Vec<PathBuf> {
+    SCOPES
+        .into_iter()
+        .map(|scope| root.join("src/protocol").join(format!("{scope}.rs")))
+        .collect()
+}
+
+/// Verb-named intent handler files. After the package-by-scope migration these
+/// self-contained handler files live directly at the top level of their scope
+/// directory; there is no separate `src/protocol/intents` tree. `identity` has
+/// no intent handlers.
+fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
+    const HANDLERS: &[(&str, &[&str])] = &[
+        (
+            "connection",
+            &["create_response", "send_bootstrap_request"],
+        ),
+        (
+            "content",
+            &[
+                "purge_below_retention_floor",
+                "purge_deleted_message",
+                "purge_expired_message",
+                "purge_message_child",
+            ],
+        ),
+        (
+            "encryption",
+            &[
+                "create_key_wrap",
+                "purge_retired_recipient_material",
+                "unwrap_key_wrap",
+            ],
+        ),
+        (
+            "sync",
+            &[
+                "seed_connection",
+                "send_compare_response",
+                "send_needed_fact_id",
+                "send_requested_fact",
+                "share_fact_with_workspace",
+            ],
+        ),
+        (
+            "transport",
+            &[
+                "receive_transit_frame",
+                "send_facts_on_connection",
+                "send_network_frame",
+            ],
+        ),
+    ];
+    HANDLERS
+        .iter()
+        .flat_map(|(scope, verbs)| {
+            verbs.iter().map(move |verb| {
+                root.join("src/protocol")
+                    .join(scope)
+                    .join(format!("{verb}.rs"))
+            })
+        })
+        .collect()
+}
+
+fn intent_handler_file_set(root: &Path) -> BTreeSet<PathBuf> {
+    intent_handler_files(root).into_iter().collect()
+}
+
+/// All rust files under the six scope directories that are NOT verb-named
+/// intent handler files: every fact-family module, scope-level fact file, and
+/// fact CLI/command adapter.
+fn fact_family_files(root: &Path) -> Vec<PathBuf> {
+    let handlers = intent_handler_file_set(root);
+    scope_dirs(root)
+        .iter()
+        .flat_map(|dir| rust_files(dir))
+        .filter(|path| !handlers.contains(path))
+        .collect()
+}
+
+fn fact_family_files_named(root: &Path, name: &str) -> Vec<PathBuf> {
+    fact_family_files(root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|file_name| file_name == name))
+        .collect()
+}
+
 fn projector_implementation_files(root: &Path) -> Vec<PathBuf> {
-    let facts_root = root.join("src/protocol/facts");
-    rust_files(&facts_root)
+    fact_family_files(root)
         .into_iter()
         .filter(|path| {
             path.file_name()
                 .is_some_and(|file_name| file_name == "project.rs")
                 || path
-                    .strip_prefix(&facts_root)
-                    .expect("protocol fact file")
                     .components()
                     .any(|component| component.as_os_str() == "project")
         })
@@ -126,7 +224,7 @@ fn contains_legacy_custom_context_matcher_api(text: &str) -> bool {
 #[test]
 fn purge_deleted_message_intent_does_not_encode_projection_work() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let intent = source_text(&root.join("src/protocol/intents/content/purge_deleted_message.rs"));
+    let intent = source_text(&root.join("src/protocol/content/purge_deleted_message.rs"));
 
     for forbidden in [
         "open_message",
@@ -147,13 +245,9 @@ fn purge_deleted_message_intent_does_not_encode_projection_work() {
 #[test]
 fn handlers_do_not_own_event_module_projection_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intents");
-    if !handler_root.exists() {
-        return;
-    }
 
     let mut offenders = Vec::new();
-    for path in rust_files(&handler_root) {
+    for path in intent_handler_files(root) {
         let text = source_text(&path);
         for forbidden in [
             "CONTENT_MESSAGE_ROWS",
@@ -180,7 +274,7 @@ fn handlers_do_not_own_event_module_projection_rows() {
 #[test]
 fn purge_deleted_message_handler_must_be_real_retention_work_when_it_exists() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol/intents/content/purge_deleted_message.rs");
+    let path = root.join("src/protocol/content/purge_deleted_message.rs");
     if !path.exists() {
         return;
     }
@@ -331,7 +425,7 @@ fn target_projectors_document_policy_narratives() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
-    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+    for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
@@ -363,7 +457,7 @@ fn target_projectors_route_primary_decode_through_core_typed_adapter() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
-    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+    for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
@@ -399,7 +493,7 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
-    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+    for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
@@ -426,7 +520,7 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
 #[test]
 fn event_module_context_rs_files_do_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let offenders = rust_files_named(&root.join("src/protocol/facts"), "context.rs")
+    let offenders = fact_family_files_named(root, "context.rs")
         .into_iter()
         .map(|path| path.strip_prefix(root).unwrap().display().to_string())
         .collect::<Vec<_>>();
@@ -470,7 +564,7 @@ fn legacy_custom_context_matcher_api_does_not_reappear() {
 fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "context.rs") {
+    for path in fact_family_files_named(root, "context.rs") {
         let text = source_text(&path);
         for forbidden in [
             "Intent",
@@ -505,7 +599,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
 fn target_row_layouts_do_not_emit_context_or_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "rows.rs") {
+    for path in fact_family_files_named(root, "rows.rs") {
         let text = source_text(&path);
         for forbidden in [
             "ContextNeed",
@@ -537,7 +631,7 @@ fn target_row_layouts_do_not_emit_context_or_intents() {
 fn target_facts_do_not_use_legacy_file_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files(&root.join("src/protocol/facts")) {
+    for path in fact_family_files(root) {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -557,19 +651,16 @@ fn target_facts_do_not_use_legacy_file_names() {
 fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
-    files.extend(rust_files_named(
-        &root.join("src/protocol/facts"),
-        "project.rs",
-    ));
+    files.extend(fact_family_files_named(root, "project.rs"));
     files.extend(
-        rust_files(&root.join("src/protocol/facts"))
+        fact_family_files(root)
             .into_iter()
             .filter(|path| {
                 path.components()
                     .any(|component| component.as_os_str() == "project")
             }),
     );
-    files.extend(rust_files(&root.join("src/protocol/intents")));
+    files.extend(intent_handler_files(root));
 
     let mut offenders = Vec::new();
     for path in files {
@@ -584,13 +675,13 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
         }
         for line in text.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("use crate::protocol::facts") && trimmed.contains("commands") {
+            if trimmed.starts_with("use crate::protocol::") && trimmed.contains("commands") {
                 offenders.push(format!(
                     "{} imports fact-module commands from reactive code: {trimmed}",
                     path.strip_prefix(root).unwrap().display()
                 ));
             }
-            if trimmed.starts_with("use crate::protocol::facts") && trimmed.contains("cli") {
+            if trimmed.starts_with("use crate::protocol::") && trimmed.contains("cli") {
                 offenders.push(format!(
                     "{} imports fact-module cli from reactive code: {trimmed}",
                     path.strip_prefix(root).unwrap().display()
@@ -612,7 +703,7 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
 fn target_facts_do_not_import_legacy_protocol_or_workers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files(&root.join("src/protocol/facts")) {
+    for path in fact_family_files(root) {
         let text = source_text(&path);
         for forbidden in [
             "crate::legacy::protocol",
@@ -640,7 +731,7 @@ fn target_facts_do_not_import_legacy_protocol_or_workers() {
 fn target_intent_files_only_encode_intent_payloads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "intent.rs") {
+    for path in fact_family_files_named(root, "intent.rs") {
         let text = source_text(&path);
         for forbidden in [
             "Store",
@@ -677,7 +768,7 @@ fn target_intent_files_only_encode_intent_payloads() {
 fn target_projectors_do_not_define_intent_payloads_or_handler_logic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+    for path in fact_family_files_named(root, "project.rs") {
         let text = source_text(&path);
         for forbidden in [
             "IntentKind::new",
@@ -709,10 +800,9 @@ fn target_manifests_are_declarations_only() {
     let mut manifests = vec![
         root.join("src/lib.rs"),
         root.join("src/core.rs"),
-        root.join("src/protocol/facts.rs"),
-        root.join("src/protocol/intents.rs"),
+        root.join("src/protocol.rs"),
     ];
-    manifests.extend(immediate_rust_children(&root.join("src/protocol/facts")));
+    manifests.extend(scope_manifests(root));
 
     let mut offenders = Vec::new();
     for path in manifests {
@@ -778,93 +868,91 @@ fn concrete_protocol_manifests_live_under_protocol() {
         stale.join("\n")
     );
 
-    for required in ["src/protocol/facts.rs", "src/protocol/intents.rs"] {
+    assert!(
+        root.join("src/protocol.rs").is_file(),
+        "missing protocol-owned root manifest src/protocol.rs"
+    );
+    for manifest in scope_manifests(root) {
         assert!(
-            root.join(required).is_file(),
-            "missing protocol-owned manifest {required}"
+            manifest.is_file(),
+            "missing protocol scope manifest {}",
+            manifest.strip_prefix(root).unwrap().display()
         );
+    }
+
+    assert!(
+        !root.join("src/protocol/facts.rs").exists()
+            && !root.join("src/protocol/facts").exists()
+            && !root.join("src/protocol/intents.rs").exists()
+            && !root.join("src/protocol/intents").exists(),
+        "the package-by-layer facts/ and intents/ trees are retired; protocol state is organized by scope"
+    );
+}
+
+/// Compares one `<module>.rs` manifest against its sibling `<module>/`
+/// directory, then recurses into every declared child that is itself a
+/// directory-backed module. A scope manifest declares both fact-family modules
+/// and verb-named intent modules; both are ordinary `pub mod` declarations and
+/// must each have a backing `.rs` file or directory.
+fn check_manifest_tree(
+    root: &Path,
+    manifest: &Path,
+    module_root: &Path,
+    offenders: &mut Vec<String>,
+) {
+    let declared = declared_modules_in(&source_text(manifest));
+    if !module_root.exists() {
+        if !declared.is_empty() {
+            offenders.push(format!(
+                "{} declares modules but {} is missing",
+                manifest.strip_prefix(root).unwrap().display(),
+                module_root.strip_prefix(root).unwrap().display()
+            ));
+        }
+        return;
+    }
+
+    let files = immediate_rust_module_names(module_root);
+    let missing_files = declared.difference(&files).cloned().collect::<Vec<_>>();
+    let missing_declarations = files.difference(&declared).cloned().collect::<Vec<_>>();
+    if !missing_files.is_empty() {
+        offenders.push(format!(
+            "{} declares modules without files: {}",
+            manifest.strip_prefix(root).unwrap().display(),
+            missing_files.join(", ")
+        ));
+    }
+    if !missing_declarations.is_empty() {
+        offenders.push(format!(
+            "{} has files not declared by manifest: {}",
+            module_root.strip_prefix(root).unwrap().display(),
+            missing_declarations.join(", ")
+        ));
+    }
+
+    for child in &declared {
+        let child_manifest = module_root.join(format!("{child}.rs"));
+        let child_dir = module_root.join(child);
+        if child_manifest.is_file() && child_dir.is_dir() {
+            check_manifest_tree(root, &child_manifest, &child_dir, offenders);
+        }
     }
 }
 
 #[test]
 fn target_manifests_match_their_filesystem_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/protocol/facts");
-    let handler_root = root.join("src/protocol/intents");
     let mut offenders = Vec::new();
 
-    for (manifest, module_root) in [
-        (root.join("src/protocol/facts.rs"), event_root.clone()),
-        (root.join("src/protocol/intents.rs"), handler_root),
-    ] {
-        let declared = declared_modules_in(&source_text(&manifest));
-        let mut files = immediate_rust_module_names(&module_root);
-        files.remove("registry");
-        let missing_files = declared.difference(&files).cloned().collect::<Vec<_>>();
-        let missing_declarations = files.difference(&declared).cloned().collect::<Vec<_>>();
-        if !missing_files.is_empty() {
-            offenders.push(format!(
-                "{} declares modules without files: {}",
-                manifest.strip_prefix(root).unwrap().display(),
-                missing_files.join(", ")
-            ));
-        }
-        if !missing_declarations.is_empty() {
-            offenders.push(format!(
-                "{} has files not declared by manifest: {}",
-                module_root.strip_prefix(root).unwrap().display(),
-                missing_declarations.join(", ")
-            ));
-        }
-    }
-
-    for manifest in immediate_rust_children(&event_root) {
-        if manifest
-            .file_name()
-            .is_some_and(|file_name| file_name == "registry.rs")
-        {
-            continue;
-        }
-        let module_name = manifest
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .expect("module file stem");
-        let declared = declared_modules_in(&source_text(&manifest));
-        let module_root = event_root.join(module_name);
-        if declared.is_empty() && !module_root.exists() {
-            continue;
-        }
-        if !module_root.exists() {
-            offenders.push(format!(
-                "{} declares children but {} is missing",
-                manifest.strip_prefix(root).unwrap().display(),
-                module_root.strip_prefix(root).unwrap().display()
-            ));
-            continue;
-        }
-
-        let files = immediate_rust_module_names(&module_root);
-        let missing_files = declared.difference(&files).cloned().collect::<Vec<_>>();
-        let missing_declarations = files.difference(&declared).cloned().collect::<Vec<_>>();
-        if !missing_files.is_empty() {
-            offenders.push(format!(
-                "{} declares child modules without files: {}",
-                manifest.strip_prefix(root).unwrap().display(),
-                missing_files.join(", ")
-            ));
-        }
-        if !missing_declarations.is_empty() {
-            offenders.push(format!(
-                "{} has child files not declared by manifest: {}",
-                module_root.strip_prefix(root).unwrap().display(),
-                missing_declarations.join(", ")
-            ));
-        }
+    for scope in SCOPES {
+        let manifest = root.join("src/protocol").join(format!("{scope}.rs"));
+        let module_root = root.join("src/protocol").join(scope);
+        check_manifest_tree(root, &manifest, &module_root, &mut offenders);
     }
 
     assert!(
         offenders.is_empty(),
-        "target module manifests must stay synchronized with the filesystem so orphan files cannot become hidden dumping grounds:\n{}",
+        "protocol scope manifests must stay synchronized with the filesystem so orphan files cannot become hidden dumping grounds:\n{}",
         offenders.join("\n")
     );
 }
@@ -872,19 +960,22 @@ fn target_manifests_match_their_filesystem_modules() {
 #[test]
 fn target_fact_child_files_use_narrow_slice_names() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let event_root = root.join("src/protocol/facts");
     let mut offenders = Vec::new();
 
-    for path in rust_files(&event_root) {
-        if path.parent() == Some(event_root.as_path()) {
-            continue;
-        }
-        if path.parent().and_then(|parent| parent.parent()) == Some(event_root.as_path()) {
-            continue;
-        }
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
+    for scope_root in scope_dirs(root) {
+        for path in rust_files(&scope_root) {
+            // Skip scope-level files (intent handlers, scope-level fact files)
+            // and fact-family-level files; deeper nested files must use a named
+            // responsibility slice.
+            if path.parent() == Some(scope_root.as_path()) {
+                continue;
+            }
+            if path.parent().and_then(|parent| parent.parent()) == Some(scope_root.as_path()) {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
         if !matches!(
             file_name,
             "addr.rs"
@@ -915,8 +1006,9 @@ fn target_fact_child_files_use_narrow_slice_names() {
                 | "secret_path.rs"
                 | "signed_key_wrap.rs"
                 | "validation.rs"
-        ) {
-            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+            ) {
+                offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+            }
         }
     }
 
@@ -997,46 +1089,51 @@ fn protocol_runtime_wrapper_does_not_reappear() {
 }
 
 #[test]
-fn target_intents_are_themed_handler_files_without_driver_or_intent_submodules() {
+fn target_intents_are_self_contained_handler_files_without_driver_or_intent_submodules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intents");
-    if !handler_root.exists() {
-        return;
-    }
+
+    // There is no separate package-by-layer intents/ tree.
+    assert!(
+        !root.join("src/protocol/intents").exists()
+            && !root.join("src/protocol/intents.rs").exists(),
+        "the src/protocol/intents tree is retired; intents are verb-named handler files under their scope"
+    );
 
     let mut offenders = Vec::new();
-    let allowed_themes = ["connection", "content", "encryption", "sync", "transport"];
-    for entry in std::fs::read_dir(&handler_root).expect("read handlers") {
-        let path = entry.expect("handler dir entry").path();
-        if path.is_dir() {
-            let dir_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            if !allowed_themes.contains(&dir_name) {
-                offenders.push(path.strip_prefix(root).unwrap().display().to_string());
-                continue;
-            }
-            for child in std::fs::read_dir(&path).expect("read intent theme") {
-                let child_path = child.expect("intent theme entry").path();
-                if child_path.is_dir() {
-                    offenders.push(child_path.strip_prefix(root).unwrap().display().to_string());
-                }
-            }
-        }
-    }
-    for path in rust_files(&handler_root) {
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+    for handler in intent_handler_files(root) {
+        // Each intent must be exactly one self-contained handler .rs file
+        // sitting directly inside its scope directory.
+        if !handler.is_file() {
+            offenders.push(format!(
+                "{} is not a single handler file",
+                handler.strip_prefix(root).unwrap().display()
+            ));
             continue;
-        };
-        if matches!(file_name, "driver.rs" | "intent.rs") {
-            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+        // A same-named sibling directory would mean the handler was split into
+        // driver/catch-all submodules.
+        let submodule_dir = handler.with_extension("");
+        if submodule_dir.is_dir() {
+            offenders.push(format!(
+                "{} has a backing submodule directory",
+                submodule_dir.strip_prefix(root).unwrap().display()
+            ));
+        }
+        // Intent handlers must not import a driver/intent catch-all submodule.
+        let text = source_text(&handler);
+        for declared in declared_modules_in(&text) {
+            if matches!(declared.as_str(), "driver" | "intent") {
+                offenders.push(format!(
+                    "{} declares a {declared:?} submodule",
+                    handler.strip_prefix(root).unwrap().display()
+                ));
+            }
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "intents should be themed once, with self-contained handler files under src/protocol/intents/<theme>:\n{}",
+        "each intent should be one self-contained verb-named handler file under its scope, with no driver or intent catch-all submodules:\n{}",
         offenders.join("\n")
     );
 }
@@ -1044,16 +1141,9 @@ fn target_intents_are_themed_handler_files_without_driver_or_intent_submodules()
 #[test]
 fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intents");
-    if !handler_root.exists() {
-        return;
-    }
 
     let mut offenders = Vec::new();
-    for path in rust_files(&handler_root) {
-        if path.file_name().is_some_and(|name| name == "payload.rs") {
-            continue;
-        }
+    for path in intent_handler_files(root) {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -1097,29 +1187,39 @@ fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
 #[test]
 fn connection_intents_treat_transit_frames_as_opaque() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol/intents/connection.rs");
-    if !path.exists() {
-        return;
-    }
+    let connection_handlers = intent_handler_files(root)
+        .into_iter()
+        .filter(|path| {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .is_some_and(|scope| scope == "connection")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !connection_handlers.is_empty(),
+        "connection scope should still own verb-named intent handler files"
+    );
 
-    let text = source_text(&path);
-    let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();
-    for forbidden in [
-        "canonical_events",
-        "facts::encryption",
-        "XChaCha",
-        "X25519",
-        "ciphertext",
-        "nonce",
-        "encrypt",
-        "decrypt",
-    ] {
-        if production.contains(forbidden) {
-            offenders.push(format!(
-                "{} contains {forbidden:?}",
-                path.strip_prefix(root).unwrap().display()
-            ));
+    for path in connection_handlers {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        for forbidden in [
+            "canonical_events",
+            "protocol::encryption",
+            "XChaCha",
+            "X25519",
+            "ciphertext",
+            "nonce",
+            "encrypt",
+            "decrypt",
+        ] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
         }
     }
 
@@ -1133,20 +1233,23 @@ fn connection_intents_treat_transit_frames_as_opaque() {
 #[test]
 fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let signed_root = root.join("src/protocol/facts/identity::signed_fact");
+    let signed_root = root.join("src/protocol/identity/signed_fact");
     if !signed_root.exists() {
         return;
     }
 
+    let mut files = rust_files(&signed_root);
+    files.push(root.join("src/protocol/identity/signed_fact.rs"));
+
     let mut offenders = Vec::new();
-    for path in rust_files(&signed_root) {
+    for path in files {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
-            "facts::encryption",
-            "facts::content::message",
-            "facts::sync",
-            "facts::identity::workspace",
+            "protocol::encryption",
+            "protocol::content::message",
+            "protocol::sync",
+            "protocol::identity::workspace",
             "decode_key_wrap",
             "encode_key_wrap",
             "ContentMessage",
@@ -1238,7 +1341,7 @@ fn target_schema_substrate_stays_protocol_neutral() {
     let mut offenders = Vec::new();
 
     for forbidden in [
-        "crate::protocol::facts",
+        "crate::protocol",
         "crate::legacy::protocol",
         "crate::legacy::workers",
         "Intent",
@@ -1265,8 +1368,11 @@ fn target_schema_substrate_stays_protocol_neutral() {
 fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "layout.rs") {
-        let text = source_text(&path);
+    for path in fact_family_files_named(root, "layout.rs") {
+        // Strip comments so module-boundary doc prose (which may legitimately
+        // name Projectors/Intents to explain what layout.rs must NOT do) does
+        // not register as projection/intent/handler code.
+        let text = strip_line_comments(&source_text(&path));
         for forbidden in [
             "TableRow",
             "TableName",
@@ -1309,7 +1415,7 @@ fn target_layout_files_do_not_own_projection_intents_handlers_or_cli() {
 fn target_projectors_do_not_define_row_tables_or_row_shapes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "project.rs") {
+    for path in fact_family_files_named(root, "project.rs") {
         let text = source_text(&path);
         for forbidden in ["TableRow", "TableName", "TableName::new", "_ROWS:"] {
             if text.contains(forbidden) {
@@ -1332,10 +1438,10 @@ fn target_projectors_do_not_define_row_tables_or_row_shapes() {
 fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files(&root.join("src/protocol/facts"))
+    for path in fact_family_files(root)
         .into_iter()
         .filter(|path| path.file_name().is_none_or(|name| name != "cli.rs"))
-        .chain(rust_files(&root.join("src/protocol/intents")))
+        .chain(intent_handler_files(root))
     {
         let text = source_text(&path);
         for forbidden in [
@@ -1371,7 +1477,7 @@ fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
 fn protocol_cli_files_do_not_own_app_runtime_effects() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for path in rust_files_named(&root.join("src/protocol/facts"), "cli.rs") {
+    for path in fact_family_files_named(root, "cli.rs") {
         let text = source_text(&path);
         for forbidden in [
             "Runtime::open",
@@ -1448,16 +1554,9 @@ fn match_app_selects_protocol_description() {
 #[test]
 fn target_handlers_do_not_own_projection_rows_or_projector_context() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intents");
-    if !handler_root.exists() {
-        return;
-    }
 
     let mut offenders = Vec::new();
-    for path in rust_files(&handler_root) {
-        if path.file_name().is_some_and(|name| name == "payload.rs") {
-            continue;
-        }
+    for path in intent_handler_files(root) {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -1490,16 +1589,9 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
 #[test]
 fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let handler_root = root.join("src/protocol/intents");
-    if !handler_root.exists() {
-        return;
-    }
 
     let mut offenders = Vec::new();
-    for path in rust_files(&handler_root) {
-        if path.file_name().is_some_and(|name| name == "payload.rs") {
-            continue;
-        }
+    for path in intent_handler_files(root) {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
@@ -1549,7 +1641,7 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
 
     assert!(
         offenders.is_empty(),
-        "intent handlers must not define protocol fact wire layouts, fact-module fact tags, or crypto-shaped placeholder facts; put fact shapes and fixed bytes under src/protocol/facts:\n{}",
+        "intent handlers must not define protocol fact wire layouts, fact-module fact tags, or crypto-shaped placeholder facts; put fact shapes and fixed bytes in their scope's fact-family modules:\n{}",
         offenders.join("\n")
     );
 }

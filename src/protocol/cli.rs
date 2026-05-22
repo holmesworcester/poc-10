@@ -27,8 +27,8 @@ use crate::core::command_context::{
 };
 use crate::core::daemon;
 use crate::core::runtime::Runtime;
-use crate::protocol::facts::sync;
-use crate::protocol::facts::{content, encryption, identity};
+use crate::protocol::sync;
+use crate::protocol::{content, encryption, identity};
 use std::path::PathBuf;
 
 const COMMAND_SETTLE_ROUNDS: usize = 4;
@@ -628,7 +628,7 @@ pub(crate) fn negentropy_drain(
 ) -> Result<CliOutput, String> {
     let _limit = sync::shared_fact::cli::parse_negentropy_drain_limit(args)?;
     ctx.settle_local_command_work()?;
-    let status = crate::protocol::facts::sync::shared_fact::sync_status(ctx.runtime().store())?;
+    let status = crate::protocol::sync::shared_fact::sync_status(ctx.runtime().store())?;
     Ok(sync::shared_fact::cli::negentropy_drain_output(&status))
 }
 
@@ -638,7 +638,7 @@ pub(crate) fn sync_status(
 ) -> Result<CliOutput, String> {
     sync::shared_fact::cli::require_sync_status_args(args)?;
     ctx.settle_local_command_work()?;
-    let status = crate::protocol::facts::sync::shared_fact::sync_status(ctx.runtime().store())?;
+    let status = crate::protocol::sync::shared_fact::sync_status(ctx.runtime().store())?;
     Ok(sync::shared_fact::cli::sync_status_output(&status))
 }
 

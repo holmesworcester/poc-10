@@ -1,9 +1,9 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-use topo::protocol::facts::encryption::fact::{
+use topo::protocol::encryption::fact::{
     LocalHistoryNodeSecretFact, LocalKeySecretFact, RemovalFrontierFact,
 };
-use topo::protocol::facts::encryption::{
+use topo::protocol::encryption::{
     layout as encryption_layout, project::EncryptionProjector,
 };
 
@@ -97,7 +97,7 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
 
 fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at_ms: u64) -> Fact {
     Fact::new(
-        topo::protocol::facts::identity::workspace::scope(workspace_id),
+        topo::protocol::identity::workspace::scope(workspace_id),
         created_at_ms,
         encryption_layout::encode_removal_frontier(&RemovalFrontierFact {
             workspace_id,
@@ -157,7 +157,7 @@ fn history_node_fact(
 }
 
 fn frontier_match(owner: [u8; 32], workspace_id: [u8; 32], frontier: Fact) -> MatchedContext {
-    let scope = topo::protocol::facts::identity::workspace::scope(workspace_id);
+    let scope = topo::protocol::identity::workspace::scope(workspace_id);
     matched(
         topo::core::context::ContextNeed::range(
             owner,
