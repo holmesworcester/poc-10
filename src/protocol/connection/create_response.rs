@@ -175,7 +175,7 @@ use crate::protocol::connection::request::layout as request_layout;
 use crate::protocol::connection::response::create::{
     build_responder_response, BuildResponderResponse,
 };
-use crate::protocol::identity::endpoint::local_endpoint;
+use crate::protocol::identity::endpoint::create as local_endpoint;
 use crate::protocol::identity::invite::layout as invite_layout;
 use crate::protocol::transport::transit_received;
 

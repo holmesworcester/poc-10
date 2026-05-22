@@ -26,7 +26,7 @@ use crate::protocol::connection::send_bootstrap_request::{
     send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
 };
 
-use super::addr::encode_optional_addr;
+use super::create::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
 use super::rows::connection_request_row;
 
@@ -301,8 +301,9 @@ mod projector_tests {
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
+    use topo::protocol::connection::request::create::encode_optional_addr;
     use topo::protocol::connection::request::{
-        addr::encode_optional_addr, fact::ConnectionRequestFact, layout, project, rows,
+        fact::ConnectionRequestFact, layout, project, rows,
     };
     use topo::protocol::identity::invite::{
         fact::InviteSecretFact, layout as invite_layout,

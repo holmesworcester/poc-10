@@ -293,14 +293,14 @@ pub fn apply_horizon_floor(
                 ),
             ))
             .row_mutation(RowMutation::DeleteWhere(
-                content::message::retention::message_row_delete(
+                content::message::create::message_row_delete(
                     content::message::rows::CONTENT_MESSAGE_ROWS,
                     row.workspace_id,
                     row.message_id,
                 ),
             ))
             .row_mutation(RowMutation::DeleteWhere(
-                content::message::retention::message_row_delete(
+                content::message::create::message_row_delete(
                     content::message::rows::OPENED_MESSAGE_ROWS,
                     row.workspace_id,
                     row.message_id,
@@ -370,7 +370,7 @@ fn setting_fact(
 }
 
 fn local_admin_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
-    let membership = identity::workspace::local_membership::local_membership(store, workspace_id)?
+    let membership = identity::workspace::queries::local_membership(store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let user_id = membership.user_authority_fact_id;
     let admin_rows = store

@@ -13,7 +13,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::content::message::authority;
+use crate::protocol::content::message::project;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::content_event_row;
@@ -41,11 +41,11 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: authority::DecodedFact<super::fact::ContentEventFact>,
+        decoded: project::DecodedFact<super::fact::ContentEventFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let authority::DecodedFact {
+        let project::DecodedFact {
             payload: event,
             signer,
             envelope,
@@ -54,9 +54,9 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
-        let signer_need = authority::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, signer);
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !authority::validate_signer_context(
+            if !project::validate_signer_context(
                 context,
                 need,
                 signer,
@@ -67,7 +67,7 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
                 return Ok(output_with_signer_need(signer_need));
             }
         }
-        authority::verify_envelope(envelope.as_ref(), "content event")?;
+        project::verify_envelope(envelope.as_ref(), "content event")?;
 
         // 3. Materialize.
         Ok(output_with_signer_need(signer_need)

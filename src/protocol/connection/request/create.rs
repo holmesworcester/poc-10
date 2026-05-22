@@ -1,14 +1,93 @@
-//! Shared connection-request validation helpers.
+//! Shared connection-request construction and validation helpers.
 //!
 //! Commands construct signed requests; projectors and receive handlers verify
 //! them. The transcript and signature checks live here so reactive paths do not
-//! call user-facing `commands.rs`.
+//! call user-facing `commands.rs`. The optional listen-addr block conversion
+//! also lives here: it needs `std::net` types, which `layout.rs` may not own,
+//! and it is request-specific construction machinery shared by the layout
+//! codec, projection, and the bootstrap-request handler.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::core::crypto;
+use crate::core::wire;
 use crate::protocol::identity::invite::fact::InviteSecretFact;
 
-use super::addr::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
+
+// ---------------------------------------------------------------------------
+// Optional listen-addr block.
+//
+// Conversion between optional `SocketAddr` listen hints and the fixed 19-byte
+// addr block (`1` family byte + `16` address bytes + `2` port bytes) used
+// inside the connection-request fact bytes. The family byte selects how the
+// 16-byte slot is interpreted; absent and present addresses consume the same
+// bytes so the fact stays self-describing without a length prefix.
+// ---------------------------------------------------------------------------
+
+pub const ADDR_BLOCK_BYTES: usize = 19;
+pub const ADDR_FAMILY_NONE: u8 = 0;
+pub const ADDR_FAMILY_V4: u8 = 1;
+pub const ADDR_FAMILY_V6: u8 = 2;
+
+pub fn encode_optional_addr(addr: Option<SocketAddr>) -> Result<[u8; ADDR_BLOCK_BYTES], String> {
+    let mut out = [0u8; ADDR_BLOCK_BYTES];
+    match addr {
+        None => {
+            out[0] = ADDR_FAMILY_NONE;
+        }
+        Some(addr) => match addr.ip() {
+            IpAddr::V4(ip) => {
+                out[0] = ADDR_FAMILY_V4;
+                out[1..5].copy_from_slice(&ip.octets());
+                wire::put_u16be(addr.port(), &mut out[17..19]).map_err(addr_wire_err)?;
+            }
+            IpAddr::V6(ip) => {
+                out[0] = ADDR_FAMILY_V6;
+                out[1..17].copy_from_slice(&ip.octets());
+                wire::put_u16be(addr.port(), &mut out[17..19]).map_err(addr_wire_err)?;
+            }
+        },
+    }
+    Ok(out)
+}
+
+pub fn decode_optional_addr(bytes: &[u8; ADDR_BLOCK_BYTES]) -> Result<Option<SocketAddr>, String> {
+    let family = bytes[0];
+    let raw = &bytes[1..17];
+    let port = wire::take_u16be(&bytes[17..19]).map_err(addr_wire_err)?;
+    match family {
+        ADDR_FAMILY_NONE => {
+            if raw.iter().any(|byte| *byte != 0) || port != 0 {
+                return Err("absent listen addr must zero its address bytes".to_string());
+            }
+            Ok(None)
+        }
+        ADDR_FAMILY_V4 => {
+            if raw[4..].iter().any(|byte| *byte != 0) {
+                return Err("ipv4 listen addr must zero its trailing bytes".to_string());
+            }
+            let octets = [raw[0], raw[1], raw[2], raw[3]];
+            Ok(Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::from(octets)),
+                port,
+            )))
+        }
+        ADDR_FAMILY_V6 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(raw);
+            Ok(Some(SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::from(octets)),
+                port,
+            )))
+        }
+        other => Err(format!("unknown listen addr family {other}")),
+    }
+}
+
+fn addr_wire_err(err: wire::WireError) -> String {
+    format!("{err:?}")
+}
 
 pub fn invite_signing_transcript(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();

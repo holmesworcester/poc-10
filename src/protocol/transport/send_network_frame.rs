@@ -154,7 +154,7 @@ fn resolve_target(
             })?,
     };
     let request = connection::request::layout::decode_fact(request_fact.body())?;
-    let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
+    let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
         .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {
         request.from_listen_addr

@@ -363,8 +363,9 @@ mod projector_tests {
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
+    use topo::protocol::connection::request::create::encode_optional_addr;
     use topo::protocol::connection::request::{
-        addr::encode_optional_addr, fact::ConnectionRequestFact, layout as request_layout,
+        fact::ConnectionRequestFact, layout as request_layout,
     };
     use topo::protocol::connection::response::{create, layout, project, rows};
     use topo::protocol::identity::endpoint::fact::EndpointFact;

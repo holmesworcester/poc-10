@@ -14,7 +14,7 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
-use crate::protocol::content::message::authority::{self, DecodedPayload};
+use crate::protocol::content::message::project::{self, DecodedPayload};
 use crate::protocol::content::{message, message_deletion};
 use crate::protocol::identity;
 use crate::protocol::identity::user;
@@ -45,11 +45,11 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: authority::DecodedFact<super::fact::ContentReactionFact>,
+        decoded: project::DecodedFact<super::fact::ContentReactionFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let authority::DecodedFact {
+        let project::DecodedFact {
             payload: reaction,
             signer,
             envelope,
@@ -58,7 +58,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let signer_need = authority::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, signer);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message",
@@ -74,7 +74,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             reaction.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !authority::validate_signer_context(
+            if !project::validate_signer_context(
                 context,
                 need,
                 signer,
@@ -123,7 +123,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
                 reaction.target_message_id,
                 target_context.message.author_user_id,
             )?;
-            authority::verify_envelope(envelope.as_ref(), "reaction")?;
+            project::verify_envelope(envelope.as_ref(), "reaction")?;
             return Ok(delete_reaction_projection(reaction.workspace_id, fact.id)
                 .need(target_need)
                 .need(target_deletion_need));
@@ -137,7 +137,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             ]));
         };
         validate_author_user(author, reaction.workspace_id, reaction.author_user_id)?;
-        authority::verify_envelope(envelope.as_ref(), "reaction")?;
+        project::verify_envelope(envelope.as_ref(), "reaction")?;
 
         // 3. Materialize.
         let row = reaction_row(ReactionRow {
@@ -168,7 +168,7 @@ fn context_payload<'a>(
     need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    authority::context_payload(context, need, label)
+    project::context_payload(context, need, label)
 }
 
 fn output_with_needs(
@@ -290,7 +290,7 @@ fn maybe_signed_payload(
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
-        authority::decode_raw_or_signed(payload, expected_type, label)
+        project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),

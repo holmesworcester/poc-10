@@ -136,7 +136,7 @@ impl IntentHandler for ReceiveTransitFrameHandler {
         let facts = match receive::bootstrap_frame_kind(&input.frame)? {
             BootstrapFrameKind::ConnectionRequest(request) => {
                 let invite_fact = context.require_fact(&request.invite_secret_fact_id)?;
-                let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
+                let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
                     .ok_or_else(|| {
                         HandlerError::fatal("bootstrap request receiver has no local endpoint")
                     })?;

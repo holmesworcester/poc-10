@@ -244,13 +244,25 @@ are conceptually related. This rule applies to encryption and sync equally:
 `recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
 `sync_have_id`, `sync_need_id`, `sync_range_request`, `sync_encrypted_root`,
 `sync_shared_fact`, and `sync_key_wrap_available` are separate fact-family
-modules. Shared helper code is allowed only when its file name states the
-specific invariant it owns, such as signer validation or range matching.
+modules.
 
-`project.rs` is not a folder for sub-events. A `project/` subtree is acceptable
-only for fact-family-local helper slices named after validation steps or output
-families. If a `project/` child corresponds to a different fact tag, the module
-is bundled incorrectly and must be split.
+A fact-family directory contains ONLY the standard role files, and only the
+ones it needs: `fact.rs`, `layout.rs`, `project.rs`, `rows.rs`, `queries.rs`,
+`create.rs`, `commands.rs`, `cli.rs`. There are no other files. There is no
+invariant-named helper slice and no `project/` subtree. Helper logic that would
+once have lived in a separately named file folds into whichever standard role
+file owns its responsibility: pure byte/codec helpers into `layout.rs`;
+projection, admission, authority, and validation policy into `project.rs`; fact
+construction and shared reactive construction helpers into `create.rs`;
+user-facing reads, lookups, and counts into `queries.rs`; command and intent
+mutation logic into `commands.rs`; CLI argv/format into `cli.rs`. It is
+acceptable for `project.rs` or `create.rs` to grow large as a result; that is
+the explicit tradeoff. Keep the merged code organized with clear section
+comments and do not duplicate logic.
+
+`project.rs` is not a folder for sub-events. If a would-be `project/` child
+corresponds to a different fact tag, the module is bundled incorrectly and must
+be split into its own fact family.
 
 Within a scope, names tell facts and intents apart. Fact families are
 noun-named: a directory, or a single noun-named `.rs` file. Intent handlers are
@@ -327,7 +339,10 @@ Those files should contain declarations and narrow re-exports only.
 
 ### File Role Rules
 
-Use role names that predict allowed behavior:
+A fact-family directory contains ONLY these standard role files, and only the
+ones it needs. There are no other files in a fact-family directory: any helper
+logic folds into the standard file whose role owns it. Use role names that
+predict allowed behavior:
 
 ```text
 fact.rs
@@ -367,14 +382,15 @@ queries.rs
 rows.rs
   read-model row shapes
 
-facts/<domain>/<range-helper>.rs
-  nontrivial context range encoders live beside the domain that validates their
-  candidates. Simple fact-id and composite-id ranges are emitted directly from
-  projectors with `ContextNeed::range` and `ContextOffer::range`.
-
 frame.rs / receive.rs
-  transit-specific fixed-frame helpers and receive classification
+  transit-specific fixed-frame helpers and receive classification (transit
+  modules only)
 ```
+
+Context range encoders are not a separate file. Simple fact-id and composite-id
+ranges are emitted directly from projectors with `ContextNeed::range` and
+`ContextOffer::range`; any nontrivial range encoding folds into the `project.rs`
+of the family that validates its candidates.
 
 ### Command Chaining
 
@@ -402,8 +418,8 @@ daemon should stop after durably submitting their facts; the daemon pipeline
 should perform projection, intent dispatch, and network effects.
 
 Avoid broad names such as `utils`, `helpers`, `common`, `misc`, `manager`, and
-`service`. If a helper is real, its file should name the invariant it enforces
-or the object it builds.
+`service`. A fact family never gains a new file for a helper: real helper logic
+folds into the standard role file that owns its responsibility.
 
 ### Schema Ownership
 
@@ -744,11 +760,12 @@ When implementing or reviewing a projector:
 6. Emit bounded row writes/deletes as row mutations in projector output.
 7. Convert async, retryable, IO, purge, transit, sync, and key-healing work to
    explicit typed deferred intents owned by handlers.
-8. Keep helper functions small, local to the fact family, and named after the
-   invariant they validate.
+8. Keep helper functions small and local to the fact family. They live inside
+   the standard role file that owns their responsibility, not in a separate
+   invariant-named file.
 9. Emit simple fact-id or composite-id context with `ContextNeed::range` and
-   `ContextOffer::range` directly. Put nontrivial range encodings and
-   candidate validation beside the domain that validates them.
+   `ContextOffer::range` directly. Fold nontrivial range encodings and candidate
+   validation into the `project.rs` of the domain that validates them.
 10. If a module is temporarily a row shell because sibling context is not ready,
     document the exact behavior gap in the module docs and remove that gap when
     the sibling context lands.

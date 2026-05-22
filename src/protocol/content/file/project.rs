@@ -15,7 +15,7 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
-use crate::protocol::content::message::authority::{self, DecodedPayload};
+use crate::protocol::content::message::project::{self, DecodedPayload};
 use crate::protocol::content::{file_deletion, message, message_deletion};
 use crate::protocol::identity;
 use crate::protocol::identity::user;
@@ -47,11 +47,11 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: authority::DecodedFact<super::fact::ContentFileFact>,
+        decoded: project::DecodedFact<super::fact::ContentFileFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let authority::DecodedFact {
+        let project::DecodedFact {
             payload: file,
             signer,
             envelope,
@@ -61,7 +61,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let signer_need = authority::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, signer);
         let file_deletion_need = crate::core::context::ContextNeed::for_key_parts(
             fact.id,
             "content_deleted",
@@ -83,7 +83,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             file.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !authority::validate_signer_context(
+            if !project::validate_signer_context(
                 context,
                 need,
                 signer,
@@ -102,7 +102,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         }
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
-            authority::verify_envelope(envelope.as_ref(), "file")?;
+            project::verify_envelope(envelope.as_ref(), "file")?;
             return Ok(delete_file_projection(file.workspace_id, fact.id).need(file_deletion_need));
         }
         let Some(parent_payload) = context_payload(context, &parent_need, "file parent")? else {
@@ -136,7 +136,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
                 file.message_id,
                 parent.message.author_user_id,
             )?;
-            authority::verify_envelope(envelope.as_ref(), "file")?;
+            project::verify_envelope(envelope.as_ref(), "file")?;
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(file_deletion_need)
                 .need(parent_need)
@@ -152,7 +152,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             ]));
         };
         validate_author_user(author, file.workspace_id, file.author_user_id)?;
-        authority::verify_envelope(envelope.as_ref(), "file")?;
+        project::verify_envelope(envelope.as_ref(), "file")?;
 
         // 3. Materialize.
         Ok(output_with_needs([
@@ -189,7 +189,7 @@ fn context_payload<'a>(
     need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    authority::context_payload(context, need, label)
+    project::context_payload(context, need, label)
 }
 
 fn output_with_needs(
@@ -377,7 +377,7 @@ fn maybe_signed_payload(
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
-        authority::decode_raw_or_signed(payload, expected_type, label)
+        project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),

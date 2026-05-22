@@ -4,15 +4,26 @@
 //! text is the encrypted field inside that fact, and projection opens it only
 //! when matching key context is available.
 
-use crate::core::command_context::{CommandContext, CommandOutput, WorkspaceId};
+use crate::core::command_context::{
+    CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability,
+    LocalSigningCapability, WorkspaceId,
+};
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
-use crate::core::facts::{Fact, FactScope, ScopeKind};
+use crate::core::effects::PipelineEffects;
+use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
+use crate::core::intents::{RowMutation, TableDeleteWhere};
+use crate::core::pipeline::commit_pipeline_effects_to_store;
+use crate::core::runtime::Runtime;
+use crate::core::select::Value;
+use crate::core::store::{Store, TableName};
 use crate::core::wire;
+use crate::protocol::content::message;
 use crate::protocol::content::message::fact::{
     ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::content::message::layout;
 use crate::protocol::content::message::queries;
+use crate::protocol::content::message::rows;
 use crate::protocol::encryption;
 use crate::protocol::identity;
 use crate::protocol::identity::signed_fact::{self, create as signed_fact_create};
@@ -132,7 +143,7 @@ fn local_author_user_id(
     workspace_id: WorkspaceId,
 ) -> Result<Option<crate::core::facts::FactId>, String> {
     Ok(
-        identity::workspace::local_membership::local_membership(ctx.store(), workspace_id)?
+        identity::workspace::queries::local_membership(ctx.store(), workspace_id)?
             .map(|membership| membership.user_authority_fact_id),
     )
 }
@@ -200,4 +211,220 @@ pub fn deterministic_nonce(
     let mut nonce = [0u8; NONCE_BYTES];
     nonce.copy_from_slice(&hash[..NONCE_BYTES]);
     nonce
+}
+
+// ---------------------------------------------------------------------------
+// Local authoring capabilities (command boundary).
+//
+// Sending a message needs two local secrets: the endpoint signing key and the
+// current local removal-frontier key. This is the command boundary that
+// assembles those capabilities from already-projected local state. It is not a
+// projector and it is not a query module for display state.
+// ---------------------------------------------------------------------------
+
+pub struct ContentMessageVault {
+    signing: LocalSigningCapability,
+    encryption: LocalEncryptionCapability,
+}
+
+impl ContentMessageVault {
+    pub fn for_workspace(runtime: &Runtime, workspace_id: [u8; 32]) -> Result<Self, String> {
+        let endpoint = identity::endpoint::create::local_endpoint(runtime.store())?
+            .ok_or_else(|| "local endpoint is not initialized".to_string())?;
+        identity::workspace::queries::local_membership(runtime.store(), workspace_id)?
+            .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
+        let encryption = latest_local_key_secret(runtime, workspace_id)?;
+        Ok(Self {
+            signing: LocalSigningCapability {
+                workspace_id,
+                signer_id: endpoint.endpoint,
+                public_key: endpoint.signing_public_key,
+                private_key: endpoint.signing_secret,
+            },
+            encryption: LocalEncryptionCapability {
+                workspace_id: encryption.workspace_id,
+                frontier_id: encryption.frontier_id,
+                owner_endpoint_id: encryption.owner_endpoint_id,
+                created_at_ms: encryption.created_at_ms,
+                key_secret: encryption.key_secret,
+            },
+        })
+    }
+}
+
+impl IdentityVault for ContentMessageVault {
+    fn local_signing_capability(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<LocalSigningCapability, String> {
+        if self.signing.workspace_id == workspace_id {
+            Ok(self.signing.clone())
+        } else {
+            Err("signing capability is not for requested workspace".to_string())
+        }
+    }
+
+    fn local_encryption_capability(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<LocalEncryptionCapability, String> {
+        if self.encryption.workspace_id == workspace_id {
+            Ok(self.encryption.clone())
+        } else {
+            Err("encryption capability is not for requested workspace".to_string())
+        }
+    }
+}
+
+fn latest_local_key_secret(
+    runtime: &Runtime,
+    workspace_id: [u8; 32],
+) -> Result<encryption::local_key_secret::fact::LocalKeySecretFact, String> {
+    runtime
+        .facts()
+        .filter_map(|fact| {
+            encryption::local_key_secret::layout::decode_local_key_secret(fact.body())
+                .ok()
+                .filter(|secret| secret.workspace_id == workspace_id)
+        })
+        .max_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.frontier_id.cmp(&right.frontier_id))
+        })
+        .ok_or_else(|| "no local key frontier is available for this workspace".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Message retention (expiry and deletion purge support).
+//
+// Retention is the point where message state intentionally stops being a live
+// row. These helpers decode either raw or signed message facts into the fields
+// needed for expiration, write tombstones that preserve deletion history, and
+// remove live message rows through the same atomic effect commit path used by
+// normal projection. They are invoked by the content purge intent handlers.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRetentionFact {
+    pub workspace_id: FactId,
+    pub created_at_ms: u64,
+    pub author_user_id: FactId,
+    pub minute: u64,
+    pub expires_at_minute: u64,
+}
+
+pub trait RetentionMessageView {
+    fn workspace_id(&self) -> FactId;
+    fn created_at_ms(&self) -> u64;
+    fn author_user_id(&self) -> FactId;
+    fn minute(&self) -> u64;
+    fn expires_at_minute(&self) -> u64;
+}
+
+impl RetentionMessageView for MessageRetentionFact {
+    fn workspace_id(&self) -> FactId {
+        self.workspace_id
+    }
+
+    fn created_at_ms(&self) -> u64 {
+        self.created_at_ms
+    }
+
+    fn author_user_id(&self) -> FactId {
+        self.author_user_id
+    }
+
+    fn minute(&self) -> u64 {
+        self.minute
+    }
+
+    fn expires_at_minute(&self) -> u64 {
+        self.expires_at_minute
+    }
+}
+
+pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> {
+    match fact.bytes.first().copied() {
+        Some(layout::TYPE_CONTENT_MESSAGE) => {
+            content_message_retention(layout::decode_fact(fact.body())?)
+        }
+        Some(signed_fact::TYPE_SIGNED_FACT) => {
+            let envelope = signed_fact::decode_envelope(fact.body())?;
+            match envelope.inner_type {
+                layout::TYPE_CONTENT_MESSAGE => {
+                    content_message_retention(layout::decode_fact(&envelope.payload)?)
+                }
+                _ => Err("signed fact does not contain a message".to_string()),
+            }
+        }
+        _ => Err("expected message fact".to_string()),
+    }
+}
+
+pub fn delete_message_projection(
+    store: &Store,
+    message_id: FactId,
+    message: &impl RetentionMessageView,
+    context: &str,
+) -> Result<(), String> {
+    let workspace_id = message.workspace_id();
+    let effects = PipelineEffects::new()
+        .row_mutation(RowMutation::InsertValues(rows::message_tombstone_row(
+            workspace_id,
+            message_id,
+            message.author_user_id(),
+            message.created_at_ms(),
+        )))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            rows::OPENED_MESSAGE_ROWS,
+            workspace_id,
+            message_id,
+        )))
+        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+            rows::CONTENT_MESSAGE_ROWS,
+            workspace_id,
+            message_id,
+        )));
+    commit_pipeline_effects_to_store(
+        store,
+        &effects,
+        &[
+            rows::MESSAGE_TOMBSTONE_ROWS,
+            rows::OPENED_MESSAGE_ROWS,
+            rows::CONTENT_MESSAGE_ROWS,
+        ],
+        context,
+    )?;
+    Ok(())
+}
+
+/// Builds the keyed delete for a message row in `table`. This is a pure value
+/// constructor used by both projection (expiry/deletion outputs) and the
+/// retention helpers above.
+pub(crate) fn message_row_delete(
+    table: TableName,
+    workspace_id: FactId,
+    message_id: FactId,
+) -> TableDeleteWhere {
+    TableDeleteWhere {
+        table,
+        columns: rows::MESSAGE_KEY_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(message_id.to_vec()),
+        ],
+    }
+}
+
+fn content_message_retention(
+    message: message::fact::ContentMessageFact,
+) -> Result<MessageRetentionFact, String> {
+    Ok(MessageRetentionFact {
+        workspace_id: message.workspace_id,
+        created_at_ms: message.created_at_ms,
+        author_user_id: message.author_user_id,
+        minute: message.minute,
+        expires_at_minute: message.expires_at_minute,
+    })
 }

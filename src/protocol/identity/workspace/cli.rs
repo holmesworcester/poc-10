@@ -180,7 +180,7 @@ pub fn count_output(
     ])
 }
 
-pub fn count_report_output(report: &super::runtime_counts::RuntimeCountReport) -> CliOutput {
+pub fn count_report_output(report: &super::queries::RuntimeCountReport) -> CliOutput {
     count_output(
         report.workspace_rows,
         report.facts,

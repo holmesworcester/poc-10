@@ -24,7 +24,7 @@ pub fn identity(ctx: &CommandContext<'_>, _args: CliArgs<'_>) -> Result<CliOutpu
             encode_hex(&endpoint.signing_public_key)
         ),
     ];
-    for membership in identity::workspace::local_membership::local_memberships(ctx.store())? {
+    for membership in identity::workspace::queries::local_memberships(ctx.store())? {
         lines.push(format!(
             "workspace: {} {} user_id={} endpoint_shared_id={} endpoint_role={}",
             encode_hex(&membership.workspace_id),

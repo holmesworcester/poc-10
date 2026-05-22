@@ -1,17 +1,44 @@
-//! Local endpoint private capability access.
+//! Local endpoint fact construction and private capability access.
 //!
-//! This is deliberately not `queries.rs`. Query helpers expose projected public
-//! state for display and selection. This module reconstructs local private
-//! endpoint material for command and handler capability boundaries that are
-//! already authorized to use it.
+//! `create_local_endpoint` and `endpoint_fact` build new local endpoint
+//! material. `local_endpoint` reconstructs local private endpoint material for
+//! command and handler capability boundaries that are already authorized to
+//! use it; this is deliberately not in `queries.rs`, which exposes only
+//! projected public state. Reactive paths share these constructors.
 
 use crate::core::crypto;
 use crate::core::fact_store::persisted_facts;
-use crate::core::facts::FactScope;
+use crate::core::facts::{Fact, FactScope};
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;
-use super::rows;
+use super::{layout, rows};
+
+pub fn create_local_endpoint() -> EndpointFact {
+    let secret = crypto::random_x25519_private_key();
+    let signing_secret = crypto::random_ed25519_private_key();
+    EndpointFact {
+        endpoint: crypto::x25519_public_key(&secret),
+        secret,
+        signing_public_key: crypto::ed25519_public_key(&signing_secret),
+        signing_secret,
+    }
+}
+
+pub fn endpoint_fact(created_at_ms: u64, endpoint: EndpointFact) -> Result<Fact, String> {
+    Ok(Fact::new(
+        FactScope::Local,
+        created_at_ms,
+        layout::encode_fact(&endpoint)?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Local endpoint private capability access.
+//
+// Private endpoint material is reconstructed for command and handler capability
+// boundaries that are already authorized to use it.
+// ---------------------------------------------------------------------------
 
 pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
     let endpoint = store
@@ -65,7 +92,7 @@ fn unprojected_local_endpoint(store: &Store) -> Result<Option<EndpointFact>, Str
         .into_iter()
         .filter(|fact| fact.scope == FactScope::Local)
         .filter_map(|fact| {
-            super::layout::decode_fact(fact.body())
+            layout::decode_fact(fact.body())
                 .ok()
                 .map(|endpoint| (fact.timestamp, fact.id, endpoint))
         })

@@ -957,64 +957,59 @@ fn target_manifests_match_their_filesystem_modules() {
     );
 }
 
+/// The only files a fact-family directory may contain.
+const STANDARD_FAMILY_FILES: [&str; 8] = [
+    "fact.rs",
+    "layout.rs",
+    "project.rs",
+    "rows.rs",
+    "queries.rs",
+    "create.rs",
+    "commands.rs",
+    "cli.rs",
+];
+
+/// Fact families that do not yet meet the standard-role-file rule because they
+/// are pending the transit/connection redesign (see
+/// `transit_connection_redesign.md`). Remove these entries when that lands.
+const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 2] = ["transport/transit", "transport/transit_received"];
+
 #[test]
-fn target_fact_child_files_use_narrow_slice_names() {
+fn fact_family_directories_contain_only_standard_role_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
-    for scope_root in scope_dirs(root) {
-        for path in rust_files(&scope_root) {
-            // Skip scope-level files (intent handlers, scope-level fact files)
-            // and fact-family-level files; deeper nested files must use a named
-            // responsibility slice.
-            if path.parent() == Some(scope_root.as_path()) {
+    for scope_dir in scope_dirs(root) {
+        let scope = scope_dir.file_name().unwrap().to_str().unwrap();
+        for family_dir in immediate_subdirs(&scope_dir) {
+            let family = family_dir.file_name().unwrap().to_str().unwrap();
+            if FAMILY_FILE_RULE_EXCEPTIONS.contains(&format!("{scope}/{family}").as_str()) {
                 continue;
             }
-            if path.parent().and_then(|parent| parent.parent()) == Some(scope_root.as_path()) {
-                continue;
+            // A fact family is a flat set of role files — no nested directories.
+            for nested in immediate_subdirs(&family_dir) {
+                offenders.push(format!(
+                    "{} is a nested directory; a fact family is flat",
+                    nested.strip_prefix(root).unwrap().display()
+                ));
             }
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-        if !matches!(
-            file_name,
-            "addr.rs"
-                | "authority.rs"
-                | "authoring.rs"
-                | "create.rs"
-                | "commands.rs"
-                | "queries.rs"
-                | "retention.rs"
-                | "cli.rs"
-                | "fact.rs"
-                | "frame.rs"
-                | "intent.rs"
-                | "layout.rs"
-                | "local_endpoint.rs"
-                | "local_membership.rs"
-                | "key_request.rs"
-                | "local_material.rs"
-                | "local_recipient_key.rs"
-                | "message.rs"
-                | "offers.rs"
-                | "project.rs"
-                | "range_request.rs"
-                | "receive.rs"
-                | "recipient_key.rs"
-                | "rows.rs"
-                | "runtime_counts.rs"
-                | "secret_path.rs"
-                | "signed_key_wrap.rs"
-                | "validation.rs"
-            ) {
-                offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+            for file in immediate_rust_files(&family_dir) {
+                let name = file.file_name().unwrap().to_str().unwrap();
+                if !STANDARD_FAMILY_FILES.contains(&name) {
+                    offenders.push(format!(
+                        "{} is not a standard role file",
+                        file.strip_prefix(root).unwrap().display()
+                    ));
+                }
             }
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "target fact child files should stay in named responsibility slices, not generic helper or catch-all files:\n{}",
+        "a fact-family directory may contain only the standard role files \
+         {STANDARD_FAMILY_FILES:?} and no subdirectories; fold helper logic into \
+         a role file:\n{}",
         offenders.join("\n")
     );
 }
@@ -1247,6 +1242,47 @@ fn fact_family_directories_are_noun_named() {
     assert!(
         offenders.is_empty(),
         "fact-family directories under a scope must be noun-named, not verb-first:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn scope_directories_contain_only_intents_and_family_manifests() {
+    // Only intents linger outside of facts. Every `.rs` file directly under a
+    // scope directory is either a registered intent handler or a `<family>.rs`
+    // manifest paired with a `<family>/` directory. Every subdirectory is a
+    // fact family paired with its manifest.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let intents = intent_handler_file_set(root);
+    let mut offenders = Vec::new();
+
+    for scope_dir in scope_dirs(root) {
+        for file in immediate_rust_files(&scope_dir) {
+            if intents.contains(&file) {
+                continue;
+            }
+            if !file.with_extension("").is_dir() {
+                offenders.push(format!(
+                    "{} is neither a registered intent handler nor a `<family>.rs` \
+                     manifest with a matching `<family>/` directory",
+                    file.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+        for family_dir in immediate_subdirs(&scope_dir) {
+            if !family_dir.with_extension("rs").is_file() {
+                offenders.push(format!(
+                    "{} has no `<family>.rs` manifest beside it",
+                    family_dir.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "directly under a scope, only intent handlers and `<family>.rs` manifests \
+         (each paired with a `<family>/` directory) may appear:\n{}",
         offenders.join("\n")
     );
 }

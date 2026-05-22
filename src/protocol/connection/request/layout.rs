@@ -11,8 +11,8 @@
 
 use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
+use super::create::{decode_optional_addr, encode_optional_addr, ADDR_BLOCK_BYTES};
 
-use super::addr::{decode_optional_addr, encode_optional_addr, ADDR_BLOCK_BYTES};
 use super::fact::ConnectionRequestFact;
 
 pub const TYPE_CONNECTION_REQUEST: u8 = 42;

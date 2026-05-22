@@ -169,7 +169,7 @@ pub fn create_device_link(
         identity::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
     let membership =
-        identity::workspace::local_membership::local_membership(ctx.store(), input.workspace_id)?
+        identity::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.signing_public_key != local.signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());
@@ -756,7 +756,7 @@ fn local_admin_id(
     workspace_id: FactId,
     signing_public_key: [u8; 32],
 ) -> Result<LocalAdminAuthority, String> {
-    let membership = identity::workspace::local_membership::local_membership(store, workspace_id)?
+    let membership = identity::workspace::queries::local_membership(store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.signing_public_key != signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());

@@ -86,7 +86,7 @@ impl MatchCliContext {
         run: impl FnOnce(&CommandContext<'_>) -> Result<T, String>,
     ) -> Result<T, String> {
         let clock = FixedClock(timestamp);
-        let vault = content::message::authoring::ContentMessageVault::for_workspace(
+        let vault = content::message::create::ContentMessageVault::for_workspace(
             &self.runtime,
             workspace_id,
         )?;
@@ -218,7 +218,7 @@ pub(crate) fn workspaces(
 
 pub(crate) fn count(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(0, identity::workspace::cli::COUNT_USAGE)?;
-    let report = identity::workspace::runtime_counts::runtime_count_report(ctx.runtime())?;
+    let report = identity::workspace::queries::runtime_count_report(ctx.runtime())?;
     Ok(identity::workspace::cli::count_report_output(&report))
 }
 

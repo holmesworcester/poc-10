@@ -219,7 +219,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         }
         let batches = fact_batches(facts_for_work(work, context)?)?;
 
-        let local_endpoint = endpoint::local_endpoint::local_endpoint(context.store()?)?
+        let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
             .ok_or_else(|| {
                 HandlerError::fatal("send_facts_on_connection requires local endpoint state")
             })?;

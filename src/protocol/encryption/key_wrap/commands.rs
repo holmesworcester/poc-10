@@ -167,7 +167,7 @@ pub fn create_recipient_key(
     input: CreateRecipientKey,
 ) -> Result<CommandOutput<CreateRecipientKeyReceipt>, String> {
     let membership =
-        identity::workspace::local_membership::local_membership(ctx.store(), input.workspace_id)?
+        identity::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.endpoint_role != identity::endpoint_shared::fact::EndpointRole::Device {
         return Err("local endpoint role cannot receive key wraps".to_string());
@@ -209,10 +209,10 @@ pub fn create_key_frontier(
     ctx: &CommandContext<'_>,
     input: CreateKeyFrontier,
 ) -> Result<CommandOutput<CreateKeyFrontierReceipt>, String> {
-    let endpoint = identity::endpoint::local_endpoint::local_endpoint(ctx.store())?
+    let endpoint = identity::endpoint::create::local_endpoint(ctx.store())?
         .ok_or_else(|| "local endpoint is not initialized".to_string())?;
     let membership =
-        identity::workspace::local_membership::local_membership(ctx.store(), input.workspace_id)?
+        identity::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.endpoint_id != endpoint.endpoint {
         return Err("local endpoint membership does not match local endpoint".to_string());

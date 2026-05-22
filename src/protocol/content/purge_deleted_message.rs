@@ -12,7 +12,7 @@
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::content::{message::retention, message_deletion};
+use crate::protocol::content::{message::create as retention, message_deletion};
 
 pub const PURGE_DELETED_MESSAGE: &str = "purge_deleted_message";
 pub const PURGE_TARGET_MESSAGE: u8 = 1;

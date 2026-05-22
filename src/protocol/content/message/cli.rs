@@ -378,7 +378,7 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
 
     let local = identity::endpoint::queries::local_endpoint_public(ctx.store())?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let local_memberships = identity::workspace::local_membership::local_memberships(ctx.store())?;
+    let local_memberships = identity::workspace::queries::local_memberships(ctx.store())?;
     if !local_memberships
         .iter()
         .any(|membership| membership.workspace_id == workspace_id)
@@ -484,7 +484,7 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
 }
 
 fn selected_workspace_id(ctx: &CommandContext<'_>) -> Result<FactId, String> {
-    let memberships = identity::workspace::local_membership::local_memberships(ctx.store())?;
+    let memberships = identity::workspace::queries::local_memberships(ctx.store())?;
     match memberships.as_slice() {
         [] => Err("no joined workspaces; create or accept one first".to_string()),
         [membership] => Ok(membership.workspace_id),
@@ -523,7 +523,7 @@ fn user_name(
 }
 
 fn local_author_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
-    identity::workspace::local_membership::local_membership(store, workspace_id)?
+    identity::workspace::queries::local_membership(store, workspace_id)?
         .map(|membership| membership.user_authority_fact_id)
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())
 }

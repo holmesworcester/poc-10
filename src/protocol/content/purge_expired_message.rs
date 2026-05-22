@@ -7,7 +7,7 @@
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::content::message::retention;
+use crate::protocol::content::message::create as retention;
 
 pub const PURGE_EXPIRED_MESSAGE: &str = "purge_expired_message";
 

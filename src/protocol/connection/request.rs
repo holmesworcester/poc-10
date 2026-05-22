@@ -7,7 +7,6 @@
 //! Change this root when the request family gains a new submodule; change
 //! `project.rs` for handshake admission policy.
 
-pub mod addr;
 pub mod commands;
 pub mod create;
 pub mod fact;

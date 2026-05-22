@@ -127,7 +127,7 @@ pub fn shareable_facts_for_connection(
     let Some(connection) = connection_response_row(store, connection_id)? else {
         return Ok(Vec::new());
     };
-    let Some(local_endpoint) = identity::endpoint::local_endpoint::local_endpoint(store)? else {
+    let Some(local_endpoint) = identity::endpoint::create::local_endpoint(store)? else {
         return Ok(Vec::new());
     };
     let Some(remote_endpoint) =
@@ -170,7 +170,7 @@ pub fn connection_ids_for_shareable_fact(
 ) -> Result<Vec<FactId>, String> {
     let mut connection_ids = Vec::new();
     let workspace_ids = shareable_workspaces_for_fact(store, fact)?;
-    let Some(local_endpoint) = identity::endpoint::local_endpoint::local_endpoint(store)? else {
+    let Some(local_endpoint) = identity::endpoint::create::local_endpoint(store)? else {
         return Ok(Vec::new());
     };
     let endpoint_memberships = endpoint_memberships(store)?;

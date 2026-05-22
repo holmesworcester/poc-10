@@ -31,7 +31,7 @@ pub fn grant_admin(
     input: GrantAdmin,
 ) -> Result<CommandOutput<GrantAdminReceipt>, String> {
     let membership =
-        identity::workspace::local_membership::local_membership(ctx.store(), input.workspace_id)?
+        identity::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let authority_admin_id = ctx
         .store()
@@ -48,7 +48,7 @@ pub fn grant_admin(
         .into_iter()
         .find(|user| user.user_id == input.user_id)
         .ok_or_else(|| "target user is not in this workspace".to_string())?;
-    let local_endpoint = identity::endpoint::local_endpoint::local_endpoint(ctx.store())?
+    let local_endpoint = identity::endpoint::create::local_endpoint(ctx.store())?
         .ok_or_else(|| "local endpoint has not been created".to_string())?;
     let grant = AdminFact {
         created_at_ms: input.created_at_ms,

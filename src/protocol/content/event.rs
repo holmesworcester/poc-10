@@ -24,10 +24,10 @@ pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
     type Payload =
-        crate::protocol::content::message::authority::DecodedFact<fact::ContentEventFact>;
+        crate::protocol::content::message::project::DecodedFact<fact::ContentEventFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        crate::protocol::content::message::authority::decode_raw_or_signed_fact(
+        crate::protocol::content::message::project::decode_raw_or_signed_fact(
             fact,
             layout::TYPE_CONTENT_EVENT,
             "content event",

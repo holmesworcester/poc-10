@@ -17,7 +17,7 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::content::message;
-use crate::protocol::content::message::authority::{self, DecodedPayload};
+use crate::protocol::content::message::project::{self, DecodedPayload};
 use crate::protocol::identity;
 use crate::protocol::identity::user;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -47,11 +47,11 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: authority::DecodedFact<super::fact::ContentMessageDeletionFact>,
+        decoded: project::DecodedFact<super::fact::ContentMessageDeletionFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let authority::DecodedFact {
+        let project::DecodedFact {
             payload: deletion,
             signer,
             envelope,
@@ -60,7 +60,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
-        let signer_need = authority::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, signer);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message_meta",
@@ -76,7 +76,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             deletion.author_user_id,
         );
         if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !authority::validate_signer_context(
+            if !project::validate_signer_context(
                 context,
                 need,
                 signer,
@@ -109,7 +109,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         };
         validate_target_message(&deletion, target_fact)?;
         validate_author_user(&deletion, author_fact)?;
-        authority::verify_envelope(envelope.as_ref(), "message deletion")?;
+        project::verify_envelope(envelope.as_ref(), "message deletion")?;
 
         // 3. Materialize.
         let row = message_deletion_row(MessageDeletionRow {
@@ -141,7 +141,7 @@ fn context_payload<'a>(
     need: &crate::core::context::ContextNeed,
     label: &str,
 ) -> Result<Option<&'a Fact>, String> {
-    authority::context_payload(context, need, label)
+    project::context_payload(context, need, label)
 }
 
 fn output_with_needs(
@@ -199,7 +199,7 @@ fn maybe_signed_payload(
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
-        authority::decode_raw_or_signed(payload, expected_type, label)
+        project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),

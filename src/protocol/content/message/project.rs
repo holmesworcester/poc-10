@@ -29,8 +29,6 @@ use crate::protocol::content::purge_deleted_message::{
 use crate::protocol::content::purge_expired_message::{self, PurgeExpiredMessage};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
-use super::authority::{self, DecodedPayload};
-use super::retention::message_row_delete;
 use super::rows::{
     content_message_row, message_tombstone_row, opened_message_row, OpenedMessageRow,
     CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
@@ -59,11 +57,11 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: authority::DecodedFact<super::fact::ContentMessageFact>,
+        decoded: DecodedFact<super::fact::ContentMessageFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let authority::DecodedFact {
+        let DecodedFact {
             payload: message,
             envelope,
             ..
@@ -119,12 +117,12 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         let Some(signer_payload) = context.payload_for(&signer_need) else {
             return Ok(base_output);
         };
-        validate_signer_context(signer_payload, &signer_need, &message, envelope.as_ref())?;
+        validate_message_signer_context(signer_payload, &signer_need, &message, envelope.as_ref())?;
         let Some(author) = context_payload(context, &author_need, "message author")? else {
             return Ok(base_output);
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
-        authority::verify_envelope(envelope.as_ref(), "message")?;
+        verify_envelope(envelope.as_ref(), "message")?;
 
         let metadata_output = base_output.offer(crate::core::context::ContextOffer::range(
             fact.id,
@@ -193,15 +191,7 @@ fn base_wait_output(
     )
 }
 
-fn context_payload<'a>(
-    context: &'a ProjectionContext,
-    need: &crate::core::context::ContextNeed,
-    label: &str,
-) -> Result<Option<&'a Fact>, String> {
-    authority::context_payload(context, need, label)
-}
-
-fn validate_signer_context(
+fn validate_message_signer_context(
     payload: &Fact,
     _need: &ContextNeed,
     message: &super::fact::ContentMessageFact,
@@ -371,12 +361,12 @@ fn expired_output(
             message.author_user_id,
             message.created_at_ms,
         )))
-        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
             CONTENT_MESSAGE_ROWS,
             message.workspace_id,
             message_id,
         )))
-        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
             OPENED_MESSAGE_ROWS,
             message.workspace_id,
             message_id,
@@ -402,12 +392,12 @@ fn author_deletion_output(
             message.author_user_id,
             message.created_at_ms,
         )))
-        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
             CONTENT_MESSAGE_ROWS,
             message.workspace_id,
             message_id,
         )))
-        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
             OPENED_MESSAGE_ROWS,
             message.workspace_id,
             message_id,
@@ -429,7 +419,7 @@ fn maybe_signed_payload(
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
-        authority::decode_raw_or_signed(payload, expected_type, label)
+        decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
@@ -446,6 +436,163 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
         Err("content message fact scope does not match body workspace".to_string())
     }
 }
+
+// ===========================================================================
+// Authority: raw/signed payload unwrapping and signer validation.
+//
+// Content messages may arrive as raw local facts during command construction
+// or as signed envelopes when another endpoint authored them. This section
+// unwraps either shape, verifies signed envelopes when validation reaches the
+// point where a payload is meant to become durable state, and asks the context
+// system for the `endpoint_shared` fact that proves the signer belongs to the
+// same workspace. Message, file, and deletion projection depend on this.
+// ===========================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedPayload {
+    pub payload: Vec<u8>,
+    pub signer: Option<SignedSigner>,
+    pub envelope: Option<identity::signed_fact::fact::SignedFactEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedFact<T> {
+    pub payload: T,
+    pub signer: Option<SignedSigner>,
+    pub envelope: Option<identity::signed_fact::fact::SignedFactEnvelope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedSigner {
+    pub signer_id: FactId,
+    pub signer_public_key: [u8; 32],
+}
+
+/// Returns the payload a projector should decode, preserving the signer
+/// evidence when the fact was wrapped in a signed envelope.
+pub fn decode_raw_or_signed(
+    fact: &Fact,
+    expected_type: u8,
+    label: &str,
+) -> Result<DecodedPayload, String> {
+    if fact.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
+        let envelope = identity::signed_fact::decode_envelope(fact.body())
+            .map_err(|err| format!("{label} signed fact is invalid: {err}"))?;
+        if envelope.inner_type != expected_type {
+            return Err(format!("signed fact does not contain a {label}"));
+        }
+        return Ok(DecodedPayload {
+            payload: envelope.payload.clone(),
+            signer: Some(SignedSigner {
+                signer_id: envelope.signer_id,
+                signer_public_key: envelope.signer_public_key,
+            }),
+            envelope: Some(envelope),
+        });
+    }
+
+    Ok(DecodedPayload {
+        payload: fact.bytes.clone(),
+        signer: None,
+        envelope: None,
+    })
+}
+
+pub fn verify_signature<T>(decoded: &DecodedFact<T>, label: &str) -> Result<(), String> {
+    verify_envelope(decoded.envelope.as_ref(), label)
+}
+
+pub fn verify_envelope(
+    envelope: Option<&identity::signed_fact::fact::SignedFactEnvelope>,
+    label: &str,
+) -> Result<(), String> {
+    let Some(envelope) = envelope else {
+        return Ok(());
+    };
+    identity::signed_fact::verify_envelope(envelope)
+        .map_err(|err| format!("{label} signed fact is invalid: {err}"))
+}
+
+pub fn decode_raw_or_signed_fact<T>(
+    fact: &Fact,
+    expected_type: u8,
+    label: &str,
+    decode: impl FnOnce(&[u8]) -> Result<T, String>,
+) -> Result<DecodedFact<T>, String> {
+    let decoded = decode_raw_or_signed(fact, expected_type, label)?;
+    let payload = decode(&decoded.payload)?;
+    Ok(DecodedFact {
+        payload,
+        signer: decoded.signer,
+        envelope: decoded.envelope,
+    })
+}
+
+pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<ContextNeed> {
+    signer.map(|signer| {
+        crate::core::context::ContextNeed::range(
+            owner,
+            "identity_endpoint_shared",
+            crate::core::facts::FactScope::Global,
+            signer.signer_id,
+            signer.signer_id,
+        )
+    })
+}
+
+/// Checks that the context payload satisfying a signer need is the endpoint
+/// authority the signed content relies on.
+pub fn validate_signer_context(
+    context: &ProjectionContext,
+    need: &ContextNeed,
+    signer: SignedSigner,
+    workspace_id: FactId,
+    author_user_id: Option<FactId>,
+    label: &str,
+) -> Result<bool, String> {
+    let Some(payload) = context_payload(context, need, &format!("{label} signer"))? else {
+        return Ok(false);
+    };
+    if payload.id != signer.signer_id {
+        return Err(format!(
+            "{label} signer endpoint context payload id mismatch"
+        ));
+    }
+    let envelope = identity::signed_fact::decode_envelope(payload.body())
+        .map_err(|_| format!("{label} signer context is not a signed endpoint_shared"))?;
+    if envelope.inner_type != identity::endpoint_shared::TYPE_ENDPOINT_SHARED {
+        return Err(format!(
+            "{label} signer context is not a signed endpoint_shared"
+        ));
+    }
+    let endpoint = identity::endpoint_shared::decode_fact_payload(&envelope.payload)
+        .map_err(|_| format!("{label} signer context is not an endpoint_shared"))?;
+    if endpoint.workspace_id != workspace_id {
+        return Err(format!(
+            "{label} signer endpoint_shared workspace does not match {label}"
+        ));
+    }
+    if endpoint.signing_public_key != signer.signer_public_key {
+        return Err(format!(
+            "{label} signer public key does not match endpoint_shared"
+        ));
+    }
+    if author_user_id.is_some_and(|author| endpoint.user_authority_fact_id != author) {
+        return Err(format!(
+            "{label} signer endpoint is not authorized by the named author"
+        ));
+    }
+    Ok(true)
+}
+
+pub fn context_payload<'a>(
+    context: &'a ProjectionContext,
+    need: &ContextNeed,
+    label: &str,
+) -> Result<Option<&'a Fact>, String> {
+    context.payload_for_checked(need, label)
+}
+
 
 #[cfg(test)]
 mod projector_tests {
