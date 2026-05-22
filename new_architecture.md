@@ -44,7 +44,7 @@ The migration succeeds when:
 - No fact module, intent handler, command, schema, or wire layout reaches around core
   to call another stage directly.
 - There is no event-bus layer. The runtime coordinates explicit SQL-backed
-  queues: pending facts, time wakes, durable intents, and restart-local intents.
+  queues: pending facts, time wakes, durable intents, and ephemeral intents.
 - The product-facing binary is `match`; the package may still be named `topo`.
 - Product entry is a thin root function that supplies the CLI name and protocol
   registry to generic core runtime/app code. It must not contain
@@ -96,7 +96,7 @@ fixtures and the deferred partial-download-progress content tests.
   `src/core/pipeline/`: `projection.rs` projects pending facts,
   `projection_commit.rs` wakes context-matcher dependents,
   `fact_context.rs` runs the single-threaded fact/context loop and time wakes, and `dispatch.rs` dispatches
-  durable and restart-local intents.
+  durable and ephemeral intents.
 - Target fact modules under `src/protocol/facts/` are exercised by poc-10 tests
   and route production `match` behavior through the target runtime.
 - Target intent handlers under `src/protocol/intents/` are themed files and
@@ -123,7 +123,7 @@ Implemented target slices:
   writes and deletes.
 - Pending-fact projection replaces each fact's needs/offers, wakes context
   matches in the projection commit, applies row mutations,
-  persists durable intents, and keeps restart-local IO intents in TEMP SQLite
+  persists durable intents, and keeps ephemeral IO intents in TEMP SQLite
   storage.
 - Handler dispatch that accepts only declared fact inputs and returns facts,
   purges, and follow-up intents.
@@ -449,7 +449,7 @@ local_intents
 clock
 ```
 
-`src/core/network.rs` owns restart-local network queue DDL:
+`src/core/network.rs` owns ephemeral network queue DDL:
 
 ```text
 network_out
@@ -831,13 +831,13 @@ WakeDaemon
 ```
 
 Core applies row mutations during projection. Durable intents go into the
-`intents` SQLite queue and are claimed by registered handlers. Restart-local
+`intents` SQLite queue and are claimed by registered handlers. Ephemeral
 intents go into the TEMP `local_intents` queue; a restart drops them, so only
 regenerated or peer-redelivered IO belongs there.
 
 ## Intent Handlers
 
-Handlers consume durable or restart-local intents:
+Handlers consume durable or ephemeral intents:
 
 ```rust
 fn handle(intent: &Intent, ctx: &HandlerContext) -> Result<HandlerOutput, String>;
@@ -871,7 +871,7 @@ pub fn handle(intent: &Intent, ctx: &HandlerContext) -> HandlerOutput {
 Handler rules:
 
 ```text
-- One handler owns each durable or restart-local intent kind.
+- One handler owns each durable or ephemeral intent kind.
 - Handlers are themed, self-contained files under src/protocol/intents/.
 - Handlers declare exact fact inputs when they need fact context.
 - Handlers do bounded work per call.
@@ -902,7 +902,7 @@ pending projection worker
   replace the fact's context_edges
   wake context matches with SQL
   persist durable intents
-  persist restart-local intents in TEMP local_intents
+  persist ephemeral intents in TEMP local_intents
 
 intent pipeline: durable intents
   claim intent
@@ -910,15 +910,15 @@ intent pipeline: durable intents
   run flat handler
   submit returned facts
   apply purges and row mutations
-  persist returned durable and restart-local intents
+  persist returned durable and ephemeral intents
 
-intent pipeline: restart-local intents
+intent pipeline: ephemeral intents
   claim TEMP local_intents row
   build handler context from declared fact ids
   run flat handler
   submit returned facts
   apply purges and row mutations
-  persist returned durable and restart-local intents
+  persist returned durable and ephemeral intents
 
 repeat until the work budget is exhausted
 ```
@@ -1284,7 +1284,7 @@ adding new compatibility layers:
    `content_cli_test.rs`.
 4. Continue shrinking deferred intent handlers until every durable deferred step
    is atomic at its own storage boundary and every network/IO effect is
-   restart-local.
+   ephemeral.
 ```
 
 ## Guardrails

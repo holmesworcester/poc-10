@@ -4,7 +4,7 @@
 //! change, then one commit boundary makes that description durable. Commands,
 //! projectors, and intent handlers do not directly mutate all of core state.
 //! They return `PipelineEffects`: facts to admit, facts to purge, row
-//! mutations, durable intents, and restart-local intents. A commit is the
+//! mutations, durable intents, and ephemeral intents. A commit is the
 //! moment those pending effects are validated, written to SQLite, and made
 //! visible together.
 //!
@@ -34,7 +34,7 @@
 //! The commit order is part of the contract. Purges run first so stale
 //! core-owned rows disappear before new facts and derived rows become visible.
 //! New facts are admitted and marked pending for projection. Row mutations
-//! apply next. Follow-up durable and restart-local intents are recorded last, so
+//! apply next. Follow-up durable and ephemeral intents are recorded last, so
 //! downstream work is not queued until the data it depends on has committed.
 //!
 //! Keep this file protocol-neutral. It may decide whether an effect is allowed
@@ -69,7 +69,7 @@ pub(crate) struct PipelineEffectCounts {
     pub facts: usize,
     /// Durable intents newly queued.
     pub intents: usize,
-    /// Restart-local intents newly queued.
+    /// Ephemeral intents newly queued.
     pub local_intents: usize,
 }
 
@@ -92,7 +92,7 @@ pub(crate) fn validate_pipeline_effects(
 ///
 /// Intent durability is owned by the destination table. This check only rejects
 /// conflicting duplicates within that one destination queue; the durable and
-/// restart-local queues are allowed to carry the same `(kind, key)` because
+/// ephemeral queues are allowed to carry the same `(kind, key)` because
 /// dispatch defines how durable work shadows local work.
 fn validate_intents(intents: &[Intent]) -> Result<(), String> {
     let mut proposed = BTreeMap::<Vec<u8>, &Intent>::new();

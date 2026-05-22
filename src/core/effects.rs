@@ -3,7 +3,7 @@
 //! Commands, projection, and intent handlers all reduce to this structure
 //! before the SQL pipeline commits their output. The structure is intentionally
 //! mechanical: it names facts to admit, facts to purge, row mutations, durable
-//! intents, and restart-local intents. It does not contain callbacks, open
+//! intents, and ephemeral intents. It does not contain callbacks, open
 //! sockets, command receipts, or protocol-specific execution state.
 //!
 //! If a new kind of runtime effect needs atomic commit with projection or

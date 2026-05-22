@@ -4,7 +4,7 @@
 //! per-store lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
-//! convert inbound bytes to restart-local intents, process declared time wakes,
+//! convert inbound bytes to ephemeral intents, process declared time wakes,
 //! then drain projection/intent/projection work.
 
 use crate::core::cli::{CliArgs, CliOutput};
@@ -47,13 +47,13 @@ pub struct StartOptions {
 /// Protocol declarations needed by the generic daemon tick.
 #[derive(Clone, Copy)]
 pub struct DaemonDescription {
-    /// Converter from inbound network bytes to a restart-local intent.
+    /// Converter from inbound network bytes to an ephemeral intent.
     pub inbound_network_intent: Option<InboundNetworkIntent>,
     /// Time-wake schedules the daemon should admit each tick.
     pub time_wakes: &'static [DaemonTimeWake],
 }
 
-/// Function that turns an inbound frame into restart-local queued work.
+/// Function that turns an inbound frame into ephemeral queued work.
 pub type InboundNetworkIntent = fn(InboundNetworkFrame) -> Result<Intent, String>;
 
 /// Opaque inbound TCP frame plus local receipt metadata.

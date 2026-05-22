@@ -41,7 +41,7 @@ BucketList: one form is good for lookup, the other for hashes and catchup. That
 style is useful whenever a file appears to duplicate state.
 
 Use it here for pairs such as `facts` and `local_fact_admissions`, or durable
-and restart-local intent queues. The prose should say why both exist and what
+and ephemeral intent queues. The prose should say why both exist and what
 each one owns.
 
 ### Mark The Boundary

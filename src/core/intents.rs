@@ -1,7 +1,7 @@
 //! Intent queues and handler contract types.
 //!
 //! An intent is idempotent queued work. Core persists durable intents in
-//! `intents`, stores restart-local intents in `local_intents`, and dispatches
+//! `intents`, stores ephemeral intents in `local_intents`, and dispatches
 //! both through the same handler contract. The intent kind selects a handler;
 //! the key deduplicates equivalent work of that kind; the payload is opaque
 //! bytes owned by the protocol module that registered the handler.

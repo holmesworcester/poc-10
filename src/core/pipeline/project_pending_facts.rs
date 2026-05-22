@@ -258,7 +258,7 @@ pub(crate) fn drain_pending_projection(
 /// 2. `load_pending_fact` loads each fact's projection inputs.
 /// 3. `process_pending_fact` completes all processing for that one fact.
 /// 4. `prepare_projection_effects` runs protocol projection and groups the outputs.
-/// 5. `commit_projection_effects` commits every durable and restart-local effect in one
+/// 5. `commit_projection_effects` commits every durable and ephemeral effect in one
 ///    SQLite transaction.
 fn process_pending_projection_batch(
     projector: &(impl Projector + ?Sized),
@@ -357,7 +357,7 @@ struct ProjectionEffects {
 /// - Wake context matches directly.
 /// - Apply row mutations.
 /// - Record durable intents.
-/// - Record restart-local intents in the temp local queue.
+/// - Record ephemeral intents in the temp local queue.
 fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,

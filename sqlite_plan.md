@@ -116,7 +116,7 @@ during projection commit and inserts affected owners directly into
 
 - Projectors are pure over one fact plus supplied context.
 - Projectors emit needs, offers, time wakes, row mutations, durable intents, and
-  restart-local intents.
+  ephemeral intents.
 - Projection commit replaces only the current fact's context edges and time
   wakes.
 - Row writes flow through `PipelineEffects`; projectors do not write SQLite.
@@ -125,7 +125,7 @@ during projection commit and inserts affected owners directly into
 
 ## Current Status
 
-- Durable and restart-local intent queues are both SQLite-backed.
+- Durable and ephemeral intent queues are both SQLite-backed.
 - Core, network, fact, and intent tables are all declared through p8sql schema
   sources. The old Rust `Schema` registration path has been removed.
 - Context wake fanout uses typed `INSERT OR IGNORE ... SELECT` during

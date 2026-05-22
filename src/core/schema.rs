@@ -108,5 +108,5 @@ pub(crate) const PENDING_PROJECTION: TableName = TableName::new("pending_project
 pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_ranges");
 /// Durable intent queue table.
 pub(crate) const INTENTS: TableName = TableName::new("intents");
-/// Restart-local intent queue table.
+/// Ephemeral intent queue table.
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");

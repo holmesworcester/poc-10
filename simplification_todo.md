@@ -71,14 +71,14 @@ Accountable criteria:
 
 ## Status
 
-- Done in this branch: restart-local intents now use a SQLite TEMP
+- Done in this branch: ephemeral intents now use a SQLite TEMP
   `local_intents` queue.
 - Done in this branch: stored and local intent dispatch share the same
   queue-dispatch path.
 - Done in this branch: the `IntentPipeline` compatibility shell and
   `ephemeral_intents()` surface are gone.
 - Done in this branch: `Intent` no longer carries durability. The destination
-  queue table owns durable versus restart-local storage.
+  queue table owns durable versus ephemeral storage.
 - Done in this branch: common commit work now flows through `PipelineEffects`.
 - Done in this branch: core pipeline table names moved to `core::schema`, and
   `local_intents` is declared as a memory row table in `src/core/schema.p8sql`.
@@ -203,7 +203,7 @@ Target:
 
 ```text
 durable handler work -> durable INTENTS table
-restart-local handler work -> TEMP LOCAL_INTENTS table
+ephemeral handler work -> TEMP LOCAL_INTENTS table
 ```
 
 The storage table determines durability. `Intent` carries only kind,

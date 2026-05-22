@@ -22,9 +22,9 @@ use std::time::{Duration, Instant};
 
 use crate::core::store::{SchemaSource, Store, TableName, TableRow};
 
-/// Restart-local outbound network queue table.
+/// Ephemeral outbound network queue table.
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
-/// Restart-local inbound network queue table.
+/// Ephemeral inbound network queue table.
 pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const WRITE_FRAME_BUDGET: Duration = Duration::from_millis(100);

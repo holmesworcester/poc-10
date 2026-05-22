@@ -912,7 +912,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
     }
     if core_daemon.contains("network::delete_inbound") && !core_daemon.contains("!retried") {
         offenders.push(
-            "src/core/daemon.rs deletes restart-local inbound rows even when receive dispatch asked to retry"
+            "src/core/daemon.rs deletes ephemeral inbound rows even when receive dispatch asked to retry"
                 .to_string(),
         );
     }
@@ -949,14 +949,14 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     let durable_in_core_schema =
         core_schema.contains("network_in") || core_schema.contains("network_out");
     let memory_in_queue_module = network.contains("memory-local")
-        || network.contains("restart-local")
+        || network.contains("ephemeral")
         || network.contains("CREATE TEMP TABLE IF NOT EXISTS network_out");
     let runtime_loads_queue_schema = registry.contains("network::SCHEMA_SOURCE");
 
     let mut offenders = Vec::new();
     if durable_in_core_schema && memory_in_queue_module {
         offenders.push(
-            "network_in/network_out are declared both as durable core schema tables and restart-local network memory tables",
+            "network_in/network_out are declared both as durable core schema tables and ephemeral network memory tables",
         );
     }
     if memory_in_queue_module && !runtime_loads_queue_schema {
@@ -973,7 +973,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     }
     if durable_in_core_schema == memory_in_queue_module {
         offenders.push(
-            "network rows should have exactly one explicit storage contract: durable schema table or restart-local memory table",
+            "network rows should have exactly one explicit storage contract: durable schema table or ephemeral memory table",
         );
     }
     assert!(
@@ -984,7 +984,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 }
 
 #[test]
-fn cutover_network_io_intents_are_restart_local_queue_work() {
+fn cutover_network_io_intents_are_ephemeral_queue_work() {
     let root = root();
     let mut pipeline = source_text(&root.join("src/core/pipeline.rs"));
     for path in rust_files_under(&root.join("src/core/pipeline")) {
@@ -1034,14 +1034,14 @@ fn cutover_network_io_intents_are_restart_local_queue_work() {
         || !pipeline.contains("submit_local_intent_to_store")
     {
         offenders.push(
-            "core pipeline does not visibly route restart-local intents to a TEMP local intent queue"
+            "core pipeline does not visibly route ephemeral intents to a TEMP local intent queue"
                 .to_string(),
         );
     }
 
     assert!(
         offenders.is_empty(),
-        "network IO effects must be restart-local and regeneratable instead of durable protocol work:\n{}",
+        "network IO effects must be ephemeral and regeneratable instead of durable protocol work:\n{}",
         offenders.join("\n")
     );
 }

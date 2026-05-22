@@ -60,7 +60,7 @@ pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 ///
 /// `name` is a human-facing route name used for exclusion lists. `intent_kind`
 /// is the queue routing key that selects this handler for both durable and
-/// restart-local intents.
+/// ephemeral intents.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
     /// Human-facing route name used for exclusion lists.
@@ -154,7 +154,7 @@ impl HandlerSet {
 ///
 /// `Runtime` owns a single SQLite connection. All durable and memory tables,
 /// projection, and dispatch operations happen through that handle so transaction
-/// boundaries stay visible and restart-local tables are actually local to this
+/// boundaries stay visible and ephemeral tables are actually local to this
 /// runtime instance.
 pub struct Runtime {
     description: &'static RuntimeDescription,
@@ -218,7 +218,7 @@ impl Runtime {
             .expect("runtime pending fact count should load from store")
     }
 
-    /// Count durable plus restart-local queued intents.
+    /// Count durable plus ephemeral queued intents.
     pub fn pending_intent_count(&self) -> usize {
         let stored = self
             .store
@@ -279,7 +279,7 @@ impl Runtime {
         pipeline::submit_intent_to_store(&self.store, intent)
     }
 
-    /// Queue restart-local work for this runtime connection.
+    /// Queue ephemeral work for this runtime connection.
     pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
         pipeline::submit_local_intent_to_store(&self.store, intent)
     }

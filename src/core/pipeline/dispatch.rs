@@ -5,9 +5,9 @@
 //! calls the handler, and commits the row deletion plus handler effects in one
 //! transaction. Retry errors deliberately leave the row queued.
 //!
-//! Durable and restart-local queues share the same row shape. Durable work wins
+//! Durable and ephemeral queues share the same row shape. Durable work wins
 //! when both queues contain the same kind, and handling a durable row removes a
-//! duplicate local row with the same identity so restart-local retries do not
+//! duplicate local row with the same identity so ephemeral retries do not
 //! repeat work already accepted durably.
 
 use crate::core::effects::PipelineEffects;
@@ -25,7 +25,7 @@ pub(crate) fn submit_intent_to_store(store: &Store, intent: Intent) -> Result<bo
     submit_intent_to_table(store, INTENTS, intent)
 }
 
-/// Queue restart-local handler work on this SQLite connection.
+/// Queue ephemeral handler work on this SQLite connection.
 pub(crate) fn submit_local_intent_to_store(store: &Store, intent: Intent) -> Result<bool, String> {
     submit_intent_to_table(store, LOCAL_INTENTS, intent)
 }
@@ -46,7 +46,7 @@ fn submit_intent_to_table(store: &Store, table: TableName, intent: Intent) -> Re
 ///
 /// Durable queue rows are ordered by stable identity for deterministic tests
 /// and replay. Local rows use insertion order so inbound network frames and
-/// other restart-local work preserve arrival order within one process.
+/// other ephemeral work preserve arrival order within one process.
 pub(crate) fn next_queued_intent(
     store: &Store,
     allowed_kinds: &[&str],

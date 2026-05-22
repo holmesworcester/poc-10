@@ -4,7 +4,7 @@
 //! transport::transit frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, hands the opaque frame to core's
 //! network boundary, and attempts one bounded TCP write. If route
-//! context or the socket is unavailable, the handler keeps the restart-local
+//! context or the socket is unavailable, the handler keeps the ephemeral
 //! intent visible in the current process so the next sync/daemon pass can
 //! try again without making network delivery durable protocol state. There is
 //! intentionally no protocol-level peer ACK here: TCP handles stream delivery
