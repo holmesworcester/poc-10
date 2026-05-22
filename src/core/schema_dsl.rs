@@ -24,6 +24,8 @@ impl SchemaDocument {
 pub struct TableDeclaration {
     pub name: String,
     pub kind: TableKind,
+    /// Whether this is a SQLite `TEMP` (connection-local, restart-dropped) table.
+    pub temp: bool,
     pub columns: Vec<ColumnDeclaration>,
     pub row_key: RowKeyDeclaration,
     pub indexes: Vec<IndexDeclaration>,
@@ -135,7 +137,11 @@ impl<'a> Parser<'a> {
         while !matches!(self.lookahead.kind, TokenKind::Eof) {
             let table = match &self.lookahead.kind {
                 TokenKind::Ident(keyword) if keyword == "row_table" => self.parse_row_table()?,
-                _ => self.parse_table()?,
+                TokenKind::Ident(keyword) if keyword == "temp" => {
+                    self.expect_keyword("temp")?;
+                    self.parse_table(true)?
+                }
+                _ => self.parse_table(false)?,
             };
             if !table_names.insert(table.name.clone()) {
                 return Err(self.error(format!("duplicate table declaration `{}`", table.name)));
@@ -146,7 +152,7 @@ impl<'a> Parser<'a> {
         Ok(SchemaDocument { tables })
     }
 
-    fn parse_table(&mut self) -> Result<TableDeclaration, ParseError> {
+    fn parse_table(&mut self, temp: bool) -> Result<TableDeclaration, ParseError> {
         let table_token = self.expect_keyword("table")?;
         let name = self.parse_name()?;
         self.expect_symbol('{')?;
@@ -236,6 +242,7 @@ impl<'a> Parser<'a> {
         Ok(TableDeclaration {
             name,
             kind: TableKind::Typed,
+            temp,
             columns,
             row_key,
             indexes,
@@ -250,6 +257,7 @@ impl<'a> Parser<'a> {
         Ok(TableDeclaration {
             name,
             kind: TableKind::Row,
+            temp: false,
             columns: vec![
                 ColumnDeclaration {
                     name: "key".to_string(),
@@ -684,8 +692,15 @@ mod tests {
                 "pending_context_changes",
                 "intents",
                 "clock",
+                "local_intents",
             ]
         );
+        assert!(
+            core.table("local_intents")
+                .expect("local_intents table")
+                .temp
+        );
+        assert!(!core.table("intents").expect("intents table").temp);
     }
 
     #[test]

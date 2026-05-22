@@ -674,8 +674,9 @@ impl Store {
             "PRIMARY KEY ({})",
             quoted_identifier_list(&table.row_key.columns)?
         ));
+        let temp = if table.temp { "TEMP " } else { "" };
         self.conn.execute_batch(&format!(
-            "CREATE TABLE {quoted} (
+            "CREATE {temp}TABLE {quoted} (
                 {}
             );",
             declarations.join(",\n                ")

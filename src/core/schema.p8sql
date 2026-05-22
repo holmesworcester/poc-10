@@ -65,3 +65,16 @@ table intents {
   index by_execution (execution, kind);
 }
 row_table clock;
+
+# Restart-local intent queue: a TEMP table, connection-local and dropped on
+# restart. `seq` records arrival order; `by_identity` dedups idempotent re-emits.
+temp table local_intents {
+  column seq u64;
+  column kind text;
+  column idempotence_key bytes;
+  column execution u64;
+  column payload bytes;
+  row_key (seq);
+  unique index by_identity (kind, idempotence_key);
+  index by_kind_seq (kind, seq);
+}

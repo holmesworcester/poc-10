@@ -18,6 +18,9 @@ fn declared_table_names(sources: &[&str]) -> BTreeSet<String> {
     sources
         .iter()
         .flat_map(|source| parse_schema(source).expect("schema parses").tables)
+        // TEMP tables are connection-local and never appear in the disk file's
+        // sqlite_master; this assertion only covers durable tables.
+        .filter(|table| !table.temp)
         .map(|table| table.name)
         .collect()
 }
@@ -46,6 +49,16 @@ fn schema_sources_create_declared_row_tables() {
         declared.is_subset(&actual),
         "missing schema tables: {:?}",
         declared.difference(&actual).collect::<Vec<_>>()
+    );
+
+    // The TEMP `local_intents` table is connection-local (absent from the disk
+    // file's sqlite_master), but must be created and queryable on the open Store.
+    assert!(
+        store
+            .table_rows(TableName::new("local_intents"))
+            .expect("local_intents temp table is queryable")
+            .is_empty(),
+        "local_intents starts empty"
     );
 
     store
