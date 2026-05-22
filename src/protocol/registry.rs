@@ -443,11 +443,8 @@ pub const EXACT_CONTEXT_ROLES: &[&str] = &[
     matchers::TRANSIT_RECEIVED_ROLE,
 ];
 
-pub const SQL_CONTEXT_ROLES: &[&str] = &[
-    matchers::SECRET_COVERAGE_ROLE,
-    matchers::SYNC_RANGE_FACT_ROLE,
-    matchers::WRAP_SOURCE_ROLE,
-];
+pub const SQL_CONTEXT_ROLES: &[&str] =
+    &[matchers::SECRET_COVERAGE_ROLE, matchers::WRAP_SOURCE_ROLE];
 
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
@@ -499,7 +496,6 @@ pub(crate) fn protocol_context_matchers() -> ContextMatchers {
             .map(matchers::protocol_role),
         vec![
             Box::new(matchers::SecretCoverageMatcher::new()) as Box<dyn ContextMatcher>,
-            Box::new(matchers::RangeFactMatcher::new()),
             Box::new(matchers::WrapSourceMatcher::new()),
         ],
     )

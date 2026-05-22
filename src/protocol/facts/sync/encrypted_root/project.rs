@@ -5,8 +5,7 @@
 //!      workspace id.
 //!   2. CONTEXT. No incoming context is required; this fact advertises a root
 //!      summary already produced by local encryption/sync.
-//!   3. MATERIALIZE. Publish both range and exact-fact offers that point range
-//!      requests at this encrypted-root payload.
+//!   3. MATERIALIZE. Publish an exact-fact offer for this encrypted-root payload.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
@@ -14,8 +13,6 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::matchers;
-
-use super::fact::WorkspaceId;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncEncryptedRootProjector;
@@ -47,24 +44,8 @@ impl TypedProjector<super::Codec> for SyncEncryptedRootProjector {
         let scope = matchers::workspace_scope(root.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
-        Ok(ProjectionOutput::new()
-            .offer(matchers::range_fact_offer(
-                fact.id,
-                scope.clone(),
-                fact.timestamp,
-                root.fact_id,
-                root.dependency_id,
-                root.key_wrap_id,
-            ))
-            .offer(matchers::exact_fact_offer(fact.id, scope, root.fact_id)))
+        Ok(ProjectionOutput::new().offer(matchers::exact_fact_offer(fact.id, scope, root.fact_id)))
     }
-}
-
-pub(crate) fn validate_sync_fact_workspace(
-    fact: &Fact,
-    workspace_id: WorkspaceId,
-) -> Result<(), String> {
-    require_fact_scope(fact, &matchers::workspace_scope(workspace_id))
 }
 
 pub(crate) fn require_fact_scope(fact: &Fact, expected: &FactScope) -> Result<(), String> {
