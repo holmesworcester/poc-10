@@ -1,3 +1,10 @@
+//! Sync fact shape for requesting a timestamp range on one connection.
+//!
+//! Range requests are protocol control facts. They name the workspace,
+//! connection, and inclusive timestamp interval the peer should consider, while
+//! leaving response planning to the compare and transport intent handlers.
+//! Layout validation guarantees only that the range is well formed.
+
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;

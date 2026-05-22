@@ -1,3 +1,10 @@
+//! User invite fact family.
+//!
+//! User invites authorize a new user to join a workspace. Projection validates
+//! signed inviter authority and publishes invite context used by acceptance
+//! flows. This module owns user-invite bytes and admission; device invites and
+//! accepted membership are separate fact families.
+
 pub mod commands;
 pub mod fact;
 pub mod layout;

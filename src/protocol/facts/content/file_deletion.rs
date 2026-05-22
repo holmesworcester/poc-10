@@ -1,3 +1,11 @@
+//! Content file deletion fact family.
+//!
+//! File deletions are author-signed tombstones for file ids. Commands construct
+//! the deletion fact from user selection, projection verifies target and author
+//! context, and rows mark the file deleted without mutating the original file
+//! fact. Keep deletion authorization here; file metadata projection should only
+//! consume the resulting deletion context.
+
 pub mod cli;
 pub mod commands;
 pub mod create;

@@ -1,3 +1,10 @@
+//! Local endpoint fact family.
+//!
+//! Endpoint facts describe this store's local identity material: endpoint id,
+//! signing keys, and local secret rows used by command capabilities and
+//! projection context. These facts are local authority, not shared identity
+//! proofs. Shared endpoint visibility lives in `endpoint_shared`.
+
 pub mod commands;
 pub mod fact;
 pub mod layout;

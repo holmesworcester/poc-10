@@ -1,3 +1,11 @@
+//! User identity fact family.
+//!
+//! User facts establish named users inside a workspace. They are signed,
+//! projected after workspace/admin context is available, and published as user
+//! rows/context for content authorship, invites, and query display. Keep user
+//! naming and admission policy here; endpoint/device facts represent concrete
+//! devices for a user.
+
 pub mod cli;
 pub mod commands;
 pub mod fact;

@@ -1,4 +1,9 @@
-//! Fixed-width workspace fact and projection-row layout.
+//! Fixed-width layout for workspace facts and rows.
+//!
+//! Workspace names are fixed-slot UTF-8 strings with canonical zero padding so
+//! fact ids and projected row values remain stable. This module owns that byte
+//! shape. It should not grow membership or policy rules; those belong to user,
+//! endpoint, encryption, and sync modules that refer back to the workspace id.
 
 use crate::core::wire;
 use crate::core::wire::FixedSlot;

@@ -1,4 +1,9 @@
-//! Workspace root fact shape for the poc-10 target tree.
+//! Workspace root fact shape.
+//!
+//! A workspace fact creates the identity namespace that users, endpoints,
+//! invites, encryption policy, and sync sharing attach to. It contains only the
+//! stable public fields needed to name that namespace. Membership, roles, and
+//! local secrets are modeled by separate fact families.
 
 use crate::core::facts::FactId;
 

@@ -1,3 +1,11 @@
+//! Workspace admin grant fact family.
+//!
+//! Admin facts establish authority to manage a workspace. They are signed,
+//! projected only after signer/workspace context is proven, and then exposed as
+//! context that other identity and content projectors consume. Keep admin
+//! authorization in this module; downstream modules should ask for admin
+//! context rather than rechecking grant history.
+
 pub mod cli;
 pub mod commands;
 pub mod fact;

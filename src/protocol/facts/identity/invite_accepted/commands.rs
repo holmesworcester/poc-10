@@ -1,4 +1,10 @@
-//! Command constructors for local invite acceptance facts.
+//! Command constructors for accepting a workspace invite locally.
+//!
+//! Invite acceptance produces a local invite secret and a local acceptance fact
+//! that later projection can join with the public invite. This command is
+//! intentionally local: it captures the bootstrap secret and endpoint choice
+//! without publishing authority by itself. Workspace admission happens when the
+//! identity projectors validate the surrounding invite chain.
 
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::Ed25519PrivateKey;

@@ -1,4 +1,9 @@
-// Handler for retired local recipient key material.
+//! Handler for retired local recipient key material.
+//!
+//! Projection emits this intent after local recipient material is matched with a
+//! superseding recipient key. The handler revalidates that exact relationship
+//! against the loaded local fact, then purges the local secret through
+//! `PipelineEffects`. It should not scan for other retired keys.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::Intent;

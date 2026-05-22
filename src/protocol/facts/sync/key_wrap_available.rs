@@ -1,3 +1,10 @@
+//! Key-wrap-available sync fact family.
+//!
+//! These facts advertise that key-wrap material exists for a workspace or
+//! connection. Projection turns the advertisement into context that can wake
+//! key unwrap or request flows. The encrypted wrap itself remains owned by the
+//! encryption fact family.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

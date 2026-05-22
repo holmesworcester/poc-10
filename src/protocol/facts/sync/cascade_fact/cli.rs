@@ -1,3 +1,11 @@
+//! CLI parsing and rendering for the cascade dependency harness.
+//!
+//! Cascade facts are synthetic sync fixtures, so their command surface should
+//! stay small and explicit: generate a staged dependency graph, then replay it
+//! in reverse to exercise context wakeups. This file owns only user-facing
+//! argument shape and receipt text; dependency generation and replay mechanics
+//! live in `commands`.
+
 pub const GENERATE_DEPS_USAGE: &str = "generate-deps COUNT DEPS_PER_FACT";
 pub const REPLAY_DEPS_REVERSE_USAGE: &str = "replay-deps-reverse";
 

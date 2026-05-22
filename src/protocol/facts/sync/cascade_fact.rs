@@ -1,3 +1,10 @@
+//! Cascade fact family for dependency replay tests and tooling.
+//!
+//! Cascade facts model explicit dependencies between facts so sync and
+//! projection behavior can be exercised with controlled graphs. They are not a
+//! general protocol authority layer. Commands generate and replay them; rows
+//! stage dependency state; projection publishes completion context.
+
 pub mod cli;
 pub mod commands;
 pub mod fact;

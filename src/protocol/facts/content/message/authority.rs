@@ -1,3 +1,17 @@
+//! Authority helpers shared by raw and signed message-like content facts.
+//!
+//! Content messages may arrive as raw local facts during command construction
+//! or as signed envelopes when another endpoint authored them. Projection code
+//! should not have to duplicate that split. This module unwraps either shape,
+//! verifies signed envelopes when validation reaches the point where a payload
+//! is meant to become durable state, and asks the context system for the
+//! `endpoint_shared` fact that proves the signer belongs to the same workspace.
+//!
+//! Keep signer and envelope rules here. Message projection, file projection,
+//! and deletion projection should decide what payload fields mean, but the
+//! invariant that a signed payload names a real endpoint with the expected
+//! signing public key is enforced through this module.
+
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId};
 use crate::core::projectors::ProjectionContext;
@@ -23,6 +37,8 @@ pub struct SignedSigner {
     pub signer_public_key: [u8; 32],
 }
 
+/// Returns the payload a projector should decode, preserving the signer
+/// evidence when the fact was wrapped in a signed envelope.
 pub fn decode_raw_or_signed(
     fact: &Fact,
     expected_type: u8,
@@ -93,6 +109,8 @@ pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<Contex
     })
 }
 
+/// Checks that the context payload satisfying a signer need is the endpoint
+/// authority the signed content relies on.
 pub fn validate_signer_context(
     context: &ProjectionContext,
     need: &ContextNeed,

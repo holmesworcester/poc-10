@@ -1,3 +1,10 @@
+//! Projection helper for signed key wraps.
+//!
+//! A key wrap is shared encrypted material signed by the frontier owner.
+//! Projection validates signer, recipient, frontier, and optional local
+//! recipient context before materializing the accepted wrap row. If this store
+//! has matching local recipient material, projection emits an unwrap intent.
+
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};

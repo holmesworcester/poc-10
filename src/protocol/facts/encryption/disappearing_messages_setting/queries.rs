@@ -1,4 +1,10 @@
-//! Read-only views over disappearing-messages setting rows.
+//! Read-only views over disappearing-message setting rows.
+//!
+//! Multiple setting facts can exist for a scope, and newer facts supersede
+//! older ones by id rather than by mutation. These helpers reconstruct the
+//! active setting from projected rows so command code can apply policy without
+//! re-decoding every historical fact. Keep supersession rules here and row
+//! creation in the setting projector.
 
 use std::collections::BTreeSet;
 

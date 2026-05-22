@@ -1,4 +1,9 @@
 //! Fixed-width layout for sync range requests.
+//!
+//! Range requests carry an inclusive timestamp interval for a workspace on one
+//! connection. Encoding and decoding reject inverted ranges so downstream sync
+//! planners can assume `start <= end`. This module does not decide whether the
+//! peer may receive the range.
 
 use crate::core::wire;
 

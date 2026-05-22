@@ -1,3 +1,10 @@
+//! Sync need-id fact family.
+//!
+//! Need-id facts request a specific fact from a peer after compare or have-id
+//! planning discovers a gap. Projection records the request and emits handler
+//! work to send the fact when this store has it. The requested payload remains
+//! validated by its owning fact family after receipt.
+
 pub mod create;
 pub mod fact;
 pub mod layout;
@@ -18,4 +25,5 @@ impl crate::core::projectors::FactCodec for Codec {
         decode_fact_payload(fact.body())
     }
 }
+
 pub mod rows;

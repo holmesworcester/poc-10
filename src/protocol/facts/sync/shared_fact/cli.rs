@@ -1,4 +1,9 @@
-//! CLI text for sync shared-fact status commands.
+//! CLI parsing and rendering for sync shared-fact status.
+//!
+//! Sync status commands report the local shareable index and expose a
+//! compatibility drain command. This file owns only argument shape and text
+//! formatting. The index and fingerprint rules stay in `rows`, and actual
+//! connection sends stay in transport intents.
 
 use crate::core::cli::{encode_hex, CliArgs, CliOutput};
 

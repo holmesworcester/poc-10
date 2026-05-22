@@ -1,3 +1,15 @@
+//! Commands for constructing and replaying synthetic dependency graphs.
+//!
+//! The cascade harness lets sync and projection tests create facts whose
+//! dependencies are known in advance. `generate_deps` stores encoded facts in a
+//! staging table without submitting them. `replay_deps_reverse` submits that
+//! graph in reverse order, then materializes the context offers that would
+//! appear only after each dependency becomes complete.
+//!
+//! Keep the test-harness mechanics here rather than in core pipeline code.
+//! These commands deliberately model one narrow behavior: facts do not count as
+//! applied until every declared dependency has already offered completion.
+
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;

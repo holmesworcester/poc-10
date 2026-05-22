@@ -1,4 +1,10 @@
-//! Constructors for target shared signed-fact envelopes.
+//! Constructors for shared signed-fact envelopes.
+//!
+//! Several identity and content facts travel as signed envelopes so peers can
+//! verify who authored a payload without each fact family reinventing envelope
+//! bytes. This module builds those envelopes and signs exactly the canonical
+//! bytes defined by `layout`. It should remain a pure constructor; deciding
+//! whether a signer is authorized belongs to the consuming projector.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
 

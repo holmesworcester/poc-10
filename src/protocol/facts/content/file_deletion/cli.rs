@@ -1,4 +1,10 @@
-//! CLI formatting for content-file deletion.
+//! CLI parsing and formatting for content-file deletion.
+//!
+//! File deletion commands accept a user-facing selector, while the protocol
+//! operates on fact ids and file ids. This file bridges that gap by resolving a
+//! selector against the live projected file view and by rendering the deletion
+//! receipt. Deletion authority and row mutation rules stay in the command and
+//! projection modules.
 
 use crate::core::cli::{decode_hex_32_named, encode_hex_32, CliOutput};
 use crate::core::facts::FactId;

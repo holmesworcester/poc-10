@@ -1,4 +1,15 @@
-//! Helpers for bounded message retention purges.
+//! Retention helpers that turn expired or deleted messages into projection purges.
+//!
+//! Retention is the point where message state intentionally stops being a live
+//! row. This module decodes either raw or signed message facts into the fields
+//! needed for expiration, writes tombstones that preserve deletion history, and
+//! removes live message rows through the same atomic effect commit path used by
+//! normal projection.
+//!
+//! Keep bounded-retention mechanics here. The disappearing-message setting
+//! decides where the retention floor is, and message projection decides when a
+//! message is valid; this file owns the invariant that deleting a projection
+//! also leaves enough tombstone state for future sends and compaction.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};

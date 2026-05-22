@@ -1,4 +1,13 @@
-//! Deferred encryption intent layouts.
+//! Durable intent layouts for deferred encryption work.
+//!
+//! Encryption projection often discovers work before every required input is
+//! available: a recipient key needs a wrap, a signed wrap needs local recipient
+//! material, or retired local material can be purged. These intents encode that
+//! work with idempotence keys so handlers can retry safely as context appears.
+//!
+//! Keep only payload and key shape here. The decision to emit an intent belongs
+//! to projectors, and the cryptographic checks belong to `create` and the
+//! concrete intent handlers.
 
 use crate::core::facts::FactId;
 use crate::core::intents::{Intent, IntentKind};

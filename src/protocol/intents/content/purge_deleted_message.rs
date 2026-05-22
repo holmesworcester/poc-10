@@ -1,4 +1,13 @@
-//! Handler and deferred intent layout for message-deletion purges.
+//! Intent layout and handler for message-deletion purges.
+//!
+//! Message deletion projection can prove that a deletion fact targets a
+//! message, but the target message may not be available at the same moment.
+//! This durable intent waits for both facts, rechecks that the author deletion
+//! matches the message, and then emits a purge for the target fact.
+//!
+//! Keep delete-after-validation behavior here. Message projection owns live row
+//! state, `retention` owns tombstone row updates, and this handler owns only the
+//! final fact purge caused by a valid author deletion.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};

@@ -1,4 +1,13 @@
-//! Durable sync shareable-fact index rows and queries.
+//! Durable sync shareable-fact index rows and connection queries.
+//!
+//! Shared-fact projection records which workspace a fact may be sent through.
+//! This module turns those rows into connection-specific fact lists by checking
+//! endpoint membership, connection workspace authorization, and whether the
+//! named fact still exists in the core store.
+//!
+//! Keep sync visibility here. Fact admission belongs to projectors, and
+//! transport framing belongs to `send_facts_on_connection`; callers use this
+//! file to ask what a peer is allowed to learn.
 
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};

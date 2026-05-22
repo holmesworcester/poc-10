@@ -1,3 +1,11 @@
+//! Signed fact envelope family.
+//!
+//! The signed envelope is how identity authority wraps many protocol payloads
+//! without changing the inner fact layout. This module owns the envelope bytes,
+//! signature verification helpers, typed payload extraction, and projection of
+//! local signer secrets. Inner fact modules still own the semantic payload and
+//! post-signature policy.
+
 pub mod create;
 pub mod fact;
 pub mod layout;

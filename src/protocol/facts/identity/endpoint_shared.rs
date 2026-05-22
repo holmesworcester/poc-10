@@ -1,3 +1,11 @@
+//! Shared endpoint identity fact family.
+//!
+//! Endpoint-shared facts are the signed, shareable proof that an endpoint name,
+//! role, and public signing key belong in a workspace. Projection validates the
+//! signature and workspace/user context, then publishes endpoint rows and
+//! signer context that content, admin, connection, and encryption projectors
+//! rely on.
+
 pub mod cli;
 pub mod fact;
 pub mod layout;

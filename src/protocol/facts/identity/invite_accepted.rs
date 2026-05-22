@@ -1,3 +1,11 @@
+//! Invite acceptance fact family.
+//!
+//! Invite-accepted facts turn an invite secret into concrete workspace/user or
+//! endpoint membership. Projection validates the invite context and materializes
+//! the accepted identity rows/context that later projectors rely on. Commands
+//! here create the local facts needed to accept an invite; invite creation stays
+//! in `identity::invite`.
+
 pub mod commands;
 pub mod fact;
 pub mod layout;

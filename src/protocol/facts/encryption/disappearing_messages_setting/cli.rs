@@ -1,4 +1,9 @@
-//! CLI parsing for disappearing-message retention settings.
+//! CLI parsing and rendering for disappearing-message retention settings.
+//!
+//! Disappearing-message commands expose retention as workspace policy: set a
+//! TTL, tighten it with confirmation, compact old tombstones, or inspect the
+//! current floor. This file owns argument shape and report text only. Policy
+//! evaluation and row changes stay in the command, query, and retention modules.
 
 use crate::core::cli::{decode_hex_32_named, encode_hex_32, CliArgs, CliOutput};
 

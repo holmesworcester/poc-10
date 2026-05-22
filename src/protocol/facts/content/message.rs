@@ -1,3 +1,11 @@
+//! Content message fact family.
+//!
+//! Messages are the primary user-visible content records. This module owns the
+//! stable message layout, authoring constructors, authority checks for raw or
+//! signed payloads, projection into opened-message/tombstone rows, retention
+//! scheduling, queries, and CLI formatting. Other content facts depend on
+//! message context rather than duplicating message authority rules.
+
 pub mod authoring;
 pub mod authority;
 pub mod cli;

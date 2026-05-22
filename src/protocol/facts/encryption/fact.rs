@@ -1,4 +1,14 @@
-//! Poc-10 encryption fact shapes for key healing and wrap materialization.
+//! Shared encryption fact shapes for key healing and wrap materialization.
+//!
+//! Encryption facts describe three related things: who can receive wrapped
+//! material, which removal frontier owns a key tree, and which local secrets or
+//! signed wraps make encrypted history recoverable. These are protocol payload
+//! structs, not persistence rows. Layout code fixes their wire shape, projectors
+//! validate their context, and intent handlers derive new facts from them.
+//!
+//! Keep field-level protocol meaning here. If a new encryption record changes
+//! the state machine, add the shape and projection payload variant here, then
+//! teach layout, projection, and intent handlers how it is admitted.
 
 use crate::core::crypto::{
     X25519PrivateKey, X25519PublicKey, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce,

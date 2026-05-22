@@ -1,3 +1,11 @@
+//! Removal frontier fact family.
+//!
+//! A removal frontier names the live encryption frontier for a workspace and
+//! endpoint. Projection validates authority context and publishes rows/offers
+//! that later local secrets, key requests, and key wraps use to prove they are
+//! tied to the right frontier. Change this module when frontier layout or
+//! projection semantics change.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

@@ -1,4 +1,10 @@
-//! Send sync compare continuation facts for one compare fact.
+//! Intent handler for responding to one sync compare fact.
+//!
+//! A compare response is deferred because the available shareable facts and the
+//! triggering compare fact are runtime state, not fields of the compare itself.
+//! The handler loads the connection-visible fact set, asks compare planning for
+//! child compares or exact ids, persists any generated compare facts, and queues
+//! transport sends when there is something to send.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};

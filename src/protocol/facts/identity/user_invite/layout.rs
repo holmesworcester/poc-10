@@ -1,4 +1,9 @@
-//! Fixed-width user-invite fact and projection-row layout.
+//! Fixed-width layout for user-invite facts and rows.
+//!
+//! User invites name the invited public key, workspace, and authority fact. The
+//! row value mirrors the fact fields projection needs later when a user or
+//! endpoint claims the invite. Keep canonical byte shape here and signed
+//! authority checks in the user-invite projector.
 
 use crate::core::wire;
 

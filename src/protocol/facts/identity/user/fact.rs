@@ -1,4 +1,9 @@
-//! User fact shape for the poc-10 target tree.
+//! User fact shape for workspace identity.
+//!
+//! A user fact is the durable identity record for a human account inside a
+//! workspace: timestamp, workspace id, signing public key, and display name.
+//! It does not describe devices or endpoint membership; those live in endpoint
+//! and invite fact families. Keep only protocol payload fields here.
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;

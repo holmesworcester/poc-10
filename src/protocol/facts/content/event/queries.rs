@@ -1,4 +1,9 @@
-//! Read-only content-event projections.
+//! Read-only queries over projected content events.
+//!
+//! Content events are append-style payload records. Projection owns their
+//! validation and row writes; this file owns aggregate views used by commands
+//! and status reporting. Keep write behavior out of this module so callers can
+//! rely on these helpers being side-effect free snapshots of `content_event_rows`.
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;

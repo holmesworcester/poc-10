@@ -1,3 +1,16 @@
+//! Secret-path validation for local history-node key material.
+//!
+//! A local history node secret is only useful if it connects cleanly to the
+//! removal frontier it claims, descends from the stated source secret, and, for
+//! tombstones, names a different node in the same frontier. Projection depends
+//! on those checks before admitting a node into the local key tree that later
+//! wraps, unwraps, or deletes encrypted history.
+//!
+//! Keep topology rules for the local key tree here. The parent projector owns
+//! context needs and row writes, while this file owns the coordinate
+//! invariants: frontier identity, root-versus-node source shape, range
+//! containment, trie prefix extension, and self-tombstone rejection.
+
 use crate::core::facts::Fact;
 use crate::protocol::facts::encryption;
 

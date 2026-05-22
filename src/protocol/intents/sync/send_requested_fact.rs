@@ -1,4 +1,9 @@
-//! Send the fact requested by a sync need-id fact.
+//! Intent handler for sending the fact requested by a need-id.
+//!
+//! Need-id facts name exact payloads a peer says it is missing. This handler
+//! loads the requested fact, checks that the fact is shareable on the
+//! connection, rejects private or unsendable payloads, and queues transport
+//! work for the fact bytes. Authorization remains in the shareable-fact index.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};

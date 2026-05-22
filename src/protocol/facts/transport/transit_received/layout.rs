@@ -1,4 +1,10 @@
-//! Fixed-width layout for local transport::transit receive provenance facts.
+//! Fixed-width layout for local transit receive provenance facts.
+//!
+//! Received-transit facts are local audit records: they say which fact or frame
+//! arrived, from which origin address, under which connection or request, and
+//! when the local node observed it. The layout canonicalizes origin addresses
+//! so repeated receives compare by stable bytes. It should not validate the
+//! received payload itself.
 
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};

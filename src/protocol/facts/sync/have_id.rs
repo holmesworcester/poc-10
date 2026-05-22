@@ -1,3 +1,11 @@
+//! Sync have-id fact family.
+//!
+//! A have-id fact tells a peer that this connection can provide a specific
+//! fact id at a timestamp. Projection records the advertisement and wakes any
+//! matching need-id flow. The helper here builds advertisements from already
+//! stored facts; it does not validate the advertised fact's own protocol
+//! semantics.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

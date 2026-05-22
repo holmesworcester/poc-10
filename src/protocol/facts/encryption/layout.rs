@@ -1,4 +1,14 @@
-//! Fixed-width layouts for poc-10 encryption facts.
+//! Fixed-width layouts for encryption facts.
+//!
+//! Encryption material moves through sync and local storage as canonical byte
+//! strings, so this module fixes every type tag, field order, and length check.
+//! Decoders reject alternate representations such as empty secret material,
+//! malformed history coordinates, and key-wrap coordinates that do not fit the
+//! protocol.
+//!
+//! Keep byte-level invariants here. Higher-level questions, such as whether a
+//! signer owns a frontier or a recipient should get a wrap, belong to
+//! projection and intent handling.
 
 use crate::core::crypto::{
     self, X25519_PRIVATE_KEY_BYTES, X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_KEY_BYTES,

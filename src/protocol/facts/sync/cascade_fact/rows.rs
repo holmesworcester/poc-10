@@ -1,3 +1,10 @@
+//! Staging rows for synthetic cascade fact replay.
+//!
+//! Cascade generation writes encoded facts here instead of submitting them to
+//! the runtime immediately. Replay then reads the rows by index, reverses the
+//! order, and uses the stored bytes to test whether context wakeups can recover
+//! a dependency graph that arrived in an intentionally hostile order.
+
 use crate::core::store::{TableName, TableRow};
 
 pub const CASCADE_STAGED_FACT_ROWS: TableName = TableName::new("cascade_staged_fact_rows");

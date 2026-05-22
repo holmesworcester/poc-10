@@ -1,3 +1,12 @@
+//! Connection request fact family.
+//!
+//! Requests start a peer handshake from a local endpoint to an invite or known
+//! endpoint. Commands and constructors build the request, `layout` fixes its
+//! wire bytes, and projection waits for invite/provenance plus local ephemeral
+//! context before materializing a request row and emitting response work.
+//! Change this root when the request family gains a new submodule; change
+//! `project.rs` for handshake admission policy.
+
 pub mod addr;
 pub mod commands;
 pub mod create;

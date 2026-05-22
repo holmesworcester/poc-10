@@ -1,10 +1,10 @@
-// Handler for accepted key-wrap recovery.
-//
-// Acceptance is represented by the queued intent and its declared facts. The
-// handler does not scan for private keys or decide whether a wrap should have
-// been accepted; it only opens the specific wrap with the specific local
-// recipient material chosen by projection, then emits the resulting local
-// secret fact back into the common pipeline.
+//! Handler for accepted key-wrap recovery.
+//!
+//! Acceptance is represented by the queued intent and its declared facts. The
+//! handler does not scan for private keys or decide whether a wrap should have
+//! been accepted; it only opens the specific wrap with the specific local
+//! recipient material chosen by projection, then emits the resulting local
+//! secret fact back into the common pipeline.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::Intent;

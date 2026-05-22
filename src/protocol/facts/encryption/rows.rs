@@ -1,4 +1,13 @@
-//! Projection row layouts for accepted key-wrap state.
+//! Projection row layout for accepted key-wrap state.
+//!
+//! Projected key-wrap rows index signed wraps by the coordinate that later
+//! wrap creation and unwrapping need: workspace, frontier, recipient, source
+//! kind, and history address. The row stores the accepted wrap plus signer
+//! public key so later work can avoid re-running broad fact scans.
+//!
+//! Keep durable lookup shape here. Signature verification and frontier
+//! authority belong to projection; encryption commands and intent handlers read
+//! these rows as already-admitted state.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};

@@ -1,4 +1,14 @@
-//! Package exact facts into one connection transit frame.
+//! Intent handler that packages exact facts into encrypted connection frames.
+//!
+//! Sync decides which fact ids should move; this transport intent decides how
+//! to move their bytes. It supports explicit fact-id sends and bucketed
+//! shareable-range sends, loads the facts, batches them under the frame size
+//! limit, seals each batch with the connection secret, and queues ephemeral
+//! network-frame sends.
+//!
+//! Keep connection framing here. Sync visibility is resolved by `shared_fact`,
+//! sendability checks live in the transit fact family, and the lower network
+//! intent only carries already-sealed frames.
 
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,

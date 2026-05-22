@@ -1,3 +1,11 @@
+//! Fixed-width layout for cascade dependency fixtures.
+//!
+//! The cascade harness stores staged facts as raw bytes, so this layout keeps
+//! the fixture canonical: one type byte, one timestamp, an explicit dependency
+//! count, padded dependency slots, and a deterministic payload. Decoding
+//! rejects nonzero padding so two byte strings cannot represent the same
+//! dependency graph.
+
 use crate::core::facts::FactId;
 
 use super::fact::{CascadeFact, MAX_DEPS, PAYLOAD_BYTES};

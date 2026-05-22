@@ -1,3 +1,10 @@
+//! Projection helper for shared recipient keys.
+//!
+//! Recipient keys describe which endpoint public key can receive workspace
+//! encryption material. Projection validates supersession, shares the fact with
+//! the workspace, publishes recipient context, and emits proactive key-wrap
+//! work when eligible local wrap sources and signer secrets are available.
+
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::RecipientKeyFact;

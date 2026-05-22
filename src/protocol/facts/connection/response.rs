@@ -1,3 +1,11 @@
+//! Connection response fact family.
+//!
+//! Responses complete the connection handshake after a request has enough
+//! matched context. Projection validates the request side, responder secret,
+//! and endpoint relationship, then materializes connection-response rows used
+//! by transport and sync. The response intent creates these facts; this module
+//! owns their layout and projection semantics.
+
 pub mod create;
 pub mod fact;
 pub mod layout;

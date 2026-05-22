@@ -1,4 +1,9 @@
 //! Command constructors for user facts.
+//!
+//! User creation records a workspace member name and signing public key. This
+//! file owns local construction, including the signed variant used when another
+//! authority vouches for the user. Projection still validates that the user is
+//! connected to a valid invite or authority chain before rows become visible.
 
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};

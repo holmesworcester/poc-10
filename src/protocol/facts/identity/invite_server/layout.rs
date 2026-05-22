@@ -1,4 +1,9 @@
-//! Fixed-width invite-server fact and projection-row layout.
+//! Fixed-width layout for invite-server facts and rows.
+//!
+//! Invite-server facts advertise server-side invite material under workspace
+//! authority. This module fixes their canonical byte shape and row value while
+//! leaving authorization to projection. Change this file only when the durable
+//! fact or projected row format changes.
 
 use crate::core::wire;
 

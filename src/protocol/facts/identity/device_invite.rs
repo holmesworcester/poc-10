@@ -1,3 +1,10 @@
+//! Device invite fact family.
+//!
+//! Device invites let an existing identity authorize another endpoint. The fact
+//! is signed, projection verifies the inviter authority, and rows/context expose
+//! the invite key for acceptance flows. This module owns device-invite layout
+//! and admission; accepting the invite is handled by `invite_accepted`.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

@@ -1,3 +1,11 @@
+//! Shared validation helpers for encryption projection.
+//!
+//! Encryption subprojectors all need the same context checks: load matched
+//! payload facts, verify local/shared scope, validate wrap-source payloads, and
+//! connect a wrap source to local signer material. This file keeps those checks
+//! consistent so recipient keys, key requests, local material, and key wraps do
+//! not each grow their own subtly different authority logic.
+
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};

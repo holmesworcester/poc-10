@@ -1,3 +1,9 @@
+//! Encrypted root sync fact family.
+//!
+//! Encrypted-root facts advertise encrypted state roots that may lead peers to
+//! request key material. Projection validates the layout and emits context for
+//! sync/encryption flows without interpreting the encrypted payload itself.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

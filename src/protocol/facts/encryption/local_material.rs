@@ -1,3 +1,11 @@
+//! Projection helpers for local encryption material.
+//!
+//! Local key secrets and local history-node secrets are private store material
+//! that provide context to shared encryption facts. These helpers validate that
+//! local facts are tied to the right frontier/source chain, then publish
+//! wrap-source and secret-coverage offers. They should not decide recipient
+//! sharing policy; recipient and key-request projection consumes their offers.
+
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::{LocalHistoryNodeSecretFact, LocalKeySecretFact};

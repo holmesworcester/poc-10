@@ -1,4 +1,13 @@
 //! Transit frame crypto and inner-bundle framing.
+//!
+//! Transport sends exact facts inside encrypted connection frames. This module
+//! packs fact bytes into a canonical inner bundle, chooses a fixed frame size
+//! class, binds the connection and endpoint ids as associated data, and opens
+//! frames back into fact bundles for submission.
+//!
+//! Keep per-frame cryptographic mechanics here. Connection facts provide the
+//! shared secret, send intents decide which facts to bundle, and received
+//! transit projection records provenance after a frame has been opened.
 
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce};
 use crate::core::facts::FactId;

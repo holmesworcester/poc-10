@@ -1,4 +1,9 @@
-//! Fixed-width user fact and projection-row layout.
+//! Fixed-width layout for user facts and rows.
+//!
+//! User names are stored in a fixed slot so fact ids are stable and row values
+//! can be decoded without schema-dependent parsing. Encoding rejects embedded
+//! NUL bytes and decoding rejects non-canonical padding. Keep those byte
+//! invariants here; invite and admin authority checks belong to projection.
 
 use crate::core::wire;
 use crate::core::wire::FixedSlot;

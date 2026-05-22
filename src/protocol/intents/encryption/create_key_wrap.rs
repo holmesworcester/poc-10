@@ -1,10 +1,10 @@
-// Handler for deterministic target key-wrap creation.
-//
-// The projector decides that a recipient, source secret, and signer capability
-// are allowed to meet; this handler only loads those declared facts and asks
-// the encryption module to build the signed wrap. Keeping the authorization
-// decision upstream prevents this handler from becoming a second, divergent
-// policy engine.
+//! Handler for deterministic target key-wrap creation.
+//!
+//! The projector decides that a recipient, source secret, and signer capability
+//! are allowed to meet; this handler only loads those declared facts and asks
+//! the encryption module to build the signed wrap. Keeping the authorization
+//! decision upstream prevents this handler from becoming a second, divergent
+//! policy engine.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::Intent;

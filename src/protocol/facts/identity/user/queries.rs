@@ -1,4 +1,9 @@
-//! Read-only projected user lookups.
+//! Read-only queries over projected workspace users.
+//!
+//! User rows are admitted only after identity projection validates the
+//! surrounding invite or authority chain. These helpers return the current
+//! visible membership in deterministic display order for CLI and command code.
+//! They should not infer authority from raw facts.
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;

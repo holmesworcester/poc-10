@@ -1,3 +1,10 @@
+//! Projection helper for local recipient private material.
+//!
+//! A local recipient key lets this store unwrap key wraps addressed to a
+//! recipient public key. Projection proves the local secret matches the shared
+//! recipient fact, offers local-recipient context while the key is live, and
+//! emits purge work when a superseding recipient key makes the material retired.
+
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::LocalRecipientKeyFact;

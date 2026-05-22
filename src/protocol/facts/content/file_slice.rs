@@ -1,3 +1,11 @@
+//! Content file slice fact family.
+//!
+//! File slices carry encrypted byte ranges for a file whose metadata lives in a
+//! `content::file` fact. Projection validates slice metadata against file
+//! context and publishes ordered slice rows. This module owns slice layout and
+//! row materialization; higher-level file selection and output live in
+//! `content::file` queries and CLI helpers.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

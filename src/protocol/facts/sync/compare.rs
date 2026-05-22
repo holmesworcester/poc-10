@@ -1,3 +1,11 @@
+//! Sync compare fact family.
+//!
+//! Compare facts summarize a timestamp range for one connection. Projection
+//! records the inbound compare and emits response work when requested; create
+//! helpers build initial compares, split mismatched ranges, and choose exact
+//! fact-id sends when a range is small enough. This module owns the negentropy
+//! planning surface for sync.
+
 pub mod create;
 pub mod fact;
 pub mod layout;

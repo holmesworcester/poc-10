@@ -1,4 +1,12 @@
-//! Fixed-slot layout for target shared signed-fact envelopes.
+//! Fixed-slot layout for shared signed-fact envelopes.
+//!
+//! The signed envelope gives many fact families one canonical signature format:
+//! signer id, signer public key, inner type, padded payload slot, and Ed25519
+//! signature. Encoding rejects nested signed facts and private local payload
+//! types so signatures cannot accidentally publish local secret material.
+//!
+//! Keep byte-level envelope rules here. Projectors that consume signed facts
+//! must still verify workspace membership and role-specific authority.
 
 use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;

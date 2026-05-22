@@ -1,4 +1,10 @@
-//! Fixed-width invite-accepted fact and projection-row layout.
+//! Fixed-width layout for invite-accepted facts and rows.
+//!
+//! Invite acceptance joins an invite, a locally held bootstrap secret, and the
+//! endpoint that will enter the workspace. The layout stores only stable ids
+//! and the bootstrap hash, never the private bootstrap secret. Projection rows
+//! preserve the accepted edge so later endpoint creation can prove the invite
+//! was completed.
 
 use crate::core::wire;
 

@@ -1,3 +1,11 @@
+//! Content message deletion fact family.
+//!
+//! Message deletions are signed tombstones for message ids. Projection waits
+//! for target-message and author context, then records a tombstone row and
+//! emits purge intents for derived children. Message projection consumes this
+//! context to hide deleted messages; the original message fact remains
+//! immutable.
+
 pub mod commands;
 pub mod create;
 pub mod fact;

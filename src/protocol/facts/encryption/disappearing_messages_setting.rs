@@ -1,3 +1,11 @@
+//! Disappearing-message setting fact family.
+//!
+//! Settings define workspace retention policy over message minutes. Projection
+//! validates authority, supersession, and monotonic tightening rules, publishes
+//! the active-setting row, and emits purge work when a new floor makes content
+//! expired. Commands and queries here are the user-facing control surface for
+//! retention; content projection consumes the resulting policy.
+
 pub mod cli;
 pub mod commands;
 pub mod fact;

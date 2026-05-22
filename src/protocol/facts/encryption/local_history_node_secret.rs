@@ -1,3 +1,11 @@
+//! Local history-node secret fact family.
+//!
+//! These local-only facts represent derived key material for a minute tree or
+//! trie leaf below a removal frontier. Projection validates the source secret,
+//! optional tombstone source, and frontier context before publishing wrap-source
+//! and secret-coverage offers. The module is local material plumbing, not a
+//! shared protocol payload family.
+
 pub mod fact;
 pub mod layout;
 pub mod project;

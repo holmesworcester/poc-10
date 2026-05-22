@@ -1,4 +1,8 @@
-//! Fixed-width layout for sync shared-fact availability.
+//! Fixed-width layout for sync shared-fact declarations.
+//!
+//! A shared-fact declaration is just a workspace id and fact id. Projection
+//! turns it into a row that the sync index can query by connection. Keep this
+//! layout id-only; the actual fact bytes stay in the core fact store.
 
 use crate::core::wire;
 

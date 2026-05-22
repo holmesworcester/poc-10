@@ -1,3 +1,10 @@
+//! Transit-received fact family.
+//!
+//! A transit-received fact records one inbound frame with normalized origin
+//! metadata. Projection decodes the frame enough to admit the contained facts
+//! and connection provenance, then lets those facts project normally. This is
+//! the durable protocol boundary after core has staged opaque network bytes.
+
 pub mod addr;
 pub mod fact;
 pub mod layout;

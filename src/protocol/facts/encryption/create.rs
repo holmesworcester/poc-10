@@ -1,4 +1,16 @@
-//! Local constructors for target encryption facts.
+//! Pure constructors and validators for derived encryption facts.
+//!
+//! Projection and intent handlers use this module when context has already
+//! supplied the exact facts needed to create or admit a key wrap, unwrap a key
+//! wrap into local secret material, or purge retired recipient material. The
+//! functions here should remain deterministic: the same intent and context
+//! facts produce the same output fact ids.
+//!
+//! Keep cryptographic binding and coordinate validation here. Command code may
+//! choose when to ask for work, and intent handlers may choose when inputs are
+//! available, but this module owns the invariants that ciphertext associated
+//! data, signer identity, frontier ownership, recipient keys, and unwrapped
+//! target ids all match.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};

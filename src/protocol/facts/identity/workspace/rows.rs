@@ -1,4 +1,9 @@
-//! Projection row layouts for workspace state.
+//! Projection row layout for workspace state.
+//!
+//! Workspace rows are the durable lookup table for the root namespace facts.
+//! The key is the workspace fact id, and the value reuses the canonical layout
+//! fields. Keep this file focused on row shape and decoding; creation and
+//! authority live in the workspace fact family.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};

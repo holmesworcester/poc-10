@@ -1,4 +1,11 @@
-//! Shared signed-fact envelope types for target fact modules.
+//! Shared signed-fact envelope types for protocol modules.
+//!
+//! Signed envelopes wrap one non-local payload with signer identity, public
+//! key, and signature. The envelope is a transport and authority primitive:
+//! layout fixes the bytes, create signs them, and content or identity
+//! projectors decide whether the signer has the right role for the inner fact.
+//! Local signer secrets live here too because they are the private counterpart
+//! used to create envelopes on this node.
 
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;

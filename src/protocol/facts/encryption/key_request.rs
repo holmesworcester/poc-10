@@ -1,3 +1,11 @@
+//! Key-request projection helper.
+//!
+//! Key requests ask an endpoint that owns a removal frontier to produce a wrap
+//! for a requester recipient key. This helper keeps the request-specific
+//! projection policy together: validate requester/responder context, find
+//! eligible wrap sources, add signer-secret needs, and emit create-key-wrap
+//! intents once the required local signer material is available.
+
 use crate::core::facts::Fact;
 use crate::core::projectors::{ProjectionContext, ProjectionOutput};
 use crate::protocol::facts::encryption::fact::KeyRequestFact;

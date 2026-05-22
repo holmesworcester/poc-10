@@ -1,4 +1,10 @@
-//! Fixed-width device-invite fact and projection-row layout.
+//! Fixed-width layout for device-invite facts and rows.
+//!
+//! Device invites authorize an additional endpoint for an existing user. The
+//! layout keeps the optional user-invite link canonical by storing all-zeroes
+//! for `None`, and the row value mirrors the fields projection needs for later
+//! endpoint admission. Keep byte shape here and invite authority checks in the
+//! device-invite projector.
 
 use crate::core::wire;
 

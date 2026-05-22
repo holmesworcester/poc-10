@@ -1,4 +1,13 @@
-//! User-facing encryption command constructors.
+//! User-facing encryption commands and status assembly.
+//!
+//! These commands are the local entry points for creating recipient keys,
+//! removal frontiers, history nodes, key wraps, and retention chops. They read
+//! projected identity and encryption state, construct facts or local effects,
+//! and return receipts suitable for CLI output.
+//!
+//! Keep orchestration that requires local store state here. Encoding belongs in
+//! `layout`, pure fact construction belongs in `create`, and projection remains
+//! responsible for validating facts that arrive later through sync.
 
 use crate::core::clock;
 use crate::core::command_context::{

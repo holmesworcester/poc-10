@@ -1,4 +1,10 @@
 //! Command constructors for user-invite facts.
+//!
+//! User invites are the identity edge that lets a new user join a workspace.
+//! Commands build either a raw invite with a supplied public key or a signed
+//! invite when local secret material is available. Projection is still the
+//! authority boundary: it decides whether the stated authority fact can invite
+//! a user into the workspace.
 
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};

@@ -1,4 +1,10 @@
-//! Send a sync need-id fact for a peer's advertised missing fact.
+//! Intent handler for sending a need-id after a peer advertises a fact.
+//!
+//! A have-id tells us that a peer has a fact. This handler checks whether the
+//! local store lacks that fact and, if so, creates a need-id fact and queues it
+//! for transport on the same connection. It provides the request side of the
+//! exact-id sync fallback; it does not decide whether the peer may later send
+//! the requested payload.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};

@@ -1,4 +1,10 @@
-//! Read-only content-file projection queries.
+//! Read-only queries over projected file attachments.
+//!
+//! File facts project into durable rows only after their message context and
+//! deletion state have been resolved. This module exposes the resulting live
+//! attachment view for CLI selection and display. It should not decide whether
+//! a file is valid or deleted; those invariants belong to file projection and
+//! file-deletion projection.
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;

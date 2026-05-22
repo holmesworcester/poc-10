@@ -1,4 +1,10 @@
-//! Read-only projected endpoint-shared row lookups.
+//! Read-only queries over shared endpoint membership.
+//!
+//! `endpoint_shared` rows are the identity facts other protocol families use
+//! to decide whether a signer or peer belongs to a workspace. This module
+//! exposes the projected peer list in deterministic display order. It should
+//! stay side-effect free; endpoint authority is established by projection, not
+//! by these lookups.
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;

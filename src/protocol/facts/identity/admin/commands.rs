@@ -1,4 +1,10 @@
-//! User-facing admin grant constructors.
+//! Command constructors for admin grant facts.
+//!
+//! Admin grants are authority-changing identity facts. Command code must prove
+//! the local endpoint belongs to the workspace, find the local user's existing
+//! admin authority, and sign the new grant with local signing material. This
+//! file owns that local orchestration; projection still validates the signed
+//! grant when it is later submitted or received.
 
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::Ed25519PrivateKey;

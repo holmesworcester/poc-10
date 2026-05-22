@@ -1,4 +1,8 @@
-//! Fixed-width layout for sync key-wrap availability.
+//! Fixed-width layout for sync key-wrap availability facts.
+//!
+//! Key-wrap availability is an id-only sync signal. The layout guarantees a
+//! canonical workspace id and key-wrap id pair, while projection and encryption
+//! handlers decide whether the signed wrap itself is valid and useful.
 
 use crate::core::wire;
 

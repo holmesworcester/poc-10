@@ -1,3 +1,11 @@
+//! Generic content event fact family.
+//!
+//! Content events are test and utility payloads that exercise workspace-scoped
+//! shared content without the richer message/file authority model. Commands
+//! create them, projection materializes workspace-time rows, and queries expose
+//! counts for CLI/reporting flows. Keep message-specific policy out of this
+//! module; it belongs under `content::message`.
+
 pub mod cli;
 pub mod commands;
 pub mod fact;
