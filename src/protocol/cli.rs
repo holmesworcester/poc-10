@@ -303,7 +303,6 @@ pub(crate) fn key_derive(
         format!("scanned_key_wraps: {scanned_key_wraps}"),
         format!("derived_key_secrets: {}", after.saturating_sub(before)),
         "failed_key_wraps: 0".to_string(),
-        "admitted_events: 0".to_string(),
     ]))
 }
 

@@ -160,7 +160,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
 
     // Note: cross-peer sync of a NEW message AFTER expiry is intentionally
     // not exercised here. Empirically, when alice authors a fresh-minute
-    // message after both peers have purged a prior minute's events, sync
+    // message after both peers have purged a prior minute's facts, sync
     // does not redeliver the new message to bob within the test's polling
     // window. That is a sync-vs-purge interaction worth its own
     // investigation — the negentropy snapshot referencing purged ids may
@@ -170,10 +170,10 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: later admin-signed `content::disappearing_messages_setting` events
+// Test 3: later admin-signed `content::disappearing_messages_setting` facts
 // supersede earlier ones; messages stamped under an earlier setting
 // retain their stamped TTL. `workspace::commands::create` emits the
-// workspace's initial setting alongside the workspace event, so the
+// workspace's initial setting alongside the workspace fact, so the
 // "first" setting and any later admin `disappearing-set` form a chain
 // of settings — there is no separate "workspace TTL fallback" anymore.
 //
@@ -192,13 +192,13 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Pin the clock and author the first message at minute 100. This is
-    // stamped under the workspace event's TTL of 1, so its
+    // stamped under the workspace fact's TTL of 1, so its
     // expires_at_minute is 101.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "early"]));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
 
-    // Admin authors a setting event raising TTL to 5. After the setting
+    // Admin authors a setting fact raising TTL to 5. After the setting
     // is admitted, subsequent messages are stamped with TTL=5; the
     // previously-authored "early" message's stamped expiry is unchanged.
     assert_success(topo(&[
@@ -321,7 +321,7 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
 // note at the end of `cli_disappearing_messages_two_peer_convergence`):
 // cross-peer sync of a NEW post-purge message. Empirically the
 // negentropy exchange does not redeliver Y to bob within the polling
-// window after both peers have purged a prior minute's events; that's
+// window after both peers have purged a prior minute's facts; that's
 // a sync-vs-purge interaction that's worth its own investigation and
 // is orthogonal to the local post-purge authoring claim.
 // ---------------------------------------------------------------------------
@@ -546,7 +546,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 //
 // Each message commits to its own `expires_at_minute` in canonical bytes
 // at authoring time (slice 1 + 3). The admin-signed
-// `content::disappearing_messages_setting` event tightens the TTL used for
+// `content::disappearing_messages_setting` fact tightens the TTL used for
 // SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
 // messages. The deletion floor is intentionally NOT advanced here — the
 // CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
@@ -718,7 +718,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 //
 // Practical note: per the task and `bdaa60f`, the user-visible wedge
 // message is "no retained ancestor covers the target leaf", surfaced by
-// `derive_event_leaf` on the authoring path. The admit path's exact
+// leaf derivation on the authoring path. The admit path's exact
 // rejection wording is a secondary signal. The assertion below marks the
 // missing deterministic public admit/drop query needed to test redelivery
 // itself without coupling the test to key-healing side effects.
@@ -928,7 +928,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     // Sync naturally redelivers: alice's negentropy "have" set includes X,
     // bob's "have" set still excludes it, so alice resends X on the next
     // compare. With F now present on bob, admit_check_received returns
-    // Admit, the bytes enter EVENTS, the projector decrypts using F,
+    // Admit, the bytes enter the fact store, the projector decrypts using F,
     // and X appears in bob's messages listing.
     wait_for_message_text(&bob, &workspace_id, "alice: early-x");
 
@@ -937,7 +937,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     let bob_post_listing = messages_text(&bob, &workspace_id);
     assert!(
         bob_post_listing.contains(&message_fact_id),
-        "EVENTS on bob must contain X's id after F arrives and sync \
+        "bob's message listing must contain X's id after F arrives and sync \
          redelivers:\n{bob_post_listing}"
     );
 }
@@ -1275,7 +1275,7 @@ fn key_wrap_with_retry(
 ///
 /// The caller must already have a running `topo start` daemon on `host` bound
 /// to `port` and a running daemon on `joiner` (any port). The host's daemon
-/// serves the bootstrap; the joiner's daemon admits the user/endpoint events
+/// serves the bootstrap; the joiner's daemon admits the user/endpoint facts
 /// and connects back. After this returns, both peers' projections include the
 /// new membership and sync continues over the daemons' network routes.
 fn join_workspace(

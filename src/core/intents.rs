@@ -17,7 +17,7 @@
 //! Durable and ephemeral intents share identity and payload rules. Durable
 //! intents survive process restarts and participate in replay. Ephemeral
 //! intents are connection-local work, useful for inbound frames and other
-//! process-scoped events that should disappear on restart. If the same durable
+//! process-scoped signals that should disappear on restart. If the same durable
 //! identity is handled, dispatch removes the matching ephemeral duplicate so
 //! the local retry does not repeat accepted work.
 //!

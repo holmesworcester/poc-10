@@ -1,7 +1,7 @@
 //! User-invite fact shape for the poc-10 target tree.
 //!
 //! A user-invite fact publishes an invite public key bound to one workspace
-//! and records the authority event that endorsed it. The private invite key
+//! and records the authority fact that endorsed it. The private invite key
 //! travels out-of-band and is not projected as shared state.
 
 use crate::core::crypto::Ed25519PublicKey;

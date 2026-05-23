@@ -3,7 +3,7 @@
 //! Rows are keyed by `bootstrap_hash`. A connection bootstrap proves knowledge
 //! of the bootstrap secret by presenting the matching hash; this projector
 //! stores the private value beside the hash so the bootstrap path can look it
-//! up locally without exposing the private value in the event.
+//! up locally without exposing the private value in the fact.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};

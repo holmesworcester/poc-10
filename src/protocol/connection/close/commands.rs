@@ -1,4 +1,4 @@
-//! User-facing constructor for connection close events.
+//! User-facing constructor for connection close facts.
 //!
 //! Closing a connection creates a local close fact only. Projection validates
 //! the referenced connection, and target facts perform their own row deletion

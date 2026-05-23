@@ -1,7 +1,7 @@
 //! Poc-10 invite-accepted projector.
 //!
 //! POLICY. An invite_accepted fact is admitted iff:
-//!   1. STRUCTURAL. The fact is local-only and all event id/hash fields are
+//!   1. STRUCTURAL. The fact is local-only and all fact id/hash fields are
 //!      non-zero.
 //!   2. CONTEXT. Matched invite_secret context must be local and scoped to the
 //!      same workspace/invite/bootstrap hash.
@@ -53,7 +53,7 @@ impl TypedProjector<super::Codec> for InviteAcceptedProjector {
             || accepted.bootstrap_hash == [0; 32]
             || accepted.accepted_endpoint_id == [0; 32]
         {
-            return Err("invite_accepted fact has empty event id field".to_string());
+            return Err("invite_accepted fact has empty fact id field".to_string());
         }
 
         // 2. Context.

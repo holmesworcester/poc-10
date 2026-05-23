@@ -33,8 +33,8 @@ fn invite_daemons_accept_and_connect_two_cli_processes() {
     wait_for_connection_count(&host, 1);
     assert_eq!(connection_count(&host), 1);
     assert_eq!(connection_count(&joiner), 1);
-    assert_eq!(connection_event_count(&host), 2);
-    assert_eq!(connection_event_count(&joiner), 2);
+    assert_eq!(connection_fact_count(&host), 2);
+    assert_eq!(connection_fact_count(&joiner), 2);
 }
 
 #[test]
@@ -62,9 +62,9 @@ fn invite_daemons_accept_two_separate_cli_processes() {
     assert_eq!(connection_count(&host), 2);
     assert_eq!(connection_count(&joiner_a), 1);
     assert_eq!(connection_count(&joiner_b), 1);
-    assert_eq!(connection_event_count(&host), 4);
-    assert_eq!(connection_event_count(&joiner_a), 2);
-    assert_eq!(connection_event_count(&joiner_b), 2);
+    assert_eq!(connection_fact_count(&host), 4);
+    assert_eq!(connection_fact_count(&joiner_a), 2);
+    assert_eq!(connection_fact_count(&joiner_b), 2);
 }
 
 #[test]
@@ -950,7 +950,7 @@ fn wait_for_connection_count(db: &str, expected: usize) {
     );
 }
 
-fn connection_event_count(db: &str) -> usize {
+fn connection_fact_count(db: &str) -> usize {
     count_value(db, "connection_facts")
 }
 

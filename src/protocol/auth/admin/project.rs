@@ -142,7 +142,7 @@ fn project_delegated_admin(
         return Err("admin authority context payload id mismatch".to_string());
     }
     let authority = decode_admin_payload(authority_fact)
-        .map_err(|_| "signed admin authority must be an admin event".to_string())?;
+        .map_err(|_| "signed admin authority must be an admin fact".to_string())?;
     if authority.workspace_id != admin.workspace_id {
         return Err("admin authority belongs to a different workspace".to_string());
     }
@@ -154,7 +154,7 @@ fn project_delegated_admin(
         return Err("admin user context payload id mismatch".to_string());
     }
     let user = decode_user_payload(user_fact)
-        .map_err(|_| "admin user dependency must be a user event".to_string())?;
+        .map_err(|_| "admin user dependency must be a user fact".to_string())?;
     if user.workspace_id != admin.workspace_id {
         return Err("admin user belongs to a different workspace".to_string());
     }

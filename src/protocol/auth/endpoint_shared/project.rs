@@ -54,23 +54,23 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
             return Err("endpoint shared fact must have global scope".to_string());
         }
         let envelope = signed.envelope;
-        let event = signed.payload;
-        if event.endpoint_id.iter().all(|byte| *byte == 0) {
+        let shared = signed.payload;
+        if shared.endpoint_id.iter().all(|byte| *byte == 0) {
             return Err("endpoint_shared endpoint_id cannot be empty".to_string());
         }
-        if event.signing_public_key.iter().all(|byte| *byte == 0) {
+        if shared.signing_public_key.iter().all(|byte| *byte == 0) {
             return Err("endpoint_shared signing_public_key cannot be empty".to_string());
         }
-        if event.workspace_id.iter().all(|byte| *byte == 0) {
+        if shared.workspace_id.iter().all(|byte| *byte == 0) {
             return Err("endpoint_shared workspace_id cannot be empty".to_string());
         }
-        if event.device_name.as_bytes().contains(&0) {
+        if shared.device_name.as_bytes().contains(&0) {
             return Err("endpoint device name cannot contain NUL".to_string());
         }
 
         // 2. Authority.
-        let authority_need = authority_need(fact, &event, envelope.signer_id);
-        if !has_valid_authority(&authority_need, &event, &envelope, context)? {
+        let authority_need = authority_need(fact, &shared, envelope.signer_id);
+        if !has_valid_authority(&authority_need, &shared, &envelope, context)? {
             return Ok(ProjectionOutput::new().need(authority_need));
         }
         auth::signed_fact::verify_envelope(&envelope)?;
@@ -81,9 +81,9 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
                 "content_signer",
-                crate::protocol::auth::workspace::scope(event.workspace_id),
-                event.endpoint_id,
-                event.endpoint_id,
+                crate::protocol::auth::workspace::scope(shared.workspace_id),
+                shared.endpoint_id,
+                shared.endpoint_id,
             ))
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
@@ -92,9 +92,9 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
                 fact.id,
                 fact.id,
             ))
-            .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &event)?))
+            .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &shared)?))
             .intent(share_fact_with_workspace_intent_for_fact(
-                event.workspace_id,
+                shared.workspace_id,
                 fact,
             )))
     }
@@ -102,10 +102,10 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
 
 fn authority_need(
     fact: &Fact,
-    event: &super::fact::EndpointSharedFact,
+    shared: &super::fact::EndpointSharedFact,
     signer_id: [u8; 32],
 ) -> ContextNeed {
-    match event.endpoint_role {
+    match shared.endpoint_role {
         EndpointRole::InviteServer => crate::core::context::ContextNeed::range(
             fact.id,
             "auth_invite_server",
@@ -125,7 +125,7 @@ fn authority_need(
 
 fn has_valid_authority(
     need: &ContextNeed,
-    event: &super::fact::EndpointSharedFact,
+    shared: &super::fact::EndpointSharedFact,
     envelope: &auth::signed_fact::fact::SignedFactEnvelope,
     context: &ProjectionContext,
 ) -> Result<bool, String> {
@@ -138,7 +138,7 @@ fn has_valid_authority(
     if authority_fact.scope != FactScope::Global {
         return Err("endpoint_shared authority must have global scope".to_string());
     }
-    if event.endpoint_role == EndpointRole::Device {
+    if shared.endpoint_role == EndpointRole::Device {
         let invite_envelope =
             auth::signed_fact::decode_envelope(authority_fact.body()).map_err(|_| {
                 "endpoint_shared dependency is not a signed endpoint invite".to_string()
@@ -155,10 +155,10 @@ fn has_valid_authority(
                 "endpoint_shared signer public key does not match device_invite".to_string(),
             );
         }
-        if invite.workspace_id != event.workspace_id {
+        if invite.workspace_id != shared.workspace_id {
             return Err("endpoint_shared workspace does not match device_invite".to_string());
         }
-        if invite.user_authority_fact_id != event.user_authority_fact_id {
+        if invite.user_authority_fact_id != shared.user_authority_fact_id {
             return Err("endpoint_shared user authority does not match device_invite".to_string());
         }
         return Ok(true);
@@ -171,13 +171,13 @@ fn has_valid_authority(
     }
     let invite_server = invite_server::decode_fact_payload(&invite_envelope.payload)
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
-    if invite_server.workspace_id != event.workspace_id {
+    if invite_server.workspace_id != shared.workspace_id {
         return Err("endpoint_shared workspace does not match invite_server".to_string());
     }
     if invite_server.public_key != envelope.signer_public_key {
         return Err("endpoint_shared signer public key does not match invite_server".to_string());
     }
-    if envelope.signer_id != event.user_authority_fact_id {
+    if envelope.signer_id != shared.user_authority_fact_id {
         return Err("endpoint_shared user authority does not match invite_server".to_string());
     }
     Ok(true)

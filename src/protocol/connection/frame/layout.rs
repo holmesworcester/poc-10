@@ -43,13 +43,13 @@ pub const CONNECTION_FRAME_SIZE_CLASS_LARGE: u8 = 1;
 
 /// Plaintext capacity of a small connection::frame frame (4 KiB).
 ///
-/// Small frames carry control traffic and single events; the batcher chooses
+/// Small frames carry control traffic and single facts; the batcher chooses
 /// this class when the packed inner bytes fit in the small budget.
 pub const CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES: usize = 4 * 1024;
 
 /// Plaintext capacity of a large connection::frame frame (1 MiB).
 ///
-/// Large frames carry batched events. The batcher chooses this class for any
+/// Large frames carry batched facts. The batcher chooses this class for any
 /// batch that exceeds the small plaintext budget. The architecture doc does
 /// not pin exact numbers; these are the poc-10 defaults and may evolve.
 pub const CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES: usize = 1024 * 1024;

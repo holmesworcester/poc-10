@@ -2,7 +2,7 @@
 //!
 //! The close layout is fixed width:
 //! `tag(1) || connection_id(32) || closed_at_ms(8)`. Encoding preserves this
-//! exact shape so the close event has a deterministic fact id.
+//! exact shape so the close fact has a deterministic id.
 //!
 //! Change this file for close wire compatibility only. Context validation and
 //! cleanup fanout belong in `project.rs`.

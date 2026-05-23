@@ -1,7 +1,7 @@
 //! Invite-server fact shape for the poc-10 target tree.
 //!
 //! An invite-server fact publishes an invite public key for one workspace and
-//! records the authority event that endorsed it. The private invite secret is
+//! records the authority fact that endorsed it. The private invite secret is
 //! intentionally absent.
 
 use crate::core::crypto::Ed25519PublicKey;

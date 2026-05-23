@@ -1,7 +1,7 @@
 //! Invite-accepted fact shape for the poc-10 target tree.
 //!
 //! Records that this endpoint accepted an invite link naming a workspace and a
-//! shared `invite` event, together with the local scoped `invite_secret` event
+//! shared `invite` fact, together with the local scoped `invite_secret` fact
 //! id used by bootstrap and the bootstrap-hash binding. Local-only fact.
 
 use crate::core::facts::FactId;

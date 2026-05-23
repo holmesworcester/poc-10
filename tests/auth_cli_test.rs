@@ -16,6 +16,19 @@ use std::time::Duration;
 use cli_harness::*;
 
 #[test]
+fn cli_key_derive_reports_key_wrap_summary_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "derive-output.db");
+
+    let out = assert_success(topo(&["--db", &db, "key-derive"]));
+
+    assert_eq!(line_value(&out, "scanned_key_wraps"), "0");
+    assert_eq!(line_value(&out, "derived_key_secrets"), "0");
+    assert_eq!(line_value(&out, "failed_key_wraps"), "0");
+    assert_eq!(out.lines().count(), 3, "{out}");
+}
+
+#[test]
 fn cli_key_wrap_derives_access_for_proactive_recipients() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -268,7 +281,7 @@ fn cli_history_node_tombstone_rejects_derivation_from_retired_path() {
         stderr(&from_retired_root)
     );
     assert!(
-        stderr(&from_retired_root).contains("history node source event is missing"),
+        stderr(&from_retired_root).contains("history node source fact is missing"),
         "{}",
         stderr(&from_retired_root)
     );

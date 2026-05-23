@@ -399,7 +399,7 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
 }
 
 #[allow(dead_code)]
-fn file_event_match(owner: &Fact, file: &Fact) -> MatchedContext {
+fn file_fact_match(owner: &Fact, file: &Fact) -> MatchedContext {
     MatchedContext {
         need: topo::core::context::ContextNeed::range(
             owner.id,

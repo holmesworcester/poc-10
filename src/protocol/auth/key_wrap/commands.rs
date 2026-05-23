@@ -489,21 +489,21 @@ pub fn create_history_node(
     input: CreateHistoryNode,
 ) -> Result<CommandOutput<CreateHistoryNodeReceipt>, String> {
     if history_source_is_tombstoned(runtime, input.source_secret_id)? {
-        return Err("history node source event is missing".to_string());
+        return Err("history node source fact is missing".to_string());
     }
     let source = runtime
         .facts()
         .find(|fact| fact.id == input.source_secret_id)
-        .ok_or_else(|| "history node source event is missing".to_string())?;
+        .ok_or_else(|| "history node source fact is missing".to_string())?;
     let (owner_endpoint_id, source_secret) =
         history_source_material(&source, input.workspace_id, input.removal_frontier_id)?;
     if input.tombstone_node_id != [0; 32] {
         let tombstone = runtime
             .facts()
             .find(|fact| fact.id == input.tombstone_node_id)
-            .ok_or_else(|| "history node tombstone event is missing".to_string())?;
+            .ok_or_else(|| "history node tombstone fact is missing".to_string())?;
         local_history_layout::decode_local_history_node_secret(&tombstone.bytes)
-            .map_err(|_| "history node tombstone event is not a history node".to_string())?;
+            .map_err(|_| "history node tombstone fact is not a history node".to_string())?;
     }
     let mut info = Vec::with_capacity(32 + 32 + 8 + 8 + 32);
     info.extend_from_slice(&input.workspace_id);
@@ -630,7 +630,7 @@ fn history_source_material(
         return Ok((root.owner_endpoint_id, root.key_secret));
     }
     let node = local_history_layout::decode_local_history_node_secret(fact.body())
-        .map_err(|_| "history node source event is missing".to_string())?;
+        .map_err(|_| "history node source fact is missing".to_string())?;
     if node.workspace_id != workspace_id || node.frontier_id != frontier_id {
         return Err("history node source workspace or frontier mismatch".to_string());
     }
