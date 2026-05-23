@@ -10,7 +10,7 @@ use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
 
 use super::fact::{AuthorUserId, DisappearingMessagesSettingFact, SettingId, WorkspaceId};
-use super::layout::{self, NO_PREVIOUS_SETTING_ID};
+use super::layout::NO_PREVIOUS_SETTING_ID;
 
 pub const DISAPPEARING_MESSAGES_SETTING_ROWS: TableName =
     TableName::new("disappearing_messages_setting_rows");
@@ -112,11 +112,6 @@ pub fn decode_setting_row(
         supersedes_setting_id,
     })
 }
-
-// Keep the layout module referenced so changes in encoding-related constants
-// stay observable here (the row encoder uses the sentinel constant directly).
-#[allow(dead_code)]
-const _LAYOUT_FACT_BYTES: usize = layout::FACT_BYTES;
 
 #[cfg(test)]
 mod tests {
