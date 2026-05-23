@@ -251,14 +251,9 @@ pub(crate) fn key_recipient_rotation(
         auth::key_wrap::cli::key_recipient_rotation(command_context, args, previous)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    let mut output = auth::key_wrap::cli::key_recipient_output(&receipt);
-    output
-        .lines
-        .push("old_active_recipient_keys: 1".to_string());
-    output
-        .lines
-        .push("tombstoned_recipient_keys: 1".to_string());
-    Ok(output)
+    Ok(auth::key_wrap::cli::key_recipient_rotation_output(
+        &receipt, 1,
+    ))
 }
 
 pub(crate) fn key_frontier(
@@ -638,16 +633,6 @@ pub(crate) fn replay_deps_reverse(
     Ok(sync::cascade_test_fact::cli::replay_deps_reverse_output(
         &receipt,
     ))
-}
-
-pub(crate) fn negentropy_drain(
-    ctx: &mut MatchCliContext,
-    args: CliArgs<'_>,
-) -> Result<CliOutput, String> {
-    let _limit = sync::shared_fact::cli::parse_negentropy_drain_limit(args)?;
-    ctx.settle_local_command_work()?;
-    let status = crate::protocol::sync::shared_fact::sync_status(ctx.runtime().store())?;
-    Ok(sync::shared_fact::cli::negentropy_drain_output(&status))
 }
 
 pub(crate) fn sync_status(

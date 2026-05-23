@@ -165,8 +165,12 @@ fn cli_recipient_rotation_keeps_new_content_working_and_rejects_retired_recipien
         "key-rotate-recipient",
         &workspace_id,
     ]));
-    assert_eq!(line_value(&rotated, "old_active_recipient_keys"), "1");
-    assert_eq!(line_value(&rotated, "tombstoned_recipient_keys"), "1");
+    assert_eq!(line_value(&rotated, "superseded_recipient_keys"), "1");
+    assert!(
+        !rotated.contains("old_active_recipient_keys:")
+            && !rotated.contains("tombstoned_recipient_keys:"),
+        "rotation output should use supersession vocabulary:\n{rotated}"
+    );
     let new_recipient_key_id = line_value(&rotated, "recipient_key_id");
 
     let new_frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
@@ -307,17 +311,13 @@ fn cli_peer_recipient_rotation_preserves_fresh_sharing_and_rejects_retired_wraps
     wait_for_key_access(&bob, &workspace_id, &frontier_id, "yes");
 
     let rotated = assert_success(topo(&["--db", &bob, "key-rotate-recipient", &workspace_id]));
-    let old_active = line_value(&rotated, "old_active_recipient_keys")
+    let superseded = line_value(&rotated, "superseded_recipient_keys")
         .parse::<u64>()
-        .expect("parse old_active_recipient_keys");
-    let tombstoned = line_value(&rotated, "tombstoned_recipient_keys")
-        .parse::<u64>()
-        .expect("parse tombstoned_recipient_keys");
+        .expect("parse superseded_recipient_keys");
     assert!(
-        old_active >= 1,
+        superseded >= 1,
         "rotation must retire at least one key:\n{rotated}"
     );
-    assert_eq!(tombstoned, old_active);
     let new_recipient_key_id = line_value(&rotated, "recipient_key_id");
     assert_ne!(new_recipient_key_id, retired_recipient_key_id);
 

@@ -75,6 +75,17 @@ pub fn key_recipient_output(receipt: &commands::CreateRecipientKeyReceipt) -> Cl
     ])
 }
 
+pub fn key_recipient_rotation_output(
+    receipt: &commands::CreateRecipientKeyReceipt,
+    superseded_recipient_keys: usize,
+) -> CliOutput {
+    let mut output = key_recipient_output(receipt);
+    output.lines.push(format!(
+        "superseded_recipient_keys: {superseded_recipient_keys}"
+    ));
+    output
+}
+
 pub fn key_frontier(
     ctx: &CommandContext<'_>,
     args: CliArgs<'_>,

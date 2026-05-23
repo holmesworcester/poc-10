@@ -16,7 +16,7 @@
 //!     dispatcher then deletes pre-floor messages.
 //!   * `disappearing-compact` advances the floor without touching the
 //!     TTL.
-//!   * `negentropy-drain` succeeds and reports the root summary.
+//!   * `sync-status` succeeds and reports the root summary.
 
 mod cli_harness;
 
@@ -322,16 +322,16 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: `negentropy-drain` after expiry reports a changed root summary.
+// Test 6: `sync-status` after expiry reports a changed root summary.
 //
 // Setup: author messages, then expire them by advancing the clock past
-// the TTL horizon. We then call `negentropy-drain` directly to verify
+// the TTL horizon. We then call `sync-status` directly to verify
 // the CLI command succeeds and the root summary reflects the disappeared
 // messages.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cli_negentropy_drain_reports_changed_root_after_expiry() {
+fn cli_sync_status_reports_changed_root_after_expiry() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let alice_port = free_port();
@@ -346,10 +346,14 @@ fn cli_negentropy_drain_reports_changed_root_after_expiry() {
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
 
-    // Capture the pre-expiry root fingerprint via `negentropy-drain`.
-    let pre = assert_success(topo(&["--db", &alice, "negentropy-drain"]));
-    let pre_fp = line_value(&pre, "new_root_fingerprint");
-    let pre_count: u64 = line_value(&pre, "new_root_count").parse().expect("count");
+    // Capture the pre-expiry root fingerprint via `sync-status`.
+    let pre = assert_success(topo(&["--db", &alice, "sync-status"]));
+    let pre_fp = line_value(&pre, "root_fingerprint");
+    let pre_count: u64 = line_value(&pre, "root_count").parse().expect("count");
+    assert!(
+        !pre.contains("drained:") && !pre.contains("new_root_count:"),
+        "`sync-status` should not expose the retired drain output shape:\n{pre}"
+    );
     assert!(
         pre_count >= 3,
         "indexed events must include at least the 3 authored messages: {pre_count}"
@@ -365,11 +369,9 @@ fn cli_negentropy_drain_reports_changed_root_after_expiry() {
 
     // After the daemon stops, the command must still succeed and report
     // the post-expiry root summary.
-    let post = assert_success(topo(&["--db", &alice, "negentropy-drain"]));
-    let post_fp = line_value(&post, "new_root_fingerprint");
-    let post_count: u64 = line_value(&post, "new_root_count")
-        .parse()
-        .expect("post count");
+    let post = assert_success(topo(&["--db", &alice, "sync-status"]));
+    let post_fp = line_value(&post, "root_fingerprint");
+    let post_count: u64 = line_value(&post, "root_count").parse().expect("post count");
     assert_ne!(
         pre_fp, post_fp,
         "root fingerprint must change after expired messages disappear:\n\

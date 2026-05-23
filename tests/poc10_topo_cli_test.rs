@@ -62,6 +62,23 @@ fn match_demo_is_rejected_at_the_product_boundary() {
 }
 
 #[test]
+fn match_negentropy_drain_is_not_registered() {
+    let output = match_cli(&["negentropy-drain"]);
+
+    assert!(
+        !output.status.success(),
+        "`negentropy-drain` should not remain as a compatibility command"
+    );
+    let stderr = cli_harness::stderr(&output);
+    assert!(
+        stderr.contains("unknown command `negentropy-drain`")
+            && stderr.contains("match --db PATH sync-status")
+            && !stderr.contains("negentropy-drain [LIMIT]"),
+        "`negentropy-drain` should be rejected while `sync-status` remains available; got:\n{stderr}"
+    );
+}
+
+#[test]
 fn match_create_workspace_accepts_positional_identity_shape() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = temp_db(&temp, "match.db");

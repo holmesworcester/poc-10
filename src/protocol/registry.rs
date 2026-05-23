@@ -506,11 +506,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         sync_status
     ),
     cli_command!(
-        "negentropy-drain",
-        sync::shared_fact::cli::NEGENTROPY_DRAIN_USAGE,
-        negentropy_drain
-    ),
-    cli_command!(
         "content-count",
         content::message::cli::CONTENT_COUNT_USAGE,
         content_count
