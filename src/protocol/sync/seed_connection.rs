@@ -81,7 +81,9 @@ impl IntentHandler for SeedConnectionSyncHandler {
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_seed_connection_sync(raw)?;
-        let connection_fact = context.require_fact(&input.connection_id)?;
+        let Some(connection_fact) = context.fact(&input.connection_id) else {
+            return Ok(PipelineEffects::new());
+        };
         if connection_fact.id != input.connection_id {
             return Err("seed_connection_sync context payload id mismatch".into());
         }

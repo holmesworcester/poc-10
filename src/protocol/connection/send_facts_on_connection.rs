@@ -213,7 +213,9 @@ impl IntentHandler for SendFactsOnConnectionHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let work = decode_send_facts_on_connection_work(intent)?;
         let connection_id = work.connection_id();
-        let connection_fact = context.require_fact(&connection_id)?;
+        let Some(connection_fact) = context.fact(&connection_id) else {
+            return Ok(PipelineEffects::new());
+        };
         let connection = response::layout::decode_fact(connection_fact.body())?;
         if connection_fact.id != connection_id {
             return Err("send_facts_on_connection connection fact id mismatch".into());

@@ -1,31 +1,40 @@
 //! Connection ephemeral-secret projector.
 //!
-//! Ephemeral secrets are local handshake capabilities. Projection turns a
-//! decoded local secret fact into a durable local row plus an exact context
-//! offer that request/response projectors can match by secret fact id. No
-//! remote or authority context is consulted because possession of the local
-//! private key is the capability being recorded.
+//! Ephemeral secrets are local handshake capabilities. Projection turns live
+//! local secret facts into durable local rows plus exact context offers that
+//! request/response projectors can match by secret fact id. When a connection
+//! close event names the secret, the same owner deletes its row and schedules a
+//! bounded purge for the fact bytes.
 //!
 //! POLICY. A connection_ephemeral_secret is admitted iff:
 //!   1. STRUCTURAL. The local-only body decodes and the stored public key
 //!      re-derives from the private key.
-//!   2. CONTEXT. No remote or authority context is accepted; this is local key
-//!      material only.
-//!   3. MATERIALIZE. Publish a local ephemeral-secret offer and write the local
-//!      secret row keyed by this fact id.
+//!   2. CONTEXT. If exact close context is present, it must be a local
+//!      connection_close fact.
+//!   3. MATERIALIZE. Live secrets publish a local ephemeral-secret offer and
+//!      write the row keyed by this fact id. Closed secrets delete the row and
+//!      emit purge_closed_connection_material.
 //!
 //! Change this file when the local capability proof or materialized row changes.
 //! Request and response projectors own the context checks that consume this
 //! offer.
 
 use crate::core::crypto;
-use crate::core::facts::Fact;
-use crate::core::intents::RowMutation;
+use crate::core::facts::{Fact, FactScope};
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use super::rows::connection_ephemeral_secret_row;
+use crate::protocol::connection::close;
+use crate::protocol::connection::purge_closed_connection_material::{
+    purge_closed_connection_material_intent, PurgeClosedConnectionMaterial, TARGET_EPHEMERAL_SECRET,
+};
+
+use super::rows::{
+    connection_ephemeral_secret_key, connection_ephemeral_secret_row,
+    CONNECTION_EPHEMERAL_SECRET_ROWS,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionEphemeralSecretProjector;
@@ -54,12 +63,43 @@ impl TypedProjector<super::Codec> for ConnectionEphemeralSecretProjector {
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
+        if fact.scope != FactScope::Local {
+            return Err("connection ephemeral secret fact must have local scope".to_string());
+        }
         if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
             return Err("connection ephemeral public key does not match private key".to_string());
         }
 
+        // 2. Close gate.
+        let close_need = close::ephemeral_secret_closed_need(fact.id, fact.id);
+        if let Some(close_fact) = _context.payload_for(&close_need) {
+            if close_fact.scope != FactScope::Local {
+                return Err("connection ephemeral close context must be local".to_string());
+            }
+            let close = close::decode_fact_payload(close_fact.body()).map_err(|_| {
+                "connection ephemeral close context is not a connection close".to_string()
+            })?;
+            if close.connection_id == [0; 32] {
+                return Err("connection ephemeral close context has empty connection".to_string());
+            }
+            return Ok(ProjectionOutput::new()
+                .row_mutation(RowMutation::DeleteRow(TableDelete {
+                    table: CONNECTION_EPHEMERAL_SECRET_ROWS,
+                    key: connection_ephemeral_secret_key(&fact.id),
+                }))
+                .intent(purge_closed_connection_material_intent(
+                    PurgeClosedConnectionMaterial {
+                        target_kind: TARGET_EPHEMERAL_SECRET,
+                        close_id: close_fact.id,
+                        connection_id: close.connection_id,
+                        target_id: fact.id,
+                    },
+                )));
+        }
+
         // 3. Materialize.
         Ok(ProjectionOutput::new()
+            .need(close_need)
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
                 "connection_ephemeral_secret",

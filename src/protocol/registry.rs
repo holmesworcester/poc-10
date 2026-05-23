@@ -601,6 +601,7 @@ macro_rules! projector_routes {
 
 projector_routes! {
     project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
+    project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
     project_connection_request => connection::request::layout::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector;
     project_connection_response => connection::response::layout::TYPE_CONNECTION_RESPONSE, connection::response::project::ConnectionResponseProjector;
@@ -671,6 +672,11 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "create_connection_response",
         connection::create_response::CREATE_CONNECTION_RESPONSE,
         connection::create_response::CreateConnectionResponseHandler
+    ),
+    handler_route!(
+        "purge_closed_connection_material",
+        connection::purge_closed_connection_material::PURGE_CLOSED_CONNECTION_MATERIAL,
+        connection::purge_closed_connection_material::PurgeClosedConnectionMaterialHandler
     ),
     handler_route!(
         "send_sync_compare_response",

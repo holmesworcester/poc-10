@@ -20,20 +20,24 @@
 //! `layout.rs`; key-schedule construction belongs in `create.rs`.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
 use crate::protocol::auth::invite;
-use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
+use crate::protocol::connection::purge_closed_connection_material::{
+    purge_closed_connection_material_intent, PurgeClosedConnectionMaterial,
+    TARGET_CONNECTION_RESPONSE,
+};
 use crate::protocol::connection::request;
+use crate::protocol::connection::{close, ephemeral_secret};
 use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
 
 use super::create;
 use super::fact::ConnectionResponseFact;
-use super::rows::connection_response_row;
+use super::rows::{connection_response_key, connection_response_row, CONNECTION_RESPONSE_ROWS};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionResponseProjector;
@@ -71,6 +75,21 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
         }
         if response.request_id == fact.id {
             return Err("connection response cannot answer itself".to_string());
+        }
+
+        // 2. Close gate.
+        let close_need = close::connection_closed_need(fact.id, fact.id);
+        if let Some(close_fact) = projection_context.payload_for(&close_need) {
+            if close_fact.scope != FactScope::Local {
+                return Err("connection response close context must be local".to_string());
+            }
+            let close = close::decode_fact_payload(close_fact.body()).map_err(|_| {
+                "connection response close context is not a connection close".to_string()
+            })?;
+            if close.connection_id != fact.id {
+                return Err("connection response close context targets another connection".into());
+            }
+            return closed_output(fact.id, close_fact.id);
         }
 
         // 2. Shared request and invite context.
@@ -336,6 +355,7 @@ fn materialized_output(
     response: &ConnectionResponseFact,
 ) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
+        .need(close::connection_closed_need(response_id, response_id))
         .offer(crate::core::context::ContextOffer::range(
             response_id,
             "connection_response",
@@ -350,6 +370,22 @@ fn materialized_output(
         .intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: response_id,
         })))
+}
+
+fn closed_output(response_id: [u8; 32], close_id: [u8; 32]) -> Result<ProjectionOutput, String> {
+    Ok(ProjectionOutput::new()
+        .row_mutation(RowMutation::DeleteRow(TableDelete {
+            table: CONNECTION_RESPONSE_ROWS,
+            key: connection_response_key(&response_id),
+        }))
+        .intent(purge_closed_connection_material_intent(
+            PurgeClosedConnectionMaterial {
+                target_kind: TARGET_CONNECTION_RESPONSE,
+                close_id,
+                connection_id: response_id,
+                target_id: response_id,
+            },
+        )))
 }
 
 fn waiting_output<const N: usize>(

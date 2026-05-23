@@ -130,6 +130,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             "connection",
             &[
                 "create_response.rs",
+                "purge_closed_connection_material.rs",
                 "receive_network_frame.rs",
                 "send_bootstrap_request.rs",
                 "send_facts_on_connection.rs",

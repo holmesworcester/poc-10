@@ -19,6 +19,7 @@
 //! which fact ids should move, and the receiving fact families own the meaning
 //! of child facts opened from a frame.
 
+pub mod close;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
 pub mod frame;
@@ -30,6 +31,7 @@ pub mod response;
 // enough context to answer or when an invite/server bootstrap should send a
 // request over the network.
 pub mod create_response;
+pub mod purge_closed_connection_material;
 pub mod send_bootstrap_request;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

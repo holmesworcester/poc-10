@@ -70,7 +70,8 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
 pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
-        connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
+        connection::close::layout::TYPE_CONNECTION_CLOSE
+            | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::request::layout::TYPE_CONNECTION_REQUEST
             | connection::response::layout::TYPE_CONNECTION_RESPONSE
             | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
