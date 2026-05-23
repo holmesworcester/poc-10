@@ -28,7 +28,8 @@ impl crate::core::projectors::FactCodec for Codec {
 }
 
 pub use rows::{
-    connection_ids_for_shareable_fact, record_shareable_fact, shareable_fact_for_connection,
-    shareable_fact_row, shareable_fact_rows, shareable_facts_for_connection, sync_status,
+    connection_id_for_peer_or_connection, connection_ids_for_shareable_fact, record_shareable_fact,
+    shareable_fact_for_connection, shareable_fact_row, shareable_fact_rows,
+    shareable_facts_for_connection, shareable_facts_for_connection_range, sync_status,
     ShareableFactRow, SHAREABLE_FACT_ROWS,
 };

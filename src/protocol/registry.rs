@@ -488,6 +488,11 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         sync_status
     ),
     cli_command!(
+        "sync-range",
+        sync::shared_fact::cli::SYNC_RANGE_USAGE,
+        sync_range
+    ),
+    cli_command!(
         "content-count",
         content::message::cli::CONTENT_COUNT_USAGE,
         content_count

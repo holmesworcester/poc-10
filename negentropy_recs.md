@@ -3,8 +3,8 @@
 This note describes the target dep-aware negentropy model for poc-10. The
 negentropy tree is durable sync state, but dependency knowledge does not belong
 to sync handlers. Each fact projector decides the sync leaf view for the fact it
-is projecting and emits `add_to_negentropy` work with the context it already has
-and the context it still needs.
+is projecting and emits `add_to_negentropy` work with the shareable context it
+already has.
 
 ## Goal
 
@@ -30,12 +30,19 @@ sync". A parked projector can still say:
 
 - this fact belongs in this sync leaf range.
 - these matched context facts are already available.
-- these context selectors are still required before projection can finish.
 
 The `add_to_negentropy` handler owns only durable index mechanics. It persists
 the projector-supplied leaf contribution, updates ancestor summaries, and
 advertises changed ranges to live connections. It must not infer dependencies by
 scanning protocol rows, `context_edges`, or fact bytes.
+
+Unresolved needs are deliberately not part of durable negentropy state. A need
+is emitted before its payload fact has been loaded and, for many signed facts,
+before the target projector can complete signature or authority checks. Hashing
+or relaying raw need selectors through negentropy would let pre-auth input shape
+the sync commitment surface. Needs remain ordinary projector output used by the
+local context matcher and by explicit request flows; only validated offers and
+their shareable owner facts become negentropy context.
 
 ## Leaf Contribution
 
@@ -50,7 +57,7 @@ owner_timestamp_ms
 leaf_range
 state: admitted | materialized | retracted
 context_have[]
-context_need[]
+context_offer[]
 ```
 
 `context_have` contains sync-eligible context facts that the projector has
@@ -61,11 +68,13 @@ owner fact. Local-only secrets must not be listed as sendable facts; projectors
 should represent their shared coverage through the public facts or selectors
 that peers are allowed to learn.
 
-`context_need` contains the concrete selectors the projector still requires.
-Use the same role, scope, start key, and end key vocabulary as
-`ContextNeed`. Exact missing parents are encoded as single-id ranges. Broad
-selectors must carry the module's stable bound or fallback request shape so a
-peer cannot turn one leaf into unbounded amplification.
+`context_offer` contains the public offer metadata associated with the included
+context facts. It is useful when the receiver can match the transferred facts
+without re-running unrelated range discovery. Offer metadata may be indexed
+only after the projector that emitted it has decoded and validated enough input
+to publish that offer. Missing selectors are not encoded here; a receiver that
+still lacks context discovers that by projecting the received facts and emitting
+its own local needs or signed request facts.
 
 The leaf range is the owner's sync range, not the context fact's timestamp
 range. This is what makes a message inside day N carry key and authority
@@ -83,7 +92,7 @@ runs.
 
 The handler stores the canonical contribution and updates the persisted range
 tree in the same transaction. The range hash should be a deterministic digest of
-the owner fact identity plus sorted `context_have` and `context_need` entries,
+the owner fact identity plus sorted `context_have` and `context_offer` entries,
 with counts stored beside fingerprints. When a contribution changes, the
 handler subtracts the old contribution hash from affected ancestors and adds the
 new one. The handler must be idempotent: replaying the same contribution is a
@@ -112,14 +121,14 @@ be a monotonic join:
 - owner membership moves from `admitted` to `materialized` to `retracted`, and
   never moves backward.
 - `context_have` rows are inserted idempotently and kept as a union.
-- `context_need` rows are inserted idempotently, but the unresolved-need
-  fingerprint ignores any selector already satisfied by a matching
-  `context_have` row or by an explicit projector-owned need-prune row.
+- `context_offer` rows are inserted idempotently and kept as a union, but only
+  when they are backed by a shareable owner fact or authenticated protocol state
+  the receiver is allowed to learn.
 
 This keeps older queued snapshots from overwriting richer later context. If a
-module has optional branches where an old selector would become harmful rather
-than merely extra, that same projector must emit the explicit prune for its own
-owner id.
+module has optional branches where an old context fact would become harmful
+rather than merely extra, that same projector must emit the explicit prune for
+its own owner id.
 
 ## Reprojection Flow
 
@@ -129,15 +138,20 @@ may rerun the projector before committing the settled output. The settled
 output may include `add_to_negentropy` with:
 
 - no context, for a dependency-free fact.
-- some `context_have` and some `context_need`, for a parked fact.
-- all required `context_have` and no remaining required `context_need`, for a
-  fully materialized fact.
+- some `context_have` and `context_offer`, for a parked fact whose already
+  validated context should travel with the owner fact.
+- all required `context_have` and associated offers, for a fully materialized
+  fact.
 
 When new context later wakes the owner fact, the projector emits a new
 contribution. The negentropy leaf hash changes because the context view changed,
 even if the owner fact id and timestamp did not. Peers that already share the
 owner fact but differ on context closure will still compare unequal and can
 exchange the missing context facts or request facts.
+
+The projector may still emit ordinary `ContextNeed` rows while parked. Those
+rows wake local projection when matching offers arrive, but they are not hashed
+into negentropy and are not advertised as leaf closure.
 
 ## Sync Response Behavior
 
@@ -148,8 +162,8 @@ range, the response can include:
 - owner fact ids in the leaf range.
 - `context_have` fact ids attached to those owners, subject to the same
   connection authorization as ordinary shared facts.
-- `context_need` selectors that the peer may answer with matching offers or
-  explicit request facts.
+- associated context offer metadata needed to match those context facts locally,
+  also subject to authorization.
 
 This keeps dep-aware sync bounded. The expensive semantic choice of what counts
 as context was already made by projectors during projection. Sync handlers only
@@ -170,9 +184,10 @@ sync-range <peer-or-connection> --workspace <id> --start-ms <ms> --end-ms <ms>
 
 Exact spelling can follow the CLI's local conventions, but the behavior must be
 available. `--with-deps` sends the owner leaves plus projector-supplied
-`context_have` and `context_need` closure for those leaves. `--without-deps`
-sends only the owner leaves in the requested range. That second mode exists to
-prove the test is not accidentally passing because a full-range sync happened.
+`context_have` facts and associated offer context for those leaves.
+`--without-deps` sends only the owner leaves in the requested range. That second
+mode exists to prove the test is not accidentally passing because a full-range
+sync happened.
 
 ## Purge And Retraction
 
@@ -199,16 +214,18 @@ retention policy.
 
 ## Invariants
 
-- Projectors decide which facts enter negentropy and which context facts or
-  selectors are attached to each leaf.
+- Projectors decide which facts enter negentropy and which offer-backed context
+  facts are attached to each leaf.
 - Parked facts waiting on missing context can enter negentropy on first pass.
 - `add_to_negentropy` handlers persist and hash supplied contributions; they do
   not infer dependency closure.
+- Raw `ContextNeed` selectors are never persisted in negentropy state, hashed
+  into range summaries, or sent as leaf closure; they are pre-auth projector
+  hints until satisfied by validated offers.
 - Leaf and owner-purge updates are incremental; no required update path rebuilds
   the full negentropy tree.
 - Range summaries include context closure, not only owner fact ids.
 - Local-only secret material is never exposed as sendable `context_have`.
-- Broad context needs are bounded by the fact module that emits them.
 - Purge/retraction removes the owner's negentropy contribution through the
   owner projector or its validated purge path.
 
@@ -217,8 +234,10 @@ retention policy.
 Add focused tests with the implementation:
 
 - projector tests proving a parked encrypted/message fact emits
-  `add_to_negentropy` with its current `context_have` and missing
-  `context_need`.
+  `add_to_negentropy` with its current validated `context_have` and without raw
+  `ContextNeed` selectors.
+- guardrail tests proving unresolved needs do not affect negentropy hashes,
+  persisted contribution rows, or range response payloads.
 - handler tests proving idempotent upsert, ancestor hash delta updates, and
   richer snapshots do not regress when older queued intents run later.
 - index tests proving one-leaf add/update/remove touches only that leaf's path

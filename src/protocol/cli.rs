@@ -115,7 +115,7 @@ pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     let output = ctx.with_command_context(|command_context| {
         auth::invite::cli::accept(command_context, args, from_listen_addr)
     })?;
-    let receipt = ctx.runtime_mut().submit_command_output(output)?;
+    let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
 }
 
@@ -127,7 +127,7 @@ pub(crate) fn accept_invite_server(
     let output = ctx.with_command_context(|command_context| {
         auth::invite::cli::accept_invite_server(command_context, args, from_listen_addr)
     })?;
-    let receipt = ctx.runtime_mut().submit_command_output(output)?;
+    let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
 }
 
@@ -139,7 +139,7 @@ pub(crate) fn accept_link(
     let output = ctx.with_command_context(|command_context| {
         auth::invite::cli::accept_link(command_context, args, from_listen_addr)
     })?;
-    let receipt = ctx.runtime_mut().submit_command_output(output)?;
+    let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
 }
 
@@ -642,6 +642,38 @@ pub(crate) fn sync_status(
     ctx.settle_local_command_work()?;
     let status = crate::protocol::sync::shared_fact::sync_status(ctx.runtime().store())?;
     Ok(sync::shared_fact::cli::sync_status_output(&status))
+}
+
+pub(crate) fn sync_range(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    let parsed = sync::shared_fact::cli::parse_sync_range_args(args)?;
+    ctx.settle_local_command_work()?;
+    let connection_id = sync::shared_fact::connection_id_for_peer_or_connection(
+        ctx.runtime().store(),
+        parsed.workspace_id,
+        parsed.peer_or_connection_id,
+    )?
+    .ok_or_else(|| "sync-range could not find an authorized connection".to_string())?;
+    let sent =
+        crate::protocol::connection::send_facts_on_connection::send_shareable_range_on_connection_now(
+            ctx.runtime().store(),
+            connection_id,
+            parsed.start_ms,
+            parsed.end_ms,
+            parsed.include_deps,
+    )?;
+    Ok(sync::shared_fact::cli::sync_range_output(
+        sync::shared_fact::cli::SyncRangeDispatched {
+            connection_id,
+            workspace_id: parsed.workspace_id,
+            start_ms: parsed.start_ms,
+            end_ms: parsed.end_ms,
+            include_deps: parsed.include_deps,
+            sent,
+        },
+    ))
 }
 
 pub(crate) fn content_count(

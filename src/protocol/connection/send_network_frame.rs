@@ -82,10 +82,12 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid send_network_frame payload: {err}")
 }
 
+use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
+use crate::core::store::Store;
 use crate::protocol::{auth::endpoint, connection};
 
 pub const SEND_NETWORK_FRAME_MISSING_ROUTE: &str = "send_network_frame_missing_route";
@@ -97,6 +99,23 @@ impl SendNetworkFrameHandler {
     pub fn new() -> Self {
         Self
     }
+}
+
+/// Send one already-sealed connection frame without going through the queued
+/// intent scheduler.
+///
+/// This is for explicit CLI flows that name a single connection and should not
+/// be delayed behind unrelated durable network retries. The daemon path still
+/// uses the intent handler above so live-tail sync remains retryable work.
+pub fn send_network_frame_now(store: &Store, input: SendNetworkFrame) -> Result<bool, String> {
+    validate_frame(&input)?;
+    let Some(connection_fact) = persisted_fact(store, &input.routing_key)? else {
+        return Ok(false);
+    };
+    let context = HandlerContext::with_facts([connection_fact]).with_store(store);
+    let target = resolve_target(&input.routing_key, &context).map_err(|err| err.to_string())?;
+    network::send(store, target, OutboundFrame { bytes: input.frame })?;
+    Ok(true)
 }
 
 impl IntentHandler for SendNetworkFrameHandler {

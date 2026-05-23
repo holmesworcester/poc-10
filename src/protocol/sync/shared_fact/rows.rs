@@ -12,8 +12,8 @@
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::{Store, TableName, TableRow};
-use crate::protocol::{auth, connection};
-use std::collections::BTreeSet;
+use crate::protocol::{auth, connection, content};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const SHAREABLE_FACT_ROWS: TableName = TableName::new("sync_shareable_fact_rows");
 
@@ -154,6 +154,55 @@ pub fn shareable_facts_for_connection(
     Ok(facts)
 }
 
+pub fn shareable_facts_for_connection_range(
+    store: &Store,
+    connection_id: FactId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+    include_deps: bool,
+) -> Result<Vec<Fact>, String> {
+    let available = shareable_facts_for_connection(store, connection_id)?;
+    if !include_deps {
+        return Ok(available
+            .into_iter()
+            .filter(|fact| {
+                start_timestamp_ms <= fact.timestamp && fact.timestamp <= end_timestamp_ms
+            })
+            .collect());
+    }
+
+    let by_id = available
+        .into_iter()
+        .map(|fact| (fact.id, fact))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::<FactId>::new();
+    let mut pending = VecDeque::<FactId>::new();
+    for fact in by_id.values() {
+        if start_timestamp_ms <= fact.timestamp && fact.timestamp <= end_timestamp_ms {
+            selected.insert(fact.id);
+            pending.push_back(fact.id);
+        }
+    }
+
+    while let Some(fact_id) = pending.pop_front() {
+        let Some(fact) = by_id.get(&fact_id) else {
+            continue;
+        };
+        for dep_id in shareable_dependency_fact_ids(store, fact)? {
+            if by_id.contains_key(&dep_id) && selected.insert(dep_id) {
+                pending.push_back(dep_id);
+            }
+        }
+    }
+
+    let mut facts = selected
+        .into_iter()
+        .filter_map(|fact_id| by_id.get(&fact_id).cloned())
+        .collect::<Vec<_>>();
+    facts.sort_by_key(|fact| (fact.timestamp, fact.id));
+    Ok(facts)
+}
+
 pub fn shareable_fact_for_connection(
     store: &Store,
     connection_id: FactId,
@@ -162,6 +211,37 @@ pub fn shareable_fact_for_connection(
     Ok(shareable_facts_for_connection(store, connection_id)?
         .into_iter()
         .find(|fact| fact.id == fact_id))
+}
+
+pub fn connection_id_for_peer_or_connection(
+    store: &Store,
+    workspace_id: FactId,
+    peer_or_connection_id: FactId,
+) -> Result<Option<FactId>, String> {
+    if connection_response_row(store, peer_or_connection_id)?.is_some() {
+        return Ok(Some(peer_or_connection_id));
+    }
+    let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
+        return Ok(None);
+    };
+    let endpoint_memberships = endpoint_memberships(store)?;
+    for connection in connection_response_rows(store)? {
+        let Some(remote_endpoint) =
+            remote_endpoint_for_connection(&connection, local_endpoint.endpoint)
+        else {
+            continue;
+        };
+        if remote_endpoint != peer_or_connection_id {
+            continue;
+        }
+        let connection_workspaces = connection_workspaces(store, &connection)?;
+        if endpoint_memberships.contains(&(workspace_id, remote_endpoint))
+            || connection_workspaces.contains(&workspace_id)
+        {
+            return Ok(Some(connection.connection_id));
+        }
+    }
+    Ok(None)
 }
 
 pub fn connection_ids_for_shareable_fact(
@@ -239,14 +319,20 @@ fn connection_response_row(
 }
 
 fn endpoint_memberships(store: &Store) -> Result<BTreeSet<(FactId, FactId)>, String> {
+    Ok(endpoint_shared_rows(store)?
+        .into_iter()
+        .map(|row| (row.workspace_id, row.endpoint_id))
+        .collect::<BTreeSet<_>>())
+}
+
+fn endpoint_shared_rows(
+    store: &Store,
+) -> Result<Vec<auth::endpoint_shared::rows::EndpointSharedRow>, String> {
     store
         .table_rows(auth::endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
         .map_err(|err| format!("load endpoint memberships for shareable sync: {err}"))?
         .into_iter()
-        .map(|(key, value)| {
-            auth::endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
-                .map(|row| (row.workspace_id, row.endpoint_id))
-        })
+        .map(|(key, value)| auth::endpoint_shared::rows::decode_endpoint_shared_row(&key, &value))
         .collect()
 }
 
@@ -315,6 +401,74 @@ fn fact_for_shareable_row(store: &Store, row: &ShareableFactRow) -> Result<Optio
         }
         _ => Err("shareable fact row does not match a global or workspace-scoped fact".to_string()),
     }
+}
+
+fn shareable_dependency_fact_ids(store: &Store, fact: &Fact) -> Result<Vec<FactId>, String> {
+    let mut deps = Vec::new();
+    if let Ok(message) = content::message::project::decode_raw_or_signed_fact(
+        fact,
+        content::message::layout::TYPE_CONTENT_MESSAGE,
+        "content message",
+        content::message::decode_fact_payload,
+    ) {
+        deps.push(message.payload.author_user_id);
+        deps.push(message.payload.frontier_id);
+        if message.payload.disappearing_setting_id != [0; 32] {
+            deps.push(message.payload.disappearing_setting_id);
+        }
+        if let Some(endpoint_shared_id) = endpoint_shared_fact_id_for_endpoint(
+            store,
+            message.payload.workspace_id,
+            message.payload.signer_id,
+        )? {
+            deps.push(endpoint_shared_id);
+        }
+        deps.sort();
+        deps.dedup();
+        return Ok(deps);
+    }
+
+    let Some(envelope) = auth::signed_fact::decode_envelope(fact.body()).ok() else {
+        return Ok(deps);
+    };
+    match envelope.inner_type {
+        auth::endpoint_shared::TYPE_ENDPOINT_SHARED => {
+            let shared = auth::endpoint_shared::decode_fact_payload(&envelope.payload)?;
+            deps.push(shared.workspace_id);
+            deps.push(shared.user_authority_fact_id);
+            deps.push(envelope.signer_id);
+        }
+        auth::device_invite::TYPE_DEVICE_INVITE => {
+            let invite = auth::device_invite::decode_fact_payload(&envelope.payload)?;
+            deps.push(invite.workspace_id);
+            deps.push(invite.user_authority_fact_id);
+            if let Some(user_invite_fact_id) = invite.user_invite_fact_id {
+                deps.push(user_invite_fact_id);
+            } else {
+                deps.push(envelope.signer_id);
+            }
+        }
+        auth::user::TYPE_USER => {
+            let user = auth::user::decode_fact_payload(&envelope.payload)?;
+            deps.push(user.workspace_id);
+            deps.push(envelope.signer_id);
+        }
+        _ => {}
+    }
+    deps.sort();
+    deps.dedup();
+    Ok(deps)
+}
+
+fn endpoint_shared_fact_id_for_endpoint(
+    store: &Store,
+    workspace_id: FactId,
+    endpoint_id: FactId,
+) -> Result<Option<FactId>, String> {
+    Ok(endpoint_shared_rows(store)?
+        .into_iter()
+        .find(|row| row.workspace_id == workspace_id && row.endpoint_id == endpoint_id)
+        .map(|row| row.endpoint_shared_id))
 }
 
 fn remote_endpoint_for_connection(

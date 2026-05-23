@@ -4,17 +4,21 @@
 //! how those fact bytes are packaged. It loads the named connection and payload
 //! facts, verifies local endpoint ownership and sendability, batches facts into
 //! fixed connection-frame budgets, seals each batch, and emits local
-//! `send_network_frame` intents.
+//! `send_network_frame` intents. The explicit `sync-range` CLI uses the same
+//! batching and sealing logic but sends its named range immediately so unrelated
+//! queued retries cannot delay an operator-requested bounded sync.
 //!
 //! This is not socket IO and it is not sync visibility policy. Sync owns the
 //! shareable index and requested ids, `connection::frame` owns byte-level
 //! sendability and sealing, and `send_network_frame` owns the final opaque
 //! socket write.
 
+use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
+use crate::core::store::Store;
 use crate::core::{effects::PipelineEffects, facts::Fact};
 use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
@@ -36,6 +40,7 @@ pub const SHAREABLE_BUCKET_TIMESTAMPS: u64 = 4096;
 
 const EXPLICIT_FACTS_PAYLOAD: u8 = 1;
 const SHAREABLE_RANGE_PAYLOAD: u8 = 2;
+const SHAREABLE_RANGE_WITH_DEPS_PAYLOAD: u8 = 3;
 const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 4;
 const INNER_FACT_LEN_BYTES: usize = 4;
 
@@ -75,16 +80,63 @@ pub fn send_shareable_bucket_on_connection_intent(
 ) -> Intent {
     let start_timestamp_ms = timestamp_ms - (timestamp_ms % SHAREABLE_BUCKET_TIMESTAMPS);
     let end_timestamp_ms = start_timestamp_ms.saturating_add(SHAREABLE_BUCKET_TIMESTAMPS - 1);
+    send_shareable_range_on_connection_intent(
+        connection_id,
+        start_timestamp_ms,
+        end_timestamp_ms,
+        false,
+    )
+}
+
+pub fn send_shareable_range_on_connection_intent(
+    connection_id: HandlerId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+    include_deps: bool,
+) -> Intent {
     let mut payload = PayloadWriter::with_capacity(1 + 32 + 8 + 8);
-    payload.u8(SHAREABLE_RANGE_PAYLOAD);
+    payload.u8(if include_deps {
+        SHAREABLE_RANGE_WITH_DEPS_PAYLOAD
+    } else {
+        SHAREABLE_RANGE_PAYLOAD
+    });
     payload.fixed(&connection_id);
     payload.u64be(start_timestamp_ms);
     payload.u64be(end_timestamp_ms);
     Intent::new(
         IntentKind::new(SEND_FACTS_ON_CONNECTION).expect("valid send_facts_on_connection kind"),
-        shareable_range_key(connection_id, start_timestamp_ms, end_timestamp_ms),
+        shareable_range_key(
+            connection_id,
+            start_timestamp_ms,
+            end_timestamp_ms,
+            include_deps,
+        ),
         payload.finish(),
     )
+}
+
+pub fn send_shareable_range_on_connection_now(
+    store: &Store,
+    connection_id: HandlerId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+    include_deps: bool,
+) -> Result<bool, String> {
+    let Some(connection_fact) = persisted_fact(store, &connection_id)? else {
+        return Ok(false);
+    };
+    let connection = response::layout::decode_fact(connection_fact.body())?;
+    if connection_fact.id != connection_id {
+        return Err("send_facts_on_connection connection fact id mismatch".into());
+    }
+    let facts = shared_fact::shareable_facts_for_connection_range(
+        store,
+        connection_id,
+        start_timestamp_ms,
+        end_timestamp_ms,
+        include_deps,
+    )?;
+    send_fact_batches_now(store, connection_id, &connection, facts)
 }
 
 pub fn decode_send_facts_on_connection(intent: &Intent) -> Result<SendFactsOnConnection, String> {
@@ -124,15 +176,21 @@ fn decode_send_facts_on_connection_work(
                 fact_ids,
             }))
         }
-        SHAREABLE_RANGE_PAYLOAD => {
+        SHAREABLE_RANGE_PAYLOAD | SHAREABLE_RANGE_WITH_DEPS_PAYLOAD => {
             let start_timestamp_ms = reader.u64be().map_err(payload_error)?;
             let end_timestamp_ms = reader.u64be().map_err(payload_error)?;
+            let include_deps = payload_kind == SHAREABLE_RANGE_WITH_DEPS_PAYLOAD;
             reader.finish().map_err(payload_error)?;
             if start_timestamp_ms > end_timestamp_ms {
                 return Err("send_facts_on_connection shareable range is inverted".into());
             }
             if intent.key
-                != shareable_range_key(connection_id, start_timestamp_ms, end_timestamp_ms)
+                != shareable_range_key(
+                    connection_id,
+                    start_timestamp_ms,
+                    end_timestamp_ms,
+                    include_deps,
+                )
             {
                 return Err("send_facts_on_connection key does not match shareable range".into());
             }
@@ -141,6 +199,7 @@ fn decode_send_facts_on_connection_work(
                     connection_id,
                     start_timestamp_ms,
                     end_timestamp_ms,
+                    include_deps,
                 },
             ))
         }
@@ -162,12 +221,14 @@ fn shareable_range_key(
     connection_id: HandlerId,
     start_timestamp_ms: u64,
     end_timestamp_ms: u64,
+    include_deps: bool,
 ) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:send-shareable-range-on-connection:v1:");
     hash.update(&connection_id);
     hash.update(&start_timestamp_ms.to_be_bytes());
     hash.update(&end_timestamp_ms.to_be_bytes());
+    hash.update(&[u8::from(include_deps)]);
     hash.finalize().as_bytes().to_vec()
 }
 
@@ -180,6 +241,7 @@ struct SendShareableRangeOnConnection {
     connection_id: HandlerId,
     start_timestamp_ms: u64,
     end_timestamp_ms: u64,
+    include_deps: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,15 +342,15 @@ fn facts_for_work(
             .iter()
             .map(|fact_id| context.require_fact(fact_id).cloned())
             .collect(),
-        SendFactsOnConnectionWork::ShareableRange(input) => Ok(
-            shared_fact::shareable_facts_for_connection(context.store()?, input.connection_id)?
-                .into_iter()
-                .filter(|fact| {
-                    input.start_timestamp_ms <= fact.timestamp
-                        && fact.timestamp <= input.end_timestamp_ms
-                })
-                .collect(),
-        ),
+        SendFactsOnConnectionWork::ShareableRange(input) => {
+            Ok(shared_fact::shareable_facts_for_connection_range(
+                context.store()?,
+                input.connection_id,
+                input.start_timestamp_ms,
+                input.end_timestamp_ms,
+                input.include_deps,
+            )?)
+        }
     }
 }
 
@@ -312,4 +374,47 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
         batches.push(batch);
     }
     Ok(batches)
+}
+
+fn send_fact_batches_now(
+    store: &Store,
+    connection_id: HandlerId,
+    connection: &response::fact::ConnectionResponseFact,
+    facts: Vec<Fact>,
+) -> Result<bool, String> {
+    let batches = fact_batches(facts)?;
+    let local_endpoint = endpoint::create::local_endpoint(store)?
+        .ok_or_else(|| "send_facts_on_connection requires local endpoint state".to_string())?;
+    let (sender_endpoint, receiver_endpoint) =
+        if local_endpoint.endpoint == connection.from_endpoint {
+            (connection.from_endpoint, connection.to_endpoint)
+        } else if local_endpoint.endpoint == connection.to_endpoint {
+            (connection.to_endpoint, connection.from_endpoint)
+        } else {
+            return Err("send_facts_on_connection local endpoint is not part of connection".into());
+        };
+
+    let mut sent = false;
+    for batch in batches {
+        let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
+        let mut bundle = ConnectionFrameFactBundle::new();
+        for fact in &batch {
+            bundle.push(create::require_sendable_fact(fact)?.to_vec());
+        }
+        sent |= send_network_frame::send_network_frame_now(
+            store,
+            SendNetworkFrame {
+                routing_key: connection_id,
+                frame: frame::seal_connection_send_frame(
+                    connection_id,
+                    sender_endpoint,
+                    receiver_endpoint,
+                    connection.connection_secret,
+                    &fact_ids,
+                    bundle,
+                )?,
+            },
+        )?;
+    }
+    Ok(sent)
 }
