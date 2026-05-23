@@ -116,19 +116,13 @@ fn matching_lines_with_comment_mode(
 const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
-const INTENT_HANDLER_FILES: [&str; 18] = [
+const INTENT_HANDLER_FILES: [&str; 12] = [
     "src/protocol/connection/create_response.rs",
-    "src/protocol/connection/purge_closed_connection_material.rs",
     "src/protocol/connection/receive_network_frame.rs",
     "src/protocol/connection/send_bootstrap_request.rs",
     "src/protocol/connection/send_facts_on_connection.rs",
     "src/protocol/connection/send_network_frame.rs",
-    "src/protocol/content/purge_below_retention_floor.rs",
-    "src/protocol/content/purge_deleted_message.rs",
-    "src/protocol/content/purge_expired_message.rs",
-    "src/protocol/content/purge_message_child.rs",
     "src/protocol/auth/create_key_wrap.rs",
-    "src/protocol/auth/purge_retired_recipient_material.rs",
     "src/protocol/auth/unwrap_key_wrap.rs",
     "src/protocol/sync/seed_connection.rs",
     "src/protocol/sync/send_compare_response.rs",
@@ -392,7 +386,7 @@ fn cutover_legacy_island_is_deleted() {
 fn cutover_projector_output_guardrail_is_real_and_enabled() {
     let root = root();
     let test = source_text(&root.join("tests/poc10_architecture_boundary_test.rs"));
-    let fn_name = "fn poc10_target_projectors_emit_only_needs_offers_and_intents";
+    let fn_name = "fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents";
     let Some(start) = test.find(fn_name) else {
         panic!("missing {fn_name}");
     };
@@ -516,7 +510,7 @@ fn cutover_dep_aware_sync_has_encrypted_out_of_range_display_perf_proof() {
 }
 
 #[test]
-fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
+fn cutover_purge_child_secret_retirement_sync_and_expiry_are_projector_owned() {
     let root = root();
     let handlers = intent_handler_files(&root)
         .into_iter()
@@ -527,18 +521,55 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_target_handlers() {
         })
         .collect::<Vec<_>>();
 
-    for required_fragment in [
+    assert!(
+        handlers.iter().any(|name| name.contains("share_fact")),
+        "sync sharing is still bounded handler work; current handlers: {}",
+        handlers.join(", ")
+    );
+    for forbidden_fragment in [
         "purge",
         "message_child",
         "retired_recipient",
-        "share_fact",
         "expired",
         "floor",
     ] {
         assert!(
-            handlers.iter().any(|name| name.contains(required_fragment)),
-            "missing bounded target handler covering {required_fragment:?}; current handlers: {}",
+            handlers
+                .iter()
+                .all(|name| !name.contains(forbidden_fragment)),
+            "deletion, retirement, and expiry cleanup must be projector-owned, not handler-owned; unexpected {forbidden_fragment:?} handler in {}",
             handlers.join(", ")
+        );
+    }
+
+    let style = source_text(&root.join("projector_style.md"));
+    for required_pattern in [
+        "## Deletion Pattern",
+        "Deletion is target-owned",
+        "ProjectionOutput::purge_self",
+        "core rejects cross-fact purges",
+    ] {
+        assert!(
+            style.contains(required_pattern),
+            "projector_style.md must remember the target-owned deletion pattern; missing {required_pattern:?}"
+        );
+    }
+
+    for projector in [
+        "src/protocol/auth/local_key_secret/project.rs",
+        "src/protocol/auth/local_history_node_secret/project.rs",
+        "src/protocol/auth/local_recipient_key/project.rs",
+        "src/protocol/connection/ephemeral_secret/project.rs",
+        "src/protocol/connection/response/project.rs",
+        "src/protocol/content/message/project.rs",
+        "src/protocol/content/reaction/project.rs",
+        "src/protocol/content/file/project.rs",
+        "src/protocol/content/file_slice/project.rs",
+    ] {
+        let text = source_text(&root.join(projector));
+        assert!(
+            text.contains(".purge_self("),
+            "{projector} must self-purge after matched deletion/close/retirement context"
         );
     }
 
@@ -635,6 +666,7 @@ fn cutover_auth_family_facade_delegates_to_named_fact_slices() {
         "removal_frontier",
         "local_history_node_secret",
         "local_key_secret",
+        "local_secret_retirement",
         "key_request",
         "key_wrap",
     ];

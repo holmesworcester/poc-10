@@ -778,8 +778,9 @@ struct ProjectionRun {
 /// Call the protocol projector and normalize the output for the SQL pipeline.
 ///
 /// Projection output is the complete replacement context for this fact. This
-/// helper enforces that projectors only own their own context/time rows, then
-/// computes the context delta that will wake dependent facts after commit.
+/// helper enforces that projectors only own their own context/time rows and may
+/// purge only their own fact, then computes the context delta that will wake
+/// dependent facts after commit.
 fn run_projection_with_context(
     projector: &(impl Projector + ?Sized),
     fact: &Fact,
@@ -798,11 +799,16 @@ fn run_projection_with_context(
     })
 }
 
-/// Reject any projected need, offer, or time wake whose `owner` is not the fact
-/// being projected.
+/// Reject any projected need, offer, time wake, or purge whose owner is not the
+/// fact being projected.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    if !output.effects.purged_facts.is_empty() {
-        return Err("projector output cannot purge facts".to_string());
+    for purged in &output.effects.purged_facts {
+        if *purged != fact.id {
+            return Err(format!(
+                "projector tried to purge fact {:x?} while projecting {:x?}",
+                purged, fact.id
+            ));
+        }
     }
     for need in &output.needs {
         if need.owner != fact.id {
@@ -869,6 +875,28 @@ mod tests {
             .expect_err("projection should reject foreign time-wake owner");
 
         assert!(err.contains("projector emitted time wake"));
+    }
+
+    #[test]
+    fn projection_run_rejects_purge_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = BadPurgeOwnerProjector;
+
+        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect_err("projection should reject foreign purge owner");
+
+        assert!(err.contains("projector tried to purge fact"));
+    }
+
+    #[test]
+    fn projection_run_allows_self_purge() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = SelfPurgeProjector;
+
+        let run = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
+            .expect("projection should allow self purge");
+
+        assert_eq!(run.pipeline.purged_facts, vec![fact.id]);
     }
 
     #[test]
@@ -1502,6 +1530,30 @@ mod tests {
                 timeline: Timeline::new("test").unwrap(),
                 at: 1,
             }))
+        }
+    }
+
+    struct BadPurgeOwnerProjector;
+
+    impl Projector for BadPurgeOwnerProjector {
+        fn project(
+            &self,
+            _fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().purge_self([9; 32]))
+        }
+    }
+
+    struct SelfPurgeProjector;
+
+    impl Projector for SelfPurgeProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().purge_self(fact.id))
         }
     }
 

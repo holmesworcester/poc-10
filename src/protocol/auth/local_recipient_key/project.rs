@@ -2,7 +2,7 @@
 //!
 //! POLICY. A local recipient key is admitted iff it is local-scoped and matches
 //! its shared recipient fact. Projection offers local-recipient context while the
-//! key is live, and emits purge work when a superseding recipient key retires it.
+//! key is live, and self-purges when a superseding recipient key retires it.
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
@@ -10,9 +10,6 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
-use crate::protocol::auth::purge_retired_recipient_material::{
-    purge_retired_recipient_material_intent, PurgeRetiredRecipientMaterialIntent,
-};
 use crate::protocol::auth::recipient_key;
 
 use super::fact::LocalRecipientKeyFact;
@@ -86,15 +83,9 @@ fn local_recipient_key(
     let output = ProjectionOutput::new()
         .need(recipient_need)
         .need(superseded_need);
-    // 3. Materialize: offer local-recipient context or emit purge work.
+    // 3. Materialize: offer local-recipient context or self-purge.
     if is_superseded {
-        return Ok(output.intent(purge_retired_recipient_material_intent(
-            PurgeRetiredRecipientMaterialIntent {
-                workspace_id: local.workspace_id,
-                recipient_key_id: local.recipient_key_id,
-                local_recipient_key_id: fact.id,
-            },
-        )));
+        return Ok(output.purge_self(fact.id));
     }
 
     Ok(output.offer(ContextOffer::range(

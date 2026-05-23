@@ -2,9 +2,10 @@
 //!
 //! Settings define workspace retention policy over message minutes. Projection
 //! validates authority, supersession, and monotonic tightening rules, publishes
-//! the active-setting row, and emits purge work when a new floor makes content
-//! expired. Commands and queries here are the user-facing control surface for
-//! retention; content projection consumes the resulting policy.
+//! the active-setting row, and offers retention-floor context for messages in
+//! the workspace. Commands and queries here are the user-facing control surface
+//! for retention; message projection consumes the resulting policy and
+//! self-purges expired facts.
 
 pub mod cli;
 pub mod commands;

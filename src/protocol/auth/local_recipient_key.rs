@@ -1,8 +1,8 @@
 //! Local recipient key fact family.
 //!
 //! A local recipient key holds private material that lets this store unwrap key
-//! wraps. Projection proves it matches the shared recipient fact and emits purge
-//! work when the recipient key is superseded.
+//! wraps. Projection proves it matches the shared recipient fact and self-purges
+//! when the recipient key is superseded.
 
 pub mod fact;
 pub mod layout;

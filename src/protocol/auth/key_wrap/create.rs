@@ -2,7 +2,7 @@
 //!
 //! Projection and intent handlers use this module when context has already
 //! supplied the exact facts needed to create or admit a key wrap, unwrap a key
-//! wrap into local secret material, or purge retired recipient material.
+//! wrap into local secret material, or validate derived local material.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
@@ -15,7 +15,6 @@ use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use crate::protocol::auth::local_key_secret::layout as local_key_secret_layout;
 use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
 use crate::protocol::auth::local_recipient_key::layout as local_recipient_layout;
-use crate::protocol::auth::purge_retired_recipient_material::PurgeRetiredRecipientMaterialIntent;
 use crate::protocol::auth::recipient_key::fact::RecipientKeyFact;
 use crate::protocol::auth::recipient_key::layout as recipient_key_layout;
 use crate::protocol::auth::removal_frontier::layout as removal_frontier_layout;
@@ -200,27 +199,6 @@ pub fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
         wrap.created_at_ms,
         bytes,
     ))
-}
-
-pub fn validate_retired_recipient_material(
-    intent: &PurgeRetiredRecipientMaterialIntent,
-    local_recipient_key_fact: &Fact,
-) -> Result<(), String> {
-    if local_recipient_key_fact.id != intent.local_recipient_key_id {
-        return Err("local recipient key fact id does not match purge intent".to_string());
-    }
-    if local_recipient_key_fact.scope != FactScope::Local {
-        return Err("retired recipient material is not local".to_string());
-    }
-    let local =
-        local_recipient_layout::decode_local_recipient_key(&local_recipient_key_fact.bytes)?;
-    if local.workspace_id != intent.workspace_id {
-        return Err("retired recipient material workspace mismatch".to_string());
-    }
-    if local.recipient_key_id != intent.recipient_key_id {
-        return Err("retired recipient material recipient mismatch".to_string());
-    }
-    Ok(())
 }
 
 fn wrap_material(intent: &CreateKeyWrapIntent, source_fact: &Fact) -> Result<WrapMaterial, String> {

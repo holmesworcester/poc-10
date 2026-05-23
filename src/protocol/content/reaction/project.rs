@@ -4,7 +4,8 @@
 //!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
 //!      reaction payload.
 //!   2. CONTEXT. Projection waits for signer, target content message, target
-//!      deletion, and author context; deleted targets remove the reaction row.
+//!      deletion, and author context; deleted targets remove the reaction row
+//!      and purge this reaction fact.
 //!   3. MATERIALIZE. Live reactions write one row and share the fact.
 
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -126,7 +127,8 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             project::verify_envelope(envelope.as_ref(), "reaction")?;
             return Ok(delete_reaction_projection(reaction.workspace_id, fact.id)
                 .need(target_need)
-                .need(target_deletion_need));
+                .need(target_deletion_need)
+                .purge_self(fact.id));
         }
         let Some(author) = context_payload(context, &author_need, "reaction author")? else {
             return Ok(output_with_needs([

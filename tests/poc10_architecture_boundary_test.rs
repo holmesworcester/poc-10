@@ -118,34 +118,18 @@ const PROTOCOL_SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
 /// directory. Everything else under a scope directory is fact-module code.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     let handlers: [(&str, &[&str]); 4] = [
-        (
-            "auth",
-            &[
-                "create_key_wrap.rs",
-                "purge_retired_recipient_material.rs",
-                "unwrap_key_wrap.rs",
-            ],
-        ),
+        ("auth", &["create_key_wrap.rs", "unwrap_key_wrap.rs"]),
         (
             "connection",
             &[
                 "create_response.rs",
-                "purge_closed_connection_material.rs",
                 "receive_network_frame.rs",
                 "send_bootstrap_request.rs",
                 "send_facts_on_connection.rs",
                 "send_network_frame.rs",
             ],
         ),
-        (
-            "content",
-            &[
-                "purge_below_retention_floor.rs",
-                "purge_deleted_message.rs",
-                "purge_expired_message.rs",
-                "purge_message_child.rs",
-            ],
-        ),
+        ("content", &[]),
         (
             "sync",
             &[
@@ -603,7 +587,7 @@ fn poc10_architecture_docs_describe_legacy_queues_as_removed_mechanisms() {
 }
 
 #[test]
-fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
+fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let projector_paths = target_projector_files(root);
     assert!(
@@ -631,7 +615,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
 
     assert!(
         offenders.is_empty(),
-        "poc-10 target projectors should emit only needs, offers, row mutations, and intents; rows, deletes, and labels must go through projector output helpers, not ad hoc fields:\n{}",
+        "poc-10 target projectors should emit only needs, offers, row mutations, self-purge, and intents; rows, deletes, and labels must go through projector output helpers, not ad hoc fields:\n{}",
         offenders.join("\n")
     );
 }

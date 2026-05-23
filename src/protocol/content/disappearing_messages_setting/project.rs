@@ -14,6 +14,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth;
+use crate::protocol::content::message;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::DisappearingMessagesSettingFact;
@@ -120,6 +121,10 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
                 FactScope::Global,
                 fact.id,
                 fact.id,
+            ))
+            .offer(message::retention_floor_offer(
+                fact.id,
+                setting.workspace_id,
             ))
             .row_mutation(RowMutation::PutRow(row))
             .intent(share_fact_with_workspace_intent_for_fact(

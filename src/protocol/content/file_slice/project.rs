@@ -4,9 +4,10 @@
 //!   1. STRUCTURAL. The fact is workspace-scoped and its parent file selector
 //!      and slice index decode from the canonical payload.
 //!   2. CONTEXT. Projection waits for the parent file, rejects out-of-range
-//!      indexes, and watches parent deletion context.
+//!      indexes, and watches parent file/message deletion context.
 //!   3. MATERIALIZE. Live slices write one row and share the fact; deleted
-//!      parents delete the slice row. AEAD opening stays in auth key-material code.
+//!      parents delete the slice row and purge this slice fact. AEAD opening
+//!      stays in auth key-material code.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId};
@@ -21,6 +22,7 @@ use crate::protocol::content::file_deletion;
 use crate::protocol::content::message;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project as message_project;
+use crate::protocol::content::message_deletion;
 use crate::protocol::content::purge::project as content_purge;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -105,11 +107,43 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         }
         let file_deletion_need = content_purge::target_purged_need(
             fact.id,
-            scope,
+            scope.clone(),
             parent_message.frontier_id,
             unix_minute_for(file.created_at_ms),
             parent.id,
         );
+        let parent_deletion_need = content_purge::target_purged_need(
+            fact.id,
+            scope,
+            parent_message.frontier_id,
+            parent_message.minute,
+            file.message_id,
+        );
+        if let Some(deletion) = context_payload(
+            context,
+            &parent_deletion_need,
+            "file slice message parent deletion",
+        )? {
+            validate_message_deletion(
+                deletion,
+                file.workspace_id,
+                parent_message.frontier_id,
+                parent_message.minute,
+                file.message_id,
+                parent_message.author_user_id,
+            )?;
+            return Ok(ProjectionOutput::new()
+                .need(file_need)
+                .need(message_need)
+                .need(file_deletion_need)
+                .need(parent_deletion_need)
+                .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
+                    slice.workspace_id,
+                    slice.file_id,
+                    slice.slice_index,
+                )))
+                .purge_self(fact.id));
+        }
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {
@@ -118,11 +152,13 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
                 .need(file_need)
                 .need(message_need)
                 .need(file_deletion_need)
+                .need(parent_deletion_need)
                 .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
                     slice.workspace_id,
                     slice.file_id,
                     slice.slice_index,
-                ))));
+                )))
+                .purge_self(fact.id));
         }
 
         // 3. Materialize.
@@ -130,6 +166,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             .need(file_need)
             .need(message_need)
             .need(file_deletion_need)
+            .need(parent_deletion_need)
             .row_mutation(RowMutation::InsertValues(content_file_slice_row(
                 fact.id, &slice,
             )))
@@ -167,6 +204,39 @@ fn validate_file_deletion(
         return Err(
             "file slice parent deletion author does not match parent file author".to_string(),
         );
+    }
+    Ok(())
+}
+
+fn validate_message_deletion(
+    payload: &Fact,
+    workspace_id: crate::core::facts::FactId,
+    target_frontier_id: crate::core::facts::FactId,
+    target_minute: u64,
+    target_message_id: crate::core::facts::FactId,
+    author_user_id: crate::core::facts::FactId,
+) -> Result<(), String> {
+    let deletion = message_project::decode_raw_or_signed_fact(
+        payload,
+        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
+        "file slice message parent deletion",
+        message_deletion::decode_fact_payload,
+    )?
+    .payload;
+    if deletion.workspace_id != workspace_id {
+        return Err("file slice message deletion workspace does not match slice".to_string());
+    }
+    if deletion.target_frontier_id != target_frontier_id {
+        return Err("file slice message deletion frontier does not match parent".to_string());
+    }
+    if deletion.target_minute != target_minute {
+        return Err("file slice message deletion minute does not match parent".to_string());
+    }
+    if deletion.target_message_id != target_message_id {
+        return Err("file slice message deletion target does not match parent".to_string());
+    }
+    if deletion.author_user_id != author_user_id {
+        return Err("file slice message deletion author does not match parent".to_string());
     }
     Ok(())
 }

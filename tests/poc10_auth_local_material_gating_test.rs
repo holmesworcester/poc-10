@@ -22,8 +22,15 @@ fn local_key_secret_waits_for_frontier_then_offers_root_material() {
         .expect("missing frontier waits");
     assert!(waiting.effects.intents.is_empty());
     assert!(waiting.offers.is_empty());
-    assert_eq!(waiting.needs.len(), 1);
-    assert_eq!(waiting.needs[0].role, "auth_removal_frontier");
+    assert_eq!(waiting.needs.len(), 2);
+    assert!(waiting
+        .needs
+        .iter()
+        .any(|need| need.role == "auth_removal_frontier"));
+    assert!(waiting
+        .needs
+        .iter()
+        .any(|need| need.role == "local_secret_source_retired"));
 
     let projected = projector
         .project(
@@ -59,7 +66,11 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
         .expect("missing context waits");
     assert!(waiting.effects.intents.is_empty());
     assert!(waiting.offers.is_empty());
-    assert_eq!(waiting.needs.len(), 2);
+    assert_eq!(waiting.needs.len(), 3);
+    assert!(waiting
+        .needs
+        .iter()
+        .any(|need| need.role == "local_secret_source_retired"));
 
     let projected = projector
         .project(

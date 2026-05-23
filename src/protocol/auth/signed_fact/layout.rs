@@ -19,6 +19,7 @@ pub const TYPE_LOCAL_SIGNER_SECRET: u8 = 133;
 const TYPE_LOCAL_KEY_SECRET: u8 = 152;
 const TYPE_LOCAL_HISTORY_NODE_SECRET: u8 = 153;
 const TYPE_LOCAL_RECIPIENT_KEY: u8 = 156;
+const TYPE_LOCAL_SECRET_RETIREMENT: u8 = 157;
 pub const SIGNED_FACT_BYTES: usize =
     1 + 32 + 32 + 1 + FixedSlot::<SIGNED_FACT_PAYLOAD_BYTES>::LEN + ED25519_SIGNATURE_BYTES;
 pub const LOCAL_SIGNER_SECRET_BYTES: usize = 1 + 32 + 32 + 32 + 32;
@@ -161,6 +162,7 @@ fn private_payload_type(actual_type: u8) -> bool {
             | TYPE_LOCAL_KEY_SECRET
             | TYPE_LOCAL_HISTORY_NODE_SECRET
             | TYPE_LOCAL_RECIPIENT_KEY
+            | TYPE_LOCAL_SECRET_RETIREMENT
     )
 }
 

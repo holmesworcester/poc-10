@@ -2,7 +2,8 @@
 //!
 //! POLICY. A local key secret is admitted iff it is local-scoped and ties to its
 //! removal frontier. Projection publishes frontier-root wrap-source and
-//! secret-coverage offers.
+//! secret-coverage offers while live, and self-purges when retirement context
+//! for this secret arrives.
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
@@ -13,6 +14,7 @@ use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
 };
 use crate::protocol::auth::local_history_node_secret::project::secret_offer;
+use crate::protocol::auth::local_secret_retirement;
 use crate::protocol::auth::removal_frontier;
 
 use super::fact::LocalKeySecretFact;
@@ -55,7 +57,13 @@ fn project_local_key_secret(
     // 1. Structural.
     let scope = crate::protocol::auth::workspace::scope(secret.workspace_id);
     require_local_scope(fact)?;
-    // 2. Context: removal-frontier match.
+    // 2. Context: retirement and removal-frontier match.
+    let retirement_need = local_secret_retirement::secret_retired_need(fact.id, fact.id);
+    if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
+        validate_local_key_retirement(retirement_fact, fact.id, &secret)?;
+        return Ok(ProjectionOutput::new().purge_self(fact.id));
+    }
+
     let frontier_need = ContextNeed::range(
         fact.id,
         "auth_removal_frontier",
@@ -64,12 +72,16 @@ fn project_local_key_secret(
         secret.frontier_id,
     );
     let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {
-        return Ok(ProjectionOutput::new().need(frontier_need));
+        return Ok(ProjectionOutput::new()
+            .need(frontier_need)
+            .need(retirement_need));
     };
     validate_local_key_frontier(frontier_fact, &secret)?;
 
     // 3. Materialize: publish wrap-source and coverage offers.
-    let mut output = ProjectionOutput::new().need(frontier_need);
+    let mut output = ProjectionOutput::new()
+        .need(frontier_need)
+        .need(retirement_need);
     for offer in frontier_root_wrap_source_offers(
         fact.id,
         scope.clone(),
@@ -98,6 +110,25 @@ fn project_local_key_secret(
             0,
             [0; 32],
         )))
+}
+
+fn validate_local_key_retirement(
+    retirement_fact: &Fact,
+    target_id: crate::core::facts::FactId,
+    secret: &LocalKeySecretFact,
+) -> Result<(), String> {
+    if retirement_fact.scope != FactScope::Local {
+        return Err("local key secret retirement context must be local".to_string());
+    }
+    let retirement = local_secret_retirement::decode_fact_payload(retirement_fact.body())
+        .map_err(|_| "local key secret retirement context is not a retirement fact".to_string())?;
+    if retirement.workspace_id != secret.workspace_id {
+        return Err("local key secret retirement workspace mismatch".to_string());
+    }
+    if retirement.target_secret_id != target_id {
+        return Err("local key secret retirement target mismatch".to_string());
+    }
+    Ok(())
 }
 
 fn validate_local_key_frontier(

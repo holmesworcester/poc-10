@@ -4,10 +4,11 @@
 //!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
 //!      message payload with encrypted text.
 //!   2. CONTEXT. The projector records sync liveness immediately, then waits
-//!      for signer, author, deletion, secret, and time context. Once signer
-//!      and author validate, it publishes metadata context for deletion. It
-//!      does not publish opened message context or rows until the encrypted
-//!      text opens.
+//!      for signer, author, deletion, retention-floor, secret, and time
+//!      context. Once signer and author validate, it publishes metadata context
+//!      for deletion. It does not publish opened message context or rows until
+//!      the encrypted text opens. Deletion, expiry, or retention context removes
+//!      this message's rows and purges this message fact.
 //!   3. MATERIALIZE. Once opened, the projector writes read-model rows and
 //!      offers semantic message context.
 
@@ -21,16 +22,14 @@ use crate::core::projectors::{
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
 use crate::protocol::auth::user;
-use crate::protocol::content::purge_deleted_message::{
-    self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
+use crate::protocol::content::{
+    disappearing_messages_setting, message_deletion, purge::project as content_purge,
 };
-use crate::protocol::content::purge_expired_message::{self, PurgeExpiredMessage};
-use crate::protocol::content::{message_deletion, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{
-    content_message_row, message_tombstone_row, opened_message_row, OpenedMessageRow,
-    CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
+    content_message_row, message_tombstone_row, message_tombstone_row_at_minute,
+    opened_message_row, OpenedMessageRow, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +87,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             message.minute,
             fact.id,
         );
+        let retention_floor_need = super::retention_floor_need(fact.id, message.workspace_id);
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_user",
@@ -110,6 +110,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             [
                 signer_need.clone(),
                 deletion_need.clone(),
+                retention_floor_need.clone(),
                 author_need.clone(),
                 secret_need.clone(),
             ],
@@ -135,8 +136,14 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             .row_mutation(RowMutation::InsertValues(content_message_row(
                 fact.id, &message,
             )));
-        if let Some(now_minute) = expiry_minute_reached(context, &message) {
-            return Ok(expired_output(fact.id, &message, now_minute));
+        if expiry_minute_reached(context, &message).is_some() {
+            return Ok(expired_output(fact.id, &message));
+        }
+        if let Some(floor) = cover_horizon_reached(context, &message) {
+            return Ok(retired_output(fact.id, &message, floor));
+        }
+        if let Some(floor) = retention_floor_reached(context, &retention_floor_need, &message)? {
+            return Ok(retired_output(fact.id, &message, floor));
         }
         if let Some(deletion) = context_payload(context, &deletion_need, "message deletion")? {
             validate_message_deletion(
@@ -147,7 +154,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
                 fact.id,
                 message.author_user_id,
             )?;
-            return Ok(author_deletion_output(fact.id, &message, deletion.id));
+            return Ok(author_deletion_output(fact.id, &message));
         }
         let Some(secret_payload) = matched_secret_payload(context, &secret_need)? else {
             return Ok(metadata_output);
@@ -181,7 +188,7 @@ fn base_wait_output(
     message: &super::fact::ContentMessageFact,
     needs: impl IntoIterator<Item = ContextNeed>,
 ) -> ProjectionOutput {
-    with_expiry_wake(
+    with_retention_wakes(
         needs
             .into_iter()
             .fold(ProjectionOutput::new(), |output, need| output.need(need))
@@ -350,11 +357,50 @@ fn expiry_minute_reached(
     )
 }
 
-fn with_expiry_wake(
+fn retention_floor_reached(
+    context: &ProjectionContext,
+    need: &ContextNeed,
+    message: &super::fact::ContentMessageFact,
+) -> Result<Option<u64>, String> {
+    let mut floor = 0u64;
+    for (_offer, payload) in context.matched_payloads_for(need) {
+        let setting = disappearing_messages_setting::decode_fact_payload(payload.body())
+            .map_err(|_| "content message retention floor context is not a setting".to_string())?;
+        if setting.workspace_id != message.workspace_id {
+            return Err("content message retention floor workspace mismatch".to_string());
+        }
+        floor = floor.max(setting.retire_minute);
+    }
+    Ok((message.minute < floor).then_some(floor))
+}
+
+fn cover_horizon_reached(
+    context: &ProjectionContext,
+    message: &super::fact::ContentMessageFact,
+) -> Option<u64> {
+    let retire_at = message.minute.checked_add(super::COVER_HORIZON_MINUTES)?;
+    context
+        .time_reached(
+            &crate::protocol::content::message::expiration_timeline(),
+            retire_at,
+        )
+        .map(|now| now.saturating_sub(super::COVER_HORIZON_MINUTES))
+        .filter(|floor| message.minute < *floor)
+}
+
+fn with_retention_wakes(
     output: ProjectionOutput,
     owner: FactId,
     message: &super::fact::ContentMessageFact,
 ) -> ProjectionOutput {
+    let mut output = output;
+    if let Some(at) = message.minute.checked_add(super::COVER_HORIZON_MINUTES) {
+        output = output.time_wake(TimeWake {
+            owner,
+            timeline: crate::protocol::content::message::expiration_timeline(),
+            at,
+        });
+    }
     if message.expires_at_minute == u64::MAX {
         return output;
     }
@@ -368,7 +414,6 @@ fn with_expiry_wake(
 fn expired_output(
     message_id: FactId,
     message: &super::fact::ContentMessageFact,
-    now_minute: u64,
 ) -> ProjectionOutput {
     ProjectionOutput::new()
         .row_mutation(RowMutation::InsertValues(message_tombstone_row(
@@ -387,19 +432,37 @@ fn expired_output(
             message.workspace_id,
             message_id,
         )))
-        .intent(purge_expired_message::purge_expired_message_intent(
-            PurgeExpiredMessage {
-                workspace_id: message.workspace_id,
-                target_id: message_id,
-                now_minute,
-            },
-        ))
+        .purge_self(message_id)
+}
+
+fn retired_output(
+    message_id: FactId,
+    message: &super::fact::ContentMessageFact,
+    floor_minute: u64,
+) -> ProjectionOutput {
+    ProjectionOutput::new()
+        .row_mutation(RowMutation::InsertValues(message_tombstone_row_at_minute(
+            message.workspace_id,
+            message_id,
+            message.author_user_id,
+            floor_minute.saturating_sub(1),
+        )))
+        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            CONTENT_MESSAGE_ROWS,
+            message.workspace_id,
+            message_id,
+        )))
+        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            OPENED_MESSAGE_ROWS,
+            message.workspace_id,
+            message_id,
+        )))
+        .purge_self(message_id)
 }
 
 fn author_deletion_output(
     message_id: FactId,
     message: &super::fact::ContentMessageFact,
-    reason_fact_id: FactId,
 ) -> ProjectionOutput {
     ProjectionOutput::new()
         .row_mutation(RowMutation::InsertValues(message_tombstone_row(
@@ -418,15 +481,7 @@ fn author_deletion_output(
             message.workspace_id,
             message_id,
         )))
-        .intent(purge_deleted_message::purge_deleted_message_intent(
-            PurgeDeletedMessage {
-                workspace_id: message.workspace_id,
-                target_kind: PURGE_TARGET_MESSAGE,
-                target_id: message_id,
-                reason_kind: PURGE_REASON_AUTHOR_DELETION,
-                reason_fact_id,
-            },
-        ))
+        .purge_self(message_id)
 }
 
 fn maybe_signed_payload(
@@ -677,7 +732,7 @@ mod projector_tests {
             )
             .expect("project content message");
 
-        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.needs.len(), 5);
         assert_eq!(output.offers.len(), 2);
         assert!(output
             .offers
@@ -733,7 +788,7 @@ mod projector_tests {
             .expect("project content message");
 
         assert_eq!(output.offers.len(), 0);
-        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.needs.len(), 5);
         assert_eq!(output.effects.intents.len(), 1);
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
@@ -745,6 +800,10 @@ mod projector_tests {
             .needs
             .iter()
             .any(|need| need.role == "content_purged"));
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == "content_retention_floor"));
         assert!(output
             .needs
             .iter()
@@ -767,7 +826,7 @@ mod projector_tests {
             )
             .expect("project content message");
 
-        assert_eq!(output.needs.len(), 4);
+        assert_eq!(output.needs.len(), 5);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
         assert_eq!(output.effects.intents.len(), 1);

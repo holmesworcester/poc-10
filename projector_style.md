@@ -27,6 +27,21 @@ Write each projector as:
    path.
 6. Row materialization through module row helpers and schema-owned tables.
 
+## Deletion Pattern
+
+Deletion is target-owned. A deletion, close, or retirement fact publishes
+context with an offer; a due time wake supplies time context. The target fact
+keeps the matching need or wake in its normal projection output. When that
+context matches, the target projector validates the payload when there is one,
+deletes only rows it owns, and then calls `ProjectionOutput::purge_self` for
+its own fact id.
+
+Do not build parent-owned child scans or generic cascade handlers. A parent
+projector may publish deletion context, but reaction, file, slice, secret, and
+connection-material projectors are responsible for observing that context and
+removing themselves. The only purge a projector may emit is its own fact id;
+core rejects cross-fact purges from projector output.
+
 The current model projector is
 `src/protocol/auth/device_invite/project.rs`.
 

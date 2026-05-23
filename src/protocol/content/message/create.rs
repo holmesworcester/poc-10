@@ -9,13 +9,11 @@ use crate::core::command_context::{
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
-use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
+use crate::core::intents::TableDeleteWhere;
 use crate::core::intents::Value;
-use crate::core::intents::{RowMutation, TableDeleteWhere};
-use crate::core::pipeline::commit_pipeline_effects_to_store;
 use crate::core::runtime::Runtime;
-use crate::core::store::{Store, TableName};
+use crate::core::store::TableName;
 use crate::core::wire;
 use crate::protocol::auth;
 use crate::protocol::auth::signed_fact::{self, create as signed_fact_create};
@@ -384,13 +382,14 @@ fn latest_local_key_secret(
 }
 
 // ---------------------------------------------------------------------------
-// Message retention (expiry and deletion purge support).
+// Message retention (expiry, deletion, and floor support).
 //
 // Retention is the point where message state intentionally stops being a live
 // row. These helpers decode either raw or signed message facts into the fields
 // needed for expiration, write tombstones that preserve deletion history, and
 // remove live message rows through the same atomic effect commit path used by
-// normal projection. They are invoked by the content purge intent handlers.
+// normal projection. Message projection invokes them when matched context
+// tells the message fact to self-delete.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,46 +455,9 @@ pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> 
     }
 }
 
-pub fn delete_message_projection(
-    store: &Store,
-    message_id: FactId,
-    message: &impl RetentionMessageView,
-    context: &str,
-) -> Result<(), String> {
-    let workspace_id = message.workspace_id();
-    let effects = PipelineEffects::new()
-        .row_mutation(RowMutation::InsertValues(rows::message_tombstone_row(
-            workspace_id,
-            message_id,
-            message.author_user_id(),
-            message.created_at_ms(),
-        )))
-        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
-            rows::OPENED_MESSAGE_ROWS,
-            workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(message_row_delete(
-            rows::CONTENT_MESSAGE_ROWS,
-            workspace_id,
-            message_id,
-        )));
-    commit_pipeline_effects_to_store(
-        store,
-        &effects,
-        &[
-            rows::MESSAGE_TOMBSTONE_ROWS,
-            rows::OPENED_MESSAGE_ROWS,
-            rows::CONTENT_MESSAGE_ROWS,
-        ],
-        context,
-    )?;
-    Ok(())
-}
-
 /// Builds the keyed delete for a message row in `table`. This is a pure value
-/// constructor used by both projection (expiry/deletion outputs) and the
-/// retention helpers above.
+/// constructor used by message projection when expiry, deletion, or retention
+/// context removes the target fact.
 pub(crate) fn message_row_delete(
     table: TableName,
     workspace_id: FactId,

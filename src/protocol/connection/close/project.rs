@@ -9,7 +9,7 @@
 //!   2. CONTEXT. The exact local connection_response context for that id is
 //!      present and decodes as the referenced response fact.
 //!   3. MATERIALIZE. Publish close offers only; target facts own their own row
-//!      deletion and purge work when those offers wake them.
+//!      deletion and self-purge when those offers wake them.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{

@@ -111,34 +111,18 @@ fn scope_manifests(root: &Path) -> Vec<PathBuf> {
 /// directory; there is no separate `src/protocol/intents` tree.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     const HANDLERS: &[(&str, &[&str])] = &[
-        (
-            "auth",
-            &[
-                "create_key_wrap",
-                "purge_retired_recipient_material",
-                "unwrap_key_wrap",
-            ],
-        ),
+        ("auth", &["create_key_wrap", "unwrap_key_wrap"]),
         (
             "connection",
             &[
                 "create_response",
-                "purge_closed_connection_material",
                 "receive_network_frame",
                 "send_bootstrap_request",
                 "send_facts_on_connection",
                 "send_network_frame",
             ],
         ),
-        (
-            "content",
-            &[
-                "purge_below_retention_floor",
-                "purge_deleted_message",
-                "purge_expired_message",
-                "purge_message_child",
-            ],
-        ),
+        ("content", &[]),
         (
             "sync",
             &[
@@ -213,26 +197,6 @@ fn contains_legacy_custom_context_matcher_api(text: &str) -> bool {
 }
 
 #[test]
-fn purge_deleted_message_intent_does_not_encode_projection_work() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let intent = source_text(&root.join("src/protocol/content/purge_deleted_message.rs"));
-
-    for forbidden in [
-        "open_message",
-        "OpenMessage",
-        "CONTENT_MESSAGE_ROWS",
-        "OPENED_MESSAGE_ROWS",
-        "leaf_id",
-        "ciphertext",
-    ] {
-        assert!(
-            !intent.contains(forbidden),
-            "purge_deleted_message intent layout must not own projection/opening detail: {forbidden}"
-        );
-    }
-}
-
-#[test]
 fn handlers_do_not_own_event_module_projection_rows() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
@@ -258,31 +222,6 @@ fn handlers_do_not_own_event_module_projection_rows() {
         offenders.is_empty(),
         "intent handlers must not materialize or clean up fact-module projection rows:\n{}",
         offenders.join("\n")
-    );
-}
-
-#[test]
-fn purge_deleted_message_handler_must_be_real_retention_work_when_it_exists() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/protocol/content/purge_deleted_message.rs");
-    if !path.exists() {
-        return;
-    }
-
-    let text = source_text(&path);
-    for forbidden in ["CONTENT_MESSAGE_ROWS", "OPENED_MESSAGE_ROWS", "TableDelete"] {
-        assert!(
-            !text.contains(forbidden),
-            "PurgeDeletedMessage handler must not be projection row cleanup: {forbidden}"
-        );
-    }
-    assert!(
-        text.contains("purge_deleted_message")
-            || text.contains("purge_fact")
-            || text.contains("DiscoverCascade")
-            || text.contains("RetireSecret")
-            || text.contains("SyncIndexPurge"),
-        "PurgeDeletedMessage handler must preserve real retention/cascade/retire behavior"
     );
 }
 

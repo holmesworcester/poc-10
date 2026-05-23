@@ -135,16 +135,12 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         .map(|handler| handler.name.to_string())
         .collect::<BTreeSet<_>>();
 
-    for required in [
-        "purge_message_child",
-        "purge_expired_message",
-        "purge_below_retention_floor",
-    ] {
-        assert!(
-            dispatched.contains(required),
-            "{required} must be included by HANDLER_ROUTES"
-        );
-    }
+    assert!(
+        dispatched
+            .iter()
+            .all(|handler| !handler.starts_with("purge_") || !handler.contains("message")),
+        "message/content deletion should be projector-owned, not handler-owned"
+    );
     assert!(
         dispatched.len() == MATCH_RUNTIME.handlers.len(),
         "HANDLER_ROUTES must not contain duplicate runtime handler names"

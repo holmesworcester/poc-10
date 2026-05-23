@@ -31,6 +31,7 @@ pub mod key_wrap;
 pub mod local_history_node_secret;
 pub mod local_key_secret;
 pub mod local_recipient_key;
+pub mod local_secret_retirement;
 pub mod recipient_key;
 pub mod removal_frontier;
 pub mod signed_fact;
@@ -39,8 +40,6 @@ pub mod user_invite;
 pub mod workspace;
 
 // Intents: work that needs exact fact inputs after projection proves
-// eligibility - create a signed key wrap, unwrap a received wrap, or purge
-// retired local secrets.
+// eligibility - create a signed key wrap or unwrap a received wrap.
 pub mod create_key_wrap;
-pub mod purge_retired_recipient_material;
 pub mod unwrap_key_wrap;

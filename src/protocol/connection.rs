@@ -31,7 +31,6 @@ pub mod response;
 // enough context to answer or when an invite/server bootstrap should send a
 // request over the network.
 pub mod create_response;
-pub mod purge_closed_connection_material;
 pub mod send_bootstrap_request;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

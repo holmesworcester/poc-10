@@ -24,6 +24,10 @@ use crate::protocol::auth::local_key_secret::{
 use crate::protocol::auth::local_recipient_key::{
     fact::LocalRecipientKeyFact, layout as local_recipient_layout,
 };
+use crate::protocol::auth::local_secret_retirement::{
+    fact::{LocalSecretRetirementFact, RETIRE_REASON_CHOP},
+    layout as local_secret_retirement_layout,
+};
 use crate::protocol::auth::recipient_key::{
     fact::RecipientKeyFact, layout as recipient_key_layout,
 };
@@ -570,9 +574,21 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
                 .map(|_| fact.id)
         })
         .collect::<Vec<_>>();
-    for fact_id in &local_key_secret_ids {
-        runtime.purge_fact(*fact_id);
-    }
+    let retirement_facts = local_key_secret_ids
+        .iter()
+        .map(|fact_id| {
+            let retirement = LocalSecretRetirementFact {
+                workspace_id: input.workspace_id,
+                target_secret_id: *fact_id,
+                reason_kind: RETIRE_REASON_CHOP,
+                floor_minute: input.floor_minute,
+                created_at_ms: input.created_at_ms,
+            };
+            local_secret_retirement_layout::encode_fact(&retirement)
+                .map(|bytes| Fact::new(FactScope::Local, input.created_at_ms, bytes))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    runtime.submit_facts(retirement_facts)?;
     runtime.process_all_work_until_idle(4, 512)?;
     Ok(ChopNowReceipt {
         workspace_id: input.workspace_id,

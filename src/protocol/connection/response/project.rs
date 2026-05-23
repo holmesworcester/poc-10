@@ -11,7 +11,8 @@
 //!      the response references a different request fact.
 //!   2. CONTEXT. Projection validates exact request and invite-secret context.
 //!      Received responses additionally require connection fact receipt plus local
-//!      initiator secret; local responses require responder secret.
+//!      initiator secret; local responses require responder secret. Close
+//!      context removes the response row and purges this response fact.
 //!   3. MATERIALIZE. Valid responses write the connection_response row, publish
 //!      local connection context, and seed sync for the materialized connection.
 //!
@@ -27,10 +28,6 @@ use crate::core::projectors::{
 
 use crate::protocol::auth::invite;
 use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
-use crate::protocol::connection::purge_closed_connection_material::{
-    purge_closed_connection_material_intent, PurgeClosedConnectionMaterial,
-    TARGET_CONNECTION_RESPONSE,
-};
 use crate::protocol::connection::request;
 use crate::protocol::connection::{close, ephemeral_secret};
 use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
@@ -89,7 +86,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
             if close.connection_id != fact.id {
                 return Err("connection response close context targets another connection".into());
             }
-            return closed_output(fact.id, close_fact.id);
+            return closed_output(fact.id);
         }
 
         // 2. Shared request and invite context.
@@ -372,20 +369,13 @@ fn materialized_output(
         })))
 }
 
-fn closed_output(response_id: [u8; 32], close_id: [u8; 32]) -> Result<ProjectionOutput, String> {
+fn closed_output(response_id: [u8; 32]) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
         .row_mutation(RowMutation::DeleteRow(TableDelete {
             table: CONNECTION_RESPONSE_ROWS,
             key: connection_response_key(&response_id),
         }))
-        .intent(purge_closed_connection_material_intent(
-            PurgeClosedConnectionMaterial {
-                target_kind: TARGET_CONNECTION_RESPONSE,
-                close_id,
-                connection_id: response_id,
-                target_id: response_id,
-            },
-        )))
+        .purge_self(response_id))
 }
 
 fn waiting_output<const N: usize>(

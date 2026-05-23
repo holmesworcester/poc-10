@@ -426,6 +426,12 @@ fn cli_chop_revokes_frontier_rejects_old_wraps_and_allows_fresh_messages() {
         "no",
         "chop must wipe F's row"
     );
+    let keys_after_chop = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
+    assert_eq!(
+        line_value(&keys_after_chop, "local_key_secrets"),
+        "0",
+        "chop must purge retired local key-secret fact bytes:\n{keys_after_chop}"
+    );
     let post_messages = messages_text(&alice, &workspace_id);
     assert!(
         post_messages.contains("alice: before chop"),
@@ -469,9 +475,7 @@ fn cli_chop_revokes_frontier_rejects_old_wraps_and_allows_fresh_messages() {
         .parse()
         .expect("parse subsumed_leaf_tombstones_gcd");
 
-    // Remaining gaps: no public durable-storage audit proves retired
-    // recipient private keys, old wraps, and deleted frontier bytes are
-    // unrecoverable; and no `topo message-open`/decrypt check depends on live
+    // Remaining gap: no `topo message-open`/decrypt check depends on live
     // frontier access. `topo messages` lists an already-open local projection,
     // so message visibility is not a reliable recovery observable.
 }

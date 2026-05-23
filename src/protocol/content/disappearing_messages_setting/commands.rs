@@ -6,15 +6,8 @@
 
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
-use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::intents::RowMutation;
-use crate::core::pipeline::commit_pipeline_effects_to_store;
-use crate::core::runtime::Runtime;
 use crate::core::store::Store;
-use crate::protocol::content::purge_below_retention_floor::{
-    purge_below_retention_floor_intent, PurgeBelowRetentionFloor,
-};
 use crate::protocol::{auth, content};
 use std::collections::BTreeSet;
 
@@ -240,9 +233,6 @@ pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport
         .map(|minute| minute.saturating_sub(30 * 24 * 60))
         .unwrap_or(0);
     let effective_floor = setting_floor_minute.max(horizon_floor);
-    if horizon_floor > 0 {
-        apply_horizon_floor(store, workspace_id, horizon_floor)?;
-    }
     let message_tombstones = content::message::queries::message_tombstone_count_at_or_after(
         store,
         workspace_id,
@@ -267,81 +257,6 @@ pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport
         live_messages,
         message_tombstones,
     })
-}
-
-pub fn apply_horizon_floor(
-    store: &Store,
-    workspace_id: FactId,
-    horizon_floor: u64,
-) -> Result<(), String> {
-    let retired = content::message::queries::content_message_rows(store, workspace_id)?
-        .into_iter()
-        .filter(|row| row.minute < horizon_floor)
-        .collect::<Vec<_>>();
-    if retired.is_empty() {
-        return Ok(());
-    }
-    let mut effects = PipelineEffects::new();
-    for row in retired {
-        effects = effects
-            .row_mutation(RowMutation::InsertValues(
-                content::message::rows::message_tombstone_row(
-                    row.workspace_id,
-                    row.message_id,
-                    row.author_user_id,
-                    row.created_at_ms,
-                ),
-            ))
-            .row_mutation(RowMutation::DeleteWhere(
-                content::message::create::message_row_delete(
-                    content::message::rows::CONTENT_MESSAGE_ROWS,
-                    row.workspace_id,
-                    row.message_id,
-                ),
-            ))
-            .row_mutation(RowMutation::DeleteWhere(
-                content::message::create::message_row_delete(
-                    content::message::rows::OPENED_MESSAGE_ROWS,
-                    row.workspace_id,
-                    row.message_id,
-                ),
-            ));
-    }
-    commit_pipeline_effects_to_store(
-        store,
-        &effects,
-        &[
-            content::message::rows::MESSAGE_TOMBSTONE_ROWS,
-            content::message::rows::CONTENT_MESSAGE_ROWS,
-            content::message::rows::OPENED_MESSAGE_ROWS,
-        ],
-        "apply horizon floor",
-    )?;
-    Ok(())
-}
-
-pub fn enqueue_floor_retention(
-    runtime: &mut Runtime,
-    workspace_id: FactId,
-    setting_id: FactId,
-    floor_minute: u64,
-) -> Result<usize, String> {
-    let mut queued = 0usize;
-    for message in content::message::queries::content_message_rows(runtime.store(), workspace_id)? {
-        if message.minute >= floor_minute {
-            continue;
-        }
-        if runtime.submit_intent(purge_below_retention_floor_intent(
-            PurgeBelowRetentionFloor {
-                workspace_id,
-                setting_id,
-                target_id: message.message_id,
-            },
-        ))? {
-            queued += 1;
-        }
-    }
-    Ok(queued)
 }
 
 fn setting_fact(

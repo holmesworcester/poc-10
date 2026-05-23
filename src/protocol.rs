@@ -12,7 +12,7 @@
 //!
 //! Each scope module root is the navigational map for that scope. Fact families
 //! are noun-named submodules (`message`, `key_wrap`); intents are verb-named
-//! submodules (`purge_expired_message`, `send_network_frame`). The usual fact
+//! submodules (`close`, `send_network_frame`). The usual fact
 //! shape is `fact.rs` for typed payloads, `layout.rs` for stable bytes,
 //! `project.rs` for admission and derived state, `rows.rs` for projected SQL
 //! rows, `queries.rs` for user-facing reads, and `commands.rs`/`create.rs` for

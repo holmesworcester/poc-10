@@ -3,8 +3,9 @@
 //! Projection is core's deterministic reactive path. A projector receives one
 //! immutable fact plus the context rows core has matched for that fact, and it
 //! returns the complete replacement context owned by that fact together with
-//! row mutations and intents to commit. The pipeline enforces that a projector
-//! only owns context and time wakes for the fact being projected.
+//! row mutations, self-purge, and follow-up work to commit. The pipeline
+//! enforces that a projector only owns context, time wakes, and purges for the
+//! fact being projected.
 //!
 //! Projectors are where protocol facts become protocol state. They decode the
 //! fact payload, check scope and context proofs, decide whether enough input is
@@ -19,6 +20,12 @@
 //! context or no longer needs a wake, the projector simply stops emitting it and
 //! the projection commit removes the old row.
 //!
+//! Deletion follows the same owner rule. A target fact keeps a standing need for
+//! the deletion, retirement, close, or time context that can remove it. When
+//! that context matches, the target projector deletes its own projection rows
+//! and may purge only its own fact bytes. Projectors must not purge other facts
+//! or rely on a parent projector to discover and delete children.
+//!
 //! Core may run a projector more than once before committing. If an uncommitted
 //! run emits needs that already match stored offers, the projection pipeline grows
 //! the supplied `ProjectionContext` and reruns the same projector. Only the final
@@ -26,10 +33,10 @@
 //! projector instead of moving dependency groups or blockers into core.
 //!
 //! Protocol projector implementations own admission policy: scope checks,
-//! context proof checks, derived rows, offers, needs, time wakes, and follow-up
-//! intents. This file defines the contract they implement. Keep byte decoding
-//! in the fact module's codec and keep user-facing workflows in command
-//! modules.
+//! context proof checks, derived rows, offers, needs, time wakes, self-purge,
+//! and follow-up intents. This file defines the contract they implement. Keep
+//! byte decoding in the fact module's codec and keep user-facing workflows in
+//! command modules.
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::effects::PipelineEffects;
@@ -312,7 +319,7 @@ pub struct ProjectionOutput {
     pub offers: Vec<ContextOffer>,
     /// Complete replacement time wakes for the projected fact.
     pub time_wakes: Vec<TimeWake>,
-    /// Child facts, row mutations, and intents to commit with this projection.
+    /// Child facts, self-purge, row mutations, and intents to commit with this projection.
     pub effects: PipelineEffects,
 }
 
@@ -338,6 +345,16 @@ impl ProjectionOutput {
 
     pub fn row_mutation(mut self, mutation: RowMutation) -> Self {
         self.effects.row_mutations.push(mutation);
+        self
+    }
+
+    /// Purge the projected fact after its projector has removed owned rows.
+    ///
+    /// Core verifies at commit preparation that this id is the projected fact
+    /// id. Cross-fact deletion must be expressed as context that wakes the
+    /// target fact's projector, not as another projector purging it.
+    pub fn purge_self(mut self, id: FactId) -> Self {
+        self.effects.purged_facts.push(id);
         self
     }
 

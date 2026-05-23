@@ -6,8 +6,8 @@
 //! initiator/responder ephemeral-secret fact ids referenced by the response.
 //!
 //! The close fact does not delete material itself. The target fact families keep
-//! standing close needs, then delete their own rows and schedule bounded purge
-//! work after close context arrives. Change this family for close fact bytes or
+//! standing close needs, then delete their own rows and purge their own fact
+//! bytes after close context arrives. Change this family for close fact bytes or
 //! close-context coordinates; change the target projectors for target-specific
 //! cleanup.
 

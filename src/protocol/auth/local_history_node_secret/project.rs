@@ -2,7 +2,9 @@
 //!
 //! POLICY. A local history-node secret is admitted iff it is local-scoped, ties
 //! cleanly to its frontier and source chain, and obeys parent/child addressing.
-//! Projection publishes wrap-source and secret-coverage offers.
+//! Projection publishes wrap-source and secret-coverage offers while live, and
+//! self-purges when retirement context names this node. A tombstoning node
+//! publishes retirement context for the source path node it replaces.
 //!
 //! This module also owns the secret-coverage coordinate scheme: core only sees
 //! byte ranges, so the time/leaf-prefix layout for encrypted-message secret
@@ -17,6 +19,7 @@ use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
 };
 use crate::protocol::auth::local_key_secret;
+use crate::protocol::auth::local_secret_retirement;
 use crate::protocol::auth::removal_frontier;
 
 use super::fact::{
@@ -273,11 +276,17 @@ fn project_local_history_node_secret(
             node.tombstone_node_id,
         ))
     };
+    let retirement_need = local_secret_retirement::secret_retired_need(fact.id, fact.id);
     let mut waiting = ProjectionOutput::new()
         .need(frontier_need.clone())
-        .need(source_need.clone());
+        .need(source_need.clone())
+        .need(retirement_need.clone());
     if let Some(need) = &tombstone_need {
         waiting = waiting.need(need.clone());
+    }
+    if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
+        validate_history_retirement(retirement_fact, fact.id, &node)?;
+        return Ok(ProjectionOutput::new().purge_self(fact.id));
     }
 
     let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {
@@ -345,6 +354,12 @@ fn project_local_history_node_secret(
         node.fact_id_prefix,
     ) {
         output = output.offer(offer);
+    }
+    if node.tombstone_node_id != [0; 32] {
+        output = output.offer(local_secret_retirement::secret_retired_offer(
+            fact.id,
+            node.tombstone_node_id,
+        ));
     }
     Ok(output
         .offer(ContextOffer::range(
@@ -434,6 +449,39 @@ fn validate_history_source(
         }));
     }
     Err("local history node source context is not key material".to_string())
+}
+
+fn validate_history_retirement(
+    retirement_fact: &Fact,
+    target_id: FactId,
+    node: &LocalHistoryNodeSecretFact,
+) -> Result<(), String> {
+    if retirement_fact.scope != FactScope::Local {
+        return Err("local history node retirement context must be local".to_string());
+    }
+    if let Ok(retirement) = local_secret_retirement::decode_fact_payload(retirement_fact.body()) {
+        if retirement.workspace_id != node.workspace_id {
+            return Err("local history node retirement workspace mismatch".to_string());
+        }
+        if retirement.target_secret_id != target_id {
+            return Err("local history node retirement target mismatch".to_string());
+        }
+        return Ok(());
+    }
+
+    let tombstone = super::decode_fact_payload(retirement_fact.body()).map_err(|_| {
+        "local history node retirement context is not a retirement or history node".to_string()
+    })?;
+    if tombstone.workspace_id != node.workspace_id
+        || tombstone.frontier_id != node.frontier_id
+        || tombstone.owner_endpoint_id != node.owner_endpoint_id
+    {
+        return Err("local history node retirement lineage mismatch".to_string());
+    }
+    if tombstone.tombstone_node_id != target_id {
+        return Err("local history node retirement target mismatch".to_string());
+    }
+    Ok(())
 }
 
 fn validate_history_tombstone(

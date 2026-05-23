@@ -387,6 +387,7 @@ pub(crate) fn disappearing_status(
 ) -> Result<CliOutput, String> {
     let workspace_id = content::disappearing_messages_setting::cli::status_workspace_id(args)?;
     ctx.settle_local_command_work()?;
+    settle_due_message_time_wakes(ctx)?;
     let report = content::disappearing_messages_setting::commands::status_report(
         ctx.runtime().store(),
         workspace_id,
@@ -394,6 +395,26 @@ pub(crate) fn disappearing_status(
     Ok(content::disappearing_messages_setting::cli::status_output(
         &report,
     ))
+}
+
+fn settle_due_message_time_wakes(ctx: &mut MatchCliContext) -> Result<(), String> {
+    let Some(now_ms) = clock::logical_time(ctx.runtime().store())? else {
+        return Ok(());
+    };
+    let now_minute = now_ms / content::disappearing_messages_setting::commands::UNIX_MINUTE_MS;
+    for _ in 0..COMMAND_SETTLE_ROUNDS {
+        let due = ctx.runtime_mut().process_due_time_range(
+            content::message::expiration_timeline(),
+            None,
+            now_minute,
+            COMMAND_SETTLE_LIMIT,
+        );
+        ctx.settle_local_command_work()?;
+        if due == 0 {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn disappearing_tighten(
@@ -422,12 +443,6 @@ pub(crate) fn disappearing_tighten(
         input,
     )?;
     let receipt = ctx.submit_and_settle(output)?;
-    content::disappearing_messages_setting::commands::enqueue_floor_retention(
-        ctx.runtime_mut(),
-        args.workspace_id,
-        receipt.setting_fact_id,
-        receipt.target_floor_minute,
-    )?;
     ctx.settle_local_command_work()?;
     Ok(CliOutput::lines(vec![
         format!(

@@ -4,7 +4,8 @@
 //!   1. STRUCTURAL. The fact is workspace-scoped, has valid descriptor fields,
 //!      and contains a raw or signed content_file payload.
 //!   2. CONTEXT. Projection waits for signer, parent content message, deletion,
-//!      and author context; deletion context removes the descriptor row.
+//!      parent deletion, and author context; deletion context removes the
+//!      descriptor row and purges this file fact.
 //!   3. MATERIALIZE. Live files publish file/exact-fact offers, write the
 //!      descriptor row, and share the fact. File bytes remain slice facts.
 
@@ -129,7 +130,8 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(parent_need)
                 .need(file_deletion_need)
-                .need(parent_deletion_need));
+                .need(parent_deletion_need)
+                .purge_self(fact.id));
         }
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?
@@ -146,7 +148,8 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(file_deletion_need)
                 .need(parent_need)
-                .need(parent_deletion_need));
+                .need(parent_deletion_need)
+                .purge_self(fact.id));
         }
         let Some(author) = context_payload(context, &author_need, "file author")? else {
             return Ok(output_with_needs([

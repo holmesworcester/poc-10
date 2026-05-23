@@ -75,11 +75,25 @@ pub fn message_tombstone_row(
     author_user_id: AuthorId,
     created_at_ms: u64,
 ) -> TableInsert {
+    message_tombstone_row_at_minute(
+        workspace_id,
+        message_id,
+        author_user_id,
+        created_at_ms / UNIX_MINUTE_MS,
+    )
+}
+
+pub fn message_tombstone_row_at_minute(
+    workspace_id: WorkspaceId,
+    message_id: FactId,
+    author_user_id: AuthorId,
+    authored_minute: u64,
+) -> TableInsert {
     read_models::MESSAGE_TOMBSTONES.insert(vec![
         Value::Bytes(workspace_id.to_vec()),
         Value::Bytes(message_id.to_vec()),
         Value::Bytes(author_user_id.to_vec()),
-        Value::U64(created_at_ms / UNIX_MINUTE_MS),
+        Value::U64(authored_minute),
     ])
 }
 

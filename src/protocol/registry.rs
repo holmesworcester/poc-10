@@ -616,6 +616,7 @@ projector_routes! {
     project_auth_removal_frontier => auth::removal_frontier::layout::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector;
     project_auth_local_key_secret => auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector;
     project_auth_local_history_node_secret => auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
+    project_auth_local_secret_retirement => auth::local_secret_retirement::layout::TYPE_LOCAL_SECRET_RETIREMENT, auth::local_secret_retirement::project::LocalSecretRetirementProjector;
     project_auth_key_request => auth::key_request::layout::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector;
     project_auth_key_wrap => auth::key_wrap::layout::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector;
     project_auth_local_recipient_key => auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector;
@@ -674,11 +675,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         connection::create_response::CreateConnectionResponseHandler
     ),
     handler_route!(
-        "purge_closed_connection_material",
-        connection::purge_closed_connection_material::PURGE_CLOSED_CONNECTION_MATERIAL,
-        connection::purge_closed_connection_material::PurgeClosedConnectionMaterialHandler
-    ),
-    handler_route!(
         "send_sync_compare_response",
         sync::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
         sync::send_compare_response::SendSyncCompareResponseHandler
@@ -709,34 +705,9 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         auth::create_key_wrap::CreateKeyWrapHandler
     ),
     handler_route!(
-        "purge_retired_recipient_material",
-        auth::purge_retired_recipient_material::PURGE_RETIRED_RECIPIENT_MATERIAL,
-        auth::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler
-    ),
-    handler_route!(
         "unwrap_key_wrap",
         auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
         auth::unwrap_key_wrap::UnwrapKeyWrapHandler
-    ),
-    handler_route!(
-        "purge_deleted_message",
-        content::purge_deleted_message::PURGE_DELETED_MESSAGE,
-        content::purge_deleted_message::PurgeDeletedMessageHandler
-    ),
-    handler_route!(
-        "purge_message_child",
-        content::purge_message_child::PURGE_MESSAGE_CHILD,
-        content::purge_message_child::PurgeMessageChildHandler
-    ),
-    handler_route!(
-        "purge_expired_message",
-        content::purge_expired_message::PURGE_EXPIRED_MESSAGE,
-        content::purge_expired_message::PurgeExpiredMessageHandler
-    ),
-    handler_route!(
-        "purge_below_retention_floor",
-        content::purge_below_retention_floor::PURGE_BELOW_RETENTION_FLOOR,
-        content::purge_below_retention_floor::PurgeBelowRetentionFloorHandler
     ),
     handler_route!(
         "send_facts_on_connection",

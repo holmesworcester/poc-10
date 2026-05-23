@@ -3,8 +3,8 @@
 //! Ephemeral secrets are local handshake capabilities. Projection turns live
 //! local secret facts into durable local rows plus exact context offers that
 //! request/response projectors can match by secret fact id. When a connection
-//! close event names the secret, the same owner deletes its row and schedules a
-//! bounded purge for the fact bytes.
+//! close event names the secret, the same owner deletes its row and purges its
+//! own fact bytes.
 //!
 //! POLICY. A connection_ephemeral_secret is admitted iff:
 //!   1. STRUCTURAL. The local-only body decodes and the stored public key
@@ -13,7 +13,7 @@
 //!      connection_close fact.
 //!   3. MATERIALIZE. Live secrets publish a local ephemeral-secret offer and
 //!      write the row keyed by this fact id. Closed secrets delete the row and
-//!      emit purge_closed_connection_material.
+//!      purge their own fact bytes.
 //!
 //! Change this file when the local capability proof or materialized row changes.
 //! Request and response projectors own the context checks that consume this
@@ -26,15 +26,11 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::connection::close;
-use crate::protocol::connection::purge_closed_connection_material::{
-    purge_closed_connection_material_intent, PurgeClosedConnectionMaterial, TARGET_EPHEMERAL_SECRET,
-};
-
 use super::rows::{
     connection_ephemeral_secret_key, connection_ephemeral_secret_row,
     CONNECTION_EPHEMERAL_SECRET_ROWS,
 };
+use crate::protocol::connection::close;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionEphemeralSecretProjector;
@@ -87,14 +83,7 @@ impl TypedProjector<super::Codec> for ConnectionEphemeralSecretProjector {
                     table: CONNECTION_EPHEMERAL_SECRET_ROWS,
                     key: connection_ephemeral_secret_key(&fact.id),
                 }))
-                .intent(purge_closed_connection_material_intent(
-                    PurgeClosedConnectionMaterial {
-                        target_kind: TARGET_EPHEMERAL_SECRET,
-                        close_id: close_fact.id,
-                        connection_id: close.connection_id,
-                        target_id: fact.id,
-                    },
-                )));
+                .purge_self(fact.id));
         }
 
         // 3. Materialize.
