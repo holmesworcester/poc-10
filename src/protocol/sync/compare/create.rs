@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn start_compare_fact_summarizes_root_range() {
-        let facts = vec![plain_fact(10, 1), plain_fact(20, 2)];
+        let facts = [plain_fact(10, 1), plain_fact(20, 2)];
 
         let compare_fact = start_compare_fact([7; 32], facts.iter()).expect("start compare");
         let compare = super::super::layout::decode_fact(&compare_fact.bytes).expect("decode");
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn response_plan_batches_local_facts_for_small_mismatched_range() {
-        let facts = vec![plain_fact(10, 1), plain_fact(20, 2)];
+        let facts = [plain_fact(10, 1), plain_fact(20, 2)];
         let compare_fact = compare_fact(TimestampRange::ROOT, RangeSummary::default(), true);
 
         let output = response_plan(&compare_fact, facts.iter()).expect("response plan");

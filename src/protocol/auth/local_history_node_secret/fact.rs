@@ -46,7 +46,7 @@ pub fn mask_prefix_to_depth(prefix: FactId, bit_depth: u16) -> FactId {
     let remaining_bits = (bit_depth % 8) as u8;
     if remaining_bits > 0 {
         let keep = 8 - remaining_bits;
-        let mask = (0xffu8 << keep) & 0xff;
+        let mask = 0xffu8 << keep;
         out[full_bytes] &= mask;
         for byte in &mut out[full_bytes + 1..] {
             *byte = 0;

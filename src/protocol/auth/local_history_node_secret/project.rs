@@ -332,7 +332,7 @@ fn project_local_history_node_secret(
         .range_start
         .checked_add(node.range_width - 1)
         .ok_or_else(|| "history node range end overflow".to_string())?;
-    if node.bit_depth % 8 != 0 {
+    if !node.bit_depth.is_multiple_of(8) {
         return Err(
             "content-message history coverage only accepts byte-aligned prefixes".to_string(),
         );

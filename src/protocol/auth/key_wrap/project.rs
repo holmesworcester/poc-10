@@ -285,7 +285,7 @@ fn valid_history_coordinate(
 ) -> bool {
     range_width != 0
         && range_width.is_power_of_two()
-        && range_start % range_width == 0
+        && range_start.is_multiple_of(range_width)
         && bit_depth <= 256
         && fact_id_prefix == mask_prefix_to_depth(fact_id_prefix, bit_depth)
         && (range_width == 1 || (bit_depth == 0 && fact_id_prefix == [0; 32]))

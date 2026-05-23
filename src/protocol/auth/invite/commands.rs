@@ -393,16 +393,17 @@ pub fn accept(
         )?;
 
         facts.push(device_invite.clone());
-        facts.push(endpoint_shared_fact(
-            input.created_at_ms.saturating_add(6),
-            input.invite.workspace_id,
-            user.receipt.user_id,
-            local.endpoint,
-            local.signing_public_key,
-            &device_name,
-            device_invite.id,
-            input.invite.bootstrap_secret,
-        )?);
+        facts.push(endpoint_shared_fact(EndpointSharedFactInput {
+            created_at_ms: input.created_at_ms.saturating_add(6),
+            workspace_id: input.invite.workspace_id,
+            user_id: user.receipt.user_id,
+            endpoint_id: local.endpoint,
+            signing_public_key: local.signing_public_key,
+            endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
+            device_name: &device_name,
+            signer_id: device_invite.id,
+            signer_private_key: input.invite.bootstrap_secret,
+        })?);
 
         let accepted = auth::invite_accepted::commands::accept(
             auth::invite_accepted::commands::AcceptInvite {
@@ -486,16 +487,17 @@ pub fn accept_device_link(
             to_listen_addr: Some(input.invite.addr),
         },
     )?;
-    let endpoint_shared = endpoint_shared_fact(
-        input.created_at_ms.saturating_add(4),
-        input.invite.workspace_id,
+    let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
+        created_at_ms: input.created_at_ms.saturating_add(4),
+        workspace_id: input.invite.workspace_id,
         user_id,
-        local.endpoint,
-        local.signing_public_key,
-        &input.device_name,
-        input.invite.invite_fact_id,
-        input.invite.bootstrap_secret,
-    )?;
+        endpoint_id: local.endpoint,
+        signing_public_key: local.signing_public_key,
+        endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
+        device_name: &input.device_name,
+        signer_id: input.invite.invite_fact_id,
+        signer_private_key: input.invite.bootstrap_secret,
+    })?;
     let accepted =
         auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
             created_at_ms: input.created_at_ms.saturating_add(5),
@@ -555,17 +557,17 @@ pub fn accept_invite_server(
             to_listen_addr: Some(input.invite.addr),
         },
     )?;
-    let endpoint_shared = endpoint_shared_fact_with_role(
-        input.created_at_ms.saturating_add(4),
-        input.invite.workspace_id,
-        input.invite.invite_fact_id,
-        local.endpoint,
-        local.signing_public_key,
-        auth::endpoint_shared::fact::EndpointRole::InviteServer,
-        &input.device_name,
-        input.invite.invite_fact_id,
-        input.invite.bootstrap_secret,
-    )?;
+    let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
+        created_at_ms: input.created_at_ms.saturating_add(4),
+        workspace_id: input.invite.workspace_id,
+        user_id: input.invite.invite_fact_id,
+        endpoint_id: local.endpoint,
+        signing_public_key: local.signing_public_key,
+        endpoint_role: auth::endpoint_shared::fact::EndpointRole::InviteServer,
+        device_name: &input.device_name,
+        signer_id: input.invite.invite_fact_id,
+        signer_private_key: input.invite.bootstrap_secret,
+    })?;
     let accepted =
         auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
             created_at_ms: input.created_at_ms.saturating_add(5),
@@ -590,55 +592,34 @@ pub fn accept_invite_server(
     .with_facts(facts))
 }
 
-fn endpoint_shared_fact(
-    created_at_ms: u64,
-    workspace_id: FactId,
-    user_id: FactId,
-    endpoint_id: FactId,
-    signing_public_key: [u8; 32],
-    device_name: &str,
-    signer_id: FactId,
-    signer_private_key: [u8; 32],
-) -> Result<Fact, String> {
-    endpoint_shared_fact_with_role(
-        created_at_ms,
-        workspace_id,
-        user_id,
-        endpoint_id,
-        signing_public_key,
-        auth::endpoint_shared::fact::EndpointRole::Device,
-        device_name,
-        signer_id,
-        signer_private_key,
-    )
-}
-
-fn endpoint_shared_fact_with_role(
+struct EndpointSharedFactInput<'a> {
     created_at_ms: u64,
     workspace_id: FactId,
     user_id: FactId,
     endpoint_id: FactId,
     signing_public_key: [u8; 32],
     endpoint_role: auth::endpoint_shared::fact::EndpointRole,
-    device_name: &str,
+    device_name: &'a str,
     signer_id: FactId,
     signer_private_key: [u8; 32],
-) -> Result<Fact, String> {
+}
+
+fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, String> {
     let endpoint = auth::endpoint_shared::fact::EndpointSharedFact {
-        created_at_ms,
-        workspace_id,
-        user_authority_fact_id: user_id,
-        endpoint_id,
-        signing_public_key,
-        endpoint_role,
-        device_name: device_name.to_string(),
+        created_at_ms: input.created_at_ms,
+        workspace_id: input.workspace_id,
+        user_authority_fact_id: input.user_id,
+        endpoint_id: input.endpoint_id,
+        signing_public_key: input.signing_public_key,
+        endpoint_role: input.endpoint_role,
+        device_name: input.device_name.to_string(),
     };
     let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
-        signer_id,
-        &signer_private_key,
+        input.signer_id,
+        &input.signer_private_key,
         auth::endpoint_shared::layout::encode_fact(&endpoint)?,
     )?;
-    Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
+    Ok(Fact::new(FactScope::Global, input.created_at_ms, bytes))
 }
 
 pub fn parse(value: &str) -> Result<Invite, String> {

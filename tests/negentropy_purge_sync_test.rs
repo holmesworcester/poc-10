@@ -442,10 +442,10 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     let bodies = ["m-a", "m-b", "m-c", "m-d", "m-e"];
     for (i, body) in bodies.iter().enumerate() {
-        let db = if i % 2 == 0 { &alice } else { &bob };
+        let db = if i.is_multiple_of(2) { &alice } else { &bob };
         assert_success(topo(&["--db", db, "send", &workspace_id, body]));
     }
-    let expected_author = |i: usize| if i % 2 == 0 { "alice" } else { "bob" };
+    let expected_author = |i: usize| if i.is_multiple_of(2) { "alice" } else { "bob" };
     for (i, body) in bodies.iter().enumerate() {
         let suffix = format!("{}: {body}", expected_author(i));
         wait_for_message_text(&alice, &workspace_id, &suffix);

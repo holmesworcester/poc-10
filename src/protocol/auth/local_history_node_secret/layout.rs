@@ -76,7 +76,7 @@ pub(crate) fn validate_history_node_coordinate(
             "history-node key wrap range_width must be a non-zero power of two".to_string(),
         );
     }
-    if range_start % range_width != 0 {
+    if !range_start.is_multiple_of(range_width) {
         return Err("history-node key wrap range_start must be aligned to range_width".to_string());
     }
     if bit_depth > 256 {

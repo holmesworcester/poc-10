@@ -232,7 +232,7 @@ fn receive_handler_emits_durable_bootstrap_request_and_receipt_only() {
 
     assert!(output.ephemeral_facts.is_empty());
     assert_eq!(output.facts.len(), 2);
-    assert!(output.facts.iter().any(|fact| *fact == expected_request));
+    assert!(output.facts.contains(&expected_request));
     assert!(output.intents.is_empty());
     assert!(output.facts.iter().all(|fact| {
         !matches!(
@@ -275,11 +275,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
     let admitted_wrap =
         auth_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
     assert!(
-        output
-            .effects
-            .facts
-            .iter()
-            .any(|fact| *fact == admitted_wrap),
+        output.effects.facts.contains(&admitted_wrap),
         "opened frame should emit the admitted signed key-wrap fact"
     );
     let receipt_fact = output
@@ -348,7 +344,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 
     assert_eq!(output.effects.facts.len(), 2);
     let admitted = Fact::new(FactScope::Global, 0, compare_bytes);
-    assert!(output.effects.facts.iter().any(|fact| *fact == admitted));
+    assert!(output.effects.facts.contains(&admitted));
     let receipt_fact = output
         .effects
         .facts

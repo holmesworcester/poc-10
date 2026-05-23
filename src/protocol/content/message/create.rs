@@ -117,7 +117,7 @@ fn build_message_fact(
     if trimmed.is_empty() {
         return Err("send_message text must not be blank".to_string());
     }
-    if text.as_bytes().len() > MAX_TEXT_BYTES {
+    if text.len() > MAX_TEXT_BYTES {
         return Err(format!(
             "send_message text exceeds {MAX_TEXT_BYTES} byte encrypted slot"
         ));

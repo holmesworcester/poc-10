@@ -166,7 +166,7 @@ fn target_projector_files(root: &Path) -> Vec<PathBuf> {
     fact_module_files(root)
         .into_iter()
         .filter(|path| {
-            if !path.extension().is_some_and(|ext| ext == "rs") {
+            if path.extension().is_none_or(|ext| ext != "rs") {
                 return false;
             }
             let relative = path.strip_prefix(root).unwrap().display().to_string();

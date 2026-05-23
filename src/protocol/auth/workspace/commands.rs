@@ -86,17 +86,17 @@ pub fn create_workspace_with_identity(
         user_public,
         endpoint.signing_secret,
     )?;
-    let endpoint_shared = endpoint_shared_fact(
-        created_at_ms + 6,
+    let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
+        created_at_ms: created_at_ms + 6,
         workspace_id,
-        user.id,
-        user_public,
-        identity.device_name,
-        device_invite.id,
-        endpoint.signing_secret,
-        endpoint_output.effects.facts.first(),
-        ctx.store(),
-    )?;
+        user_id: user.id,
+        signing_public_key: user_public,
+        device_name: identity.device_name,
+        signer_id: device_invite.id,
+        signer_private_key: endpoint.signing_secret,
+        new_endpoint_fact: endpoint_output.effects.facts.first(),
+        store: ctx.store(),
+    })?;
     let mut facts = vec![
         workspace,
         user_invite,
@@ -121,21 +121,24 @@ pub fn create_workspace_with_identity(
     .with_facts(facts))
 }
 
-fn endpoint_shared_fact(
+struct EndpointSharedFactInput<'a> {
     created_at_ms: u64,
     workspace_id: FactId,
     user_id: FactId,
     signing_public_key: Ed25519PublicKey,
-    device_name: &str,
+    device_name: &'a str,
     signer_id: FactId,
     signer_private_key: [u8; 32],
-    new_endpoint_fact: Option<&Fact>,
-    store: &Store,
-) -> Result<Fact, String> {
-    let endpoint_id = if let Some(endpoint_fact) = new_endpoint_fact {
+    new_endpoint_fact: Option<&'a Fact>,
+    store: &'a Store,
+}
+
+fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, String> {
+    let endpoint_id = if let Some(endpoint_fact) = input.new_endpoint_fact {
         auth::endpoint::layout::decode_fact(&endpoint_fact.bytes)?.endpoint
     } else {
-        let value = store
+        let value = input
+            .store
             .table_row(
                 auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
                 auth::endpoint::rows::LOCAL_KEY,
@@ -145,20 +148,20 @@ fn endpoint_shared_fact(
         id32(&value, "local endpoint")?
     };
     let payload = auth::endpoint_shared::fact::EndpointSharedFact {
-        created_at_ms,
-        workspace_id,
-        user_authority_fact_id: user_id,
+        created_at_ms: input.created_at_ms,
+        workspace_id: input.workspace_id,
+        user_authority_fact_id: input.user_id,
         endpoint_id,
-        signing_public_key,
+        signing_public_key: input.signing_public_key,
         endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
-        device_name: device_name.to_string(),
+        device_name: input.device_name.to_string(),
     };
     let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
-        signer_id,
-        &signer_private_key,
+        input.signer_id,
+        &input.signer_private_key,
         auth::endpoint_shared::layout::encode_fact(&payload)?,
     )?;
-    Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
+    Ok(Fact::new(FactScope::Global, input.created_at_ms, bytes))
 }
 
 fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {

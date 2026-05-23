@@ -18,7 +18,7 @@ pub fn create_workspace(
     if trimmed.is_empty() {
         return Err("create_workspace name must not be blank".to_string());
     }
-    if name.as_bytes().len() > WORKSPACE_NAME_BYTES {
+    if name.len() > WORKSPACE_NAME_BYTES {
         return Err(format!(
             "create_workspace name exceeds {WORKSPACE_NAME_BYTES} byte slot"
         ));

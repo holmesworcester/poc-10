@@ -164,17 +164,17 @@ fn received_connection_request_effect(
         input.received_at_local_ms,
         input.frame.to_vec(),
     );
-    let receipt = connection_fact_receipt_for_path(
-        request_fact.id,
-        input.origin_addr,
-        request.to_endpoint,
-        request.from_endpoint,
-        connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST,
-        None,
-        Some(request_fact.id),
-        crypto::hash(input.frame),
-        input.received_at_local_ms,
-    )?;
+    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+        received_fact_id: request_fact.id,
+        origin_addr: input.origin_addr,
+        local_endpoint_id: request.to_endpoint,
+        sender_endpoint_id: request.from_endpoint,
+        receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST,
+        connection_id: None,
+        request_id: Some(request_fact.id),
+        frame_hash: crypto::hash(input.frame),
+        received_at_local_ms: input.received_at_local_ms,
+    })?;
     Ok(PipelineEffects::new().fact(request_fact).fact(receipt))
 }
 
@@ -189,17 +189,17 @@ fn received_connection_response_effect(
         input.received_at_local_ms,
         input.frame.to_vec(),
     );
-    let receipt = connection_fact_receipt_for_path(
-        response_fact.id,
-        input.origin_addr,
-        response.to_endpoint,
-        response.from_endpoint,
-        connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_RESPONSE,
-        Some(response_fact.id),
-        Some(response.request_id),
-        crypto::hash(input.frame),
-        input.received_at_local_ms,
-    )?;
+    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+        received_fact_id: response_fact.id,
+        origin_addr: input.origin_addr,
+        local_endpoint_id: response.to_endpoint,
+        sender_endpoint_id: response.from_endpoint,
+        receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_RESPONSE,
+        connection_id: Some(response_fact.id),
+        request_id: Some(response.request_id),
+        frame_hash: crypto::hash(input.frame),
+        received_at_local_ms: input.received_at_local_ms,
+    })?;
     Ok(PipelineEffects::new().fact(response_fact).fact(receipt))
 }
 
@@ -255,16 +255,17 @@ pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, St
     let mut facts = Vec::with_capacity(opened.facts.len() * 2);
     for bytes in opened.facts {
         let received = admit_received_fact_bytes(bytes)?;
-        let receipt = connection_frame_fact_receipt(
-            received.id,
-            input.origin_addr,
-            opened.receiver_endpoint_id,
-            opened.sender_endpoint_id,
-            opened.connection_id,
-            connection.request_id,
-            opened.frame_hash,
-            input.received_at_local_ms,
-        )?;
+        let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+            received_fact_id: received.id,
+            origin_addr: input.origin_addr,
+            local_endpoint_id: opened.receiver_endpoint_id,
+            sender_endpoint_id: opened.sender_endpoint_id,
+            receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
+            connection_id: Some(opened.connection_id),
+            request_id: Some(connection.request_id),
+            frame_hash: opened.frame_hash,
+            received_at_local_ms: input.received_at_local_ms,
+        })?;
         facts.push(received);
         facts.push(receipt);
     }
@@ -548,32 +549,9 @@ fn workspace_scope(workspace_id: FactId) -> FactScope {
     crate::protocol::auth::workspace::scope(workspace_id)
 }
 
-fn connection_frame_fact_receipt(
+struct ConnectionFactReceiptInput<'a> {
     received_fact_id: FactId,
-    origin_addr: &[u8],
-    local_endpoint_id: FactId,
-    sender_endpoint_id: FactId,
-    connection_id: FactId,
-    request_id: FactId,
-    frame_hash: [u8; 32],
-    received_at_local_ms: u64,
-) -> Result<Fact, String> {
-    connection_fact_receipt_for_path(
-        received_fact_id,
-        origin_addr,
-        local_endpoint_id,
-        sender_endpoint_id,
-        connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
-        Some(connection_id),
-        Some(request_id),
-        frame_hash,
-        received_at_local_ms,
-    )
-}
-
-fn connection_fact_receipt_for_path(
-    received_fact_id: FactId,
-    origin_addr: &[u8],
+    origin_addr: &'a [u8],
     local_endpoint_id: FactId,
     sender_endpoint_id: FactId,
     receive_path: u8,
@@ -581,21 +559,23 @@ fn connection_fact_receipt_for_path(
     request_id: Option<FactId>,
     frame_hash: [u8; 32],
     received_at_local_ms: u64,
-) -> Result<Fact, String> {
+}
+
+fn connection_fact_receipt_for_path(input: ConnectionFactReceiptInput<'_>) -> Result<Fact, String> {
     let fact = connection::fact_receipt::fact::ConnectionFactReceipt {
-        received_fact_id,
-        origin_addr: origin_addr.to_vec(),
-        local_endpoint_id,
-        sender_endpoint_id,
-        receive_path,
-        connection_id,
-        request_id,
-        frame_hash,
-        received_at_local_ms,
+        received_fact_id: input.received_fact_id,
+        origin_addr: input.origin_addr.to_vec(),
+        local_endpoint_id: input.local_endpoint_id,
+        sender_endpoint_id: input.sender_endpoint_id,
+        receive_path: input.receive_path,
+        connection_id: input.connection_id,
+        request_id: input.request_id,
+        frame_hash: input.frame_hash,
+        received_at_local_ms: input.received_at_local_ms,
     };
     Ok(Fact::new(
         FactScope::Local,
-        received_at_local_ms,
+        input.received_at_local_ms,
         connection::fact_receipt::layout::encode_fact(&fact)?,
     ))
 }

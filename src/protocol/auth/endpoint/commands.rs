@@ -72,8 +72,7 @@ mod tests {
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("open store");
         let endpoint = create_local_endpoint();
-        let fact =
-            super::super::create::endpoint_fact(10, endpoint.clone()).expect("endpoint fact");
+        let fact = super::super::create::endpoint_fact(10, endpoint).expect("endpoint fact");
         crate::core::pipeline::submit_fact_to_store(&store, fact).expect("submit fact");
 
         let output = local_or_create(&store, 20).expect("reuse endpoint");

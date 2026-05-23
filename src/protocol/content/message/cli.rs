@@ -121,7 +121,7 @@ pub fn react(
     if emoji.is_empty() {
         return Err("reaction emoji must not be empty".to_string());
     }
-    if emoji.as_bytes().len() > reaction::fact::REACTION_CIPHERTEXT_BYTES {
+    if emoji.len() > reaction::fact::REACTION_CIPHERTEXT_BYTES {
         return Err("reaction emoji is too long".to_string());
     }
 

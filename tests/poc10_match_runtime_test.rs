@@ -84,16 +84,16 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
     let frontier = removal_frontier_fact(workspace_id, [33; 32]);
     let frontier_id = frontier.id;
     let key_secret = [9; crypto::XCHACHA20_POLY1305_KEY_BYTES];
-    let message = signed_content_message_fact(
+    let message = signed_content_message_fact(SignedContentMessageInput {
         workspace_id,
-        [44; 32],
+        author_user_id: [44; 32],
         signer_id,
-        &signer_private,
+        signer_private: &signer_private,
         frontier_id,
         key_secret,
-        60_000,
-        "runtime signed message",
-    );
+        created_at_ms: 60_000,
+        text: "runtime signed message",
+    });
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
 
     runtime.submit_fact(frontier);
@@ -180,32 +180,35 @@ fn local_key_secret_fact(
     )
 }
 
-fn signed_content_message_fact(
+struct SignedContentMessageInput<'a> {
     workspace_id: [u8; 32],
     author_user_id: [u8; 32],
     signer_id: [u8; 32],
-    signer_private: &[u8; 32],
+    signer_private: &'a [u8; 32],
     frontier_id: [u8; 32],
     key_secret: [u8; crypto::XCHACHA20_POLY1305_KEY_BYTES],
     created_at_ms: u64,
-    text: &str,
-) -> Fact {
-    let minute = created_at_ms / 60_000;
+    text: &'a str,
+}
+
+fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
+    let minute = input.created_at_ms / 60_000;
     let nonce = [7; content_message::fact::NONCE_BYTES];
-    let plaintext = content_message::create::pad_plaintext(text.as_bytes()).expect("pad text");
+    let plaintext =
+        content_message::create::pad_plaintext(input.text.as_bytes()).expect("pad text");
     let ciphertext = crypto::xchacha20poly1305_encrypt(
-        &key_secret,
-        &content_message::create::associated_data(workspace_id, frontier_id, minute),
+        &input.key_secret,
+        &content_message::create::associated_data(input.workspace_id, input.frontier_id, minute),
         &nonce,
         &plaintext,
     )
     .expect("encrypt message");
     let body = content_message::fact::ContentMessageFact {
-        workspace_id,
-        created_at_ms,
-        author_user_id,
-        signer_id,
-        frontier_id,
+        workspace_id: input.workspace_id,
+        created_at_ms: input.created_at_ms,
+        author_user_id: input.author_user_id,
+        signer_id: input.signer_id,
+        frontier_id: input.frontier_id,
         local_history_node_secret_id: [0; 32],
         expires_at_minute: u64::MAX,
         disappearing_setting_id: [0; 32],
@@ -214,9 +217,14 @@ fn signed_content_message_fact(
         ciphertext,
     };
     let payload = content_message::layout::encode_fact(&body).expect("encode content message");
-    let bytes = signed_fact_create::sign_payload_bytes(signer_id, signer_private, payload)
-        .expect("sign content message");
-    Fact::new(workspace_scope(workspace_id), created_at_ms, bytes)
+    let bytes =
+        signed_fact_create::sign_payload_bytes(input.signer_id, input.signer_private, payload)
+            .expect("sign content message");
+    Fact::new(
+        workspace_scope(input.workspace_id),
+        input.created_at_ms,
+        bytes,
+    )
 }
 
 fn workspace_scope(workspace_id: [u8; 32]) -> FactScope {

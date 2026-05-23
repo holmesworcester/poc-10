@@ -348,6 +348,9 @@ fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
     })
 }
 
+/// The all-zero [`FactId`] stored in the scope columns of non-scoped facts.
+const EMPTY_FACT_ID: FactId = [0u8; 32];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +378,3 @@ mod tests {
         );
     }
 }
-
-/// The all-zero [`FactId`] stored in the scope columns of non-scoped facts.
-const EMPTY_FACT_ID: FactId = [0u8; 32];
