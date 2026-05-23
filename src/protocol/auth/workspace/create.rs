@@ -6,7 +6,7 @@
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactScope};
-use crate::protocol::auth::workspace::fact::{WorkspaceFact, WORKSPACE_NAME_BYTES};
+use crate::protocol::auth::workspace::fact::{WorkspaceFact, WorkspaceName, WORKSPACE_NAME_BYTES};
 use crate::protocol::auth::workspace::layout;
 
 pub fn create_workspace(
@@ -27,7 +27,7 @@ pub fn create_workspace(
     let workspace = WorkspaceFact {
         created_at_ms,
         public_key,
-        name: name.to_string(),
+        name: WorkspaceName::new(name).map_err(|err| format!("workspace name: {err}"))?,
     };
     let bytes = layout::encode_fact(&workspace)?;
     Ok(Fact::new(FactScope::Global, created_at_ms, bytes))

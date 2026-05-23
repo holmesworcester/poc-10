@@ -71,7 +71,7 @@ pub fn signed_admin_fact(
     signer_private_key: Ed25519PrivateKey,
     grant: AdminFact,
 ) -> Result<Fact, String> {
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
+    let bytes = auth::signed_envelope::create::sign_payload_bytes(
         signer_id,
         &signer_private_key,
         layout::encode_fact(&grant)?,

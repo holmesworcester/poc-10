@@ -13,7 +13,7 @@ use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
 use topo::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
 use topo::protocol::auth::removal_frontier::layout as removal_frontier_layout;
-use topo::protocol::auth::signed_fact::create as signed_fact_create;
+use topo::protocol::auth::signed_envelope::create as signed_envelope_create;
 use topo::protocol::auth::workspace::{commands::create_workspace, rows as workspace_rows};
 use topo::protocol::content::message as content_message;
 
@@ -214,11 +214,11 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
         disappearing_setting_id: [0; 32],
         minute,
         nonce,
-        ciphertext,
+        ciphertext: content_message::fact::MessageCiphertext::new(&ciphertext).expect("ciphertext"),
     };
     let payload = content_message::layout::encode_fact(&body).expect("encode content message");
     let bytes =
-        signed_fact_create::sign_payload_bytes(input.signer_id, input.signer_private, payload)
+        signed_envelope_create::sign_payload_bytes(input.signer_id, input.signer_private, payload)
             .expect("sign content message");
     Fact::new(
         workspace_scope(input.workspace_id),

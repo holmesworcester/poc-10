@@ -215,7 +215,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
         total_slices: 2,
         slice_bytes: 2048,
         root_hash: [7; file::fact::FILE_ROOT_HASH_BYTES],
-        sealed_metadata: b"meta".to_vec(),
+        sealed_metadata: file::fact::SealedMetadata::new(b"meta").expect("metadata"),
     };
     conn.execute(
         "INSERT INTO content_files

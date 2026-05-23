@@ -396,7 +396,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) {
         project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

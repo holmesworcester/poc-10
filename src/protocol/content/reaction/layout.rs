@@ -26,8 +26,7 @@ pub fn encode_fact(fact: &ContentReactionFact) -> Result<Vec<u8>, String> {
     out.fixed(&fact.target_message_id);
     out.fixed(&fact.author_user_id);
     out.fixed(&fact.nonce);
-    out.fixed_slot::<REACTION_CIPHERTEXT_BYTES>(&fact.ciphertext)
-        .map_err(wire_err)?;
+    out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
     out.finish_exact(CONTENT_REACTION_BYTES).map_err(wire_err)
 }
 
@@ -47,7 +46,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentReactionFact, String> {
         author_user_id: reader.array().map_err(wire_err)?,
         nonce: reader.array().map_err(wire_err)?,
         ciphertext: reader
-            .fixed_slot::<REACTION_CIPHERTEXT_BYTES>()
+            .fixed_slot_value::<REACTION_CIPHERTEXT_BYTES>()
             .map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
@@ -69,7 +68,10 @@ mod tests {
             target_message_id: [2; 32],
             author_user_id: [3; 32],
             nonce: [4; REACTION_NONCE_BYTES],
-            ciphertext: b"sealed-reaction".to_vec(),
+            ciphertext: crate::protocol::content::reaction::fact::ReactionCiphertext::new(
+                b"sealed-reaction",
+            )
+            .expect("ciphertext"),
         }
     }
 

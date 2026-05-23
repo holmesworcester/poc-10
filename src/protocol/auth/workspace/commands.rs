@@ -154,9 +154,10 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
         endpoint_id,
         signing_public_key: input.signing_public_key,
         endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
-        device_name: input.device_name.to_string(),
+        device_name: auth::endpoint_shared::fact::EndpointDeviceName::new(input.device_name)
+            .map_err(|err| format!("endpoint device name: {err}"))?,
     };
-    let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
+    let bytes = crate::protocol::auth::signed_envelope::create::sign_payload_bytes(
         input.signer_id,
         &input.signer_private_key,
         auth::endpoint_shared::layout::encode_fact(&payload)?,
@@ -266,7 +267,7 @@ fn device_invite_fact(
         user_invite_fact_id: Some(user_invite_fact_id),
         public_key,
     };
-    let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
+    let bytes = crate::protocol::auth::signed_envelope::create::sign_payload_bytes(
         user_authority_fact_id,
         &signer_private_key,
         auth::device_invite::layout::encode_fact(&payload)?,

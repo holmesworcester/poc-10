@@ -598,7 +598,7 @@ projector_routes! {
     project_endpoint => auth::endpoint::layout::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector;
     project_invite => auth::invite::layout::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector;
     project_workspace => auth::workspace::layout::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector;
-    project_signed_fact => auth::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET, auth::signed_fact::project::SignedFactProjector;
+    project_auth_local_signer_secret => auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector;
     project_device_invite => auth::device_invite::layout::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector;
     project_endpoint_shared => auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector;
     project_invite_server => auth::invite_server::layout::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector;
@@ -613,18 +613,19 @@ projector_routes! {
     project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector;
     project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector;
     project_connection_frame_small => connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL, connection::frame::project::ConnectionFrameProjector;
-    project_connection_frame_large => connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE, connection::frame::project::ConnectionFrameProjector;
+    project_connection_frame_file_slice => connection::frame::layout::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame::project::ConnectionFrameProjector;
+    project_connection_frame_bundle => connection::frame::layout::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame::project::ConnectionFrameProjector;
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
     project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }
 
 fn signed_effective_tag(fact: &Fact) -> Result<u8, String> {
-    Ok(auth::signed_fact::layout::decode_signed_fact(&fact.bytes)?.inner_type)
+    Ok(auth::signed_envelope::layout::decode_signed_envelope(&fact.bytes)?.inner_type)
 }
 
 const ENVELOPE_ROUTES: &[EnvelopeRoute] = &[EnvelopeRoute {
-    outer_tag: auth::signed_fact::layout::TYPE_SIGNED_FACT,
+    outer_tag: auth::signed_envelope::layout::TYPE_SIGNED_ENVELOPE,
     effective_tag: signed_effective_tag,
 }];
 

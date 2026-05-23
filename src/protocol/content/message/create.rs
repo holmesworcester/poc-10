@@ -16,9 +16,9 @@ use crate::core::runtime::Runtime;
 use crate::core::store::TableName;
 use crate::core::wire;
 use crate::protocol::auth;
-use crate::protocol::auth::signed_fact::{self, create as signed_fact_create};
+use crate::protocol::auth::signed_envelope::{self, create as signed_envelope_create};
 use crate::protocol::content::message::fact::{
-    ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
+    ContentMessageFact, MessageCiphertext, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::content::message::layout;
 use crate::protocol::content::message::queries;
@@ -177,12 +177,16 @@ fn build_message_fact(
         disappearing_setting_id,
         minute,
         nonce,
-        ciphertext,
+        ciphertext: MessageCiphertext::new(&ciphertext)
+            .map_err(|err| format!("content message ciphertext: {err}"))?,
     };
     let payload = layout::encode_fact(&message)?;
-    let envelope_bytes =
-        signed_fact_create::sign_payload_bytes(signing.signer_id, &signing.private_key, payload)?;
-    debug_assert_eq!(envelope_bytes.len(), signed_fact::SIGNED_FACT_BYTES);
+    let envelope_bytes = signed_envelope_create::sign_payload_bytes(
+        signing.signer_id,
+        &signing.private_key,
+        payload,
+    )?;
+    debug_assert_eq!(envelope_bytes.len(), signed_envelope::SIGNED_ENVELOPE_BYTES);
 
     let fact = Fact::new(
         FactScope::Scoped {
@@ -440,13 +444,13 @@ pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> 
         Some(layout::TYPE_CONTENT_MESSAGE) => {
             content_message_retention(layout::decode_fact(fact.body())?)
         }
-        Some(signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = signed_fact::decode_envelope(fact.body())?;
+        Some(signed_envelope::TYPE_SIGNED_ENVELOPE) => {
+            let envelope = signed_envelope::decode_envelope(fact.body())?;
             match envelope.inner_type {
                 layout::TYPE_CONTENT_MESSAGE => {
                     content_message_retention(layout::decode_fact(&envelope.payload)?)
                 }
-                _ => Err("signed fact does not contain a message".to_string()),
+                _ => Err("signed envelope does not contain a message".to_string()),
             }
         }
         _ => Err("expected message fact".to_string()),

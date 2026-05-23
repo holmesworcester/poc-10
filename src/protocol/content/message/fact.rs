@@ -4,10 +4,12 @@
 //! encrypted field that opens only when matching key context is available.
 
 use crate::core::facts::FactId;
+use crate::core::wire::FixedSlot;
 
 pub const UNIX_MINUTE_MS: u64 = 60_000;
 pub const CIPHERTEXT_BYTES: usize = 128;
 pub const NONCE_BYTES: usize = 24;
+pub type MessageCiphertext = FixedSlot<CIPHERTEXT_BYTES>;
 
 pub type WorkspaceId = FactId;
 pub type AuthorId = FactId;
@@ -26,7 +28,7 @@ pub struct ContentMessageFact {
     pub disappearing_setting_id: FactId,
     pub minute: u64,
     pub nonce: [u8; NONCE_BYTES],
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: MessageCiphertext,
 }
 
 /// Convenience: derive the authoring `unix_minute` from `created_at_ms`. The

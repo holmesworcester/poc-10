@@ -6,7 +6,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::protocol::auth::signed_fact;
+use crate::protocol::auth::signed_envelope;
 
 use crate::protocol::auth::create_key_wrap::CreateKeyWrapIntent;
 use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
@@ -15,6 +15,7 @@ use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use crate::protocol::auth::local_key_secret::layout as local_key_secret_layout;
 use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
 use crate::protocol::auth::local_recipient_key::layout as local_recipient_layout;
+use crate::protocol::auth::local_signer_secret::layout as local_signer_secret_layout;
 use crate::protocol::auth::recipient_key::fact::RecipientKeyFact;
 use crate::protocol::auth::recipient_key::layout as recipient_key_layout;
 use crate::protocol::auth::removal_frontier::layout as removal_frontier_layout;
@@ -118,9 +119,9 @@ pub fn unwrap_key_wrap_fact(
         return Err("frontier fact id does not match unwrap intent".to_string());
     }
 
-    let envelope = signed_fact::layout::decode_signed_fact(&key_wrap_fact.bytes)?;
+    let envelope = signed_envelope::layout::decode_signed_envelope(&key_wrap_fact.bytes)?;
     if envelope.inner_type != layout::TYPE_KEY_WRAP {
-        return Err("signed fact does not contain an auth key wrap".to_string());
+        return Err("signed envelope does not contain an auth key wrap".to_string());
     }
     let wrap = layout::decode_key_wrap(&envelope.payload)?;
     require_unwrap_coordinate(intent, &wrap)?;
@@ -169,7 +170,7 @@ pub fn create_signed_key_wrap_fact(
     signer_secret_fact: &Fact,
 ) -> Result<Fact, String> {
     let wrap = create_key_wrap_fact(intent, recipient_fact, source_fact)?;
-    let signer = signed_fact::layout::decode_local_signer_secret(&signer_secret_fact.bytes)?;
+    let signer = local_signer_secret_layout::decode_fact(&signer_secret_fact.bytes)?;
     if signer_secret_fact.id != intent.signer_secret_fact_id {
         return Err("signer secret fact id does not match create_key_wrap intent".to_string());
     }
@@ -180,15 +181,18 @@ pub fn create_signed_key_wrap_fact(
     if signer.signer_id != key_wrap.signer_endpoint_id {
         return Err("signer secret does not match key wrap signer".to_string());
     }
-    let signed_bytes =
-        signed_fact::create::sign_payload_bytes(signer.signer_id, &signer.private_key, wrap.bytes)?;
+    let signed_bytes = signed_envelope::create::sign_payload_bytes(
+        signer.signer_id,
+        &signer.private_key,
+        wrap.bytes,
+    )?;
     Ok(Fact::new(wrap.scope, wrap.timestamp, signed_bytes))
 }
 
 pub fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(&bytes)?;
+    let envelope = signed_envelope::layout::decode_signed_envelope(&bytes)?;
     if envelope.inner_type != layout::TYPE_KEY_WRAP {
-        return Err("signed fact does not contain an auth key wrap".to_string());
+        return Err("signed envelope does not contain an auth key wrap".to_string());
     }
     let wrap = layout::decode_key_wrap(&envelope.payload)?;
     if envelope.signer_id != wrap.signer_endpoint_id {
@@ -457,7 +461,7 @@ mod tests {
         };
         let payload = layout::encode_key_wrap(&wrap).expect("encode key wrap");
         let bytes =
-            signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            signed_envelope::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
                 .expect("sign key wrap");
         (bytes, wrap)
     }
@@ -489,7 +493,7 @@ mod tests {
         })
         .expect("encode recipient key");
         let bytes =
-            signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
+            signed_envelope::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
                 .expect("sign recipient key");
 
         let err = admit_signed_key_wrap_fact(bytes).expect_err("recipient key is not a key wrap");

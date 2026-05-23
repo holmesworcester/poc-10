@@ -241,7 +241,7 @@ pub fn create_key_frontier(
         input.created_at_ms,
         local_key_secret_layout::encode_local_key_secret(&local_secret)?,
     );
-    let signer = auth::signed_fact::fact::LocalSignerSecretFact {
+    let signer = auth::local_signer_secret::fact::LocalSignerSecretFact {
         workspace_id: input.workspace_id,
         signer_id: endpoint.endpoint,
         public_key: endpoint.signing_public_key,
@@ -250,7 +250,7 @@ pub fn create_key_frontier(
     let signer_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        auth::signed_fact::layout::encode_local_signer_secret(&signer)?,
+        auth::local_signer_secret::layout::encode_fact(&signer)?,
     );
     Ok(CommandOutput::new(CreateKeyFrontierReceipt {
         workspace_id: input.workspace_id,

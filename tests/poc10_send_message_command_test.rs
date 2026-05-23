@@ -16,7 +16,7 @@ use topo::core::command_context::{
 use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::auth::signed_fact::layout::decode_signed_fact;
+use topo::protocol::auth::signed_envelope::layout::decode_signed_envelope;
 use topo::protocol::content::message::create::{associated_data, recover_text, send_message};
 use topo::protocol::content::message::layout::{decode_fact, TYPE_CONTENT_MESSAGE};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -126,7 +126,7 @@ fn send_message_happy_path_emits_one_content_message_fact() {
     // The fact id is the blake3 of the signed envelope bytes. Peel the
     // envelope to recover the inner content-message payload before decoding.
     let envelope =
-        decode_signed_fact(&output.effects.facts[0].bytes).expect("decode signed envelope");
+        decode_signed_envelope(&output.effects.facts[0].bytes).expect("decode signed envelope");
     assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
     let message = decode_fact(&envelope.payload).expect("decode inner content message");
     assert_eq!(message.workspace_id, workspace_id);
@@ -161,7 +161,7 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
     let envelope =
-        decode_signed_fact(&output.effects.facts[0].bytes).expect("decode signed envelope");
+        decode_signed_envelope(&output.effects.facts[0].bytes).expect("decode signed envelope");
     assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
     let message = decode_fact(&envelope.payload).expect("decode inner content message");
 

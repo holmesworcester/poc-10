@@ -20,7 +20,7 @@ use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
 use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
-use crate::protocol::auth::{self, signed_fact};
+use crate::protocol::auth::{self, signed_envelope};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::KeyWrapFact;
@@ -449,7 +449,7 @@ pub(crate) fn has_matching_signer_public_key(
     projection_context
         .matched_payloads_for(need)
         .any(|(_, payload)| {
-            let Ok(envelope) = signed_fact::decode_envelope(payload.body()) else {
+            let Ok(envelope) = signed_envelope::decode_envelope(payload.body()) else {
                 return false;
             };
             if envelope.inner_type != auth::endpoint_shared::TYPE_ENDPOINT_SHARED {
@@ -549,7 +549,7 @@ impl TypedProjector<super::Codec> for KeyWrapProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: signed_fact::SignedPayload<KeyWrapFact>,
+        signed: signed_envelope::SignedPayload<KeyWrapFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         signed_key_wrap(fact, context, signed)
@@ -559,7 +559,7 @@ impl TypedProjector<super::Codec> for KeyWrapProjector {
 fn signed_key_wrap(
     fact: &Fact,
     projection_context: &ProjectionContext,
-    signed: signed_fact::SignedPayload<KeyWrapFact>,
+    signed: signed_envelope::SignedPayload<KeyWrapFact>,
 ) -> Result<ProjectionOutput, String> {
     let envelope = signed.envelope;
     let wrap = signed.payload;
@@ -618,7 +618,7 @@ fn signed_key_wrap(
     if !signer_ready || recipient_fact.is_none() || frontier_fact.is_none() {
         return Ok(output);
     }
-    signed_fact::verify_envelope(&envelope)?;
+    signed_envelope::verify_envelope(&envelope)?;
 
     let recipient_fact = recipient_fact.expect("checked");
     if recipient_fact.id != wrap.recipient_key_id {

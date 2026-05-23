@@ -42,7 +42,7 @@ impl TypedProjector<super::Codec> for UserProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<super::fact::UserFact>,
+        signed: auth::signed_envelope::SignedPayload<super::fact::UserFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -57,7 +57,7 @@ impl TypedProjector<super::Codec> for UserProjector {
         if user.public_key == [0; 32] {
             return Err("user public_key must not be empty".to_string());
         }
-        if user.username.trim().is_empty() {
+        if user.username.as_str().trim().is_empty() {
             return Err("username must not be empty".to_string());
         }
 
@@ -72,11 +72,11 @@ impl TypedProjector<super::Codec> for UserProjector {
         let Some(invite_fact) = context.payload_for(&invite_need) else {
             return Ok(ProjectionOutput::new().need(invite_need));
         };
-        auth::signed_fact::verify_envelope(&envelope)?;
+        auth::signed_envelope::verify_envelope(&envelope)?;
         if invite_fact.id != envelope.signer_id {
             return Err("user signer context payload id mismatch".to_string());
         }
-        let invite_envelope = auth::signed_fact::decode_envelope(invite_fact.body())
+        let invite_envelope = auth::signed_envelope::decode_envelope(invite_fact.body())
             .map_err(|_| "user signer context must be a signed user_invite fact".to_string())?;
         if invite_envelope.inner_type != user_invite::TYPE_USER_INVITE {
             return Err("user signer context must be a signed user_invite fact".to_string());

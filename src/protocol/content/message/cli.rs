@@ -132,7 +132,8 @@ pub fn react(
         target_message_id: target.message_id,
         author_user_id,
         nonce: deterministic_nonce(b"topo:reaction-nonce:v1", workspace_id, created_at_ms),
-        ciphertext: emoji.as_bytes().to_vec(),
+        ciphertext: reaction::fact::ReactionCiphertext::new(emoji.as_bytes())
+            .map_err(|err| format!("reaction ciphertext: {err}"))?,
     };
     let fact = Fact::new(
         crate::protocol::auth::workspace::scope(workspace_id),
@@ -201,7 +202,11 @@ pub fn send_file(
         total_slices,
         slice_bytes: FILE_SLICE_BYTES as u32,
         root_hash,
-        sealed_metadata: encode_file_metadata(&filename, &parsed.mime)?,
+        sealed_metadata: file::fact::SealedMetadata::new(&encode_file_metadata(
+            &filename,
+            &parsed.mime,
+        )?)
+        .map_err(|err| format!("file metadata: {err}"))?,
     };
     let descriptor_fact = Fact::new(
         crate::protocol::auth::workspace::scope(parsed.workspace_id),
@@ -216,7 +221,8 @@ pub fn send_file(
             created_at_ms: created_at_ms.saturating_add(1 + slice_index as u64),
             file_id,
             slice_index: slice_index as u32,
-            ciphertext: chunk.to_vec(),
+            ciphertext: file_slice::fact::FileSliceCiphertext::new(chunk)
+                .map_err(|err| format!("file slice ciphertext: {err}"))?,
         };
         facts.push(Fact::new(
             crate::protocol::auth::workspace::scope(parsed.workspace_id),

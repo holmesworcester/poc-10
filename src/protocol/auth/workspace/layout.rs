@@ -7,9 +7,9 @@
 //! workspace id.
 
 use crate::core::wire;
-use crate::core::wire::FixedSlot;
+use crate::core::wire::FixedText;
 
-use super::fact::{WorkspaceFact, WorkspacePublicKey, WORKSPACE_NAME_BYTES};
+use super::fact::{WorkspaceFact, WorkspaceName, WorkspacePublicKey, WORKSPACE_NAME_BYTES};
 
 pub const TYPE_WORKSPACE: u8 = 131;
 pub const FACT_BYTES: usize = 1 + ROW_VALUE_BYTES;
@@ -45,11 +45,7 @@ fn encode_value_fields(fact: &WorkspaceFact, out: &mut [u8]) -> Result<(), Strin
     wire::expect_len(out, ROW_VALUE_BYTES).map_err(wire_err)?;
     wire::put_u64be(fact.created_at_ms, &mut out[0..8]).map_err(wire_err)?;
     out[8..40].copy_from_slice(&fact.public_key);
-    if fact.name.as_bytes().contains(&0) {
-        return Err("workspace name cannot contain NUL".to_string());
-    }
-    let name = FixedSlot::<WORKSPACE_NAME_BYTES>::new(fact.name.as_bytes()).map_err(wire_err)?;
-    out[40..].copy_from_slice(name.padded_bytes());
+    out[40..].copy_from_slice(fact.name.padded_bytes());
     Ok(())
 }
 
@@ -66,17 +62,11 @@ fn decode_value_fields(bytes: &[u8]) -> Result<WorkspaceFact, String> {
     })
 }
 
-fn decode_name(bytes: &[u8]) -> Result<String, String> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    if bytes[end..].iter().any(|byte| *byte != 0) {
-        return Err("workspace name has non-canonical padding".to_string());
-    }
-    std::str::from_utf8(&bytes[..end])
-        .map_err(|_| "workspace name is not valid utf-8".to_string())
-        .map(ToOwned::to_owned)
+fn decode_name(bytes: &[u8]) -> Result<WorkspaceName, String> {
+    let padded: [u8; WORKSPACE_NAME_BYTES] = bytes
+        .try_into()
+        .map_err(|_| "workspace name slot has wrong length".to_string())?;
+    FixedText::from_padded(padded).map_err(wire_err)
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -91,7 +81,7 @@ mod tests {
         WorkspaceFact {
             created_at_ms: 42,
             public_key: [7; 32],
-            name: "Engineering".to_string(),
+            name: WorkspaceName::new("Engineering").expect("name"),
         }
     }
 

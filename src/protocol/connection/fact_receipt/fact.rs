@@ -9,6 +9,7 @@
 //! context and decides whether it proves the required path.
 
 use crate::core::facts::FactId;
+use crate::core::wire::FixedSlot;
 
 pub const ORIGIN_ADDR_BYTES: usize = 256;
 pub const RECEIVE_PATH_CONNECTION_REQUEST: u8 = 0;
@@ -18,11 +19,12 @@ pub const RECEIVE_PATH_CONNECTION_RESPONSE: u8 = 2;
 pub type EndpointId = FactId;
 pub type ConnectionId = FactId;
 pub type RequestId = FactId;
+pub type OriginAddr = FixedSlot<ORIGIN_ADDR_BYTES>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFactReceipt {
     pub received_fact_id: FactId,
-    pub origin_addr: Vec<u8>,
+    pub origin_addr: OriginAddr,
     pub local_endpoint_id: EndpointId,
     pub sender_endpoint_id: EndpointId,
     pub receive_path: u8,
@@ -34,6 +36,6 @@ pub struct ConnectionFactReceipt {
 
 impl ConnectionFactReceipt {
     pub fn origin_addr_str(&self) -> Result<&str, std::str::Utf8Error> {
-        std::str::from_utf8(&self.origin_addr)
+        std::str::from_utf8(self.origin_addr.bytes())
     }
 }

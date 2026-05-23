@@ -205,7 +205,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) {
         project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
@@ -429,7 +429,11 @@ mod projector_tests {
             disappearing_setting_id: [0; 32],
             minute: 12,
             nonce: [5; crate::protocol::content::message::fact::NONCE_BYTES],
-            ciphertext: vec![6; crate::protocol::content::message::fact::CIPHERTEXT_BYTES],
+            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(&vec![
+                6;
+                crate::protocol::content::message::fact::CIPHERTEXT_BYTES
+            ])
+            .expect("ciphertext"),
         };
         Fact::new(
             crate::protocol::auth::workspace::scope(workspace_id),
@@ -443,7 +447,7 @@ mod projector_tests {
             created_at_ms: 8_000,
             workspace_id,
             public_key,
-            username: username.to_string(),
+            username: crate::protocol::auth::user::fact::Username::new(username).expect("username"),
         };
         Fact::new(
             FactScope::Global,

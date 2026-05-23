@@ -25,9 +25,13 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
         disappearing_setting_id: [0; 32],
         minute: 1,
         nonce: [5; content::message::fact::NONCE_BYTES],
-        ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
+        ciphertext: content::message::fact::MessageCiphertext::new(&vec![
+            6;
+            content::message::fact::CIPHERTEXT_BYTES
+        ])
+        .expect("message ciphertext"),
     };
-    let fact = signed_fact_in_workspace(
+    let fact = signed_envelope_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::message::layout::encode_fact(&message).expect("encode message"),
@@ -58,9 +62,10 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         total_slices: 1,
         slice_bytes: 1_024,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
-        sealed_metadata: b"sealed".to_vec(),
+        sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
+            .expect("sealed metadata"),
     };
-    let fact = signed_fact_in_workspace(
+    let fact = signed_envelope_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
         content::file::layout::encode_fact(&file).expect("encode file"),
@@ -99,9 +104,10 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
         total_slices: 1,
         slice_bytes: 1_024,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
-        sealed_metadata: b"sealed".to_vec(),
+        sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
+            .expect("sealed metadata"),
     };
-    let fact = signed_fact_in_workspace(
+    let fact = signed_envelope_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
         content::file::layout::encode_fact(&file).expect("encode file"),
@@ -131,9 +137,10 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
         target_message_id: target.id,
         author_user_id: reaction_author.id,
         nonce: [6; content::reaction::fact::REACTION_NONCE_BYTES],
-        ciphertext: b"sealed-reaction".to_vec(),
+        ciphertext: content::reaction::fact::ReactionCiphertext::new(b"sealed-reaction")
+            .expect("reaction ciphertext"),
     };
-    let fact = signed_fact_in_workspace(
+    let fact = signed_envelope_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
         content::reaction::layout::encode_fact(&reaction).expect("encode reaction"),
@@ -163,7 +170,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         target_minute: 1,
         author_user_id: author.id,
     };
-    let fact = signed_fact_in_workspace(
+    let fact = signed_envelope_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
         content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
@@ -205,7 +212,7 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
         target_file_id: target.id,
         author_user_id: deleter.id,
     };
-    let fact = signed_fact_in_workspace(
+    let fact = signed_envelope_in_workspace(
         signer.id,
         CONTENT_SIGNING_KEY,
         content::file_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
@@ -234,9 +241,10 @@ fn endpoint_shared_fact(
         endpoint_id: CONTENT_ENDPOINT_ID,
         signing_public_key: crypto::ed25519_public_key(&content_signing_key),
         endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
-        device_name: "laptop".to_string(),
+        device_name: auth::endpoint_shared::fact::EndpointDeviceName::new("laptop")
+            .expect("device name"),
     };
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
+    let bytes = auth::signed_envelope::create::sign_payload_bytes(
         [8; 32],
         &ENDPOINT_AUTHORITY_KEY,
         auth::endpoint_shared::layout::encode_fact(&endpoint).expect("encode endpoint_shared"),
@@ -250,7 +258,7 @@ fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact
         created_at_ms: 2,
         workspace_id,
         public_key,
-        username: username.to_string(),
+        username: auth::user::fact::Username::new(username).expect("username"),
     };
     Fact::new(
         FactScope::Global,
@@ -271,7 +279,11 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         disappearing_setting_id: [0; 32],
         minute: 1,
         nonce: [5; content::message::fact::NONCE_BYTES],
-        ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
+        ciphertext: content::message::fact::MessageCiphertext::new(&vec![
+            6;
+            content::message::fact::CIPHERTEXT_BYTES
+        ])
+        .expect("message ciphertext"),
     };
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
@@ -291,7 +303,8 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         total_slices: 1,
         slice_bytes: 1_024,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
-        sealed_metadata: b"sealed".to_vec(),
+        sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
+            .expect("sealed metadata"),
     };
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
@@ -300,7 +313,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     )
 }
 
-fn signed_fact_in_workspace(
+fn signed_envelope_in_workspace(
     signer_id: FactId,
     private_key: [u8; 32],
     payload: Vec<u8>,
@@ -309,7 +322,7 @@ fn signed_fact_in_workspace(
     Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         timestamp,
-        auth::signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
+        auth::signed_envelope::create::sign_payload_bytes(signer_id, &private_key, payload)
             .expect("sign content fact"),
     )
 }

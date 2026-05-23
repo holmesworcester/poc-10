@@ -9,14 +9,16 @@
 //!   || device_name_utf8_zero_padded(64)
 //! ```
 //!
-//! The signed envelope wrapper is modeled by `auth::signed_fact`; this
+//! The signed envelope wrapper is modeled by `auth::signed_envelope`; this
 //! module owns only the canonical inner endpoint_shared payload and projected
 //! row value.
 
 use crate::core::wire;
-use crate::core::wire::FixedSlot;
+use crate::core::wire::FixedText;
 
-use super::fact::{EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES};
+use super::fact::{
+    EndpointDeviceName, EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES,
+};
 
 pub const TYPE_ENDPOINT_SHARED: u8 = 135;
 pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES;
@@ -95,7 +97,7 @@ pub(crate) fn decode_row_value(value: &[u8]) -> Result<DecodedRowValue, String> 
         signing_public_key,
         endpoint_role,
         user_authority_fact_id,
-        device_name,
+        device_name: device_name.to_string(),
     })
 }
 
@@ -108,27 +110,17 @@ pub(crate) struct DecodedRowValue {
     pub device_name: String,
 }
 
-fn write_device_name(name: &str, out: &mut [u8]) -> Result<(), String> {
+fn write_device_name(name: &EndpointDeviceName, out: &mut [u8]) -> Result<(), String> {
     wire::expect_len(out, ENDPOINT_DEVICE_NAME_BYTES).map_err(wire_err)?;
-    if name.as_bytes().contains(&0) {
-        return Err("endpoint device name cannot contain NUL".to_string());
-    }
-    let slot = FixedSlot::<ENDPOINT_DEVICE_NAME_BYTES>::new(name.as_bytes()).map_err(wire_err)?;
-    out.copy_from_slice(slot.padded_bytes());
+    out.copy_from_slice(name.padded_bytes());
     Ok(())
 }
 
-fn read_device_name(bytes: &[u8]) -> Result<String, String> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    if bytes[end..].iter().any(|byte| *byte != 0) {
-        return Err("endpoint device name has non-canonical padding".to_string());
-    }
-    std::str::from_utf8(&bytes[..end])
-        .map_err(|_| "endpoint device name is not valid utf-8".to_string())
-        .map(ToOwned::to_owned)
+fn read_device_name(bytes: &[u8]) -> Result<EndpointDeviceName, String> {
+    let padded: [u8; ENDPOINT_DEVICE_NAME_BYTES] = bytes
+        .try_into()
+        .map_err(|_| "endpoint device name slot has wrong length".to_string())?;
+    FixedText::from_padded(padded).map_err(wire_err)
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -147,7 +139,7 @@ mod tests {
             endpoint_id: [3; 32],
             signing_public_key: [4; 32],
             endpoint_role: EndpointRole::Device,
-            device_name: "laptop".to_string(),
+            device_name: EndpointDeviceName::new("laptop").expect("device name"),
         }
     }
 
@@ -171,12 +163,8 @@ mod tests {
     #[test]
     fn rejects_nul_device_name() {
         assert_eq!(
-            encode_fact(&EndpointSharedFact {
-                device_name: "bad\0name".to_string(),
-                ..fact()
-            })
-            .expect_err("NUL name must fail"),
-            "endpoint device name cannot contain NUL"
+            EndpointDeviceName::new("bad\0name").expect_err("NUL name must fail"),
+            wire::WireError::InteriorNul { index: 3 }
         );
     }
 
@@ -187,7 +175,7 @@ mod tests {
         encoded[name_start + "laptop".len() + 1] = b'x';
         assert_eq!(
             decode_fact(&encoded).expect_err("padding must fail"),
-            "endpoint device name has non-canonical padding"
+            "NonZeroPadding { index: 7 }"
         );
     }
 

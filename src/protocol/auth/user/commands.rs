@@ -10,7 +10,7 @@ use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth;
 
-use super::fact::UserFact;
+use super::fact::{UserFact, Username};
 use super::layout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ pub fn user_fact(input: &CreateUser) -> Result<Fact, String> {
         created_at_ms: input.created_at_ms,
         workspace_id: input.workspace_id,
         public_key: input.public_key,
-        username: input.username.clone(),
+        username: Username::new(&input.username).map_err(|err| format!("username: {err}"))?,
     };
     Ok(Fact::new(
         FactScope::Global,
@@ -101,9 +101,9 @@ pub fn signed_user_fact(
         created_at_ms: input.created_at_ms,
         workspace_id: input.workspace_id,
         public_key,
-        username: input.username.clone(),
+        username: Username::new(&input.username).map_err(|err| format!("username: {err}"))?,
     };
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
+    let bytes = auth::signed_envelope::create::sign_payload_bytes(
         input.signer_id,
         &input.signer_private_key,
         layout::encode_fact(&payload)?,

@@ -33,13 +33,13 @@ pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<MessageDeletio
         Some(layout::TYPE_CONTENT_MESSAGE_DELETION) => {
             semantic_message_deletion(layout::decode_fact(fact.body())?)
         }
-        Some(crate::protocol::auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = crate::protocol::auth::signed_fact::decode_envelope(fact.body())?;
+        Some(crate::protocol::auth::signed_envelope::TYPE_SIGNED_ENVELOPE) => {
+            let envelope = crate::protocol::auth::signed_envelope::decode_envelope(fact.body())?;
             match envelope.inner_type {
                 layout::TYPE_CONTENT_MESSAGE_DELETION => {
                     semantic_message_deletion(layout::decode_fact(&envelope.payload)?)
                 }
-                _ => Err("signed fact does not contain a message deletion".to_string()),
+                _ => Err("signed envelope does not contain a message deletion".to_string()),
             }
         }
         _ => Err("expected message deletion fact".to_string()),
@@ -65,7 +65,7 @@ impl crate::core::projectors::FactCodec for Codec {
         crate::protocol::content::message::project::DecodedFact<fact::ContentMessageDeletionFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        crate::protocol::content::message::project::decode_raw_or_signed_fact(
+        crate::protocol::content::message::project::decode_raw_or_signed_payload(
             fact,
             layout::TYPE_CONTENT_MESSAGE_DELETION,
             "message deletion",

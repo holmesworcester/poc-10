@@ -15,7 +15,7 @@ use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::collections::BTreeSet;
 
-use super::fact::{CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
+use super::fact::{CascadeDependencies, CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
 use super::{layout, rows};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub fn generate_deps(
 
     for index in 0..count {
         let first_dependency = index.saturating_sub(deps_per_fact);
-        let dependencies = ids[first_dependency..index].to_vec();
+        let dependencies = CascadeDependencies::new(&ids[first_dependency..index])?;
         dep_edges += dependencies.len();
         let timestamp = u64::try_from(index + 1)
             .map_err(|_| "cascade fact index exceeds timestamp range".to_string())?;
@@ -128,7 +128,7 @@ fn materialize_replayed_cascade_offers(
         if !decoded
             .dependencies
             .iter()
-            .all(|dependency| applied.contains(dependency))
+            .all(|dependency| applied.contains(&dependency))
         {
             continue;
         }

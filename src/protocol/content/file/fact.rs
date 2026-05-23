@@ -9,20 +9,23 @@
 //! auth key-material code in a later wave.
 //!
 //! Current boundaries:
-//! - Signed envelope verification is owned by `auth::signed_fact`.
+//! - Signed envelope verification is owned by `auth::signed_envelope`.
 //! - Descriptor secrecy is limited to the opaque sealed metadata slot here;
 //!   key selection and per-file content-key context belong to the auth
 //!   wave.
 //! - Slice integrity is checked by the file-slice admit pipeline.
 
 use crate::core::facts::FactId;
+use crate::core::wire::FixedSlot;
 
 pub type WorkspaceId = FactId;
 pub type AuthorId = FactId;
 
 /// BLAKE3 root hash of the encrypted blob, carried in plaintext.
 pub const FILE_ROOT_HASH_BYTES: usize = 32;
+pub const SEALED_METADATA_BYTES: usize = 512;
 pub type RootHash = [u8; FILE_ROOT_HASH_BYTES];
+pub type SealedMetadata = FixedSlot<SEALED_METADATA_BYTES>;
 
 /// Product hard cap on declared blob size.
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -41,5 +44,5 @@ pub struct ContentFileFact {
     /// Opaque sealed descriptor metadata (filename + mime + AEAD tag). Treated
     /// as an opaque byte blob in this slice; auth key-material code owns the
     /// inner framing in a later wave.
-    pub sealed_metadata: Vec<u8>,
+    pub sealed_metadata: SealedMetadata,
 }

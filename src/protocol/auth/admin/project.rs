@@ -48,7 +48,7 @@ impl TypedProjector<super::Codec> for AdminProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<AdminFact>,
+        signed: auth::signed_envelope::SignedPayload<AdminFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -87,7 +87,7 @@ impl TypedProjector<super::Codec> for AdminProjector {
 fn project_bootstrap_admin(
     fact: &Fact,
     admin: &AdminFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = BootstrapAdminNeeds::new(fact.id, admin);
@@ -110,7 +110,7 @@ fn project_bootstrap_admin(
     if admin.public_key != workspace.public_key {
         return Err("admin public_key does not match root workspace public_key".to_string());
     }
-    auth::signed_fact::verify_envelope(envelope)?;
+    auth::signed_envelope::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, admin, needs.output())
@@ -119,7 +119,7 @@ fn project_bootstrap_admin(
 fn project_delegated_admin(
     fact: &Fact,
     admin: &AdminFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = DelegatedAdminNeeds::new(fact.id, admin);
@@ -161,7 +161,7 @@ fn project_delegated_admin(
     if user.public_key != admin.public_key {
         return Err("admin public_key does not match user public_key".to_string());
     }
-    auth::signed_fact::verify_envelope(envelope)?;
+    auth::signed_envelope::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, admin, needs.output())
@@ -271,8 +271,8 @@ fn materialized_output(
 fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
         Some(layout::TYPE_ADMIN) => super::decode_fact_payload(fact.body()),
-        Some(auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = auth::signed_fact::decode_envelope(fact.body())?;
+        Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) => {
+            let envelope = auth::signed_envelope::decode_envelope(fact.body())?;
             if envelope.inner_type != layout::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }
@@ -285,8 +285,8 @@ fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {
 fn decode_user_payload(fact: &Fact) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
     match fact.bytes.first().copied() {
         Some(user::TYPE_USER) => user::decode_fact_payload(fact.body()),
-        Some(auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = auth::signed_fact::decode_envelope(fact.body())?;
+        Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) => {
+            let envelope = auth::signed_envelope::decode_envelope(fact.body())?;
             if envelope.inner_type != user::TYPE_USER {
                 return Err("expected signed user".to_string());
             }

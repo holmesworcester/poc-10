@@ -7,8 +7,9 @@
 //! projection transaction.
 //!
 //! POLICY. A `connection::frame` fact is admitted iff:
-//!   1. STRUCTURAL. The fact is a local ephemeral small or large connection
-//!      frame whose body encodes the corresponding fixed outer frame shape.
+//!   1. STRUCTURAL. The fact is a local ephemeral small, file-slice, or bundle
+//!      connection frame whose body encodes the corresponding fixed outer frame
+//!      shape.
 //!   2. CONTEXT. The public frame header names an exact local
 //!      connection_response fact. Missing context parks the ephemeral input only
 //!      for its first needs check; malformed or undecryptable frames complete
@@ -63,12 +64,21 @@ impl TypedProjector<super::Codec> for ConnectionFrameProjector {
         }
 
         let (origin_addr, received_at_local_ms, frame) = match input {
-            ProjectionPayload::Small(input) => {
-                (input.origin_addr, input.received_at_local_ms, input.frame)
-            }
-            ProjectionPayload::Large(input) => {
-                (input.origin_addr, input.received_at_local_ms, input.frame)
-            }
+            ProjectionPayload::Small(input) => (
+                input.origin_addr,
+                input.received_at_local_ms,
+                input.frame.bytes().to_vec(),
+            ),
+            ProjectionPayload::FileSlice(input) => (
+                input.origin_addr,
+                input.received_at_local_ms,
+                input.frame.bytes().to_vec(),
+            ),
+            ProjectionPayload::Bundle(input) => (
+                input.origin_addr,
+                input.received_at_local_ms,
+                input.frame.bytes().to_vec(),
+            ),
         };
 
         // 2. Context.
@@ -95,7 +105,7 @@ impl TypedProjector<super::Codec> for ConnectionFrameProjector {
         match create::open_received_frame(OpenReceivedFrame {
             frame: &frame,
             connection_fact,
-            origin_addr: &origin_addr,
+            origin_addr: origin_addr.bytes(),
             received_at_local_ms,
         }) {
             Ok(facts) => Ok(facts_output(facts)),

@@ -45,7 +45,7 @@ impl TypedProjector<super::Codec> for InviteServerProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<InviteServerFact>,
+        signed: auth::signed_envelope::SignedPayload<InviteServerFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -81,7 +81,7 @@ impl TypedProjector<super::Codec> for InviteServerProjector {
 fn project_workspace_signed(
     fact: &Fact,
     invite: &InviteServerFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = WorkspaceSignedNeeds::new(fact.id, invite);
@@ -104,7 +104,7 @@ fn project_workspace_signed(
             "signed invite_server signer key does not match workspace public key".to_string(),
         );
     }
-    auth::signed_fact::verify_envelope(envelope)?;
+    auth::signed_envelope::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
@@ -113,7 +113,7 @@ fn project_workspace_signed(
 fn project_endpoint_signed(
     fact: &Fact,
     invite: &InviteServerFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = EndpointAdminNeeds::new(fact.id, invite, envelope.signer_id);
@@ -127,7 +127,7 @@ fn project_endpoint_signed(
     if endpoint_fact.id != envelope.signer_id {
         return Err("invite_server signer endpoint context payload id mismatch".to_string());
     }
-    let endpoint_envelope = auth::signed_fact::decode_envelope(endpoint_fact.body())
+    let endpoint_envelope = auth::signed_envelope::decode_envelope(endpoint_fact.body())
         .map_err(|_| "invite_server signer must be workspace or endpoint_shared".to_string())?;
     if endpoint_envelope.inner_type != endpoint_shared::TYPE_ENDPOINT_SHARED {
         return Err("invite_server signer must be workspace or endpoint_shared".to_string());
@@ -155,7 +155,7 @@ fn project_endpoint_signed(
     if endpoint.user_authority_fact_id != admin.user_fact_id {
         return Err("invite_server signer user does not match admin authority user".to_string());
     }
-    auth::signed_fact::verify_envelope(envelope)?;
+    auth::signed_envelope::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
@@ -247,8 +247,8 @@ fn decode_admin_payload(
 ) -> Result<crate::protocol::auth::admin::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
         Some(admin::TYPE_ADMIN) => admin::decode_fact_payload(fact.body()),
-        Some(auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = auth::signed_fact::decode_envelope(fact.body())?;
+        Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) => {
+            let envelope = auth::signed_envelope::decode_envelope(fact.body())?;
             if envelope.inner_type != admin::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }

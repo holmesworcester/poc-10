@@ -6,15 +6,18 @@
 //! and per-slice nonce derivation in a later wave.
 //!
 //! Current boundaries:
-//! - Signed envelope verification is owned by `auth::signed_fact`.
+//! - Signed envelope verification is owned by `auth::signed_envelope`.
 //! - Slice proof material is handled by the file-send/admit path, not this
 //!   narrow fact shape.
 //! - Parent-descriptor existence is enforced by the admit pipeline before
 //!   projection materializes rows.
 
 use crate::core::facts::FactId;
+use crate::core::wire::FixedSlot;
 
 pub type WorkspaceId = FactId;
+pub const FILE_SLICE_CIPHERTEXT_BYTES: usize = 256 * 1024;
+pub type FileSliceCiphertext = FixedSlot<FILE_SLICE_CIPHERTEXT_BYTES>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileSliceFact {
@@ -24,5 +27,5 @@ pub struct ContentFileSliceFact {
     pub slice_index: u32,
     /// Opaque per-slice ciphertext. Encryption framing and the per-slice nonce
     /// are owned by auth key-material code in a later wave.
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: FileSliceCiphertext,
 }

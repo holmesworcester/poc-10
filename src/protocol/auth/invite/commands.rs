@@ -189,7 +189,7 @@ pub fn create_device_link(
         user_invite_fact_id: None,
         public_key: crypto::ed25519_public_key(&invite_private_key),
     };
-    let device_invite_bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
+    let device_invite_bytes = crate::protocol::auth::signed_envelope::create::sign_payload_bytes(
         membership.endpoint_shared_id,
         &local.signing_secret,
         auth::device_invite::layout::encode_fact(&device_invite)?,
@@ -248,7 +248,7 @@ pub fn create_invite_server(
         workspace_id: input.workspace_id,
         authority_fact_id: authority.admin_id,
     };
-    let invite_server_bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
+    let invite_server_bytes = crate::protocol::auth::signed_envelope::create::sign_payload_bytes(
         authority.signer_id,
         &local.signing_secret,
         auth::invite_server::layout::encode_fact(&invite_server)?,
@@ -445,7 +445,7 @@ fn workspace_accept_device_invite_fact(
         user_invite_fact_id: Some(user_invite_fact_id),
         public_key: crypto::ed25519_public_key(&bootstrap_secret),
     };
-    let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
+    let bytes = crate::protocol::auth::signed_envelope::create::sign_payload_bytes(
         user_id,
         &bootstrap_secret,
         auth::device_invite::layout::encode_fact(&payload)?,
@@ -612,9 +612,10 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
         endpoint_id: input.endpoint_id,
         signing_public_key: input.signing_public_key,
         endpoint_role: input.endpoint_role,
-        device_name: input.device_name.to_string(),
+        device_name: auth::endpoint_shared::fact::EndpointDeviceName::new(input.device_name)
+            .map_err(|err| format!("endpoint device name: {err}"))?,
     };
-    let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
+    let bytes = crate::protocol::auth::signed_envelope::create::sign_payload_bytes(
         input.signer_id,
         &input.signer_private_key,
         auth::endpoint_shared::layout::encode_fact(&endpoint)?,

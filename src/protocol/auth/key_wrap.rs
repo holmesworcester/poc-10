@@ -1,10 +1,11 @@
 //! Key wrap fact family.
 //!
-//! A key wrap is a signed-envelope fact carrying encrypted key material for a
-//! recipient. This family also owns the wrap-source coordinate scheme and the
-//! shared projection helpers that recipient-key, key-request, and local-material
-//! projection consume. Projection validates signer/recipient/frontier context
-//! and emits unwrap work when local recipient material is present.
+//! A key wrap is a shared fact carried inside a signed envelope with encrypted
+//! key material for a recipient. This family also owns the wrap-source
+//! coordinate scheme and the shared projection helpers that recipient-key,
+//! key-request, and local-material projection consume. Projection validates
+//! signer/recipient/frontier context and emits unwrap work when local recipient
+//! material is present.
 
 pub mod cli;
 pub mod commands;
@@ -19,10 +20,10 @@ pub const TYPE_KEY_WRAP: u8 = layout::TYPE_KEY_WRAP;
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = crate::protocol::auth::signed_fact::SignedPayload<fact::KeyWrapFact>;
+    type Payload = crate::protocol::auth::signed_envelope::SignedPayload<fact::KeyWrapFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        crate::protocol::auth::signed_fact::decode_signed_fact_payload(
+        crate::protocol::auth::signed_envelope::decode_signed_payload(
             fact,
             layout::TYPE_KEY_WRAP,
             "auth key wrap",

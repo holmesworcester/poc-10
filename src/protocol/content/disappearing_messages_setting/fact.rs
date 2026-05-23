@@ -10,7 +10,7 @@
 //! can chain them.
 //!
 //! Current boundaries:
-//! - Signed envelope verification is owned by `auth::signed_fact`.
+//! - Signed envelope verification is owned by `auth::signed_envelope`.
 //! - Workspace-admin authority is validated by the projector context.
 //! - Monotonic floor checks are enforced through the supersedes chain in the
 //!   setting projector.

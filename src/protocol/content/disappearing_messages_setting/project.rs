@@ -162,8 +162,8 @@ fn validate_authority(
 fn decode_admin_payload(fact: &Fact) -> Result<auth::admin::fact::AdminFact, String> {
     match fact.bytes.first().copied() {
         Some(auth::admin::TYPE_ADMIN) => auth::admin::decode_fact_payload(fact.body()),
-        Some(auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = auth::signed_fact::decode_envelope(fact.body())?;
+        Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) => {
+            let envelope = auth::signed_envelope::decode_envelope(fact.body())?;
             if envelope.inner_type != auth::admin::TYPE_ADMIN {
                 return Err("expected signed admin".to_string());
             }

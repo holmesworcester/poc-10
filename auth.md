@@ -19,7 +19,8 @@ needs/offers, `WakeLoop`, projectors, and handlers.
   granting, and accepting workspace authority.
 - `endpoint` and `endpoint_shared`: local and shared endpoint identity
   material.
-- `signed_fact`: shared envelope binding signer identity to another payload.
+- `signed_envelope`: shared codec binding signer identity to another payload;
+  projectors for the wrapped fact family own signature and authority checks.
 - `removal_frontier`: shared fact naming a content-key frontier and its owner.
 - `recipient_key`: shared endpoint public key for receiving wraps.
 - `local_recipient_key`: local private material paired with one recipient key.

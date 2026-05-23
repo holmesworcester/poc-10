@@ -9,6 +9,7 @@
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
+use crate::core::wire::FixedText;
 
 pub const ENDPOINT_DEVICE_NAME_BYTES: usize = 64;
 
@@ -16,6 +17,7 @@ pub type EndpointId = [u8; 32];
 pub type WorkspaceId = FactId;
 pub type UserAuthorityId = FactId;
 pub type EndpointSharedId = FactId;
+pub type EndpointDeviceName = FixedText<ENDPOINT_DEVICE_NAME_BYTES>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointRole {
@@ -48,5 +50,5 @@ pub struct EndpointSharedFact {
     pub endpoint_id: EndpointId,
     pub signing_public_key: Ed25519PublicKey,
     pub endpoint_role: EndpointRole,
-    pub device_name: String,
+    pub device_name: EndpointDeviceName,
 }

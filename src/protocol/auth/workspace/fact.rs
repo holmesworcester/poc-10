@@ -6,15 +6,17 @@
 //! local secrets are modeled by separate fact families.
 
 use crate::core::facts::FactId;
+use crate::core::wire::FixedText;
 
 pub const WORKSPACE_NAME_BYTES: usize = 64;
 
 pub type WorkspaceId = FactId;
 pub type WorkspacePublicKey = [u8; 32];
+pub type WorkspaceName = FixedText<WORKSPACE_NAME_BYTES>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceFact {
     pub created_at_ms: u64,
     pub public_key: WorkspacePublicKey,
-    pub name: String,
+    pub name: WorkspaceName,
 }

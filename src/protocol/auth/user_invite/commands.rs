@@ -107,7 +107,7 @@ pub fn signed_user_invite_fact(
         workspace_id: input.workspace_id,
         authority_fact_id: input.authority_fact_id,
     };
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
+    let bytes = auth::signed_envelope::create::sign_payload_bytes(
         signer_id,
         &signer_private_key,
         layout::encode_fact(&payload)?,

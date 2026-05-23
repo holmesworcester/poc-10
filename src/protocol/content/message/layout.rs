@@ -36,8 +36,7 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.fixed(&fact.disappearing_setting_id);
     out.u64be(fact.minute);
     out.fixed(&fact.nonce);
-    out.fixed_slot::<CIPHERTEXT_BYTES>(&fact.ciphertext)
-        .map_err(wire_err)?;
+    out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
     out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
 }
 
@@ -59,7 +58,9 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
         disappearing_setting_id: reader.array().map_err(wire_err)?,
         minute: reader.u64be().map_err(wire_err)?,
         nonce: reader.array().map_err(wire_err)?,
-        ciphertext: reader.fixed_slot::<CIPHERTEXT_BYTES>().map_err(wire_err)?,
+        ciphertext: reader
+            .fixed_slot_value::<CIPHERTEXT_BYTES>()
+            .map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
     Ok(fact)
@@ -85,7 +86,8 @@ mod tests {
             disappearing_setting_id: [6; 32],
             minute: 3,
             nonce: [8; NONCE_BYTES],
-            ciphertext: b"sealed".to_vec(),
+            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(b"sealed")
+                .expect("ciphertext"),
         }
     }
 

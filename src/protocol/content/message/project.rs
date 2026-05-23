@@ -205,7 +205,7 @@ fn validate_message_signer_context(
     payload: &Fact,
     _need: &ContextNeed,
     message: &super::fact::ContentMessageFact,
-    envelope: Option<&auth::signed_fact::fact::SignedFactEnvelope>,
+    envelope: Option<&auth::signed_envelope::fact::SignedEnvelope>,
 ) -> Result<(), String> {
     let endpoint = endpoint_shared_signer(payload)
         .ok_or_else(|| "content message signer context must be endpoint_shared".to_string())?;
@@ -231,7 +231,7 @@ fn validate_message_signer_context(
 fn endpoint_shared_signer(
     payload: &Fact,
 ) -> Option<auth::endpoint_shared::fact::EndpointSharedFact> {
-    auth::endpoint_shared::decode_raw_or_signed_fact(payload).ok()
+    auth::endpoint_shared::decode_raw_or_signed_payload(payload).ok()
 }
 
 fn validate_author_user(
@@ -489,7 +489,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) {
         decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
@@ -523,14 +523,14 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 pub struct DecodedPayload {
     pub payload: Vec<u8>,
     pub signer: Option<SignedSigner>,
-    pub envelope: Option<auth::signed_fact::fact::SignedFactEnvelope>,
+    pub envelope: Option<auth::signed_envelope::fact::SignedEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedFact<T> {
     pub payload: T,
     pub signer: Option<SignedSigner>,
-    pub envelope: Option<auth::signed_fact::fact::SignedFactEnvelope>,
+    pub envelope: Option<auth::signed_envelope::fact::SignedEnvelope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,14 +546,14 @@ pub fn decode_raw_or_signed(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if fact.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        let envelope = auth::signed_fact::decode_envelope(fact.body())
-            .map_err(|err| format!("{label} signed fact is invalid: {err}"))?;
+    if fact.bytes.first().copied() == Some(auth::signed_envelope::TYPE_SIGNED_ENVELOPE) {
+        let envelope = auth::signed_envelope::decode_envelope(fact.body())
+            .map_err(|err| format!("{label} signed envelope is invalid: {err}"))?;
         if envelope.inner_type != expected_type {
-            return Err(format!("signed fact does not contain a {label}"));
+            return Err(format!("signed envelope does not contain a {label}"));
         }
         return Ok(DecodedPayload {
-            payload: envelope.payload.clone(),
+            payload: envelope.payload.bytes().to_vec(),
             signer: Some(SignedSigner {
                 signer_id: envelope.signer_id,
                 signer_public_key: envelope.signer_public_key,
@@ -574,17 +574,17 @@ pub fn verify_signature<T>(decoded: &DecodedFact<T>, label: &str) -> Result<(), 
 }
 
 pub fn verify_envelope(
-    envelope: Option<&auth::signed_fact::fact::SignedFactEnvelope>,
+    envelope: Option<&auth::signed_envelope::fact::SignedEnvelope>,
     label: &str,
 ) -> Result<(), String> {
     let Some(envelope) = envelope else {
         return Ok(());
     };
-    auth::signed_fact::verify_envelope(envelope)
-        .map_err(|err| format!("{label} signed fact is invalid: {err}"))
+    auth::signed_envelope::verify_envelope(envelope)
+        .map_err(|err| format!("{label} signed envelope is invalid: {err}"))
 }
 
-pub fn decode_raw_or_signed_fact<T>(
+pub fn decode_raw_or_signed_payload<T>(
     fact: &Fact,
     expected_type: u8,
     label: &str,
@@ -629,7 +629,7 @@ pub fn validate_signer_context(
             "{label} signer endpoint context payload id mismatch"
         ));
     }
-    let envelope = auth::signed_fact::decode_envelope(payload.body())
+    let envelope = auth::signed_envelope::decode_envelope(payload.body())
         .map_err(|_| format!("{label} signer context is not a signed endpoint_shared"))?;
     if envelope.inner_type != auth::endpoint_shared::TYPE_ENDPOINT_SHARED {
         return Err(format!(
@@ -894,7 +894,7 @@ mod projector_tests {
             created_at_ms: 12_000,
             workspace_id,
             public_key: [22; 32],
-            username: "alice".to_string(),
+            username: crate::protocol::auth::user::fact::Username::new("alice").expect("username"),
         };
         Fact::new(
             FactScope::Global,
@@ -933,7 +933,10 @@ mod projector_tests {
             disappearing_setting_id: [0; 32],
             minute,
             nonce,
-            ciphertext,
+            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(
+                &ciphertext,
+            )
+            .expect("ciphertext"),
         };
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
@@ -951,7 +954,10 @@ mod projector_tests {
             endpoint_id: message.signer_id,
             signing_public_key: [6; 32],
             endpoint_role: EndpointRole::Device,
-            device_name: "alice-device".to_string(),
+            device_name: crate::protocol::auth::endpoint_shared::fact::EndpointDeviceName::new(
+                "alice-device",
+            )
+            .expect("device name"),
         };
         Fact::new(
             FactScope::Global,

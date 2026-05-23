@@ -101,7 +101,7 @@ fn validate_frontier_endpoint_shared_owner(
     owner_fact: &Fact,
     frontier: &RemovalFrontierFact,
 ) -> Result<(), String> {
-    if let Ok(owner) = auth::signed_fact::decode_signed_fact_payload(
+    if let Ok(owner) = auth::signed_envelope::decode_signed_payload(
         owner_fact,
         auth::endpoint_shared::TYPE_ENDPOINT_SHARED,
         "endpoint_shared",
@@ -124,7 +124,7 @@ fn validate_frontier_local_owner(
     frontier: &RemovalFrontierFact,
 ) -> Result<(), String> {
     let owner =
-        auth::signed_fact::decode_local_signer_secret_payload(owner_fact.body()).map_err(|_| {
+        auth::local_signer_secret::decode_fact_payload(owner_fact.body()).map_err(|_| {
             "removal frontier local owner context must be local signer secret".to_string()
         })?;
     if owner.workspace_id != frontier.workspace_id {

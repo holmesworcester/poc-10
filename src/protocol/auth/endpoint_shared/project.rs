@@ -46,7 +46,7 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<super::fact::EndpointSharedFact>,
+        signed: auth::signed_envelope::SignedPayload<super::fact::EndpointSharedFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -73,7 +73,7 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
         if !has_valid_authority(&authority_need, &shared, &envelope, context)? {
             return Ok(ProjectionOutput::new().need(authority_need));
         }
-        auth::signed_fact::verify_envelope(&envelope)?;
+        auth::signed_envelope::verify_envelope(&envelope)?;
 
         // 3. Materialize.
         Ok(ProjectionOutput::new()
@@ -126,7 +126,7 @@ fn authority_need(
 fn has_valid_authority(
     need: &ContextNeed,
     shared: &super::fact::EndpointSharedFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     context: &ProjectionContext,
 ) -> Result<bool, String> {
     let Some(authority_fact) = context.payload_for(need) else {
@@ -139,8 +139,8 @@ fn has_valid_authority(
         return Err("endpoint_shared authority must have global scope".to_string());
     }
     if shared.endpoint_role == EndpointRole::Device {
-        let invite_envelope =
-            auth::signed_fact::decode_envelope(authority_fact.body()).map_err(|_| {
+        let invite_envelope = auth::signed_envelope::decode_envelope(authority_fact.body())
+            .map_err(|_| {
                 "endpoint_shared dependency is not a signed endpoint invite".to_string()
             })?;
         if invite_envelope.inner_type != device_invite::TYPE_DEVICE_INVITE {
@@ -164,7 +164,7 @@ fn has_valid_authority(
         return Ok(true);
     }
 
-    let invite_envelope = auth::signed_fact::decode_envelope(authority_fact.body())
+    let invite_envelope = auth::signed_envelope::decode_envelope(authority_fact.body())
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
     if invite_envelope.inner_type != invite_server::TYPE_INVITE_SERVER {
         return Err("endpoint_shared dependency is not a signed endpoint invite".to_string());

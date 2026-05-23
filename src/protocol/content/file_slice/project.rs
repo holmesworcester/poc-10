@@ -95,7 +95,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         else {
             return Ok(ProjectionOutput::new().need(file_need).need(message_need));
         };
-        let parent_message = message_project::decode_raw_or_signed_fact(
+        let parent_message = message_project::decode_raw_or_signed_payload(
             message_payload,
             message::TYPE_CONTENT_MESSAGE,
             "file slice message parent",
@@ -216,7 +216,7 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_project::decode_raw_or_signed_fact(
+    let deletion = message_project::decode_raw_or_signed_payload(
         payload,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "file slice message parent deletion",

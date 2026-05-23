@@ -324,8 +324,8 @@ Reviewer instructions:
   guardrail now proves it does not own protocol command business logic; end
   state is a generic core app facade driven by protocol command registries.
 - [ ] Content projector parity review found remaining real checks to add:
-  content_event/message/file/reaction/deletion projectors must consistently
-  need signer endpoint context, validate signer workspace/key/user authority,
-  and validate leaf/setting context before row materialization.
+  message/file/reaction/deletion projectors must consistently need signer
+  endpoint context, validate signer workspace/key/user authority, and validate
+  leaf/setting context before row materialization.
 - [ ] Guardrails still include ignored cutover TODO tests. A normal non-ignored
   suite passing is not the same as the final review passing.

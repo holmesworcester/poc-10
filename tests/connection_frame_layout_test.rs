@@ -6,17 +6,25 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
+use topo::protocol::auth::signed_envelope::fact::SIGNED_ENVELOPE_PAYLOAD_BYTES;
+use topo::protocol::auth::signed_envelope::layout::SIGNED_ENVELOPE_BYTES;
 use topo::protocol::connection::frame::frame::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
 use topo::protocol::connection::frame::layout::{
-    decode_frame_parts, peek_frame_header, ConnectionFrameHeader, ConnectionFrameLargeV1,
-    ConnectionFrameSmallV1, CONNECTION_FRAME_HEADER_BYTES, CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES,
-    CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES, CONNECTION_FRAME_LARGE_WIRE_BYTES,
-    CONNECTION_FRAME_SIZE_CLASS_LARGE, CONNECTION_FRAME_SIZE_CLASS_SMALL,
-    CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
-    CONNECTION_FRAME_SMALL_WIRE_BYTES, CONNECTION_FRAME_TAG, CONNECTION_FRAME_VERSION,
+    decode_frame_parts, peek_frame_header, ConnectionFrameBundleV1, ConnectionFrameFileSliceV1,
+    ConnectionFrameHeader, ConnectionFrameSmallV1, CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES,
+    CONNECTION_FRAME_BUNDLE_FACT_SLOTS, CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES,
+    CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES, CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
+    CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES, CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES,
+    CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES, CONNECTION_FRAME_HEADER_BYTES,
+    CONNECTION_FRAME_SIZE_CLASS_BUNDLE, CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+    CONNECTION_FRAME_SIZE_CLASS_SMALL, CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
+    CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, CONNECTION_FRAME_SMALL_WIRE_BYTES,
+    CONNECTION_FRAME_TAG, CONNECTION_FRAME_VERSION,
 };
+use topo::protocol::content::file::layout::CONTENT_FILE_BYTES;
+use topo::protocol::content::file_slice::layout::CONTENT_FILE_SLICE_BYTES;
 
 const SENDER: [u8; 32] = [0x11; 32];
 const RECEIVER: [u8; 32] = [0x22; 32];
@@ -35,7 +43,7 @@ fn small_sample() -> ConnectionFrameSmallV1 {
     }
 }
 
-/// Runs a closure on a fresh thread with an 8 MiB stack so that large frame
+/// Runs a closure on a fresh thread with a larger stack so file-slice frame
 /// values can be materialized without overflowing the default test stack.
 fn on_big_stack<F>(f: F)
 where
@@ -49,15 +57,28 @@ where
         .unwrap();
 }
 
-fn large_sample() -> Box<ConnectionFrameLargeV1> {
-    Box::new(ConnectionFrameLargeV1 {
+fn file_slice_sample() -> Box<ConnectionFrameFileSliceV1> {
+    Box::new(ConnectionFrameFileSliceV1 {
         sender_endpoint_id: FixedBytes(SENDER),
         receiver_endpoint_id: FixedBytes(RECEIVER),
         connection_id: FixedBytes(CONNECTION),
         nonce: FixedBytes(NONCE),
-        ciphertext: Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::new(b"hello large")
-            .unwrap(),
+        ciphertext: Ciphertext::<CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES>::new(
+            b"hello file slice",
+        )
+        .unwrap(),
     })
+}
+
+fn bundle_sample() -> ConnectionFrameBundleV1 {
+    ConnectionFrameBundleV1 {
+        sender_endpoint_id: FixedBytes(SENDER),
+        receiver_endpoint_id: FixedBytes(RECEIVER),
+        connection_id: FixedBytes(CONNECTION),
+        nonce: FixedBytes(NONCE),
+        ciphertext: Ciphertext::<CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES>::new(b"hello bundle")
+            .unwrap(),
+    }
 }
 
 #[test]
@@ -65,18 +86,45 @@ fn connection_frame_constants_match_architecture_shape() {
     assert_eq!(CONNECTION_FRAME_HEADER_BYTES, 4 + 1 + 1 + 32 + 32 + 32 + 24);
     assert_eq!(CONNECTION_FRAME_VERSION, 1);
     assert_eq!(CONNECTION_FRAME_SIZE_CLASS_SMALL, 0);
-    assert_eq!(CONNECTION_FRAME_SIZE_CLASS_LARGE, 1);
+    assert_eq!(CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE, 1);
+    assert_eq!(CONNECTION_FRAME_SIZE_CLASS_BUNDLE, 2);
 
     assert_eq!(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, 4 * 1024);
-    assert_eq!(CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES, 1024 * 1024);
+    assert_eq!(
+        CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES,
+        4 + 1 + 4 + 4 + CONTENT_FILE_SLICE_BYTES
+    );
+    assert!(SIGNED_ENVELOPE_PAYLOAD_BYTES >= CONTENT_FILE_BYTES);
+    assert_eq!(
+        CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES,
+        SIGNED_ENVELOPE_BYTES
+    );
+    assert!(CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES >= CONTENT_FILE_BYTES);
+    assert_eq!(
+        CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
+        (64 * 1024 - (4 + 1 + 4)) / (4 + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)
+    );
+    assert_eq!(
+        CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES,
+        4 + 1
+            + 4
+            + CONNECTION_FRAME_BUNDLE_FACT_SLOTS * (4 + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)
+    );
+    assert!(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES < CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES);
+    assert!(CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES < 64 * 1024);
+    assert!(CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES < CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES);
 
     assert_eq!(
         CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
         CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
     );
     assert_eq!(
-        CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES,
-        CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
+        CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES,
+        CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
+    );
+    assert_eq!(
+        CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES,
+        CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
     );
 
     assert_eq!(
@@ -84,8 +132,12 @@ fn connection_frame_constants_match_architecture_shape() {
         CONNECTION_FRAME_HEADER_BYTES + 4 + CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES
     );
     assert_eq!(
-        CONNECTION_FRAME_LARGE_WIRE_BYTES,
-        CONNECTION_FRAME_HEADER_BYTES + 4 + CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES
+        CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+        CONNECTION_FRAME_HEADER_BYTES + 4 + CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES
+    );
+    assert_eq!(
+        CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
+        CONNECTION_FRAME_HEADER_BYTES + 4 + CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES
     );
 
     assert_eq!(
@@ -93,14 +145,18 @@ fn connection_frame_constants_match_architecture_shape() {
         CONNECTION_FRAME_SMALL_WIRE_BYTES
     );
     assert_eq!(
-        ConnectionFrameLargeV1::LEN,
-        CONNECTION_FRAME_LARGE_WIRE_BYTES
+        ConnectionFrameFileSliceV1::LEN,
+        CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES
+    );
+    assert_eq!(
+        ConnectionFrameBundleV1::LEN,
+        CONNECTION_FRAME_BUNDLE_WIRE_BYTES
     );
 
     // Outer length reveals only the size class.
     assert_ne!(
         CONNECTION_FRAME_SMALL_WIRE_BYTES,
-        CONNECTION_FRAME_LARGE_WIRE_BYTES
+        CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES
     );
 }
 
@@ -129,20 +185,35 @@ fn small_frame_header_has_golden_byte_layout() {
 }
 
 #[test]
-fn large_frame_header_uses_large_size_class_byte() {
+fn file_slice_frame_header_uses_file_slice_size_class_byte() {
     on_big_stack(|| {
-        let frame = large_sample();
-        let mut out = vec![0u8; ConnectionFrameLargeV1::LEN];
+        let frame = file_slice_sample();
+        let mut out = vec![0u8; ConnectionFrameFileSliceV1::LEN];
         frame.encode(&mut out).unwrap();
 
         assert_eq!(&out[..4], b"TRNS");
         assert_eq!(out[4], CONNECTION_FRAME_VERSION);
-        assert_eq!(out[5], CONNECTION_FRAME_SIZE_CLASS_LARGE);
+        assert_eq!(out[5], CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE);
         assert_eq!(&out[6..38], &SENDER);
         assert_eq!(&out[38..70], &RECEIVER);
         assert_eq!(&out[70..102], &CONNECTION);
         assert_eq!(&out[102..126], &NONCE);
     });
+}
+
+#[test]
+fn bundle_frame_header_uses_bundle_size_class_byte() {
+    let frame = bundle_sample();
+    let mut out = vec![0u8; ConnectionFrameBundleV1::LEN];
+    frame.encode(&mut out).unwrap();
+
+    assert_eq!(&out[..4], b"TRNS");
+    assert_eq!(out[4], CONNECTION_FRAME_VERSION);
+    assert_eq!(out[5], CONNECTION_FRAME_SIZE_CLASS_BUNDLE);
+    assert_eq!(&out[6..38], &SENDER);
+    assert_eq!(&out[38..70], &RECEIVER);
+    assert_eq!(&out[70..102], &CONNECTION);
+    assert_eq!(&out[102..126], &NONCE);
 }
 
 #[test]
@@ -153,12 +224,20 @@ fn connection_frames_round_trip() {
     assert_eq!(ConnectionFrameSmallV1::decode(&small_bytes).unwrap(), small);
 
     on_big_stack(|| {
-        let large = large_sample();
-        let mut large_bytes = vec![0u8; ConnectionFrameLargeV1::LEN];
-        large.encode(&mut large_bytes).unwrap();
-        let decoded = ConnectionFrameLargeV1::decode(&large_bytes).unwrap();
-        assert_eq!(&decoded, large.as_ref());
+        let file_slice = file_slice_sample();
+        let mut file_slice_bytes = vec![0u8; ConnectionFrameFileSliceV1::LEN];
+        file_slice.encode(&mut file_slice_bytes).unwrap();
+        let decoded = ConnectionFrameFileSliceV1::decode(&file_slice_bytes).unwrap();
+        assert_eq!(&decoded, file_slice.as_ref());
     });
+
+    let bundle = bundle_sample();
+    let mut bundle_bytes = vec![0u8; ConnectionFrameBundleV1::LEN];
+    bundle.encode(&mut bundle_bytes).unwrap();
+    assert_eq!(
+        ConnectionFrameBundleV1::decode(&bundle_bytes).unwrap(),
+        bundle
+    );
 }
 
 #[test]
@@ -200,48 +279,55 @@ fn wrong_outer_length_is_rejected() {
 }
 
 #[test]
-fn small_bytes_decode_fails_against_large_frame() {
+fn small_bytes_decode_fails_against_bundle_frame() {
     let small = small_sample();
     let mut buf = vec![0u8; ConnectionFrameSmallV1::LEN];
     small.encode(&mut buf).unwrap();
-    // Feeding small bytes to the large decoder must fail on length. The large
-    // decoder materializes a ConnectionFrameLargeV1 on the success path, so run on a
-    // larger stack to avoid blowing the default test thread stack.
-    on_big_stack(move || {
-        assert_eq!(
-            ConnectionFrameLargeV1::decode(&buf).unwrap_err(),
-            WireError::WrongLength {
-                expected: ConnectionFrameLargeV1::LEN,
-                actual: ConnectionFrameSmallV1::LEN,
-            }
-        );
-    });
+    assert_eq!(
+        ConnectionFrameBundleV1::decode(&buf).unwrap_err(),
+        WireError::WrongLength {
+            expected: ConnectionFrameBundleV1::LEN,
+            actual: ConnectionFrameSmallV1::LEN,
+        }
+    );
 }
 
 #[test]
 fn mismatched_size_class_byte_is_rejected() {
-    // Build a small-sized buffer but stamp the large size-class byte into it.
+    // Build a small-sized buffer but stamp the bundle size-class byte into it.
     let small = small_sample();
     let mut buf = vec![0u8; ConnectionFrameSmallV1::LEN];
     small.encode(&mut buf).unwrap();
-    buf[5] = CONNECTION_FRAME_SIZE_CLASS_LARGE;
+    buf[5] = CONNECTION_FRAME_SIZE_CLASS_BUNDLE;
     assert_eq!(
         ConnectionFrameSmallV1::decode(&buf).unwrap_err(),
         WireError::InvalidBool {
-            actual: CONNECTION_FRAME_SIZE_CLASS_LARGE
+            actual: CONNECTION_FRAME_SIZE_CLASS_BUNDLE
         }
     );
 
-    // And the reverse: stamp the small size-class byte into a large buffer.
+    // And the reverse: stamp the small size-class byte into a bundle buffer.
+    let bundle = bundle_sample();
+    let mut buf = vec![0u8; ConnectionFrameBundleV1::LEN];
+    bundle.encode(&mut buf).unwrap();
+    buf[5] = CONNECTION_FRAME_SIZE_CLASS_SMALL;
+    assert_eq!(
+        ConnectionFrameBundleV1::decode(&buf).unwrap_err(),
+        WireError::InvalidBool {
+            actual: CONNECTION_FRAME_SIZE_CLASS_SMALL
+        }
+    );
+
+    // File-slice frames have their own size-class byte too.
     on_big_stack(|| {
-        let large = large_sample();
-        let mut buf = vec![0u8; ConnectionFrameLargeV1::LEN];
-        large.encode(&mut buf).unwrap();
-        buf[5] = CONNECTION_FRAME_SIZE_CLASS_SMALL;
+        let file_slice = file_slice_sample();
+        let mut buf = vec![0u8; ConnectionFrameFileSliceV1::LEN];
+        file_slice.encode(&mut buf).unwrap();
+        buf[5] = CONNECTION_FRAME_SIZE_CLASS_BUNDLE;
         assert_eq!(
-            ConnectionFrameLargeV1::decode(&buf).unwrap_err(),
+            ConnectionFrameFileSliceV1::decode(&buf).unwrap_err(),
             WireError::InvalidBool {
-                actual: CONNECTION_FRAME_SIZE_CLASS_SMALL
+                actual: CONNECTION_FRAME_SIZE_CLASS_BUNDLE
             }
         );
     });
@@ -352,32 +438,63 @@ fn sealed_small_connection_frame_fills_fixed_ciphertext_slot() {
 }
 
 #[test]
-fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
+fn sealed_bundle_connection_frame_fills_fixed_ciphertext_slot() {
+    let facts = (0..7)
+        .map(|index| vec![index; CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES])
+        .collect::<Vec<_>>();
+    let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
+        connection_id: CONNECTION,
+        sender_endpoint_id: SENDER,
+        receiver_endpoint_id: RECEIVER,
+        connection_secret: SECRET,
+        nonce: NONCE,
+        facts: ConnectionFrameFactBundle::from_bytes(facts.clone()),
+    })
+    .expect("seal bundle frame");
+
+    assert_eq!(frame.len(), CONNECTION_FRAME_BUNDLE_WIRE_BYTES);
+    let parts = decode_frame_parts(&frame).expect("decode frame parts");
+    assert_eq!(parts.header.size_class, CONNECTION_FRAME_SIZE_CLASS_BUNDLE);
+    assert_eq!(
+        parts.ciphertext.len(),
+        CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES
+    );
+
+    let opened = connection_frame::open_connection_frame(&frame, &SECRET)
+        .expect("open bundle connection::frame frame");
+    assert_eq!(opened.facts.into_iter().collect::<Vec<_>>(), facts);
+}
+
+#[test]
+fn sealed_file_slice_connection_frame_fills_fixed_ciphertext_slot() {
     on_big_stack(|| {
-        let large_fact = vec![0x55; CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES];
+        let file_slice_fact = vec![0x77; CONTENT_FILE_SLICE_BYTES];
         let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
             connection_id: CONNECTION,
             sender_endpoint_id: SENDER,
             receiver_endpoint_id: RECEIVER,
             connection_secret: SECRET,
             nonce: NONCE,
-            facts: ConnectionFrameFactBundle::from_bytes([large_fact.clone()]),
+            facts: ConnectionFrameFactBundle::from_bytes([file_slice_fact.clone()]),
         })
-        .expect("seal large frame");
+        .expect("seal file-slice frame");
 
-        assert_eq!(frame.len(), CONNECTION_FRAME_LARGE_WIRE_BYTES);
+        assert_eq!(frame.len(), CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES);
         let parts = decode_frame_parts(&frame).expect("decode frame parts");
-        assert_eq!(parts.header.size_class, CONNECTION_FRAME_SIZE_CLASS_LARGE);
+        assert_eq!(
+            parts.header.size_class,
+            CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE
+        );
         assert_eq!(
             parts.ciphertext.len(),
-            CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES
+            CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES
         );
 
         let opened = connection_frame::open_connection_frame(&frame, &SECRET)
-            .expect("open large connection::frame frame");
+            .expect("open file-slice connection::frame frame");
         assert_eq!(
             opened.facts.into_iter().collect::<Vec<_>>(),
-            vec![large_fact]
+            vec![file_slice_fact]
         );
     });
 }

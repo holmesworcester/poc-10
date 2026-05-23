@@ -8,24 +8,19 @@
 
 use crate::core::facts::FactId;
 
-use super::fact::{CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
+use super::fact::{CascadeDependencies, CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
 
 pub const TYPE_CASCADE_TEST_FACT: u8 = 2;
 pub const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
 
 pub fn encode_fact(fact: &CascadeTestFact) -> Result<Vec<u8>, String> {
-    if fact.dependencies.len() > MAX_DEPS {
-        return Err("cascade fact dependency count exceeds fixed fields".to_string());
-    }
-
     let mut out = vec![0; ENCODED_BYTES];
     out[0] = TYPE_CASCADE_TEST_FACT;
     out[1..9].copy_from_slice(&fact.timestamp.to_be_bytes());
     out[9] = fact.dependencies.len() as u8;
     let mut offset = 10;
-    for idx in 0..MAX_DEPS {
-        let dependency = fact.dependencies.get(idx).copied().unwrap_or([0; 32]);
-        out[offset..offset + 32].copy_from_slice(&dependency);
+    for dependency in fact.dependencies.padded_ids() {
+        out[offset..offset + 32].copy_from_slice(dependency);
         offset += 32;
     }
     out[offset..offset + PAYLOAD_BYTES].copy_from_slice(&fact.payload);
@@ -60,7 +55,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<CascadeTestFact, String> {
 
     Ok(CascadeTestFact {
         timestamp,
-        dependencies,
+        dependencies: CascadeDependencies::new(&dependencies)?,
         payload: bytes[offset..offset + PAYLOAD_BYTES].try_into().unwrap(),
     })
 }
@@ -73,7 +68,7 @@ mod tests {
     fn cascade_test_fact_roundtrips_fixed_width() {
         let fact = CascadeTestFact {
             timestamp: 42,
-            dependencies: vec![[1; 32], [2; 32]],
+            dependencies: CascadeDependencies::new(&[[1; 32], [2; 32]]).expect("dependencies"),
             payload: [7; PAYLOAD_BYTES],
         };
 

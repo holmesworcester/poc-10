@@ -1,7 +1,8 @@
 //! Connection-frame sealing, classification, and child admission.
 //!
 //! Outbound connection sends call this module to reject private/local payloads
-//! and seal an ordered fact bundle into fixed small or large frame bytes.
+//! and seal an ordered fact bundle into fixed small, file-slice, or bundle
+//! frame bytes.
 //! Inbound receive handling calls the same module to classify raw network bytes
 //! into bootstrap request/response facts or ephemeral frame facts. Frame
 //! projection calls it again to open a frame and turn each inner payload into a
@@ -17,9 +18,12 @@ use crate::core::crypto;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::FactCodec;
+use crate::core::wire::FixedSlot;
 use crate::protocol::{auth, connection, content, sync};
 
-use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use super::fact::{
+    ConnectionFrameBundleFact, ConnectionFrameFileSliceFact, ConnectionFrameSmallFact,
+};
 use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 
 /// Return the bytes that may be packaged into a connection::frame frame.
@@ -48,11 +52,11 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
         ));
     }
 
-    if tag == auth::signed_fact::layout::TYPE_SIGNED_FACT {
+    if tag == auth::signed_envelope::layout::TYPE_SIGNED_ENVELOPE {
         let envelope =
-            auth::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
+            auth::signed_envelope::layout::decode_signed_envelope(fact.body()).map_err(|err| {
                 format!(
-                    "connection::frame send refused invalid signed fact {:?}: {err}",
+                    "connection::frame send refused invalid signed envelope {:?}: {err}",
                     fact.id
                 )
             })?;
@@ -76,12 +80,13 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::response::layout::TYPE_CONNECTION_RESPONSE
             | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
             | auth::invite::layout::TYPE_INVITE_SECRET
-            | auth::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
+            | auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET
             | auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
             | auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
             | connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL
-            | connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE
+            | connection::frame::layout::TYPE_CONNECTION_FRAME_FILE_SLICE
+            | connection::frame::layout::TYPE_CONNECTION_FRAME_BUNDLE
             | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
     )
 }
@@ -212,9 +217,9 @@ fn received_connection_frame_effect(
     match parts.header.size_class {
         super::layout::CONNECTION_FRAME_SIZE_CLASS_SMALL => {
             let fact = ConnectionFrameSmallFact {
-                origin_addr: input.origin_addr.to_vec(),
+                origin_addr: origin_addr_slot(input.origin_addr)?,
                 received_at_local_ms: input.received_at_local_ms,
-                frame: input.frame.to_vec(),
+                frame: exact_frame_slot(input.frame)?,
             };
             Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
                 FactScope::Local,
@@ -222,20 +227,47 @@ fn received_connection_frame_effect(
                 super::layout::encode_small_fact(&fact)?,
             )))
         }
-        super::layout::CONNECTION_FRAME_SIZE_CLASS_LARGE => {
-            let fact = ConnectionFrameLargeFact {
-                origin_addr: input.origin_addr.to_vec(),
+        super::layout::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
+            let fact = ConnectionFrameFileSliceFact {
+                origin_addr: origin_addr_slot(input.origin_addr)?,
                 received_at_local_ms: input.received_at_local_ms,
-                frame: input.frame.to_vec(),
+                frame: exact_frame_slot(input.frame)?,
             };
             Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
                 FactScope::Local,
                 input.received_at_local_ms,
-                super::layout::encode_large_fact(&fact)?,
+                super::layout::encode_file_slice_fact(&fact)?,
+            )))
+        }
+        super::layout::CONNECTION_FRAME_SIZE_CLASS_BUNDLE => {
+            let fact = ConnectionFrameBundleFact {
+                origin_addr: origin_addr_slot(input.origin_addr)?,
+                received_at_local_ms: input.received_at_local_ms,
+                frame: exact_frame_slot(input.frame)?,
+            };
+            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
+                FactScope::Local,
+                input.received_at_local_ms,
+                super::layout::encode_bundle_fact(&fact)?,
             )))
         }
         _ => Ok(PipelineEffects::new()),
     }
+}
+
+fn origin_addr_slot(
+    origin_addr: &[u8],
+) -> Result<connection::fact_receipt::fact::OriginAddr, String> {
+    let normalized = connection::fact_receipt::create::normalize_origin_addr_bytes(origin_addr)?;
+    connection::fact_receipt::fact::OriginAddr::new(&normalized)
+        .map_err(|err| format!("connection frame origin addr: {err}"))
+}
+
+fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot<N>, String> {
+    if frame.len() != N {
+        return Err(format!("connection frame must be exactly {N} bytes"));
+    }
+    FixedSlot::new(frame).map_err(|err| format!("connection frame bytes: {err}"))
 }
 
 pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, String> {
@@ -412,7 +444,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         sync::need_id::TYPE_SYNC_NEED_ID => {
             return admit_with_codec::<sync::need_id::Codec>(bytes, |_| Ok(Admission::global(0)));
         }
-        auth::signed_fact::TYPE_SIGNED_FACT => {}
+        auth::signed_envelope::TYPE_SIGNED_ENVELOPE => {}
         _ => {
             return Err(format!(
                 "unsupported received connection::frame fact type {tag}"
@@ -420,7 +452,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         }
     }
 
-    admit_signed_fact_bytes(bytes)
+    admit_signed_envelope_bytes(bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -474,8 +506,8 @@ fn admit_with_decoder<T>(
     Ok(Fact::new(admission.scope, admission.timestamp, bytes))
 }
 
-fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
-    let envelope = auth::signed_fact::layout::decode_signed_fact(&bytes)?;
+fn admit_signed_envelope_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
+    let envelope = auth::signed_envelope::layout::decode_signed_envelope(&bytes)?;
     match envelope.inner_type {
         auth::user_invite::TYPE_USER_INVITE => {
             admit_with_codec::<auth::user_invite::Codec>(bytes, |signed| {
@@ -556,7 +588,8 @@ struct ConnectionFactReceiptInput<'a> {
 fn connection_fact_receipt_for_path(input: ConnectionFactReceiptInput<'_>) -> Result<Fact, String> {
     let fact = connection::fact_receipt::fact::ConnectionFactReceipt {
         received_fact_id: input.received_fact_id,
-        origin_addr: input.origin_addr.to_vec(),
+        origin_addr: connection::fact_receipt::fact::OriginAddr::new(input.origin_addr)
+            .map_err(|err| format!("connection fact receipt origin addr: {err}"))?,
         local_endpoint_id: input.local_endpoint_id,
         sender_endpoint_id: input.sender_endpoint_id,
         receive_path: input.receive_path,
@@ -593,7 +626,7 @@ mod tests {
     use super::*;
     use crate::core::crypto::{ed25519_public_key, ed25519_sign};
     use crate::protocol::auth::invite::fact::InviteSecretFact;
-    use crate::protocol::auth::signed_fact::fact::SignedFactEnvelope;
+    use crate::protocol::auth::signed_envelope::fact::{SignedEnvelope, SignedEnvelopePayload};
     use crate::protocol::auth::user::fact::UserFact;
     use crate::protocol::auth::workspace::fact::WorkspaceFact;
 
@@ -622,7 +655,7 @@ mod tests {
         let workspace = WorkspaceFact {
             created_at_ms: 55_555,
             public_key: [7; 32],
-            name: "workspace".to_string(),
+            name: auth::workspace::fact::WorkspaceName::new("workspace").expect("name"),
         };
         let bytes = auth::workspace::layout::encode_fact(&workspace).expect("workspace");
 
@@ -639,22 +672,22 @@ mod tests {
             created_at_ms: 66_666,
             workspace_id: [8; 32],
             public_key: [9; 32],
-            username: "alice".to_string(),
+            username: auth::user::fact::Username::new("alice").expect("username"),
         };
         let payload = auth::user::layout::encode_fact(&user).expect("user payload");
         let signing_secret = [10; 32];
-        let mut envelope = SignedFactEnvelope {
+        let mut envelope = SignedEnvelope {
             signer_id: [11; 32],
             signer_public_key: ed25519_public_key(&signing_secret),
             inner_type: auth::user::layout::TYPE_USER,
-            payload,
+            payload: SignedEnvelopePayload::new(&payload).expect("payload"),
             signature: [0; 64],
         };
         let signing_bytes =
-            auth::signed_fact::layout::signing_bytes(&envelope).expect("signing bytes");
+            auth::signed_envelope::layout::signing_bytes(&envelope).expect("signing bytes");
         envelope.signature = ed25519_sign(&signing_secret, &signing_bytes);
-        let bytes =
-            auth::signed_fact::layout::encode_signed_fact(&envelope).expect("signed identity");
+        let bytes = auth::signed_envelope::layout::encode_signed_envelope(&envelope)
+            .expect("signed identity");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");
 

@@ -64,7 +64,7 @@ impl crate::core::projectors::FactCodec for Codec {
         crate::protocol::content::message::project::DecodedFact<fact::ContentMessageFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        project::decode_raw_or_signed_fact(
+        project::decode_raw_or_signed_payload(
             fact,
             layout::TYPE_CONTENT_MESSAGE,
             "content message",

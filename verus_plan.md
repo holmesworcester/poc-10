@@ -243,9 +243,10 @@ delegated:
 Cycles of admin facts do not bootstrap authority because the induction requires
 an already valid authority offer before a delegated admin offer can be emitted.
 
-Current caveat: auth signed-envelope validation is still a known parity gap.
-The Verus proof should not claim final shared authority soundness until
-`signed_fact` verification is part of these projector contracts.
+Current caveat: auth signed-envelope validation is part of the projector
+contracts that consume signed payloads. The Verus proof should model those
+per-family signature and authority checks directly instead of treating signed
+envelopes as their own projected fact family.
 
 ## Connection Handshake Slice
 

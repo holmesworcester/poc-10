@@ -117,7 +117,8 @@ mod tests {
             disappearing_setting_id: [6; 32],
             minute: 1,
             nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
-            ciphertext: b"sealed".to_vec(),
+            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(b"sealed")
+                .expect("ciphertext"),
         };
         let row = content_message_row([9; 32], &fact);
         assert_eq!(row.table, CONTENT_MESSAGE_ROWS);

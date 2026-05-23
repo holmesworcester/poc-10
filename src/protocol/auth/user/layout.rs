@@ -6,9 +6,9 @@
 //! invariants here; invite and admin authority checks belong to projection.
 
 use crate::core::wire;
-use crate::core::wire::FixedSlot;
+use crate::core::wire::FixedText;
 
-use super::fact::{UserFact, USERNAME_BYTES};
+use super::fact::{UserFact, Username, USERNAME_BYTES};
 
 pub const TYPE_USER: u8 = 14;
 pub const ROW_VALUE_BYTES: usize = 8 + 32 + 32 + USERNAME_BYTES;
@@ -69,7 +69,7 @@ pub(crate) fn decode_row_value(value: &[u8]) -> Result<DecodedRowValue, String> 
         created_at_ms,
         public_key,
         user_invite_id,
-        username,
+        username: username.to_string(),
     })
 }
 
@@ -80,27 +80,17 @@ pub(crate) struct DecodedRowValue {
     pub username: String,
 }
 
-fn write_username(username: &str, out: &mut [u8]) -> Result<(), String> {
+fn write_username(username: &Username, out: &mut [u8]) -> Result<(), String> {
     wire::expect_len(out, USERNAME_BYTES).map_err(wire_err)?;
-    if username.as_bytes().contains(&0) {
-        return Err("username cannot contain NUL".to_string());
-    }
-    let slot = FixedSlot::<USERNAME_BYTES>::new(username.as_bytes()).map_err(wire_err)?;
-    out.copy_from_slice(slot.padded_bytes());
+    out.copy_from_slice(username.padded_bytes());
     Ok(())
 }
 
-fn read_username(bytes: &[u8]) -> Result<String, String> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    if bytes[end..].iter().any(|byte| *byte != 0) {
-        return Err("username has non-canonical padding".to_string());
-    }
-    std::str::from_utf8(&bytes[..end])
-        .map_err(|_| "username is not valid utf-8".to_string())
-        .map(ToOwned::to_owned)
+fn read_username(bytes: &[u8]) -> Result<Username, String> {
+    let padded: [u8; USERNAME_BYTES] = bytes
+        .try_into()
+        .map_err(|_| "username slot has wrong length".to_string())?;
+    FixedText::from_padded(padded).map_err(wire_err)
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -116,7 +106,7 @@ mod tests {
             created_at_ms: 42,
             workspace_id: [2; 32],
             public_key: [7; 32],
-            username: "alice".to_string(),
+            username: Username::new("alice").expect("username"),
         }
     }
 
@@ -147,16 +137,14 @@ mod tests {
 
     #[test]
     fn rejects_long_username() {
-        let err = encode_fact(&UserFact {
-            created_at_ms: 1,
-            workspace_id: [0; 32],
-            public_key: [0; 32],
-            username: "a".repeat(USERNAME_BYTES + 1),
-        })
-        .expect_err("long username must fail");
-        assert!(
-            err.contains("ValueTooLarge") || err.contains("too"),
-            "{err}"
+        let err =
+            Username::new(&"a".repeat(USERNAME_BYTES + 1)).expect_err("long username must fail");
+        assert_eq!(
+            err,
+            wire::WireError::ValueTooLarge {
+                max: USERNAME_BYTES,
+                actual: USERNAME_BYTES + 1
+            }
         );
     }
 }

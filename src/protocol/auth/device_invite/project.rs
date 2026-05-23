@@ -45,7 +45,7 @@ impl TypedProjector<super::Codec> for DeviceInviteProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<DeviceInviteFact>,
+        signed: auth::signed_envelope::SignedPayload<DeviceInviteFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -86,7 +86,7 @@ impl TypedProjector<super::Codec> for DeviceInviteProjector {
 fn project_user_signed(
     fact: &Fact,
     invite: &DeviceInviteFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     user_invite_fact_id: FactId,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
@@ -109,7 +109,7 @@ fn project_user_signed(
     if user_fact.id != invite.user_authority_fact_id {
         return Err("device_invite user context payload id mismatch".to_string());
     }
-    let user_envelope = auth::signed_fact::decode_envelope(user_fact.body())
+    let user_envelope = auth::signed_envelope::decode_envelope(user_fact.body())
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
     if user_envelope.inner_type != user::TYPE_USER {
         return Err("device_invite signer must be user or endpoint_shared".to_string());
@@ -129,7 +129,7 @@ fn project_user_signed(
     if user_invite_fact.id != user_invite_fact_id {
         return Err("device_invite user_invite context payload id mismatch".to_string());
     }
-    let invite_envelope = auth::signed_fact::decode_envelope(user_invite_fact.body())
+    let invite_envelope = auth::signed_envelope::decode_envelope(user_invite_fact.body())
         .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
     if invite_envelope.inner_type != user_invite::TYPE_USER_INVITE {
         return Err("device_invite user_invite dependency is not a user_invite".to_string());
@@ -142,7 +142,7 @@ fn project_user_signed(
     if user_invite.public_key != user_envelope.signer_public_key {
         return Err("device_invite user_invite key does not match user".to_string());
     }
-    auth::signed_fact::verify_envelope(envelope)?;
+    auth::signed_envelope::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
@@ -151,7 +151,7 @@ fn project_user_signed(
 fn project_endpoint_signed(
     fact: &Fact,
     invite: &DeviceInviteFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
+    envelope: &auth::signed_envelope::fact::SignedEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = EndpointSignedNeeds::new(fact.id, invite, envelope.signer_id);
@@ -167,7 +167,7 @@ fn project_endpoint_signed(
     if signer_fact.id != envelope.signer_id {
         return Err("device_invite endpoint_shared context payload id mismatch".to_string());
     }
-    let signer_envelope = auth::signed_fact::decode_envelope(signer_fact.body())
+    let signer_envelope = auth::signed_envelope::decode_envelope(signer_fact.body())
         .map_err(|_| "device_invite signer must be user or endpoint_shared".to_string())?;
     if signer_envelope.inner_type != endpoint_shared::TYPE_ENDPOINT_SHARED {
         return Err("device_invite signer must be user or endpoint_shared".to_string());
@@ -190,7 +190,7 @@ fn project_endpoint_signed(
             "endpoint_shared-signed device_invite user authority does not match signer".to_string(),
         );
     }
-    auth::signed_fact::verify_envelope(envelope)?;
+    auth::signed_envelope::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())

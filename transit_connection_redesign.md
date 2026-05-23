@@ -70,8 +70,8 @@ require request, invite, initiator ephemeral-secret, and connection-response
 fact-receipt context before they materialize a local connection.
 
 `connection::frame` owns established-connection frame projection.
-Its projector accepts only local ephemeral small/large frame facts, reads the
-connection id from the public header, and needs the exact local
+Its projector accepts only local ephemeral small, file-slice, or bundle frame
+facts, reads the connection id from the public header, and needs the exact local
 `connection_response` fact for that connection. If that context is not already
 available, the one-shot ephemeral need fails and the input is dropped. If the
 context is present, the projector opens the frame and emits durable child facts

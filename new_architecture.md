@@ -1014,7 +1014,8 @@ Connection frames use the same fixed-layout system as facts. The outer frame lay
 
 ```text
 ConnectionFrameSmallV1
-ConnectionFrameLargeV1
+ConnectionFrameFileSliceV1
+ConnectionFrameBundleV1
 ```
 
 Each frame has a fixed public header and a fixed encrypted payload slot:
@@ -1030,15 +1031,16 @@ nonce
 ciphertext_and_tag
 ```
 
-The encrypted payload contains packed canonical fact bytes, actual used length,
-and padding. The outer frame reveals only small or large.
+Small and file-slice frames contain packed canonical fact bytes plus padding.
+Bundle frames contain a fixed count of padded fact slots sized for normal
+bounded facts. The outer frame reveals only the size class.
 
 Outbound after connection:
 
 ```text
 SendOnConnection(connection_id, fact_id)
   -> load route, connection state, and fact bytes
-  -> package one small or large connection frame
+  -> package one small, file-slice, or bundle connection frame
   -> emit NetworkSend(addr, frame)
 ```
 

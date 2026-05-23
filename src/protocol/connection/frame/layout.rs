@@ -1,11 +1,11 @@
 //! Fixed wire layout for encrypted connection frames.
 //!
-//! Connection frames have two outer shapes, `ConnectionFrameSmallV1` and
-//! `ConnectionFrameLargeV1`. Both share a public header containing tag,
+//! Connection frames have three outer shapes: small control frames, file-slice
+//! frames sized for one content file-slice fact, and bundle frames sized for
+//! many padded fixed fact slots. They share a public header containing tag,
 //! version, size class, endpoint ids, connection id, and nonce; only the
-//! encrypted payload slot capacity differs. Received-frame fact encoding also
-//! stores normalized origin metadata around the raw frame bytes for ephemeral
-//! projection.
+//! encrypted payload slot capacity differs. Received-frame fact encoding stores
+//! fixed origin metadata around the raw frame bytes for ephemeral projection.
 //!
 //! This file owns byte compatibility, size-class constants, AEAD associated
 //! data, nonce derivation, and inner-bundle packing. It does not decide which
@@ -20,16 +20,23 @@ use crate::core::wire::{
     self, fixed_tag, Ciphertext, FixedBytes, FixedLayout, Id32, Nonce24, Tag, WireError,
 };
 
-use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use super::fact::{
+    ConnectionFrameBundleFact, ConnectionFrameFileSliceFact, ConnectionFrameSmallFact,
+};
 use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
+use crate::protocol::connection::fact_receipt::fact::{OriginAddr, ORIGIN_ADDR_BYTES};
+use crate::protocol::{auth, content::file_slice};
 
 /// Ephemeral projection-input tag for one received small connection frame.
 pub const TYPE_CONNECTION_FRAME_SMALL: u8 = 168;
 
-/// Ephemeral projection-input tag for one received large connection frame.
-pub const TYPE_CONNECTION_FRAME_LARGE: u8 = 169;
+/// Ephemeral projection-input tag for one received file-slice connection frame.
+pub const TYPE_CONNECTION_FRAME_FILE_SLICE: u8 = 169;
 
-/// Public tag prefix shared by both connection::frame frame variants.
+/// Ephemeral projection-input tag for one received bundled connection frame.
+pub const TYPE_CONNECTION_FRAME_BUNDLE: u8 = 170;
+
+/// Public tag prefix shared by all connection::frame frame variants.
 pub const CONNECTION_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
 
 /// Current connection::frame frame version.
@@ -38,8 +45,11 @@ pub const CONNECTION_FRAME_VERSION: u8 = 1;
 /// Size class byte for [`ConnectionFrameSmallV1`].
 pub const CONNECTION_FRAME_SIZE_CLASS_SMALL: u8 = 0;
 
-/// Size class byte for [`ConnectionFrameLargeV1`].
-pub const CONNECTION_FRAME_SIZE_CLASS_LARGE: u8 = 1;
+/// Size class byte for [`ConnectionFrameFileSliceV1`].
+pub const CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE: u8 = 1;
+
+/// Size class byte for [`ConnectionFrameBundleV1`].
+pub const CONNECTION_FRAME_SIZE_CLASS_BUNDLE: u8 = 2;
 
 /// Plaintext capacity of a small connection::frame frame (4 KiB).
 ///
@@ -47,20 +57,45 @@ pub const CONNECTION_FRAME_SIZE_CLASS_LARGE: u8 = 1;
 /// this class when the packed inner bytes fit in the small budget.
 pub const CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES: usize = 4 * 1024;
 
-/// Plaintext capacity of a large connection::frame frame (1 MiB).
+/// Plaintext capacity of a file-slice connection::frame frame.
 ///
-/// Large frames carry batched facts. The batcher chooses this class for any
-/// batch that exceeds the small plaintext budget. The architecture doc does
-/// not pin exact numbers; these are the poc-10 defaults and may evolve.
-pub const CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES: usize = 1024 * 1024;
+/// This capacity is exactly one inner-bundle header plus one length-prefixed
+/// content file-slice fact. It avoids the old 1 MiB catch-all frame while still
+/// carrying a full `content::file_slice`.
+pub const CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES: usize =
+    INNER_BUNDLE_HEADER_BYTES + INNER_FACT_LEN_BYTES + file_slice::layout::CONTENT_FILE_SLICE_BYTES;
+
+/// Maximum fact bytes carried in one padded bundle slot.
+///
+/// The current maximum non-file-slice carrier is a signed envelope wrapping a
+/// content-file payload. If a future non-slice fact grows, the guardrail test
+/// should force this constant to move with it.
+pub const CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES: usize =
+    auth::signed_envelope::layout::SIGNED_ENVELOPE_BYTES;
+
+/// Number of padded fact slots in one bundle frame.
+///
+/// This is the maximum slot count that keeps the encrypted plaintext below
+/// 64 KiB while fitting the current largest normal fact in every slot.
+pub const CONNECTION_FRAME_BUNDLE_FACT_SLOTS: usize = (64 * 1024 - INNER_BUNDLE_HEADER_BYTES)
+    / (INNER_FACT_LEN_BYTES + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES);
+
+/// Plaintext capacity of a bundled connection::frame frame.
+pub const CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES: usize = INNER_BUNDLE_HEADER_BYTES
+    + CONNECTION_FRAME_BUNDLE_FACT_SLOTS
+        * (INNER_FACT_LEN_BYTES + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES);
 
 /// Ciphertext slot capacity for small frames (plaintext + AEAD tag).
 pub const CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES: usize =
     CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 
-/// Ciphertext slot capacity for large frames (plaintext + AEAD tag).
-pub const CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES: usize =
-    CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+/// Ciphertext slot capacity for file-slice frames (plaintext + AEAD tag).
+pub const CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES: usize =
+    CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+
+/// Ciphertext slot capacity for bundle frames (plaintext + AEAD tag).
+pub const CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES: usize =
+    CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 
 /// Fixed public header size (tag + version + size class + 3 ids + nonce).
 pub const CONNECTION_FRAME_HEADER_BYTES: usize = Tag::<4>::LEN
@@ -75,9 +110,13 @@ pub const CONNECTION_FRAME_HEADER_BYTES: usize = Tag::<4>::LEN
 pub const CONNECTION_FRAME_SMALL_WIRE_BYTES: usize =
     CONNECTION_FRAME_HEADER_BYTES + Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::LEN;
 
-/// Outer wire length for a [`ConnectionFrameLargeV1`] frame.
-pub const CONNECTION_FRAME_LARGE_WIRE_BYTES: usize =
-    CONNECTION_FRAME_HEADER_BYTES + Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::LEN;
+/// Outer wire length for a [`ConnectionFrameFileSliceV1`] frame.
+pub const CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES: usize =
+    CONNECTION_FRAME_HEADER_BYTES + Ciphertext::<CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES>::LEN;
+
+/// Outer wire length for a [`ConnectionFrameBundleV1`] frame.
+pub const CONNECTION_FRAME_BUNDLE_WIRE_BYTES: usize =
+    CONNECTION_FRAME_HEADER_BYTES + Ciphertext::<CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES>::LEN;
 
 const VERSION_OFFSET: usize = Tag::<4>::LEN;
 const SIZE_CLASS_OFFSET: usize = VERSION_OFFSET + wire::U8_BYTES;
@@ -99,8 +138,11 @@ pub fn encode_small_fact(fact: &ConnectionFrameSmallFact) -> Result<Vec<u8>, Str
 
 pub fn decode_small_fact(bytes: &[u8]) -> Result<ConnectionFrameSmallFact, String> {
     let (origin_addr, received_at_local_ms, frame) =
-        decode_received_frame_fact(bytes, TYPE_CONNECTION_FRAME_SMALL)?;
-    require_frame_size_class(&frame, CONNECTION_FRAME_SIZE_CLASS_SMALL)?;
+        decode_received_frame_fact::<CONNECTION_FRAME_SMALL_WIRE_BYTES>(
+            bytes,
+            TYPE_CONNECTION_FRAME_SMALL,
+            CONNECTION_FRAME_SIZE_CLASS_SMALL,
+        )?;
     Ok(ConnectionFrameSmallFact {
         origin_addr,
         received_at_local_ms,
@@ -108,51 +150,100 @@ pub fn decode_small_fact(bytes: &[u8]) -> Result<ConnectionFrameSmallFact, Strin
     })
 }
 
-pub fn encode_large_fact(fact: &ConnectionFrameLargeFact) -> Result<Vec<u8>, String> {
+pub fn encode_file_slice_fact(fact: &ConnectionFrameFileSliceFact) -> Result<Vec<u8>, String> {
     encode_received_frame_fact(
-        TYPE_CONNECTION_FRAME_LARGE,
-        CONNECTION_FRAME_SIZE_CLASS_LARGE,
+        TYPE_CONNECTION_FRAME_FILE_SLICE,
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
         &fact.origin_addr,
         fact.received_at_local_ms,
         &fact.frame,
     )
 }
 
-pub fn decode_large_fact(bytes: &[u8]) -> Result<ConnectionFrameLargeFact, String> {
+pub fn decode_file_slice_fact(bytes: &[u8]) -> Result<ConnectionFrameFileSliceFact, String> {
     let (origin_addr, received_at_local_ms, frame) =
-        decode_received_frame_fact(bytes, TYPE_CONNECTION_FRAME_LARGE)?;
-    require_frame_size_class(&frame, CONNECTION_FRAME_SIZE_CLASS_LARGE)?;
-    Ok(ConnectionFrameLargeFact {
+        decode_received_frame_fact::<CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES>(
+            bytes,
+            TYPE_CONNECTION_FRAME_FILE_SLICE,
+            CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+        )?;
+    Ok(ConnectionFrameFileSliceFact {
         origin_addr,
         received_at_local_ms,
         frame,
     })
 }
 
-fn encode_received_frame_fact(
+pub fn encode_bundle_fact(fact: &ConnectionFrameBundleFact) -> Result<Vec<u8>, String> {
+    encode_received_frame_fact(
+        TYPE_CONNECTION_FRAME_BUNDLE,
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+        &fact.origin_addr,
+        fact.received_at_local_ms,
+        &fact.frame,
+    )
+}
+
+pub fn decode_bundle_fact(bytes: &[u8]) -> Result<ConnectionFrameBundleFact, String> {
+    let (origin_addr, received_at_local_ms, frame) =
+        decode_received_frame_fact::<CONNECTION_FRAME_BUNDLE_WIRE_BYTES>(
+            bytes,
+            TYPE_CONNECTION_FRAME_BUNDLE,
+            CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+        )?;
+    Ok(ConnectionFrameBundleFact {
+        origin_addr,
+        received_at_local_ms,
+        frame,
+    })
+}
+
+fn encode_received_frame_fact<const FRAME_BYTES: usize>(
     tag: u8,
     expected_size_class: u8,
-    origin_addr: &[u8],
+    origin_addr: &OriginAddr,
     received_at_local_ms: u64,
-    frame: &[u8],
+    frame: &wire::FixedSlot<FRAME_BYTES>,
 ) -> Result<Vec<u8>, String> {
-    require_frame_size_class(frame, expected_size_class)?;
-    let origin_addr = normalize_origin_addr_bytes(origin_addr)?;
-    let mut out = wire::Writer::with_capacity(1 + 4 + origin_addr.len() + 8 + 4 + frame.len());
+    if frame.len() != FRAME_BYTES {
+        return Err(format!(
+            "connection frame fact bytes must be {FRAME_BYTES} bytes"
+        ));
+    }
+    require_frame_size_class(frame.bytes(), expected_size_class)?;
+    let origin_addr = normalize_origin_addr_bytes(origin_addr.bytes())?;
+    let origin_addr = OriginAddr::new(&origin_addr).map_err(wire_err)?;
+    let mut out = wire::Writer::with_capacity(
+        1 + wire::FixedSlot::<ORIGIN_ADDR_BYTES>::LEN + 8 + wire::FixedSlot::<FRAME_BYTES>::LEN,
+    );
     out.u8(tag);
-    out.bytes_u32be(&origin_addr).map_err(wire_err)?;
+    out.fixed_slot_value(&origin_addr).map_err(wire_err)?;
     out.u64be(received_at_local_ms);
-    out.bytes_u32be(frame).map_err(wire_err)?;
+    out.fixed_slot_value(frame).map_err(wire_err)?;
     Ok(out.finish())
 }
 
-fn decode_received_frame_fact(bytes: &[u8], tag: u8) -> Result<(Vec<u8>, u64, Vec<u8>), String> {
+fn decode_received_frame_fact<const FRAME_BYTES: usize>(
+    bytes: &[u8],
+    tag: u8,
+    expected_size_class: u8,
+) -> Result<(OriginAddr, u64, wire::FixedSlot<FRAME_BYTES>), String> {
     let mut reader = wire::Reader::new(bytes);
     reader.expect_u8(tag).map_err(wire_err)?;
-    let origin_addr = normalize_origin_addr_bytes(reader.bytes_u32be().map_err(wire_err)?)?;
+    let origin_addr = reader
+        .fixed_slot_value::<ORIGIN_ADDR_BYTES>()
+        .map_err(wire_err)?;
+    let canonical_origin_addr = normalize_origin_addr_bytes(origin_addr.bytes())?;
+    if canonical_origin_addr != origin_addr.bytes() {
+        return Err("connection frame origin addr is not canonical".to_string());
+    }
     let received_at_local_ms = reader.u64be().map_err(wire_err)?;
-    let frame = reader.bytes_u32be().map_err(wire_err)?.to_vec();
+    let frame = reader.fixed_slot_value::<FRAME_BYTES>().map_err(wire_err)?;
     reader.finish().map_err(wire_err)?;
+    require_frame_size_class(frame.bytes(), expected_size_class)?;
+    if frame.len() != FRAME_BYTES {
+        return Err("connection frame fact slot must be full".to_string());
+    }
     Ok((origin_addr, received_at_local_ms, frame))
 }
 
@@ -177,14 +268,24 @@ pub struct ConnectionFrameSmallV1 {
     pub ciphertext: Ciphertext<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>,
 }
 
-/// Fixed-width large connection::frame frame.
+/// Fixed-width file-slice connection::frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectionFrameLargeV1 {
+pub struct ConnectionFrameFileSliceV1 {
     pub sender_endpoint_id: Id32,
     pub receiver_endpoint_id: Id32,
     pub connection_id: Id32,
     pub nonce: Nonce24,
-    pub ciphertext: Ciphertext<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>,
+    pub ciphertext: Ciphertext<CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES>,
+}
+
+/// Fixed-width bundled connection::frame frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFrameBundleV1 {
+    pub sender_endpoint_id: Id32,
+    pub receiver_endpoint_id: Id32,
+    pub connection_id: Id32,
+    pub nonce: Nonce24,
+    pub ciphertext: Ciphertext<CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES>,
 }
 
 impl FixedLayout for ConnectionFrameSmallV1 {
@@ -219,14 +320,14 @@ impl FixedLayout for ConnectionFrameSmallV1 {
     }
 }
 
-impl FixedLayout for ConnectionFrameLargeV1 {
-    const LEN: usize = CONNECTION_FRAME_LARGE_WIRE_BYTES;
+impl FixedLayout for ConnectionFrameFileSliceV1 {
+    const LEN: usize = CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES;
 
     fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
         encode_header(
             out,
             Self::LEN,
-            CONNECTION_FRAME_SIZE_CLASS_LARGE,
+            CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
             &self.sender_endpoint_id,
             &self.receiver_endpoint_id,
             &self.connection_id,
@@ -237,8 +338,40 @@ impl FixedLayout for ConnectionFrameLargeV1 {
 
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         let (sender, receiver, connection, nonce) =
-            decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_LARGE)?;
-        let ciphertext = Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::decode(
+            decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE)?;
+        let ciphertext = Ciphertext::<CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES>::decode(
+            &bytes[CIPHERTEXT_OFFSET..],
+        )?;
+        Ok(Self {
+            sender_endpoint_id: sender,
+            receiver_endpoint_id: receiver,
+            connection_id: connection,
+            nonce,
+            ciphertext,
+        })
+    }
+}
+
+impl FixedLayout for ConnectionFrameBundleV1 {
+    const LEN: usize = CONNECTION_FRAME_BUNDLE_WIRE_BYTES;
+
+    fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
+        encode_header(
+            out,
+            Self::LEN,
+            CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+            &self.sender_endpoint_id,
+            &self.receiver_endpoint_id,
+            &self.connection_id,
+            &self.nonce,
+        )?;
+        self.ciphertext.encode(&mut out[CIPHERTEXT_OFFSET..])
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        let (sender, receiver, connection, nonce) =
+            decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_BUNDLE)?;
+        let ciphertext = Ciphertext::<CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES>::decode(
             &bytes[CIPHERTEXT_OFFSET..],
         )?;
         Ok(Self {
@@ -261,8 +394,8 @@ pub struct ConnectionFrameHeader {
     pub nonce: Nonce24,
 }
 
-/// Borrowed connection::frame frame payload recovered without materializing a large
-/// fixed-slot value on the stack.
+/// Borrowed connection::frame frame payload recovered without materializing a
+/// large fixed-slot value on the stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameParts<'a> {
     pub header: ConnectionFrameHeader,
@@ -272,8 +405,8 @@ pub struct ConnectionFrameParts<'a> {
 /// Inspect just the public header of a connection::frame frame.
 ///
 /// Returns the size class byte and addressing fields. The caller decides which
-/// of [`ConnectionFrameSmallV1::decode`] or [`ConnectionFrameLargeV1::decode`] to run based on
-/// `size_class` and the outer length.
+/// of the fixed frame decoders to run based on `size_class` and the outer
+/// length.
 pub fn peek_frame_header(bytes: &[u8]) -> Result<ConnectionFrameHeader, WireError> {
     if bytes.len() < CONNECTION_FRAME_HEADER_BYTES {
         return Err(WireError::WrongLength {
@@ -303,8 +436,8 @@ pub fn peek_frame_header(bytes: &[u8]) -> Result<ConnectionFrameHeader, WireErro
     })
 }
 
-/// Decode the public header and borrowed ciphertext slot for either size
-/// class without copying the full padded payload.
+/// Decode the public header and borrowed ciphertext slot for any size class
+/// without copying the full padded payload.
 pub fn decode_frame_parts(bytes: &[u8]) -> Result<ConnectionFrameParts<'_>, WireError> {
     let header = peek_frame_header(bytes)?;
     let (expected_len, capacity) = frame_shape(header.size_class)?;
@@ -336,7 +469,7 @@ pub fn decode_frame_parts(bytes: &[u8]) -> Result<ConnectionFrameParts<'_>, Wire
     })
 }
 
-/// Encode a connection::frame frame for either size class from already-encrypted bytes.
+/// Encode a connection::frame frame for any size class from already-encrypted bytes.
 pub fn encode_frame_bytes(
     size_class: u8,
     sender_endpoint_id: Id32,
@@ -435,9 +568,13 @@ fn frame_shape(size_class: u8) -> Result<(usize, usize), WireError> {
             CONNECTION_FRAME_SMALL_WIRE_BYTES,
             CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
         )),
-        CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok((
-            CONNECTION_FRAME_LARGE_WIRE_BYTES,
-            CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES,
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => Ok((
+            CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+            CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES,
+        )),
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE => Ok((
+            CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
+            CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES,
         )),
         other => Err(WireError::InvalidBool { actual: other }),
     }
@@ -448,7 +585,8 @@ const _: () = {
     assert!(
         CONNECTION_FRAME_HEADER_BYTES == 4 + 1 + 1 + 32 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES
     );
-    assert!(CONNECTION_FRAME_SMALL_WIRE_BYTES < CONNECTION_FRAME_LARGE_WIRE_BYTES);
+    assert!(CONNECTION_FRAME_SMALL_WIRE_BYTES < CONNECTION_FRAME_BUNDLE_WIRE_BYTES);
+    assert!(CONNECTION_FRAME_BUNDLE_WIRE_BYTES < CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES);
 };
 
 // ---------------------------------------------------------------------------
@@ -566,9 +704,8 @@ pub fn received_connection_fact_id(frame: &[u8]) -> Result<FactId, String> {
 }
 
 pub fn seal_connection_frame(input: SealConnectionFrame) -> Result<Vec<u8>, String> {
-    let packed_len = inner_bundle_packed_len(&input.facts)?;
-    let size_class = frame_size_class_for_plaintext(packed_len)?;
-    let plaintext = encode_inner_bundle(&input.facts, plaintext_len_for_size_class(size_class)?)?;
+    let size_class = frame_size_class_for_facts(&input.facts)?;
+    let plaintext = encode_inner_bundle(size_class, &input.facts)?;
     let aad = frame_associated_data(
         size_class,
         input.sender_endpoint_id,
@@ -650,19 +787,31 @@ pub fn open_connection_frame(
         sender_endpoint_id: parts.header.sender_endpoint_id.0,
         receiver_endpoint_id: parts.header.receiver_endpoint_id.0,
         frame_hash: crypto::hash(frame),
-        facts: decode_inner_bundle(&plaintext)?,
+        facts: decode_inner_bundle(parts.header.size_class, &plaintext)?,
     })
 }
 
-fn frame_size_class_for_plaintext(len: usize) -> Result<u8, String> {
-    if len <= CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES {
+fn frame_size_class_for_facts(facts: &ConnectionFrameFactBundle) -> Result<u8, String> {
+    let packed_len = inner_bundle_packed_len(facts)?;
+    if packed_len <= CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES {
         Ok(CONNECTION_FRAME_SIZE_CLASS_SMALL)
-    } else if len <= CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
-        Ok(CONNECTION_FRAME_SIZE_CLASS_LARGE)
+    } else if facts.len() == 1
+        && facts
+            .iter()
+            .next()
+            .is_some_and(|fact| fact.len() == file_slice::layout::CONTENT_FILE_SLICE_BYTES)
+    {
+        Ok(CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE)
+    } else if facts.len() <= CONNECTION_FRAME_BUNDLE_FACT_SLOTS
+        && facts
+            .iter()
+            .all(|fact| fact.len() <= CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)
+    {
+        Ok(CONNECTION_FRAME_SIZE_CLASS_BUNDLE)
     } else {
         Err(format!(
-            "connection::frame inner payload too large: max {} got {len}",
-            CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES
+            "connection::frame inner payload does not fit small, file-slice, or {}x{} bundle slots",
+            CONNECTION_FRAME_BUNDLE_FACT_SLOTS, CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES
         ))
     }
 }
@@ -670,7 +819,8 @@ fn frame_size_class_for_plaintext(len: usize) -> Result<u8, String> {
 fn plaintext_len_for_size_class(size_class: u8) -> Result<usize, String> {
     match size_class {
         CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES),
-        CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok(CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => Ok(CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE => Ok(CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES),
         other => Err(format!(
             "unknown connection::frame frame size class {other}"
         )),
@@ -680,7 +830,8 @@ fn plaintext_len_for_size_class(size_class: u8) -> Result<usize, String> {
 fn ciphertext_len_for_size_class(size_class: u8) -> Result<usize, String> {
     match size_class {
         CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok(CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES),
-        CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok(CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => Ok(CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE => Ok(CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES),
         other => Err(format!(
             "unknown connection::frame frame size class {other}"
         )),
@@ -722,6 +873,21 @@ fn inner_bundle_packed_len(facts: &ConnectionFrameFactBundle) -> Result<usize, S
 }
 
 fn encode_inner_bundle(
+    size_class: u8,
+    facts: &ConnectionFrameFactBundle,
+) -> Result<Vec<u8>, String> {
+    match size_class {
+        CONNECTION_FRAME_SIZE_CLASS_SMALL | CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
+            encode_packed_inner_bundle(facts, plaintext_len_for_size_class(size_class)?)
+        }
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE => encode_fixed_slot_inner_bundle(facts),
+        other => Err(format!(
+            "unknown connection::frame frame size class {other}"
+        )),
+    }
+}
+
+fn encode_packed_inner_bundle(
     facts: &ConnectionFrameFactBundle,
     plaintext_len: usize,
 ) -> Result<Vec<u8>, String> {
@@ -745,7 +911,51 @@ fn encode_inner_bundle(
     Ok(out)
 }
 
-fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
+fn encode_fixed_slot_inner_bundle(facts: &ConnectionFrameFactBundle) -> Result<Vec<u8>, String> {
+    if facts.is_empty() {
+        return Err("connection::frame inner bundle must contain at least one fact".to_string());
+    }
+    if facts.len() > CONNECTION_FRAME_BUNDLE_FACT_SLOTS {
+        return Err(format!(
+            "connection::frame bundle has {} facts, max {}",
+            facts.len(),
+            CONNECTION_FRAME_BUNDLE_FACT_SLOTS
+        ));
+    }
+
+    let mut out = vec![0; CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES];
+    let mut offset = 0;
+    put(&mut out, &mut offset, INNER_BUNDLE_TAG)?;
+    put(&mut out, &mut offset, &[INNER_BUNDLE_VERSION])?;
+    put_u32(&mut out, &mut offset, facts.len())?;
+    for fact in facts.iter() {
+        if fact.len() > CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES {
+            return Err(format!(
+                "connection::frame bundle fact has {} bytes, max {}",
+                fact.len(),
+                CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES
+            ));
+        }
+        put_u32(&mut out, &mut offset, fact.len())?;
+        put(&mut out, &mut offset, fact)?;
+        offset += CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES - fact.len();
+    }
+    Ok(out)
+}
+
+fn decode_inner_bundle(size_class: u8, bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
+    match size_class {
+        CONNECTION_FRAME_SIZE_CLASS_SMALL | CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
+            decode_packed_inner_bundle(bytes)
+        }
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE => decode_fixed_slot_inner_bundle(bytes),
+        other => Err(format!(
+            "unknown connection::frame frame size class {other}"
+        )),
+    }
+}
+
+fn decode_packed_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != INNER_BUNDLE_TAG {
         return Err("expected connection::frame inner bundle".to_string());
@@ -765,6 +975,48 @@ fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String
         facts.push(reader.bytes()?.to_vec());
     }
     reader.finish_zero_padding()?;
+    Ok(facts)
+}
+
+fn decode_fixed_slot_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
+    if bytes.len() != CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES {
+        return Err("connection::frame fixed-slot bundle length mismatch".to_string());
+    }
+    let mut reader = Reader::new(bytes);
+    if reader.take(4)? != INNER_BUNDLE_TAG {
+        return Err("expected connection::frame inner bundle".to_string());
+    }
+    let version = reader.u8()?;
+    if version != INNER_BUNDLE_VERSION {
+        return Err(format!(
+            "unsupported connection::frame inner bundle version {version}"
+        ));
+    }
+    let count = reader.u32()? as usize;
+    if count == 0 {
+        return Err("connection::frame inner bundle must contain at least one fact".to_string());
+    }
+    if count > CONNECTION_FRAME_BUNDLE_FACT_SLOTS {
+        return Err("connection::frame inner bundle count exceeds slot count".to_string());
+    }
+
+    let mut facts = ConnectionFrameFactBundle::new();
+    for index in 0..CONNECTION_FRAME_BUNDLE_FACT_SLOTS {
+        let len = reader.u32()? as usize;
+        let slot = reader.take(CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)?;
+        if index < count {
+            if len > CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES {
+                return Err("connection::frame inner bundle slot length exceeds slot".to_string());
+            }
+            if slot[len..].iter().any(|byte| *byte != 0) {
+                return Err("connection::frame inner bundle slot has nonzero padding".to_string());
+            }
+            facts.push(slot[..len].to_vec());
+        } else if len != 0 || slot.iter().any(|byte| *byte != 0) {
+            return Err("connection::frame unused bundle slot is nonzero".to_string());
+        }
+    }
+    reader.finish()?;
     Ok(facts)
 }
 
@@ -831,6 +1083,14 @@ impl<'a> Reader<'a> {
             Ok(())
         } else {
             Err("connection::frame inner bundle has nonzero padding".to_string())
+        }
+    }
+
+    fn finish(self) -> Result<(), String> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err("connection::frame inner bundle has trailing bytes".to_string())
         }
     }
 }

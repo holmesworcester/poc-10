@@ -46,7 +46,7 @@ impl TypedProjector<super::Codec> for CascadeTestFactProjector {
 
         // 2. Context.
         let mut output = ProjectionOutput::new();
-        for dependency_id in decoded.dependencies {
+        for dependency_id in decoded.dependencies.iter() {
             let need = crate::core::context::ContextNeed::range(
                 fact.id,
                 "sync_exact_fact",
