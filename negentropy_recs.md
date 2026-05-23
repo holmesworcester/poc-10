@@ -90,6 +90,12 @@ new one. The handler must be idempotent: replaying the same contribution is a
 no-op, and replaying a richer later contribution cannot lose context learned by
 an earlier pass.
 
+Incrementality is load-bearing. Updating one leaf must touch only the stored
+leaf contribution and the ancestor path from that leaf to the root. It must not
+rebuild a namespace tree by scanning all leaves. Batches may coalesce shared
+ancestors across several changed leaves, but the work should still be
+proportional to the changed leaves and their unique ancestor set.
+
 Intent identity must allow reprojection to enqueue changed views without
 conflicting with an already queued older view. The safest shape is a
 content-addressed intent key:
@@ -158,6 +164,15 @@ or `remove_from_negentropy` intent for its own owner id. The handler removes
 the stored contribution and updates ancestor hashes transactionally before or
 with physical fact-byte purge.
 
+Owner purge is the same minimal update as insertion: subtract the stored
+contribution from that owner's leaf path and delete the leaf rows. The harder
+case where purging one dependency invalidates other already-indexed leaves is
+not required for the first implementation. If that path is added, it should be
+driven by projector-owned reverse references from `context_have` facts or
+bounded selector rows back to the affected owner leaves, then apply ordinary
+leaf deltas for only those owners. It should not become a full tree rebuild or
+a sync-handler dependency scan.
+
 Sync must not rediscover purged ids from a stale shareable scan. A missing fact
 row is not enough as the primary mechanism; the negentropy contribution for the
 purged owner must also disappear or become a tombstone according to the module's
@@ -170,6 +185,8 @@ retention policy.
 - Parked facts waiting on missing context can enter negentropy on first pass.
 - `add_to_negentropy` handlers persist and hash supplied contributions; they do
   not infer dependency closure.
+- Leaf and owner-purge updates are incremental; no required update path rebuilds
+  the full negentropy tree.
 - Range summaries include context closure, not only owner fact ids.
 - Local-only secret material is never exposed as sendable `context_have`.
 - Broad context needs are bounded by the fact module that emits them.
@@ -185,6 +202,8 @@ Add focused tests with the implementation:
   `context_need`.
 - handler tests proving idempotent upsert, ancestor hash delta updates, and
   richer snapshots do not regress when older queued intents run later.
+- index tests proving one-leaf add/update/remove touches only that leaf's path
+  to the root, with batched updates coalescing shared ancestors.
 - purge tests proving a self-purged owner is removed from the persisted
   negentropy root and is not reintroduced by a follow-up sync round.
 - two-peer sync tests where an in-range message depends on out-of-range
