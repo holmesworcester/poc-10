@@ -33,7 +33,6 @@ pub struct ContentMessageRow {
     pub signer_id: FactId,
     pub frontier_id: FrontierId,
     pub minute: u64,
-    pub leaf_id: FactId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +54,6 @@ pub fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> Tab
         Value::Bytes(fact.signer_id.to_vec()),
         Value::Bytes(fact.frontier_id.to_vec()),
         Value::U64(fact.minute),
-        Value::Bytes(fact.leaf_id.to_vec()),
         Value::Bool(false),
     ])
 }
@@ -101,7 +99,6 @@ mod tests {
             expires_at_minute: u64::MAX,
             disappearing_setting_id: [6; 32],
             minute: 1,
-            leaf_id: [7; 32],
             nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
             ciphertext: b"sealed".to_vec(),
         };
@@ -113,8 +110,7 @@ mod tests {
         assert_eq!(row.values[2], Value::Bytes(vec![2; 32]));
         assert_eq!(row.values[4], Value::Bytes(vec![3; 32]));
         assert_eq!(row.values[5], Value::Bytes(vec![4; 32]));
-        assert_eq!(row.values[7], Value::Bytes(vec![7; 32]));
-        assert_eq!(row.values[8], Value::Bool(false));
+        assert_eq!(row.values[7], Value::Bool(false));
     }
 
     #[test]

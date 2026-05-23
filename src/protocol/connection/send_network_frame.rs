@@ -86,7 +86,7 @@ use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
-use crate::protocol::{connection, identity::endpoint};
+use crate::protocol::{auth::endpoint, connection};
 
 pub const SEND_NETWORK_FRAME_MISSING_ROUTE: &str = "send_network_frame_missing_route";
 

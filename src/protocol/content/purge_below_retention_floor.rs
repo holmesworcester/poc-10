@@ -8,7 +8,7 @@ use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::{
-    content::message::create as retention, encryption::disappearing_messages_setting,
+    content::disappearing_messages_setting, content::message::create as retention,
 };
 
 pub const PURGE_BELOW_RETENTION_FLOOR: &str = "purge_below_retention_floor";

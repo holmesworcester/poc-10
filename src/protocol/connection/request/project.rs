@@ -28,6 +28,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::auth::{endpoint, invite};
 use crate::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse,
 };
@@ -36,7 +37,6 @@ use crate::protocol::connection::fact_receipt;
 use crate::protocol::connection::send_bootstrap_request::{
     send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
 };
-use crate::protocol::identity::{endpoint, invite};
 
 use super::create::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
@@ -137,7 +137,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
         // 2b. Received bootstrap path.
         let endpoint_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "identity_local_endpoint",
+            "auth_local_endpoint",
             crate::core::facts::FactScope::Local,
             request.to_endpoint,
             request.to_endpoint,
@@ -283,7 +283,7 @@ fn waiting_output<const N: usize>(
 
 fn validate_invite_signature(
     request: &ConnectionRequestFact,
-    invite_secret: &crate::protocol::identity::invite::fact::InviteSecretFact,
+    invite_secret: &crate::protocol::auth::invite::fact::InviteSecretFact,
 ) -> Result<(), String> {
     if invite_secret.bootstrap_hash != request.bootstrap_hash {
         return Err("connection request bootstrap hash is not authorized".to_string());
@@ -328,6 +328,8 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
+    use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::connection::create_response::{
         decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
     };
@@ -340,8 +342,6 @@ mod projector_tests {
     };
     use topo::protocol::connection::request::create::encode_optional_addr;
     use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
-    use topo::protocol::identity::endpoint::{fact::EndpointFact, layout as endpoint_layout};
-    use topo::protocol::identity::invite::{fact::InviteSecretFact, layout as invite_layout};
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
         let invite = InviteSecretFact::new([55; 32]);
@@ -495,7 +495,7 @@ mod projector_tests {
         );
         let need = crate::core::context::ContextNeed::range(
             owner,
-            "identity_local_endpoint",
+            "auth_local_endpoint",
             crate::core::facts::FactScope::Local,
             endpoint_id,
             endpoint_id,
@@ -504,7 +504,7 @@ mod projector_tests {
             need,
             offer: crate::core::context::ContextOffer::range(
                 fact.id,
-                "identity_local_endpoint",
+                "auth_local_endpoint",
                 crate::core::facts::FactScope::Local,
                 endpoint_id,
                 endpoint_id,

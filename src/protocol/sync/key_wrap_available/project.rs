@@ -42,7 +42,7 @@ impl TypedProjector<super::Codec> for SyncKeyWrapAvailableProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = crate::protocol::identity::workspace::scope(key.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(key.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()

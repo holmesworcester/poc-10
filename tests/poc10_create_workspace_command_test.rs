@@ -7,8 +7,8 @@ use topo::core::command_context::{
     WorkspaceId,
 };
 use topo::core::store::Store;
-use topo::protocol::identity::workspace::commands::create_workspace;
-use topo::protocol::identity::workspace::layout as workspace_layout;
+use topo::protocol::auth::workspace::commands::create_workspace;
+use topo::protocol::auth::workspace::layout as workspace_layout;
 
 struct FixedClock(Cell<u64>);
 

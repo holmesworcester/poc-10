@@ -17,7 +17,7 @@ use crate::core::crypto;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::FactCodec;
-use crate::protocol::{connection, content, encryption, identity, sync};
+use crate::protocol::{auth, connection, content, sync};
 
 use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
 use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
@@ -48,9 +48,9 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
         ));
     }
 
-    if tag == identity::signed_fact::layout::TYPE_SIGNED_FACT {
+    if tag == auth::signed_fact::layout::TYPE_SIGNED_FACT {
         let envelope =
-            identity::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
+            auth::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
                 format!(
                     "connection::frame send refused invalid signed fact {:?}: {err}",
                     fact.id
@@ -73,12 +73,12 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
         connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::request::layout::TYPE_CONNECTION_REQUEST
             | connection::response::layout::TYPE_CONNECTION_RESPONSE
-            | identity::endpoint::layout::TYPE_LOCAL_ENDPOINT
-            | identity::invite::layout::TYPE_INVITE_SECRET
-            | identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
-            | encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
-            | encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
-            | encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
+            | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
+            | auth::invite::layout::TYPE_INVITE_SECRET
+            | auth::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
+            | auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
+            | auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
+            | auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
             | connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL
             | connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE
             | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
@@ -276,51 +276,45 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         .copied()
         .ok_or_else(|| "received connection::frame fact bytes are empty".to_string())?;
     match tag {
-        identity::workspace::TYPE_WORKSPACE => {
-            return admit_with_codec::<identity::workspace::Codec>(bytes, |workspace| {
+        auth::workspace::TYPE_WORKSPACE => {
+            return admit_with_codec::<auth::workspace::Codec>(bytes, |workspace| {
                 Ok(Admission::global(workspace.created_at_ms))
             });
         }
-        identity::user_invite::TYPE_USER_INVITE => {
-            return admit_with_decoder(
-                bytes,
-                identity::user_invite::decode_fact_payload,
-                |invite| Ok(Admission::global(invite.created_at_ms)),
-            );
+        auth::user_invite::TYPE_USER_INVITE => {
+            return admit_with_decoder(bytes, auth::user_invite::decode_fact_payload, |invite| {
+                Ok(Admission::global(invite.created_at_ms))
+            });
         }
-        identity::user::TYPE_USER => {
-            return admit_with_decoder(bytes, identity::user::decode_fact_payload, |user| {
+        auth::user::TYPE_USER => {
+            return admit_with_decoder(bytes, auth::user::decode_fact_payload, |user| {
                 Ok(Admission::global(user.created_at_ms))
             });
         }
-        identity::admin::TYPE_ADMIN => {
-            return admit_with_decoder(bytes, identity::admin::decode_fact_payload, |admin| {
+        auth::admin::TYPE_ADMIN => {
+            return admit_with_decoder(bytes, auth::admin::decode_fact_payload, |admin| {
                 Ok(Admission::global(admin.created_at_ms))
             });
         }
-        identity::device_invite::TYPE_DEVICE_INVITE => {
-            return admit_with_decoder(
-                bytes,
-                identity::device_invite::decode_fact_payload,
-                |invite| Ok(Admission::global(invite.created_at_ms)),
-            );
+        auth::device_invite::TYPE_DEVICE_INVITE => {
+            return admit_with_decoder(bytes, auth::device_invite::decode_fact_payload, |invite| {
+                Ok(Admission::global(invite.created_at_ms))
+            });
         }
-        identity::endpoint_shared::TYPE_ENDPOINT_SHARED => {
+        auth::endpoint_shared::TYPE_ENDPOINT_SHARED => {
             return admit_with_decoder(
                 bytes,
-                identity::endpoint_shared::decode_fact_payload,
+                auth::endpoint_shared::decode_fact_payload,
                 |shared| Ok(Admission::global(shared.created_at_ms)),
             );
         }
-        identity::invite_server::TYPE_INVITE_SERVER => {
-            return admit_with_decoder(
-                bytes,
-                identity::invite_server::decode_fact_payload,
-                |server| Ok(Admission::global(server.created_at_ms)),
-            );
+        auth::invite_server::TYPE_INVITE_SERVER => {
+            return admit_with_decoder(bytes, auth::invite_server::decode_fact_payload, |server| {
+                Ok(Admission::global(server.created_at_ms))
+            });
         }
-        encryption::disappearing_messages_setting::TYPE_DISAPPEARING_MESSAGES_SETTING => {
-            return admit_with_codec::<encryption::disappearing_messages_setting::Codec>(
+        content::disappearing_messages_setting::TYPE_DISAPPEARING_MESSAGES_SETTING => {
+            return admit_with_codec::<content::disappearing_messages_setting::Codec>(
                 bytes,
                 |setting| {
                     Ok(Admission::workspace(
@@ -386,31 +380,31 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
-        encryption::recipient_key::layout::TYPE_RECIPIENT_KEY => {
-            return admit_with_codec::<encryption::recipient_key::Codec>(bytes, |recipient| {
+        auth::recipient_key::layout::TYPE_RECIPIENT_KEY => {
+            return admit_with_codec::<auth::recipient_key::Codec>(bytes, |recipient| {
                 Ok(Admission::workspace(
                     recipient.workspace_id,
                     recipient.created_at_ms,
                 ))
             });
         }
-        encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
-            return admit_with_codec::<encryption::removal_frontier::Codec>(bytes, |frontier| {
+        auth::removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
+            return admit_with_codec::<auth::removal_frontier::Codec>(bytes, |frontier| {
                 Ok(Admission::workspace(
                     frontier.workspace_id,
                     frontier.created_at_ms,
                 ))
             });
         }
-        encryption::key_request::layout::TYPE_KEY_REQUEST => {
-            return admit_with_codec::<encryption::key_request::Codec>(bytes, |request| {
+        auth::key_request::layout::TYPE_KEY_REQUEST => {
+            return admit_with_codec::<auth::key_request::Codec>(bytes, |request| {
                 Ok(Admission::workspace(
                     request.workspace_id,
                     request.created_at_ms,
                 ))
             });
         }
-        encryption::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+        auth::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             return Err(
                 "received connection::frame payload is local history-node secret".to_string(),
             );
@@ -424,7 +418,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         sync::need_id::TYPE_SYNC_NEED_ID => {
             return admit_with_codec::<sync::need_id::Codec>(bytes, |_| Ok(Admission::global(0)));
         }
-        identity::signed_fact::TYPE_SIGNED_FACT => {}
+        auth::signed_fact::TYPE_SIGNED_FACT => {}
         _ => {
             return Err(format!(
                 "unsupported received connection::frame fact type {tag}"
@@ -487,37 +481,35 @@ fn admit_with_decoder<T>(
 }
 
 fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
-    let envelope = identity::signed_fact::layout::decode_signed_fact(&bytes)?;
+    let envelope = auth::signed_fact::layout::decode_signed_fact(&bytes)?;
     match envelope.inner_type {
-        identity::user_invite::TYPE_USER_INVITE => {
-            admit_with_codec::<identity::user_invite::Codec>(bytes, |signed| {
+        auth::user_invite::TYPE_USER_INVITE => {
+            admit_with_codec::<auth::user_invite::Codec>(bytes, |signed| {
                 Ok(Admission::global(signed.payload.created_at_ms))
             })
         }
-        identity::user::TYPE_USER => admit_with_codec::<identity::user::Codec>(bytes, |signed| {
+        auth::user::TYPE_USER => admit_with_codec::<auth::user::Codec>(bytes, |signed| {
             Ok(Admission::global(signed.payload.created_at_ms))
         }),
-        identity::admin::TYPE_ADMIN => {
-            admit_with_codec::<identity::admin::Codec>(bytes, |signed| {
+        auth::admin::TYPE_ADMIN => admit_with_codec::<auth::admin::Codec>(bytes, |signed| {
+            Ok(Admission::global(signed.payload.created_at_ms))
+        }),
+        auth::device_invite::TYPE_DEVICE_INVITE => {
+            admit_with_codec::<auth::device_invite::Codec>(bytes, |signed| {
                 Ok(Admission::global(signed.payload.created_at_ms))
             })
         }
-        identity::device_invite::TYPE_DEVICE_INVITE => {
-            admit_with_codec::<identity::device_invite::Codec>(bytes, |signed| {
+        auth::endpoint_shared::TYPE_ENDPOINT_SHARED => {
+            admit_with_codec::<auth::endpoint_shared::Codec>(bytes, |signed| {
                 Ok(Admission::global(signed.payload.created_at_ms))
             })
         }
-        identity::endpoint_shared::TYPE_ENDPOINT_SHARED => {
-            admit_with_codec::<identity::endpoint_shared::Codec>(bytes, |signed| {
+        auth::invite_server::TYPE_INVITE_SERVER => {
+            admit_with_codec::<auth::invite_server::Codec>(bytes, |signed| {
                 Ok(Admission::global(signed.payload.created_at_ms))
             })
         }
-        identity::invite_server::TYPE_INVITE_SERVER => {
-            admit_with_codec::<identity::invite_server::Codec>(bytes, |signed| {
-                Ok(Admission::global(signed.payload.created_at_ms))
-            })
-        }
-        encryption::key_wrap::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
+        auth::key_wrap::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
         content::message::TYPE_CONTENT_MESSAGE => {
             admit_with_codec::<content::message::Codec>(bytes, |signed| {
                 Ok(Admission::workspace(
@@ -541,7 +533,7 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
 }
 
 fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    admit_with_codec::<encryption::key_wrap::Codec>(bytes, |signed| {
+    admit_with_codec::<auth::key_wrap::Codec>(bytes, |signed| {
         let envelope = signed.envelope;
         let wrap = signed.payload;
         if envelope.signer_id != wrap.signer_endpoint_id {
@@ -552,7 +544,7 @@ fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
 }
 
 fn workspace_scope(workspace_id: FactId) -> FactScope {
-    crate::protocol::identity::workspace::scope(workspace_id)
+    crate::protocol::auth::workspace::scope(workspace_id)
 }
 
 fn connection_frame_fact_receipt(
@@ -627,10 +619,10 @@ fn require_connection_endpoints(
 mod tests {
     use super::*;
     use crate::core::crypto::{ed25519_public_key, ed25519_sign};
-    use crate::protocol::identity::invite::fact::InviteSecretFact;
-    use crate::protocol::identity::signed_fact::fact::SignedFactEnvelope;
-    use crate::protocol::identity::user::fact::UserFact;
-    use crate::protocol::identity::workspace::fact::WorkspaceFact;
+    use crate::protocol::auth::invite::fact::InviteSecretFact;
+    use crate::protocol::auth::signed_fact::fact::SignedFactEnvelope;
+    use crate::protocol::auth::user::fact::UserFact;
+    use crate::protocol::auth::workspace::fact::WorkspaceFact;
 
     #[test]
     fn admitted_message_deletion_uses_payload_created_timestamp() {
@@ -638,6 +630,8 @@ mod tests {
             workspace_id: [9; 32],
             created_at_ms: 12_345,
             target_message_id: [10; 32],
+            target_frontier_id: [12; 32],
+            target_minute: 1,
             author_user_id: [11; 32],
         };
         let bytes =
@@ -657,7 +651,7 @@ mod tests {
             public_key: [7; 32],
             name: "workspace".to_string(),
         };
-        let bytes = identity::workspace::layout::encode_fact(&workspace).expect("workspace");
+        let bytes = auth::workspace::layout::encode_fact(&workspace).expect("workspace");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit workspace");
 
@@ -674,20 +668,20 @@ mod tests {
             public_key: [9; 32],
             username: "alice".to_string(),
         };
-        let payload = identity::user::layout::encode_fact(&user).expect("user payload");
+        let payload = auth::user::layout::encode_fact(&user).expect("user payload");
         let signing_secret = [10; 32];
         let mut envelope = SignedFactEnvelope {
             signer_id: [11; 32],
             signer_public_key: ed25519_public_key(&signing_secret),
-            inner_type: identity::user::layout::TYPE_USER,
+            inner_type: auth::user::layout::TYPE_USER,
             payload,
             signature: [0; 64],
         };
         let signing_bytes =
-            identity::signed_fact::layout::signing_bytes(&envelope).expect("signing bytes");
+            auth::signed_fact::layout::signing_bytes(&envelope).expect("signing bytes");
         envelope.signature = ed25519_sign(&signing_secret, &signing_bytes);
         let bytes =
-            identity::signed_fact::layout::encode_signed_fact(&envelope).expect("signed identity");
+            auth::signed_fact::layout::encode_signed_fact(&envelope).expect("signed identity");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");
 

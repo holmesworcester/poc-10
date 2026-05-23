@@ -15,6 +15,10 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::auth::endpoint::fact::EndpointFact;
+use topo::protocol::auth::endpoint::rows as endpoint_rows;
+use topo::protocol::auth::invite::fact::InviteSecretFact;
+use topo::protocol::auth::invite::layout as invite_layout;
 use topo::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
@@ -26,10 +30,6 @@ use topo::protocol::connection::fact_receipt::layout as received_layout;
 use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as request_layout;
 use topo::protocol::connection::response::layout as response_layout;
-use topo::protocol::identity::endpoint::fact::EndpointFact;
-use topo::protocol::identity::endpoint::rows as endpoint_rows;
-use topo::protocol::identity::invite::fact::InviteSecretFact;
-use topo::protocol::identity::invite::layout as invite_layout;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]

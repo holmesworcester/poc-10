@@ -151,6 +151,8 @@ use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
+use crate::protocol::auth::endpoint::create as local_endpoint;
+use crate::protocol::auth::invite::layout as invite_layout;
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
@@ -160,8 +162,6 @@ use crate::protocol::connection::request::layout as request_layout;
 use crate::protocol::connection::response::create::{
     build_responder_response, BuildResponderResponse,
 };
-use crate::protocol::identity::endpoint::create as local_endpoint;
-use crate::protocol::identity::invite::layout as invite_layout;
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateConnectionResponseHandler;

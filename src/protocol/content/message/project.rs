@@ -18,15 +18,14 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
-use crate::protocol::content::message_deletion;
+use crate::protocol::auth;
+use crate::protocol::auth::local_history_node_secret::project as coverage;
+use crate::protocol::auth::user;
 use crate::protocol::content::purge_deleted_message::{
     self, PurgeDeletedMessage, PURGE_REASON_AUTHOR_DELETION, PURGE_TARGET_MESSAGE,
 };
 use crate::protocol::content::purge_expired_message::{self, PurgeExpiredMessage};
-use crate::protocol::encryption;
-use crate::protocol::encryption::local_history_node_secret::project as coverage;
-use crate::protocol::identity;
-use crate::protocol::identity::user;
+use crate::protocol::content::{message_deletion, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{
@@ -66,7 +65,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             envelope,
             ..
         } = decoded;
-        let scope = crate::protocol::identity::workspace::scope(message.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
         if let Some(envelope) = envelope.as_ref() {
             if envelope.signer_id != message.signer_id {
@@ -82,15 +81,16 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             message.signer_id,
             message.signer_id,
         );
-        let deletion_need = crate::core::context::ContextNeed::for_key_parts(
+        let deletion_need = content_purge::target_purged_need(
             fact.id,
-            "content_deleted",
             scope.clone(),
-            [&fact.id, &message.author_user_id],
-        )?;
+            message.frontier_id,
+            message.minute,
+            fact.id,
+        );
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "identity_user",
+            "auth_user",
             crate::core::facts::FactScope::Global,
             message.author_user_id,
             message.author_user_id,
@@ -101,7 +101,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             message.workspace_id,
             message.frontier_id,
             message.minute,
-            message.leaf_id,
+            fact.id,
         );
 
         let base_output = base_wait_output(
@@ -138,6 +138,8 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             validate_message_deletion(
                 deletion,
                 message.workspace_id,
+                message.frontier_id,
+                message.minute,
                 fact.id,
                 message.author_user_id,
             )?;
@@ -195,7 +197,7 @@ fn validate_message_signer_context(
     payload: &Fact,
     _need: &ContextNeed,
     message: &super::fact::ContentMessageFact,
-    envelope: Option<&identity::signed_fact::fact::SignedFactEnvelope>,
+    envelope: Option<&auth::signed_fact::fact::SignedFactEnvelope>,
 ) -> Result<(), String> {
     let endpoint = endpoint_shared_signer(payload)
         .ok_or_else(|| "content message signer context must be endpoint_shared".to_string())?;
@@ -220,8 +222,8 @@ fn validate_message_signer_context(
 
 fn endpoint_shared_signer(
     payload: &Fact,
-) -> Option<identity::endpoint_shared::fact::EndpointSharedFact> {
-    identity::endpoint_shared::decode_raw_or_signed_fact(payload).ok()
+) -> Option<auth::endpoint_shared::fact::EndpointSharedFact> {
+    auth::endpoint_shared::decode_raw_or_signed_fact(payload).ok()
 }
 
 fn validate_author_user(
@@ -233,7 +235,7 @@ fn validate_author_user(
         return Err("message author context payload id mismatch".to_string());
     }
     let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "message author context")?;
-    let author = crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
+    let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "message author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("message author workspace does not match message".to_string());
@@ -244,6 +246,8 @@ fn validate_author_user(
 fn validate_message_deletion(
     payload: &Fact,
     workspace_id: crate::core::facts::FactId,
+    target_frontier_id: crate::core::facts::FactId,
+    target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
@@ -258,6 +262,12 @@ fn validate_message_deletion(
             })?;
         if deletion.workspace_id != workspace_id {
             return Err("message deletion workspace does not match message".to_string());
+        }
+        if deletion.target_frontier_id != target_frontier_id {
+            return Err("message deletion frontier does not match message".to_string());
+        }
+        if deletion.target_minute != target_minute {
+            return Err("message deletion minute does not match message".to_string());
         }
         if deletion.target_message_id != target_message_id {
             return Err("message deletion target does not match message".to_string());
@@ -279,8 +289,8 @@ fn matched_secret_payload<'a>(
         if !coverage::secret_coverage_offer_valid_for_need(need, offer) {
             return Err("content message secret context offer does not match need".to_string());
         }
-        if encryption::local_key_secret::layout::decode_local_key_secret(payload.body()).is_ok()
-            || encryption::local_history_node_secret::layout::decode_local_history_node_secret(
+        if auth::local_key_secret::layout::decode_local_key_secret(payload.body()).is_ok()
+            || auth::local_history_node_secret::layout::decode_local_history_node_secret(
                 payload.body(),
             )
             .is_ok()
@@ -296,7 +306,7 @@ fn decrypt_text(
     secret_payload: &Fact,
 ) -> Result<String, String> {
     let key = if let Ok(secret) =
-        encryption::local_key_secret::layout::decode_local_key_secret(secret_payload.body())
+        auth::local_key_secret::layout::decode_local_key_secret(secret_payload.body())
     {
         if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
         {
@@ -304,7 +314,7 @@ fn decrypt_text(
         }
         secret.key_secret
     } else {
-        let node = encryption::local_history_node_secret::layout::decode_local_history_node_secret(
+        let node = auth::local_history_node_secret::layout::decode_local_history_node_secret(
             secret_payload.body(),
         )
         .map_err(|_| "content message secret context is not local key material".to_string())?;
@@ -423,7 +433,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
         decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
@@ -457,14 +467,14 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 pub struct DecodedPayload {
     pub payload: Vec<u8>,
     pub signer: Option<SignedSigner>,
-    pub envelope: Option<identity::signed_fact::fact::SignedFactEnvelope>,
+    pub envelope: Option<auth::signed_fact::fact::SignedFactEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedFact<T> {
     pub payload: T,
     pub signer: Option<SignedSigner>,
-    pub envelope: Option<identity::signed_fact::fact::SignedFactEnvelope>,
+    pub envelope: Option<auth::signed_fact::fact::SignedFactEnvelope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,8 +490,8 @@ pub fn decode_raw_or_signed(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if fact.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
-        let envelope = identity::signed_fact::decode_envelope(fact.body())
+    if fact.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
+        let envelope = auth::signed_fact::decode_envelope(fact.body())
             .map_err(|err| format!("{label} signed fact is invalid: {err}"))?;
         if envelope.inner_type != expected_type {
             return Err(format!("signed fact does not contain a {label}"));
@@ -508,13 +518,13 @@ pub fn verify_signature<T>(decoded: &DecodedFact<T>, label: &str) -> Result<(), 
 }
 
 pub fn verify_envelope(
-    envelope: Option<&identity::signed_fact::fact::SignedFactEnvelope>,
+    envelope: Option<&auth::signed_fact::fact::SignedFactEnvelope>,
     label: &str,
 ) -> Result<(), String> {
     let Some(envelope) = envelope else {
         return Ok(());
     };
-    identity::signed_fact::verify_envelope(envelope)
+    auth::signed_fact::verify_envelope(envelope)
         .map_err(|err| format!("{label} signed fact is invalid: {err}"))
 }
 
@@ -537,7 +547,7 @@ pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<Contex
     signer.map(|signer| {
         crate::core::context::ContextNeed::range(
             owner,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             crate::core::facts::FactScope::Global,
             signer.signer_id,
             signer.signer_id,
@@ -563,14 +573,14 @@ pub fn validate_signer_context(
             "{label} signer endpoint context payload id mismatch"
         ));
     }
-    let envelope = identity::signed_fact::decode_envelope(payload.body())
+    let envelope = auth::signed_fact::decode_envelope(payload.body())
         .map_err(|_| format!("{label} signer context is not a signed endpoint_shared"))?;
-    if envelope.inner_type != identity::endpoint_shared::TYPE_ENDPOINT_SHARED {
+    if envelope.inner_type != auth::endpoint_shared::TYPE_ENDPOINT_SHARED {
         return Err(format!(
             "{label} signer context is not a signed endpoint_shared"
         ));
     }
-    let endpoint = identity::endpoint_shared::decode_fact_payload(&envelope.payload)
+    let endpoint = auth::endpoint_shared::decode_fact_payload(&envelope.payload)
         .map_err(|_| format!("{label} signer context is not an endpoint_shared"))?;
     if endpoint.workspace_id != workspace_id {
         return Err(format!(
@@ -606,20 +616,19 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::auth::endpoint_shared::{
+        fact::{EndpointRole, EndpointSharedFact},
+        layout as endpoint_shared_layout,
+    };
+    use topo::protocol::auth::local_history_node_secret::project as coverage;
+    use topo::protocol::auth::local_key_secret::{fact::LocalKeySecretFact, layout as auth_layout};
     use topo::protocol::content::message::fact::ContentMessageFact;
     use topo::protocol::content::message::{layout, project, rows};
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::layout as deletion_layout;
-    use topo::protocol::encryption::local_history_node_secret::project as coverage;
-    use topo::protocol::encryption::local_key_secret::{
-        fact::LocalKeySecretFact, layout as encryption_layout,
-    };
-    use topo::protocol::identity::endpoint_shared::{
-        fact::{EndpointRole, EndpointSharedFact},
-        layout as endpoint_shared_layout,
-    };
+    use topo::protocol::content::purge::project as content_purge;
 
-    use topo::protocol::identity::user::{fact::UserFact, layout as user_layout};
+    use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
 
     macro_rules! put_row {
         ($output:expr, $table:expr) => {
@@ -726,7 +735,7 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 4);
         assert_eq!(output.effects.intents.len(), 1);
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
-        assert!(output.needs.iter().any(|need| need.role == "identity_user"));
+        assert!(output.needs.iter().any(|need| need.role == "auth_user"));
         assert!(output
             .needs
             .iter()
@@ -734,7 +743,7 @@ mod projector_tests {
         assert!(output
             .needs
             .iter()
-            .any(|need| need.role == "content_deleted"));
+            .any(|need| need.role == "content_purged"));
         assert!(output
             .needs
             .iter()
@@ -774,10 +783,12 @@ mod projector_tests {
             workspace_id: message.workspace_id,
             created_at_ms: message.created_at_ms + 1,
             target_message_id: fact.id,
+            target_frontier_id: message.frontier_id,
+            target_minute: message.minute,
             author_user_id: message.author_user_id,
         };
         let deletion_fact = Fact::new(
-            crate::protocol::identity::workspace::scope(deletion.workspace_id),
+            crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
             deletion_layout::encode_fact(&deletion).expect("encode deletion"),
         );
@@ -853,12 +864,11 @@ mod projector_tests {
             expires_at_minute: u64::MAX,
             disappearing_setting_id: [0; 32],
             minute,
-            leaf_id: [4; 32],
             nonce,
             ciphertext,
         };
         let fact = Fact::new(
-            crate::protocol::identity::workspace::scope(message.workspace_id),
+            crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
             layout::encode_fact(&message).expect("encode content message"),
         );
@@ -893,7 +903,7 @@ mod projector_tests {
         Fact::new(
             FactScope::Local,
             message.created_at_ms,
-            encryption_layout::encode_local_key_secret(&secret).expect("encode secret"),
+            auth_layout::encode_local_key_secret(&secret).expect("encode secret"),
         )
     }
 
@@ -902,7 +912,7 @@ mod projector_tests {
         message: &ContentMessageFact,
         signer: &Fact,
     ) -> MatchedContext {
-        let scope = crate::protocol::identity::workspace::scope(message.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
                 message_fact.id,
@@ -930,14 +940,14 @@ mod projector_tests {
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
                 message_fact.id,
-                "identity_user",
+                "auth_user",
                 crate::core::facts::FactScope::Global,
                 message.author_user_id,
                 message.author_user_id,
             ),
             offer: crate::core::context::ContextOffer::range(
                 author.id,
-                "identity_user",
+                "auth_user",
                 crate::core::facts::FactScope::Global,
                 author.id,
                 author.id,
@@ -951,7 +961,7 @@ mod projector_tests {
         message: &ContentMessageFact,
         secret: &Fact,
     ) -> MatchedContext {
-        let scope = crate::protocol::identity::workspace::scope(message.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
             need: coverage::secret_need(
                 message_fact.id,
@@ -959,7 +969,7 @@ mod projector_tests {
                 message.workspace_id,
                 message.frontier_id,
                 message.minute,
-                message.leaf_id,
+                message_fact.id,
             ),
             offer: coverage::secret_offer(
                 secret.id,
@@ -980,22 +990,22 @@ mod projector_tests {
         message: &ContentMessageFact,
         deletion_fact: &Fact,
     ) -> MatchedContext {
-        let scope = crate::protocol::identity::workspace::scope(message.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
-            need: crate::core::context::ContextNeed::for_key_parts(
+            need: content_purge::target_purged_need(
                 message_fact.id,
-                "content_deleted",
                 scope.clone(),
-                [&message_fact.id, &message.author_user_id],
-            )
-            .expect("deletion need"),
-            offer: crate::core::context::ContextOffer::for_key_parts(
+                message.frontier_id,
+                message.minute,
+                message_fact.id,
+            ),
+            offer: content_purge::target_purged_offer(
                 deletion_fact.id,
-                "content_deleted",
                 scope,
-                [&message_fact.id, &message.author_user_id],
-            )
-            .expect("deletion offer"),
+                message.frontier_id,
+                message.minute,
+                message_fact.id,
+            ),
             payload: deletion_fact.clone(),
         }
     }

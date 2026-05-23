@@ -112,12 +112,20 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
     matches
 }
 
-const PROTOCOL_SCOPES: [&str; 5] = ["connection", "content", "encryption", "identity", "sync"];
+const PROTOCOL_SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// The verb-named intent handler files that live directly inside each scope
 /// directory. Everything else under a scope directory is fact-module code.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
-    let handlers: [(&str, &[&str]); 5] = [
+    let handlers: [(&str, &[&str]); 4] = [
+        (
+            "auth",
+            &[
+                "create_key_wrap.rs",
+                "purge_retired_recipient_material.rs",
+                "unwrap_key_wrap.rs",
+            ],
+        ),
         (
             "connection",
             &[
@@ -137,15 +145,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "purge_message_child.rs",
             ],
         ),
-        (
-            "encryption",
-            &[
-                "create_key_wrap.rs",
-                "purge_retired_recipient_material.rs",
-                "unwrap_key_wrap.rs",
-            ],
-        ),
-        ("identity", &[]),
         (
             "sync",
             &[
@@ -639,7 +638,7 @@ fn poc10_target_projectors_emit_only_needs_offers_and_intents() {
 #[test]
 fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let accept_commands = source_text(&root.join("src/protocol/identity/invite/commands.rs"));
+    let accept_commands = source_text(&root.join("src/protocol/auth/invite/commands.rs"));
     let connection_request_projector =
         source_text(&root.join("src/protocol/connection/request/project.rs"));
 

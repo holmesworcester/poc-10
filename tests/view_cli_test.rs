@@ -228,7 +228,7 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
 }
 
 // --------------------------------------------------------------------------
-// Helpers (mirror the structure from content_cli_test.rs/encryption_cli_test.rs)
+// Helpers (mirror the structure from content_cli_test.rs/auth_cli_test.rs)
 // --------------------------------------------------------------------------
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {

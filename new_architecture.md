@@ -113,7 +113,7 @@ Implemented slices:
   healing, recipient-key supersession cleanup, signed key-wrap connection-frame
   receive, connection frame layout, sync context, fact receipt, flat handler
   contracts, black-box invite/accept/link flows, basic content send/messages,
-  encryption CLI flows, and daemon lifecycle.
+  auth key-material CLI flows, and daemon lifecycle.
 - `CommandContext` for user-facing target commands that may read projected state
   through module `queries.rs`, but do not drive handlers or network IO directly.
   The type lives in `core::command_context`.
@@ -216,8 +216,7 @@ src/
       receive_network_frame.rs
       send_facts_on_connection.rs
       send_network_frame.rs
-    encryption.rs   encryption/
-    identity.rs     identity/
+    auth.rs         auth/
     sync.rs         sync/
 
 ```
@@ -230,15 +229,25 @@ central protocol role registry or separate point API; projectors choose the
 role strings they validate and emit `ContextNeed::range` /
 `ContextOffer::range` directly when the key is a simple fact id or composite
 id. Nontrivial protocol byte layouts and candidate validation belong beside the
-domain that owns the semantics, such as encryption secret coverage and
-wrap-source ranges under `src/protocol/encryption/`. Fact modules must
+domain that owns the semantics, such as auth secret coverage and wrap-source
+ranges under `src/protocol/auth/`. Fact modules must
 not define their own `matchers.rs`, `context.rs`, or `selectors.rs` files.
 Core only stores, indexes, overlaps, and wakes; projectors must decode and
 validate matched payloads before giving candidates semantic authority.
 
+`auth` intentionally combines the old identity and key-agreement boundaries.
+Workspace authority, users, endpoints, invites, signed envelopes, recipient
+public keys, removal frontiers, key wraps, and local key material prove the
+same thing: who can act in a workspace and what secret material this store may
+use for that authority. Splitting recipient keys and frontiers away from
+endpoint identity would force content, connection, and sync projectors to
+reconstruct one proof from two scopes. Keeping it in `auth` makes the ownership
+line explicit: auth projectors publish authority and key context; other
+families consume that context and do not duplicate auth policy.
+
 A fact module is one fact family. A directory that defines several durable
 fact types is a bundle and should be split before review, even when the facts
-are conceptually related. This rule applies to encryption and sync equally:
+are conceptually related. This rule applies to auth and sync equally:
 `recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
 `sync_have_id`, `sync_need_id`, `sync_range_request`, `sync_encrypted_root`,
 `sync_shared_fact`, and `sync_key_wrap_available` are separate fact-family
@@ -596,7 +605,7 @@ encodes bounded typed parts, and `ContextNeed::for_key_parts` /
 code still owns which fields are included, their order, the role string, and
 the matched-payload validation. Domain-owned helpers remain appropriate only
 when a relation needs order-preserving low/high endpoints or candidate decoding,
-as with encryption coverage and wrap-source ranges.
+as with auth key-material coverage and wrap-source ranges.
 
 Standard context range shapes:
 
@@ -606,7 +615,7 @@ Exact fact key
   Offer(role="sync_exact_fact", range=[fact_id, fact_id])
 
 Secret coverage key range
-  Need(role="secret_coverage", range=[workspace/frontier/minute/leaf, same])
+  Need(role="secret_coverage", range=[workspace/frontier/minute/target, same])
   Offer(role="secret_coverage", range=[workspace/frontier/minute-prefix-low,
                                         workspace/frontier/minute-prefix-high])
 
@@ -614,9 +623,9 @@ Connection fact receipt key
   Need(role="connection_fact_receipt", range=[received_fact_id, received_fact_id])
   Offer(role="connection_fact_receipt", range=[received_fact_id, received_fact_id])
 
-Deletion/update key
-  Need(role="content_deleted", range=[target_id + author_id, same])
-  Offer(role="content_deleted", range=[target_id + author_id, same])
+Content purge key
+  Need(role="content_purged", range=[frontier_id + target_minute + target_fact_id, same])
+  Offer(role="content_purged", range=[frontier_id + target_minute + target_fact_id, same])
 
 Recipient-key supersession key
   Need(role="recipient_superseded", range=[recipient_key_id, recipient_key_id])
@@ -1136,7 +1145,7 @@ Sync facts are connection-scoped facts. Durable sync bytes can be cached in
 connection-scoped projection state until sent or compacted. Dep-aware sync must
 include key context needed to display in-range encrypted content.
 
-## Encryption And Key Healing
+## Auth And Key Healing
 
 Keys use context needs/offers rather than hard event dependencies.
 

@@ -1,19 +1,17 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::protocol::encryption::create_key_wrap as intent;
-use topo::protocol::encryption::create_key_wrap::CreateKeyWrapHandler;
-use topo::protocol::encryption::key_wrap::fact::WrappedSecretKind;
-use topo::protocol::encryption::key_wrap::layout as key_wrap_layout;
-use topo::protocol::encryption::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
-use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
-use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
-use topo::protocol::encryption::recipient_key::fact::{
-    RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY,
-};
-use topo::protocol::encryption::recipient_key::layout as recipient_key_layout;
-use topo::protocol::identity;
-use topo::protocol::identity::signed_fact::fact::LocalSignerSecretFact;
-use topo::protocol::identity::workspace::scope as workspace_scope;
+use topo::protocol::auth;
+use topo::protocol::auth::create_key_wrap as intent;
+use topo::protocol::auth::create_key_wrap::CreateKeyWrapHandler;
+use topo::protocol::auth::key_wrap::fact::WrappedSecretKind;
+use topo::protocol::auth::key_wrap::layout as key_wrap_layout;
+use topo::protocol::auth::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
+use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
+use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
+use topo::protocol::auth::recipient_key::layout as recipient_key_layout;
+use topo::protocol::auth::signed_fact::fact::LocalSignerSecretFact;
+use topo::protocol::auth::workspace::scope as workspace_scope;
 
 #[test]
 fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
@@ -44,7 +42,7 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
 
     assert_eq!(first.facts.len(), 1);
     assert_eq!(first.facts, second.facts);
-    let envelope = identity::signed_fact::layout::decode_signed_fact(&first.facts[0].bytes)
+    let envelope = auth::signed_fact::layout::decode_signed_fact(&first.facts[0].bytes)
         .expect("decode signed key wrap");
     assert_eq!(envelope.signer_id, endpoint);
     assert_eq!(envelope.inner_type, key_wrap_layout::TYPE_KEY_WRAP);
@@ -103,7 +101,7 @@ fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact
     Fact::new(
         FactScope::Local,
         10,
-        identity::signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        auth::signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
             workspace_id,
             signer_id,
             public_key: topo::core::crypto::ed25519_public_key(&private_key),

@@ -6,7 +6,7 @@
 //!   2. AUTHORITY. The signer, target file, and author user contexts must all
 //!      validate against the same workspace and target.
 //!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
-//!      content_deleted offer, and share the deletion fact.
+//!      content_purged offer, and share the deletion fact.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -14,10 +14,11 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::content::file;
+use crate::protocol::auth;
+use crate::protocol::auth::user;
+use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, DecodedPayload};
-use crate::protocol::identity;
-use crate::protocol::identity::user;
+use crate::protocol::content::{file, message, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{file_deletion_row, FileDeletionRow};
@@ -54,7 +55,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = crate::protocol::identity::workspace::scope(deletion.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
@@ -68,7 +69,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
         );
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "identity_user",
+            "auth_user",
             crate::core::facts::FactScope::Global,
             deletion.author_user_id,
             deletion.author_user_id,
@@ -97,15 +98,34 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
                 Some(author_need),
             ]));
         };
+        let target = validate_target_file(&deletion, target_fact, &scope)?;
+        let parent_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "content_message",
+            scope.clone(),
+            target.message_id,
+            target.message_id,
+        );
+        let Some(parent_fact) =
+            context_payload(context, &parent_need, "file deletion parent message")?
+        else {
+            return Ok(output_with_needs([
+                signer_need,
+                Some(target_need),
+                Some(parent_need),
+                Some(author_need),
+            ]));
+        };
+        let parent = validate_parent_message(&target, parent_fact, &scope)?;
         let Some(author_fact) = context_payload(context, &author_need, "file deletion author")?
         else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(target_need),
+                Some(parent_need),
                 Some(author_need),
             ]));
         };
-        validate_target_file(&deletion, target_fact, &scope)?;
         validate_author_user(&deletion, author_fact)?;
         project::verify_envelope(envelope.as_ref(), "file deletion")?;
 
@@ -117,20 +137,24 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         });
-        Ok(
-            output_with_needs([signer_need, Some(target_need), Some(author_need)])
-                .offer(crate::core::context::ContextOffer::for_key_parts(
-                    fact.id,
-                    "content_deleted",
-                    scope,
-                    [&deletion.target_file_id, &deletion.author_user_id],
-                )?)
-                .row_mutation(RowMutation::InsertValues(row))
-                .intent(share_fact_with_workspace_intent_for_fact(
-                    deletion.workspace_id,
-                    fact,
-                )),
-        )
+        Ok(output_with_needs([
+            signer_need,
+            Some(target_need),
+            Some(parent_need),
+            Some(author_need),
+        ])
+        .offer(content_purge::target_purged_offer(
+            fact.id,
+            scope,
+            parent.frontier_id,
+            unix_minute_for(target.created_at_ms),
+            deletion.target_file_id,
+        ))
+        .row_mutation(RowMutation::InsertValues(row))
+        .intent(share_fact_with_workspace_intent_for_fact(
+            deletion.workspace_id,
+            fact,
+        )))
     }
 }
 
@@ -155,7 +179,7 @@ fn validate_target_file(
     deletion: &super::fact::ContentFileDeletionFact,
     target_fact: &Fact,
     expected_scope: &FactScope,
-) -> Result<(), String> {
+) -> Result<file::fact::ContentFileFact, String> {
     if target_fact.id != deletion.target_file_id {
         return Err("file deletion target context payload id mismatch".to_string());
     }
@@ -172,7 +196,31 @@ fn validate_target_file(
     if target.author_user_id != deletion.author_user_id {
         return Err("file deletion author is not the target file author".to_string());
     }
-    Ok(())
+    Ok(target)
+}
+
+fn validate_parent_message(
+    target: &file::fact::ContentFileFact,
+    parent_fact: &Fact,
+    expected_scope: &FactScope,
+) -> Result<message::fact::ContentMessageFact, String> {
+    if parent_fact.id != target.message_id {
+        return Err("file deletion parent context payload id mismatch".to_string());
+    }
+    if &parent_fact.scope != expected_scope {
+        return Err("file deletion parent scope does not match deletion".to_string());
+    }
+    let parent_payload = maybe_signed_payload(
+        parent_fact,
+        message::TYPE_CONTENT_MESSAGE,
+        "file deletion parent",
+    )?;
+    let parent = message::decode_fact_payload(&parent_payload.payload)
+        .map_err(|_| "file deletion parent context must be a content message".to_string())?;
+    if parent.workspace_id != target.workspace_id {
+        return Err("file deletion parent workspace does not match file".to_string());
+    }
+    Ok(parent)
 }
 
 fn validate_author_user(
@@ -197,7 +245,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
         project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

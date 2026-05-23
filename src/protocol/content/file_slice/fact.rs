@@ -2,11 +2,11 @@
 //!
 //! Each slice carries one chunk of an encrypted file blob, identified by its
 //! parent `file_id` and `slice_index`. The slice ciphertext is treated as an
-//! opaque length-prefixed blob; the encryption module owns the AEAD framing
+//! opaque length-prefixed blob; auth key-material code owns the AEAD framing
 //! and per-slice nonce derivation in a later wave.
 //!
 //! Current boundaries:
-//! - Signed envelope verification is owned by `identity::signed_fact`.
+//! - Signed envelope verification is owned by `auth::signed_fact`.
 //! - Slice proof material is handled by the file-send/admit path, not this
 //!   narrow fact shape.
 //! - Parent-descriptor existence is enforced by the admit pipeline before
@@ -23,6 +23,6 @@ pub struct ContentFileSliceFact {
     pub file_id: FactId,
     pub slice_index: u32,
     /// Opaque per-slice ciphertext. Encryption framing and the per-slice nonce
-    /// are owned by the encryption module in a later wave.
+    /// are owned by auth key-material code in a later wave.
     pub ciphertext: Vec<u8>,
 }

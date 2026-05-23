@@ -28,7 +28,7 @@ Write each projector as:
 6. Row materialization through module row helpers and schema-owned tables.
 
 The current model projector is
-`src/protocol/facts/identity/device_invite/project.rs`.
+`src/protocol/auth/device_invite/project.rs`.
 
 ## Inline Policy
 
@@ -62,7 +62,7 @@ impl TypedProjector<super::Codec> for DeviceInviteProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: identity::signed_fact::SignedPayload<DeviceInviteFact>,
+        signed: auth::signed_fact::SignedPayload<DeviceInviteFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -141,10 +141,10 @@ through core's typed adapter. The owning fact module supplies a small codec:
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = identity::signed_fact::SignedPayload<fact::DeviceInviteFact>;
+    type Payload = auth::signed_fact::SignedPayload<fact::DeviceInviteFact>;
 
     fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
-        identity::signed_fact::decode_signed_fact_payload(
+        auth::signed_fact::decode_signed_fact_payload(
             fact,
             layout::TYPE_DEVICE_INVITE,
             "device_invite",
@@ -169,16 +169,16 @@ let endpoint = endpoint_shared::decode_fact_payload(&endpoint_envelope.payload)
 
 That keeps wire formatting centralized inside the owning fact module while
 letting projector policy read as typed facts and named witnesses. The same rule
-applies to signed envelopes: use `identity::signed_fact::TYPE_SIGNED_FACT`,
-`identity::signed_fact::SignedPayload<T>`, and
-`identity::signed_fact::decode_envelope`, not the signed-fact layout module.
+applies to signed envelopes: use `auth::signed_fact::TYPE_SIGNED_FACT`,
+`auth::signed_fact::SignedPayload<T>`, and
+`auth::signed_fact::decode_envelope`, not the signed-fact layout module.
 
 Family projectors use the same rule with a module-owned enum:
 
 ```rust
 pub enum ProjectionPayload {
     Message(fact::ContentMessageFact),
-    SignedMessage(identity::signed_fact::SignedPayload<fact::ContentMessageFact>),
+    SignedMessage(auth::signed_fact::SignedPayload<fact::ContentMessageFact>),
     SecretNode(fact::SecretNodeFact),
 }
 ```

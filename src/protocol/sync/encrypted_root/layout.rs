@@ -2,7 +2,7 @@
 //!
 //! Encrypted-root facts are small sync control records, so their layout is only
 //! a type tag plus the ids needed to find the encrypted payload dependency and
-//! key wrap. Keep this file byte-focused; encryption modules validate the
+//! key wrap. Keep this file byte-focused; auth modules validate the
 //! payloads named by these ids.
 
 use crate::core::wire;

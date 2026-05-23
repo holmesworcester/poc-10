@@ -6,6 +6,15 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::FixedBytes;
+use topo::protocol::auth;
+use topo::protocol::auth::endpoint::fact::EndpointFact;
+use topo::protocol::auth::invite::fact::InviteSecretFact;
+use topo::protocol::auth::invite::layout as invite_layout;
+use topo::protocol::auth::key_wrap::create as auth_create;
+use topo::protocol::auth::key_wrap::fact::{
+    KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
+};
+use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
 use topo::protocol::connection::frame::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
 use topo::protocol::connection::frame::frame::{
@@ -23,15 +32,6 @@ use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
-use topo::protocol::encryption::key_wrap::create as encryption_create;
-use topo::protocol::encryption::key_wrap::fact::{
-    KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
-};
-use topo::protocol::encryption::key_wrap::layout as encryption_layout;
-use topo::protocol::identity;
-use topo::protocol::identity::endpoint::fact::EndpointFact;
-use topo::protocol::identity::invite::fact::InviteSecretFact;
-use topo::protocol::identity::invite::layout as invite_layout;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::sync::compare::layout as sync_compare_layout;
 
@@ -154,10 +154,10 @@ fn signed_key_wrap_bytes() -> Vec<u8> {
         nonce: [26; 24],
         ciphertext: [27; KEY_WRAP_CIPHERTEXT_BYTES],
     };
-    identity::signed_fact::create::sign_payload_bytes(
+    auth::signed_fact::create::sign_payload_bytes(
         signer_id,
         &signer_private_key,
-        encryption_layout::encode_key_wrap(&wrap).expect("key wrap"),
+        auth_layout::encode_key_wrap(&wrap).expect("key wrap"),
     )
     .expect("signed key wrap")
 }
@@ -273,7 +273,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
 
     assert_eq!(output.effects.facts.len(), 2);
     let admitted_wrap =
-        encryption_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
+        auth_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
     assert!(
         output
             .effects

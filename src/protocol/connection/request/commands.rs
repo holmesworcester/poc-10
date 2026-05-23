@@ -14,11 +14,11 @@ use std::net::SocketAddr;
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::protocol::auth;
+use crate::protocol::auth::endpoint::fact::EndpointFact;
+use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
-use crate::protocol::identity;
-use crate::protocol::identity::endpoint::fact::EndpointFact;
-use crate::protocol::identity::invite::fact::InviteSecretFact;
 
 use super::fact::ConnectionRequestFact;
 use super::{create as request_create, layout};
@@ -61,7 +61,7 @@ pub fn create(
     let invite_secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        identity::invite::layout::encode_fact(&invite_secret)?,
+        auth::invite::layout::encode_fact(&invite_secret)?,
     );
 
     let ephemeral_private_key = crypto::random_x25519_private_key();
@@ -119,7 +119,7 @@ fn validate_id(name: &str, id: &FactId) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::core::crypto;
-    use crate::protocol::identity::endpoint::fact::EndpointFact;
+    use crate::protocol::auth::endpoint::fact::EndpointFact;
 
     use super::*;
 

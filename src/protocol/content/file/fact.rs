@@ -6,12 +6,12 @@
 //! BLAKE3 root hash of the encrypted blob (carried in plaintext per the design
 //! note in `new_architecture.md`). Filename, mime, and other descriptor secrets
 //! ride inside an opaque `sealed_metadata` slot whose AEAD framing is owned by
-//! the encryption module in a later wave.
+//! auth key-material code in a later wave.
 //!
 //! Current boundaries:
-//! - Signed envelope verification is owned by `identity::signed_fact`.
+//! - Signed envelope verification is owned by `auth::signed_fact`.
 //! - Descriptor secrecy is limited to the opaque sealed metadata slot here;
-//!   key selection and per-file content-key context belong to the encryption
+//!   key selection and per-file content-key context belong to the auth
 //!   wave.
 //! - Slice integrity is checked by the file-slice admit pipeline.
 
@@ -39,7 +39,7 @@ pub struct ContentFileFact {
     pub slice_bytes: u32,
     pub root_hash: RootHash,
     /// Opaque sealed descriptor metadata (filename + mime + AEAD tag). Treated
-    /// as an opaque byte blob in this slice; the encryption module owns the
+    /// as an opaque byte blob in this slice; auth key-material code owns the
     /// inner framing in a later wave.
     pub sealed_metadata: Vec<u8>,
 }

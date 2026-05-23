@@ -9,13 +9,13 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
+use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
+use topo::protocol::auth::removal_frontier::layout as removal_frontier_layout;
+use topo::protocol::auth::signed_fact::create as signed_fact_create;
+use topo::protocol::auth::workspace::{commands::create_workspace, rows as workspace_rows};
 use topo::protocol::content::message as content_message;
-use topo::protocol::encryption::local_key_secret::fact::LocalKeySecretFact;
-use topo::protocol::encryption::local_key_secret::layout as local_key_secret_layout;
-use topo::protocol::encryption::removal_frontier::fact::RemovalFrontierFact;
-use topo::protocol::encryption::removal_frontier::layout as removal_frontier_layout;
-use topo::protocol::identity::signed_fact::create as signed_fact_create;
-use topo::protocol::identity::workspace::{commands::create_workspace, rows as workspace_rows};
 
 struct FixedClock(Cell<u64>);
 
@@ -214,7 +214,6 @@ fn signed_content_message_fact(
         expires_at_minute: u64::MAX,
         disappearing_setting_id: [0; 32],
         minute,
-        leaf_id: [4; 32],
         nonce,
         ciphertext,
     };

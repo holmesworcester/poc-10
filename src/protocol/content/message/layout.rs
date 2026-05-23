@@ -11,7 +11,6 @@
 //!   expires_at_minute (u64be)
 //!   disappearing_setting_id (32)
 //!   minute (u64be)
-//!   leaf_id (32)
 //!   nonce (24)
 //!   ciphertext (fixed slot)
 
@@ -22,7 +21,7 @@ use super::fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES};
 pub const TYPE_CONTENT_MESSAGE: u8 = 50;
 
 pub const CONTENT_MESSAGE_BYTES: usize =
-    1 + 32 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + 32 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES;
+    1 + 32 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES;
 
 pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_BYTES);
@@ -36,7 +35,6 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.u64be(fact.expires_at_minute);
     out.fixed(&fact.disappearing_setting_id);
     out.u64be(fact.minute);
-    out.fixed(&fact.leaf_id);
     out.fixed(&fact.nonce);
     out.fixed_slot::<CIPHERTEXT_BYTES>(&fact.ciphertext)
         .map_err(wire_err)?;
@@ -60,7 +58,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
         expires_at_minute: reader.u64be().map_err(wire_err)?,
         disappearing_setting_id: reader.array().map_err(wire_err)?,
         minute: reader.u64be().map_err(wire_err)?,
-        leaf_id: reader.array().map_err(wire_err)?,
         nonce: reader.array().map_err(wire_err)?,
         ciphertext: reader.fixed_slot::<CIPHERTEXT_BYTES>().map_err(wire_err)?,
     };
@@ -87,7 +84,6 @@ mod tests {
             expires_at_minute: u64::MAX,
             disappearing_setting_id: [6; 32],
             minute: 3,
-            leaf_id: [7; 32],
             nonce: [8; NONCE_BYTES],
             ciphertext: b"sealed".to_vec(),
         }

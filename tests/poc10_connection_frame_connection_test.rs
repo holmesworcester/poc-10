@@ -4,6 +4,9 @@ use topo::core::intents::IntentKind;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::auth;
+use topo::protocol::auth::endpoint::fact::EndpointFact;
+use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection::frame::frame as connection_frame;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
@@ -14,10 +17,6 @@ use topo::protocol::connection::send_facts_on_connection::{
 use topo::protocol::connection::send_network_frame::{
     decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
-use topo::protocol::encryption;
-use topo::protocol::identity;
-use topo::protocol::identity::endpoint::fact::EndpointFact;
-use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
 
@@ -87,13 +86,13 @@ fn send_facts_on_connection_refuses_forged_local_fact_reference() {
 fn send_facts_on_connection_refuses_forged_private_tag_reference() {
     let (connection_fact, _) = connection_fact();
     for private_tag in [
-        identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET,
-        encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET,
-        encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET,
-        encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY,
+        auth::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET,
+        auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET,
+        auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET,
+        auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
-            topo::protocol::identity::workspace::scope([7; 32]),
+            topo::protocol::auth::workspace::scope([7; 32]),
             1,
             vec![private_tag, 1, 2, 3],
         );
@@ -119,7 +118,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
     let store = store_with_local_endpoint();
     let (connection_fact, connection) = connection_fact();
     let fact = Fact::new(
-        topo::protocol::identity::workspace::scope([7; 32]),
+        topo::protocol::auth::workspace::scope([7; 32]),
         1,
         shared_fact_layout::encode_fact(&SharedFact {
             workspace_id: [7; 32],

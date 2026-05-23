@@ -25,7 +25,6 @@ pub struct ContentMessageFact {
     pub expires_at_minute: u64,
     pub disappearing_setting_id: FactId,
     pub minute: u64,
-    pub leaf_id: FactId,
     pub nonce: [u8; NONCE_BYTES],
     pub ciphertext: Vec<u8>,
 }

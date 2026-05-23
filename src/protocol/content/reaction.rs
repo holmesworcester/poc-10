@@ -1,7 +1,7 @@
 //! Content reaction fact family.
 //!
 //! Reactions are encrypted, author-scoped child records of messages. Projection
-//! waits for message, signer, deletion, and encryption context before
+//! waits for message, signer, deletion, and auth key-material context before
 //! publishing reaction rows. Keep reaction payload layout and admission here;
 //! message projection only provides the parent context that reactions require.
 

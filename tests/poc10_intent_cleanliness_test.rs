@@ -86,11 +86,11 @@ fn strip_line_comments(text: &str) -> String {
         .join("\n")
 }
 
-/// The six protocol scope directories. Since the package-by-scope migration
+/// Protocol scope directories. Since the package-by-scope migration
 /// each scope directory holds BOTH fact-family modules and verb-named intent
 /// handler files, replacing the old `src/protocol/facts` and
 /// `src/protocol/intents` layer roots.
-const SCOPES: [&str; 5] = ["connection", "content", "encryption", "identity", "sync"];
+const SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 fn scope_dirs(root: &Path) -> Vec<PathBuf> {
     SCOPES
@@ -108,10 +108,17 @@ fn scope_manifests(root: &Path) -> Vec<PathBuf> {
 
 /// Verb-named intent handler files. After the package-by-scope migration these
 /// self-contained handler files live directly at the top level of their scope
-/// directory; there is no separate `src/protocol/intents` tree. `identity` has
-/// no intent handlers.
+/// directory; there is no separate `src/protocol/intents` tree.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     const HANDLERS: &[(&str, &[&str])] = &[
+        (
+            "auth",
+            &[
+                "create_key_wrap",
+                "purge_retired_recipient_material",
+                "unwrap_key_wrap",
+            ],
+        ),
         (
             "connection",
             &[
@@ -129,14 +136,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "purge_deleted_message",
                 "purge_expired_message",
                 "purge_message_child",
-            ],
-        ),
-        (
-            "encryption",
-            &[
-                "create_key_wrap",
-                "purge_retired_recipient_material",
-                "unwrap_key_wrap",
             ],
         ),
         (
@@ -223,7 +222,6 @@ fn purge_deleted_message_intent_does_not_encode_projection_work() {
         "CONTENT_MESSAGE_ROWS",
         "OPENED_MESSAGE_ROWS",
         "leaf_id",
-        "minute",
         "ciphertext",
     ] {
         assert!(
@@ -1340,7 +1338,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
         let production = strip_line_comments(production_text_before_unit_tests(&text));
         for forbidden in [
             "canonical_events",
-            "protocol::encryption",
+            "protocol::auth",
             "XChaCha",
             "X25519",
             "ciphertext",
@@ -1367,23 +1365,23 @@ fn connection_intents_treat_connection_frames_as_opaque() {
 #[test]
 fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let signed_root = root.join("src/protocol/identity/signed_fact");
+    let signed_root = root.join("src/protocol/auth/signed_fact");
     if !signed_root.exists() {
         return;
     }
 
     let mut files = rust_files(&signed_root);
-    files.push(root.join("src/protocol/identity/signed_fact.rs"));
+    files.push(root.join("src/protocol/auth/signed_fact.rs"));
 
     let mut offenders = Vec::new();
     for path in files {
         let text = source_text(&path);
         let production = production_text_before_unit_tests(&text);
         for forbidden in [
-            "protocol::encryption",
+            "protocol::auth",
             "protocol::content::message",
             "protocol::sync",
-            "protocol::identity::workspace",
+            "protocol::auth::workspace",
             "decode_key_wrap",
             "encode_key_wrap",
             "ContentMessage",
@@ -1402,7 +1400,7 @@ fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
 
     assert!(
         offenders.is_empty(),
-        "identity::signed_fact must stay an envelope helper, not a central protocol dispatcher:\n{}",
+        "auth::signed_fact must stay an envelope helper, not a central protocol dispatcher:\n{}",
         offenders.join("\n")
     );
 }

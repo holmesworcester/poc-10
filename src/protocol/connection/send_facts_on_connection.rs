@@ -19,13 +19,13 @@ use crate::core::{effects::PipelineEffects, facts::Fact};
 use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::{
+    auth::endpoint,
     connection::frame::{
         create,
         frame::{self, ConnectionFrameFactBundle},
         layout::CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES,
     },
     connection::response,
-    identity::endpoint,
     sync::shared_fact,
 };
 

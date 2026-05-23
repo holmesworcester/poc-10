@@ -1,8 +1,8 @@
 # Poc-10 Cutover Checklist
 
 This is the working checklist for finishing the poc-10 rewrite. The destination
-architecture is `new_architecture.md`; encryption/key-rotation rules are in
-`encryption.md`. Reviewers should use this as the acceptance list and fail the
+architecture is `new_architecture.md`; auth key-material/key-rotation rules are in
+`auth.md`. Reviewers should use this as the acceptance list and fail the
 work on any fake or missing behavior.
 
 ## Review Loop
@@ -46,8 +46,8 @@ Reviewer instructions:
   `fact.rs`, `layout.rs`, `create.rs`, `commands.rs`, `queries.rs`,
   `matchers.rs`, `project.rs`, `rows.rs`, and module-specific small files only
   when they make the projector clearer.
-- [ ] Multi-fact bundles are split into fact-family modules. The current
-  `src/protocol/facts/encryption/` bundle is not acceptable as final shape:
+- [ ] Multi-fact bundles are split into fact-family modules. Auth key families
+  must not collapse back into one bundled module:
   recipient keys, local recipient keys, removal frontiers, local key secrets,
   key requests, key wraps, and retained/history-node key material each need
   their own fact module shape with local `fact.rs`, `layout.rs`, `project.rs`,
@@ -89,7 +89,7 @@ Reviewer instructions:
 - [ ] Root/local facts with no context requirements are explicitly identified;
   every other row-only projector is suspect until proven against poc-8.
 
-## Identity Projectors
+## Auth Projectors
 
 - [ ] Workspace projection matches poc-8 root workspace behavior.
 - [ ] User-invite projection validates workspace/admin authority through
@@ -109,7 +109,7 @@ Reviewer instructions:
   rows.
 - [ ] Invite-accepted projection waits for invite-secret context and produces
   the real local state/intents needed for bootstrap.
-- [ ] Signed envelope validation is integrated for every identity fact that was
+- [ ] Signed envelope validation is integrated for every auth fact that was
   signed in poc-8; raw inner payload projection must not silently admit shared
   authority facts.
 
@@ -131,14 +131,14 @@ Reviewer instructions:
 - [ ] Content-event projection is either removed if redundant or made fully real
   with its poc-8 signature and membership checks.
 
-## Encryption And Key Healing
+## Auth And Key Healing
 
-- [ ] Encryption is split out of the current bundled `src/protocol/facts/encryption/`
-  shape. Shared crypto/key-healing helpers may remain in a clearly named helper
-  module, but no bundled `EncryptionProjector`, bundled `fact.rs`, bundled
+- [ ] Auth key agreement stays split across `src/protocol/auth/` family
+  modules. Shared crypto/key-healing helpers may remain in a clearly named helper
+  module, but no bundled auth key projector, bundled `fact.rs`, bundled
   `layout.rs`, bundled `create.rs`, or bundled `commands.rs` may define several
   fact families at once.
-- [ ] Encryption projector layout is consistent and easy to review.
+- [ ] Auth key-material projector layout is consistent and easy to review.
 - [ ] Recipient-key projection emits the recipient offer, supersession need, and
   proactive wrap intents only for non-superseded keys.
 - [ ] Recipient-key rotation does not rewrap old frontiers for superseded keys.

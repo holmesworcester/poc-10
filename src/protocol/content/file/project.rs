@@ -15,10 +15,12 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
+use crate::protocol::auth;
+use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, DecodedPayload};
-use crate::protocol::content::{file_deletion, message, message_deletion};
-use crate::protocol::identity;
-use crate::protocol::identity::user;
+use crate::protocol::content::{
+    file_deletion, message, message_deletion, purge::project as content_purge,
+};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::MAX_FILE_BYTES;
@@ -57,17 +59,11 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             envelope,
         } = decoded;
         validate_file_fields(&file)?;
-        let scope = crate::protocol::identity::workspace::scope(file.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
         let signer_need = project::signer_need(fact.id, signer);
-        let file_deletion_need = crate::core::context::ContextNeed::for_key_parts(
-            fact.id,
-            "content_deleted",
-            scope.clone(),
-            [&fact.id, &file.author_user_id],
-        )?;
         let parent_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message",
@@ -77,7 +73,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         );
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "identity_user",
+            "auth_user",
             crate::core::facts::FactScope::Global,
             file.author_user_id,
             file.author_user_id,
@@ -94,24 +90,16 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
                 return Ok(output_with_needs([
                     signer_need,
                     Some(parent_need),
-                    Some(file_deletion_need),
                     Some(author_need),
                     None,
                 ]));
             }
         }
-        if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
-            validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
-            project::verify_envelope(envelope.as_ref(), "file")?;
-            return Ok(delete_file_projection(file.workspace_id, fact.id).need(file_deletion_need));
-        }
         let Some(parent_payload) = context_payload(context, &parent_need, "file parent")? else {
             return Ok(output_with_needs([
                 signer_need,
                 Some(parent_need),
-                Some(file_deletion_need),
                 Some(author_need),
-                None,
             ]));
         };
         let parent = parent_message_context(
@@ -121,18 +109,36 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             file.message_id,
             "file parent",
         )?;
-        let parent_deletion_need = crate::core::context::ContextNeed::for_key_parts(
+        let file_deletion_need = content_purge::target_purged_need(
             fact.id,
-            "content_deleted",
             scope.clone(),
-            [&file.message_id, &parent.message.author_user_id],
-        )?;
+            parent.message.frontier_id,
+            message::fact::unix_minute_for(file.created_at_ms),
+            fact.id,
+        );
+        let parent_deletion_need = content_purge::target_purged_need(
+            fact.id,
+            scope.clone(),
+            parent.message.frontier_id,
+            parent.message.minute,
+            file.message_id,
+        );
+        if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
+            validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
+            project::verify_envelope(envelope.as_ref(), "file")?;
+            return Ok(delete_file_projection(file.workspace_id, fact.id)
+                .need(parent_need)
+                .need(file_deletion_need)
+                .need(parent_deletion_need));
+        }
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?
         {
             validate_message_deletion(
                 deletion,
                 file.workspace_id,
+                parent.message.frontier_id,
+                parent.message.minute,
                 file.message_id,
                 parent.message.author_user_id,
             )?;
@@ -172,7 +178,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         .offer(crate::core::context::ContextOffer::range(
             fact.id,
             "sync_exact_fact",
-            crate::protocol::identity::workspace::scope(file.workspace_id),
+            crate::protocol::auth::workspace::scope(file.workspace_id),
             fact.id,
             fact.id,
         ))
@@ -292,7 +298,7 @@ fn validate_author_user(
         return Err("file author context payload id mismatch".to_string());
     }
     let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "file author")?;
-    let author = crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
+    let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "file author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("file author workspace does not match file".to_string());
@@ -328,6 +334,8 @@ fn validate_file_deletion(
 fn validate_message_deletion(
     payload: &Fact,
     workspace_id: crate::core::facts::FactId,
+    target_frontier_id: crate::core::facts::FactId,
+    target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
@@ -340,6 +348,12 @@ fn validate_message_deletion(
         .map_err(|_| "parent deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
+    }
+    if deletion.target_frontier_id != target_frontier_id {
+        return Err("parent deletion frontier does not match file parent".to_string());
+    }
+    if deletion.target_minute != target_minute {
+        return Err("parent deletion minute does not match file parent".to_string());
     }
     if deletion.target_message_id != target_message_id {
         return Err("parent deletion target does not match file parent".to_string());
@@ -357,6 +371,8 @@ struct ParentMessageContext<'a> {
 
 struct ParentMessage {
     workspace_id: crate::core::facts::FactId,
+    frontier_id: crate::core::facts::FactId,
+    minute: u64,
     author_user_id: crate::core::facts::FactId,
 }
 
@@ -366,6 +382,8 @@ fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMe
         .map_err(|_| format!("{label} context is not a content message"))?;
     Ok(ParentMessage {
         workspace_id: message.workspace_id,
+        frontier_id: message.frontier_id,
+        minute: message.minute,
         author_user_id: message.author_user_id,
     })
 }
@@ -375,7 +393,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
         project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

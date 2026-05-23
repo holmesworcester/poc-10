@@ -16,8 +16,8 @@ use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
+use crate::protocol::auth;
 use crate::protocol::content::{file, file_slice, message, message_deletion, reaction};
-use crate::protocol::identity;
 
 use super::queries;
 
@@ -108,7 +108,7 @@ pub fn react(
         ciphertext: emoji.as_bytes().to_vec(),
     };
     let fact = Fact::new(
-        crate::protocol::identity::workspace::scope(workspace_id),
+        crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
         reaction::layout::encode_fact(&reaction)?,
     );
@@ -177,7 +177,7 @@ pub fn send_file(
         sealed_metadata: encode_file_metadata(&filename, &parsed.mime)?,
     };
     let descriptor_fact = Fact::new(
-        crate::protocol::identity::workspace::scope(parsed.workspace_id),
+        crate::protocol::auth::workspace::scope(parsed.workspace_id),
         created_at_ms,
         file::layout::encode_fact(&descriptor)?,
     );
@@ -192,7 +192,7 @@ pub fn send_file(
             ciphertext: chunk.to_vec(),
         };
         facts.push(Fact::new(
-            crate::protocol::identity::workspace::scope(parsed.workspace_id),
+            crate::protocol::auth::workspace::scope(parsed.workspace_id),
             slice.created_at_ms,
             file_slice::layout::encode_fact(&slice)?,
         ));
@@ -238,10 +238,12 @@ pub fn delete_message(
         workspace_id,
         created_at_ms,
         target_message_id: target.message_id,
+        target_frontier_id: target.frontier_id,
+        target_minute: target.minute,
         author_user_id: target.author_user_id,
     };
     let fact = Fact::new(
-        crate::protocol::identity::workspace::scope(workspace_id),
+        crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
         message_deletion::layout::encode_fact(&deletion)?,
     );
@@ -376,9 +378,9 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
         _ => return Err(VIEW_USAGE.to_string()),
     };
 
-    let local = identity::endpoint::queries::local_endpoint_public(ctx.store())?
+    let local = auth::endpoint::queries::local_endpoint_public(ctx.store())?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let local_memberships = identity::workspace::queries::local_memberships(ctx.store())?;
+    let local_memberships = auth::workspace::queries::local_memberships(ctx.store())?;
     if !local_memberships
         .iter()
         .any(|membership| membership.workspace_id == workspace_id)
@@ -386,9 +388,9 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
         return Err("local endpoint has not joined this workspace".to_string());
     }
 
-    let workspace = identity::workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
-    let users = identity::user::queries::users_in_workspace(ctx.store(), workspace_id)?;
-    let peers = identity::endpoint_shared::queries::peers_in_workspace(ctx.store(), workspace_id)?;
+    let workspace = auth::workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
+    let users = auth::user::queries::users_in_workspace(ctx.store(), workspace_id)?;
+    let peers = auth::endpoint_shared::queries::peers_in_workspace(ctx.store(), workspace_id)?;
     let messages = queries::opened_messages(ctx.store(), workspace_id)?;
     let reactions = reactions_by_message(ctx.store(), workspace_id)?;
     let files = files_by_message(ctx.store(), workspace_id)?;
@@ -484,7 +486,7 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
 }
 
 fn selected_workspace_id(ctx: &CommandContext<'_>) -> Result<FactId, String> {
-    let memberships = identity::workspace::queries::local_memberships(ctx.store())?;
+    let memberships = auth::workspace::queries::local_memberships(ctx.store())?;
     match memberships.as_slice() {
         [] => Err("no joined workspaces; create or accept one first".to_string()),
         [membership] => Ok(membership.workspace_id),
@@ -497,7 +499,7 @@ fn author_name(
     workspace_id: FactId,
     signer_endpoint_id: FactId,
 ) -> Result<Option<String>, String> {
-    for peer in identity::endpoint_shared::queries::peers_in_workspace(store, workspace_id)? {
+    for peer in auth::endpoint_shared::queries::peers_in_workspace(store, workspace_id)? {
         if peer.endpoint_id != signer_endpoint_id {
             continue;
         }
@@ -511,19 +513,19 @@ fn user_name(
     workspace_id: FactId,
     user_id: FactId,
 ) -> Result<Option<String>, String> {
-    let user_key = identity::user::rows::user_key(&workspace_id, &user_id);
+    let user_key = auth::user::rows::user_key(&workspace_id, &user_id);
     let Some(value) = store
-        .table_row(identity::user::rows::USER_ROWS, &user_key)
+        .table_row(auth::user::rows::USER_ROWS, &user_key)
         .map_err(|err| format!("read user row: {err}"))?
     else {
         return Ok(None);
     };
-    let row = identity::user::rows::decode_user_row(&user_key, &value)?;
+    let row = auth::user::rows::decode_user_row(&user_key, &value)?;
     Ok(Some(row.username))
 }
 
 fn local_author_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
-    identity::workspace::queries::local_membership(store, workspace_id)?
+    auth::workspace::queries::local_membership(store, workspace_id)?
         .map(|membership| membership.user_authority_fact_id)
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())
 }
@@ -531,6 +533,8 @@ fn local_author_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, S
 #[derive(Debug, Clone)]
 struct MessageSelection {
     message_id: FactId,
+    frontier_id: FactId,
+    minute: u64,
     author_user_id: FactId,
 }
 
@@ -550,17 +554,22 @@ fn resolve_message_selector(
         let message = messages
             .get(index - 1)
             .ok_or_else(|| "message selector is out of range".to_string())?;
+        let row = queries::content_message_row(store, workspace_id, message.message_id)?
+            .ok_or_else(|| "message selector did not match a visible message".to_string())?;
         return Ok(MessageSelection {
             message_id: message.message_id,
-            author_user_id: message.author_user_id,
+            frontier_id: row.frontier_id,
+            minute: row.minute,
+            author_user_id: row.author_user_id,
         });
     }
     let message_id = decode_id(selector)?;
-    if let Some(author_user_id) = queries::message_author_user_id(store, workspace_id, message_id)?
-    {
+    if let Some(row) = queries::content_message_row(store, workspace_id, message_id)? {
         return Ok(MessageSelection {
             message_id,
-            author_user_id,
+            frontier_id: row.frontier_id,
+            minute: row.minute,
+            author_user_id: row.author_user_id,
         });
     }
     Err("message selector did not match a visible message".to_string())

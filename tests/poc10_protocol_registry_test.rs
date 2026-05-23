@@ -45,7 +45,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 #[test]
 fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let scopes = ["connection", "content", "encryption", "identity", "sync"];
+    let scopes = ["auth", "connection", "content", "sync"];
     let forbidden_fact_module_files = scopes
         .iter()
         .flat_map(|scope| rust_files(&root.join("src/protocol").join(scope)))
@@ -82,11 +82,11 @@ fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
     // wrap-source ranges in the key-wrap family, both inside their `project.rs`.
     for (required, marker) in [
         (
-            "src/protocol/encryption/local_history_node_secret/project.rs",
+            "src/protocol/auth/local_history_node_secret/project.rs",
             "secret coverage coordinate scheme",
         ),
         (
-            "src/protocol/encryption/key_wrap/project.rs",
+            "src/protocol/auth/key_wrap/project.rs",
             "wrap-source coordinate scheme",
         ),
     ] {

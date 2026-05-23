@@ -14,10 +14,10 @@ use crate::core::projectors::{
 };
 use crate::core::select::Value;
 
+use crate::protocol::auth;
+use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, DecodedPayload};
-use crate::protocol::content::{message, message_deletion};
-use crate::protocol::identity;
-use crate::protocol::identity::user;
+use crate::protocol::content::{message, message_deletion, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{reaction_row, ReactionRow, REACTION_KEY_COLUMNS, REACTION_ROWS};
@@ -54,7 +54,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = crate::protocol::identity::workspace::scope(reaction.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
@@ -68,7 +68,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
         );
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "identity_user",
+            "auth_user",
             crate::core::facts::FactScope::Global,
             reaction.author_user_id,
             reaction.author_user_id,
@@ -105,21 +105,21 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             reaction.target_message_id,
             "reaction target",
         )?;
-        let target_deletion_need = crate::core::context::ContextNeed::for_key_parts(
+        let target_deletion_need = content_purge::target_purged_need(
             fact.id,
-            "content_deleted",
             scope.clone(),
-            [
-                &reaction.target_message_id,
-                &target_context.message.author_user_id,
-            ],
-        )?;
+            target_context.message.frontier_id,
+            target_context.message.minute,
+            reaction.target_message_id,
+        );
         if let Some(deletion) =
             context_payload(context, &target_deletion_need, "reaction target deletion")?
         {
             validate_message_deletion(
                 deletion,
                 reaction.workspace_id,
+                target_context.message.frontier_id,
+                target_context.message.minute,
                 reaction.target_message_id,
                 target_context.message.author_user_id,
             )?;
@@ -212,7 +212,7 @@ fn validate_author_user(
         return Err("reaction author context payload id mismatch".to_string());
     }
     let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "reaction author")?;
-    let author = crate::protocol::identity::user::decode_fact_payload(&author_payload.payload)
+    let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "reaction author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
@@ -241,6 +241,8 @@ fn reaction_delete(workspace_id: FactId, reaction_id: FactId) -> TableDeleteWher
 fn validate_message_deletion(
     payload: &Fact,
     workspace_id: crate::core::facts::FactId,
+    target_frontier_id: crate::core::facts::FactId,
+    target_minute: u64,
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
@@ -253,6 +255,12 @@ fn validate_message_deletion(
         .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
+    }
+    if deletion.target_frontier_id != target_frontier_id {
+        return Err("target deletion frontier does not match reaction parent".to_string());
+    }
+    if deletion.target_minute != target_minute {
+        return Err("target deletion minute does not match reaction parent".to_string());
     }
     if deletion.target_message_id != target_message_id {
         return Err("target deletion target does not match reaction parent".to_string());
@@ -270,6 +278,8 @@ struct TargetMessageContext<'a> {
 
 struct TargetMessage {
     workspace_id: crate::core::facts::FactId,
+    frontier_id: crate::core::facts::FactId,
+    minute: u64,
     author_user_id: crate::core::facts::FactId,
 }
 
@@ -279,6 +289,8 @@ fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMe
         .map_err(|_| format!("{label} context is not a content message"))?;
     Ok(TargetMessage {
         workspace_id: message.workspace_id,
+        frontier_id: message.frontier_id,
+        minute: message.minute,
         author_user_id: message.author_user_id,
     })
 }
@@ -288,7 +300,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
         project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {

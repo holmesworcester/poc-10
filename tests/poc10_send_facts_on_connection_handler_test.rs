@@ -5,6 +5,8 @@ use topo::core::facts::Fact;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::auth::endpoint::fact::EndpointFact;
+use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection::frame::frame as connection_frame;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
@@ -13,8 +15,6 @@ use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use topo::protocol::connection::send_network_frame;
-use topo::protocol::identity::endpoint::fact::EndpointFact;
-use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
 
@@ -44,7 +44,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     let local_endpoint = local_endpoint();
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
     let fact = Fact::new(
-        topo::protocol::identity::workspace::scope([7; 32]),
+        topo::protocol::auth::workspace::scope([7; 32]),
         1,
         shared_fact_layout::encode_fact(&SharedFact {
             workspace_id: [7; 32],

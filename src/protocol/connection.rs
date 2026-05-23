@@ -8,7 +8,7 @@
 //!
 //! The mechanism is fact-driven. Requests, responses, receipts, and frames all
 //! enter projection through typed facts; projectors wait on explicit context
-//! needs instead of calling into identity, sync, or core networking directly.
+//! needs instead of calling into auth, sync, or core networking directly.
 //! Network handlers remain thin boundaries: they normalize metadata, package or
 //! stage bytes, and leave semantic validation to the fact family that owns the
 //! payload.

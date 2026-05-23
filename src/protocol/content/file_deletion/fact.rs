@@ -4,11 +4,11 @@
 //! named `author_user_id` wants the file fact identified by
 //! `target_file_id` removed. The canonical fact body carries only the public
 //! envelope (workspace, timestamp, target, author); the signed envelope around
-//! this payload lives in the `identity::signed_fact` fact module and is intentionally
+//! this payload lives in the `auth::signed_fact` fact module and is intentionally
 //! not represented here.
 //!
 //! Current boundary: signed envelope verification and signer-to-author
-//! authority live in `identity::signed_fact` and identity context modules, not
+//! authority live in `auth::signed_fact` and auth context modules, not
 //! in this narrow deletion payload.
 
 use crate::core::facts::FactId;

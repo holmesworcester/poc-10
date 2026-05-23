@@ -25,7 +25,7 @@ pub fn delete_file(
         author_user_id,
     };
     Ok(Fact::new(
-        crate::protocol::identity::workspace::scope(workspace_id),
+        crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
         layout::encode_fact(&deletion)?,
     ))

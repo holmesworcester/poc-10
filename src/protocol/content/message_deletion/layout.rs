@@ -5,6 +5,8 @@
 //!   workspace_id (32)
 //!   created_at_ms (u64be)
 //!   target_message_id (32)
+//!   target_frontier_id (32)
+//!   target_minute (u64be)
 //!   author_user_id (32)
 
 use crate::core::wire;
@@ -13,7 +15,7 @@ use super::fact::ContentMessageDeletionFact;
 
 pub const TYPE_CONTENT_MESSAGE_DELETION: u8 = 51;
 
-pub const CONTENT_MESSAGE_DELETION_BYTES: usize = 1 + 32 + 8 + 32 + 32;
+pub const CONTENT_MESSAGE_DELETION_BYTES: usize = 1 + 32 + 8 + 32 + 32 + 8 + 32;
 
 pub fn encode_fact(fact: &ContentMessageDeletionFact) -> Result<Vec<u8>, String> {
     let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_DELETION_BYTES);
@@ -21,6 +23,8 @@ pub fn encode_fact(fact: &ContentMessageDeletionFact) -> Result<Vec<u8>, String>
     out.fixed(&fact.workspace_id);
     out.u64be(fact.created_at_ms);
     out.fixed(&fact.target_message_id);
+    out.fixed(&fact.target_frontier_id);
+    out.u64be(fact.target_minute);
     out.fixed(&fact.author_user_id);
     out.finish_exact(CONTENT_MESSAGE_DELETION_BYTES)
         .map_err(wire_err)
@@ -39,6 +43,8 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageDeletionFact, String> {
         workspace_id: reader.array().map_err(wire_err)?,
         created_at_ms: reader.u64be().map_err(wire_err)?,
         target_message_id: reader.array().map_err(wire_err)?,
+        target_frontier_id: reader.array().map_err(wire_err)?,
+        target_minute: reader.u64be().map_err(wire_err)?,
         author_user_id: reader.array().map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
@@ -58,7 +64,9 @@ mod tests {
             workspace_id: [1; 32],
             created_at_ms: 9_000,
             target_message_id: [2; 32],
-            author_user_id: [3; 32],
+            target_frontier_id: [3; 32],
+            target_minute: 7,
+            author_user_id: [4; 32],
         }
     }
 

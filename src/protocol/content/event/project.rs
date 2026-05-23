@@ -50,7 +50,7 @@ impl TypedProjector<super::Codec> for ContentEventProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = crate::protocol::identity::workspace::scope(event.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(event.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.

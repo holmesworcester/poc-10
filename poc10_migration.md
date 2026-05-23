@@ -51,7 +51,7 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 | canonical ingress + receive metadata | receive facts plus context offers |
 | projection row writes | row mutations from projectors |
 | content purge | purge intents and purge handlers |
-| key unwrap/materialization | encryption projectors plus key handlers |
+| key unwrap/materialization | auth projectors plus key handlers |
 | connection-frame in/out | receive/connection-frame/network handlers |
 | sync worker/index | sync facts plus durable sync handlers |
 | command admission helper | `core::command_context` + generic core runtime |

@@ -29,7 +29,7 @@ use crate::core::projectors::{
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
-use crate::protocol::{connection, content, encryption, identity, sync};
+use crate::protocol::{auth, connection, content, sync};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -117,7 +117,6 @@ pub(crate) mod read_models {
             "signer_id",
             "frontier_id",
             "minute",
-            "leaf_id",
             "deleted",
         ],
         key ["workspace_id", "message_id"]
@@ -233,7 +232,7 @@ CREATE TABLE IF NOT EXISTS local_endpoint_rows (row_key BLOB PRIMARY KEY NOT NUL
 CREATE TABLE IF NOT EXISTS local_endpoint_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS local_endpoint_signing_public_key_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS local_endpoint_signing_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS identity_endpoint_shared_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_endpoint_shared_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
 CREATE TABLE IF NOT EXISTS content_event_rows (
     workspace_id BLOB NOT NULL,
@@ -256,7 +255,6 @@ CREATE TABLE IF NOT EXISTS content_messages (
     signer_id BLOB NOT NULL,
     frontier_id BLOB NOT NULL,
     minute INTEGER NOT NULL,
-    leaf_id BLOB NOT NULL,
     deleted INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, message_id)
 );
@@ -335,29 +333,29 @@ CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
 CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 "#,
     row_tables: &[
-        identity::workspace::rows::WORKSPACE_ROWS,
-        encryption::key_wrap::rows::KEY_WRAP_ROWS,
-        identity::user::rows::USER_ROWS,
-        identity::endpoint::rows::LOCAL_ENDPOINT_ROWS,
-        identity::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
-        identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-        identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-        identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
+        auth::workspace::rows::WORKSPACE_ROWS,
+        auth::key_wrap::rows::KEY_WRAP_ROWS,
+        auth::user::rows::USER_ROWS,
+        auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
+        auth::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
+        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+        auth::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
         sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
-        identity::admin::rows::ADMIN_ROWS,
+        auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::request::rows::CONNECTION_REQUEST_ROWS,
         connection::response::rows::CONNECTION_RESPONSE_ROWS,
-        identity::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
-        identity::invite_server::rows::INVITE_SERVER_ROWS,
-        identity::user_invite::rows::USER_INVITE_ROWS,
-        identity::device_invite::rows::DEVICE_INVITE_ROWS,
-        identity::invite::rows::INVITE_SECRET_ROWS,
+        auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
+        auth::invite_server::rows::INVITE_SERVER_ROWS,
+        auth::user_invite::rows::USER_INVITE_ROWS,
+        auth::device_invite::rows::DEVICE_INVITE_ROWS,
+        auth::invite::rows::INVITE_SECRET_ROWS,
         sync::compare::rows::SYNC_COMPARE_ROWS,
         sync::have_id::rows::SYNC_HAVE_ID_ROWS,
         sync::need_id::rows::SYNC_NEED_ID_ROWS,
         sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
-        encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
+        content::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     ],
 };
 
@@ -379,98 +377,86 @@ macro_rules! cli_command {
 pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!(
         "create-workspace",
-        identity::workspace::cli::CREATE_WORKSPACE_USAGE,
+        auth::workspace::cli::CREATE_WORKSPACE_USAGE,
         create_workspace
     ),
-    cli_command!("invite", identity::invite::cli::INVITE_USAGE, invite),
+    cli_command!("invite", auth::invite::cli::INVITE_USAGE, invite),
     cli_command!(
         "invite-server",
-        identity::invite::cli::INVITE_SERVER_USAGE,
+        auth::invite::cli::INVITE_SERVER_USAGE,
         invite_server
     ),
-    cli_command!("accept", identity::invite::cli::ACCEPT_USAGE, accept),
+    cli_command!("accept", auth::invite::cli::ACCEPT_USAGE, accept),
     cli_command!(
         "accept-invite-server",
-        identity::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
+        auth::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
         accept_invite_server
     ),
-    cli_command!("link", identity::invite::cli::LINK_USAGE, link),
+    cli_command!("link", auth::invite::cli::LINK_USAGE, link),
     cli_command!(
         "accept-link",
-        identity::invite::cli::ACCEPT_LINK_USAGE,
+        auth::invite::cli::ACCEPT_LINK_USAGE,
         accept_link
     ),
     cli_command!(
         "identity",
-        identity::endpoint_shared::cli::IDENTITY_USAGE,
+        auth::endpoint_shared::cli::IDENTITY_USAGE,
         identity
     ),
-    cli_command!("peers", identity::endpoint_shared::cli::PEERS_USAGE, peers),
+    cli_command!("peers", auth::endpoint_shared::cli::PEERS_USAGE, peers),
     cli_command!(
         "workspaces",
-        identity::workspace::cli::WORKSPACES_USAGE,
+        auth::workspace::cli::WORKSPACES_USAGE,
         workspaces
     ),
-    cli_command!("users", identity::user::cli::USERS_USAGE, users),
+    cli_command!("users", auth::user::cli::USERS_USAGE, users),
     cli_command!(
         "key-recipient",
-        encryption::key_wrap::cli::KEY_RECIPIENT_USAGE,
+        auth::key_wrap::cli::KEY_RECIPIENT_USAGE,
         key_recipient
     ),
     cli_command!(
         "key-rotate-recipient",
-        encryption::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE,
+        auth::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE,
         key_recipient_rotation
     ),
     cli_command!(
         "key-frontier",
-        encryption::key_wrap::cli::KEY_FRONTIER_USAGE,
+        auth::key_wrap::cli::KEY_FRONTIER_USAGE,
         key_frontier
     ),
-    cli_command!(
-        "key-wrap",
-        encryption::key_wrap::cli::KEY_WRAP_USAGE,
-        key_wrap
-    ),
+    cli_command!("key-wrap", auth::key_wrap::cli::KEY_WRAP_USAGE, key_wrap),
     cli_command!(
         "key-access",
-        encryption::key_wrap::cli::KEY_ACCESS_USAGE,
+        auth::key_wrap::cli::KEY_ACCESS_USAGE,
         key_access
     ),
     cli_command!(
         "key-derive",
-        encryption::key_wrap::cli::KEY_DERIVE_USAGE,
+        auth::key_wrap::cli::KEY_DERIVE_USAGE,
         key_derive
     ),
-    cli_command!(
-        "key-node",
-        encryption::key_wrap::cli::KEY_NODE_USAGE,
-        key_node
-    ),
-    cli_command!("keys", encryption::key_wrap::cli::KEYS_USAGE, keys),
-    cli_command!(
-        "chop-now",
-        encryption::key_wrap::cli::CHOP_NOW_USAGE,
-        chop_now
-    ),
+    cli_command!("key-node", auth::key_wrap::cli::KEY_NODE_USAGE, key_node),
+    cli_command!("keys", auth::key_wrap::cli::KEYS_USAGE, keys),
+    cli_command!("chop-now", auth::key_wrap::cli::CHOP_NOW_USAGE, chop_now),
     cli_command!(
         "disappearing-set",
-        encryption::disappearing_messages_setting::cli::DISAPPEARING_SET_USAGE,
+        content::disappearing_messages_setting::cli::DISAPPEARING_SET_USAGE,
         disappearing_set
     ),
     cli_command!(
         "disappearing-status",
-        encryption::disappearing_messages_setting::cli::DISAPPEARING_STATUS_USAGE,
+        content::disappearing_messages_setting::cli::DISAPPEARING_STATUS_USAGE,
         disappearing_status
     ),
     cli_command!(
         "disappearing-tighten",
-        encryption::disappearing_messages_setting::cli::DISAPPEARING_TIGHTEN_USAGE,
+        content::disappearing_messages_setting::cli::DISAPPEARING_TIGHTEN_USAGE,
         disappearing_tighten
     ),
     cli_command!(
         "disappearing-compact",
-        encryption::disappearing_messages_setting::cli::DISAPPEARING_COMPACT_USAGE,
+        content::disappearing_messages_setting::cli::DISAPPEARING_COMPACT_USAGE,
         disappearing_compact
     ),
     cli_command!("send", content::message::cli::SEND_USAGE, send),
@@ -500,7 +486,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("view", content::message::cli::VIEW_USAGE, view),
     cli_command!(
         "grant-admin",
-        identity::admin::cli::GRANT_ADMIN_USAGE,
+        auth::admin::cli::GRANT_ADMIN_USAGE,
         grant_admin
     ),
     cli_command!("generate", content::event::cli::GENERATE_USAGE, generate),
@@ -530,7 +516,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         content_count
     ),
     cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
-    cli_command!("count", identity::workspace::cli::COUNT_USAGE, count),
+    cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
@@ -553,21 +539,21 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     read_models::CONTENT_MESSAGE_ROWS,
     read_models::MESSAGE_DELETION_ROWS,
     read_models::REACTION_ROWS,
-    encryption::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
-    encryption::key_wrap::rows::KEY_WRAP_ROWS,
-    identity::admin::rows::ADMIN_ROWS,
-    identity::device_invite::rows::DEVICE_INVITE_ROWS,
-    identity::endpoint::rows::LOCAL_ENDPOINT_ROWS,
-    identity::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
-    identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-    identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-    identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
-    identity::invite::rows::INVITE_SECRET_ROWS,
-    identity::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
-    identity::invite_server::rows::INVITE_SERVER_ROWS,
-    identity::user::rows::USER_ROWS,
-    identity::user_invite::rows::USER_INVITE_ROWS,
-    identity::workspace::rows::WORKSPACE_ROWS,
+    content::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
+    auth::key_wrap::rows::KEY_WRAP_ROWS,
+    auth::admin::rows::ADMIN_ROWS,
+    auth::device_invite::rows::DEVICE_INVITE_ROWS,
+    auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
+    auth::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
+    auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+    auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+    auth::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
+    auth::invite::rows::INVITE_SECRET_ROWS,
+    auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
+    auth::invite_server::rows::INVITE_SERVER_ROWS,
+    auth::user::rows::USER_ROWS,
+    auth::user_invite::rows::USER_INVITE_ROWS,
+    auth::workspace::rows::WORKSPACE_ROWS,
     read_models::OPENED_MESSAGE_ROWS,
     read_models::MESSAGE_TOMBSTONE_ROWS,
     sync::compare::rows::SYNC_COMPARE_ROWS,
@@ -625,23 +611,23 @@ projector_routes! {
     project_content_message => content::message::layout::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector;
     project_content_message_deletion => content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector;
     project_content_reaction => content::reaction::layout::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector;
-    project_encryption_recipient_key => encryption::recipient_key::layout::TYPE_RECIPIENT_KEY, encryption::recipient_key::project::RecipientKeyProjector;
-    project_encryption_removal_frontier => encryption::removal_frontier::layout::TYPE_REMOVAL_FRONTIER, encryption::removal_frontier::project::RemovalFrontierProjector;
-    project_encryption_local_key_secret => encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET, encryption::local_key_secret::project::LocalKeySecretProjector;
-    project_encryption_local_history_node_secret => encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, encryption::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
-    project_encryption_key_request => encryption::key_request::layout::TYPE_KEY_REQUEST, encryption::key_request::project::KeyRequestProjector;
-    project_encryption_key_wrap => encryption::key_wrap::layout::TYPE_KEY_WRAP, encryption::key_wrap::project::KeyWrapProjector;
-    project_encryption_local_recipient_key => encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY, encryption::local_recipient_key::project::LocalRecipientKeyProjector;
-    project_endpoint => identity::endpoint::layout::TYPE_LOCAL_ENDPOINT, identity::endpoint::project::EndpointProjector;
-    project_invite => identity::invite::layout::TYPE_INVITE_SECRET, identity::invite::project::InviteSecretProjector;
-    project_workspace => identity::workspace::layout::TYPE_WORKSPACE, identity::workspace::project::WorkspaceProjector;
-    project_signed_fact => identity::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET, identity::signed_fact::project::SignedFactProjector;
-    project_device_invite => identity::device_invite::layout::TYPE_DEVICE_INVITE, identity::device_invite::project::DeviceInviteProjector;
-    project_endpoint_shared => identity::endpoint_shared::layout::TYPE_ENDPOINT_SHARED, identity::endpoint_shared::project::EndpointSharedProjector;
-    project_invite_server => identity::invite_server::layout::TYPE_INVITE_SERVER, identity::invite_server::project::InviteServerProjector;
-    project_admin => identity::admin::layout::TYPE_ADMIN, identity::admin::project::AdminProjector;
-    project_invite_accepted => identity::invite_accepted::layout::TYPE_INVITE_ACCEPTED, identity::invite_accepted::project::InviteAcceptedProjector;
-    project_disappearing_messages_setting => encryption::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING, encryption::disappearing_messages_setting::project::DisappearingMessagesSettingProjector;
+    project_auth_recipient_key => auth::recipient_key::layout::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector;
+    project_auth_removal_frontier => auth::removal_frontier::layout::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector;
+    project_auth_local_key_secret => auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector;
+    project_auth_local_history_node_secret => auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
+    project_auth_key_request => auth::key_request::layout::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector;
+    project_auth_key_wrap => auth::key_wrap::layout::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector;
+    project_auth_local_recipient_key => auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector;
+    project_endpoint => auth::endpoint::layout::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector;
+    project_invite => auth::invite::layout::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector;
+    project_workspace => auth::workspace::layout::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector;
+    project_signed_fact => auth::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET, auth::signed_fact::project::SignedFactProjector;
+    project_device_invite => auth::device_invite::layout::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector;
+    project_endpoint_shared => auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector;
+    project_invite_server => auth::invite_server::layout::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector;
+    project_admin => auth::admin::layout::TYPE_ADMIN, auth::admin::project::AdminProjector;
+    project_invite_accepted => auth::invite_accepted::layout::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector;
+    project_disappearing_messages_setting => content::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING, content::disappearing_messages_setting::project::DisappearingMessagesSettingProjector;
     project_sync_range_request => sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector;
     project_sync_encrypted_root => sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT, sync::encrypted_root::project::SyncEncryptedRootProjector;
     project_sync_shared_fact => sync::shared_fact::layout::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector;
@@ -652,16 +638,16 @@ projector_routes! {
     project_connection_frame_small => connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL, connection::frame::project::ConnectionFrameProjector;
     project_connection_frame_large => connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE, connection::frame::project::ConnectionFrameProjector;
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
-    project_user_invite => identity::user_invite::layout::TYPE_USER_INVITE, identity::user_invite::project::UserInviteProjector;
-    project_user => identity::user::layout::TYPE_USER, identity::user::project::UserProjector;
+    project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
+    project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }
 
 fn signed_effective_tag(fact: &Fact) -> Result<u8, String> {
-    Ok(identity::signed_fact::layout::decode_signed_fact(&fact.bytes)?.inner_type)
+    Ok(auth::signed_fact::layout::decode_signed_fact(&fact.bytes)?.inner_type)
 }
 
 const ENVELOPE_ROUTES: &[EnvelopeRoute] = &[EnvelopeRoute {
-    outer_tag: identity::signed_fact::layout::TYPE_SIGNED_FACT,
+    outer_tag: auth::signed_fact::layout::TYPE_SIGNED_FACT,
     effective_tag: signed_effective_tag,
 }];
 
@@ -713,18 +699,18 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     ),
     handler_route!(
         "create_key_wrap",
-        encryption::create_key_wrap::CREATE_KEY_WRAP,
-        encryption::create_key_wrap::CreateKeyWrapHandler
+        auth::create_key_wrap::CREATE_KEY_WRAP,
+        auth::create_key_wrap::CreateKeyWrapHandler
     ),
     handler_route!(
         "purge_retired_recipient_material",
-        encryption::purge_retired_recipient_material::PURGE_RETIRED_RECIPIENT_MATERIAL,
-        encryption::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler
+        auth::purge_retired_recipient_material::PURGE_RETIRED_RECIPIENT_MATERIAL,
+        auth::purge_retired_recipient_material::PurgeRetiredRecipientMaterialHandler
     ),
     handler_route!(
         "unwrap_key_wrap",
-        encryption::unwrap_key_wrap::UNWRAP_KEY_WRAP,
-        encryption::unwrap_key_wrap::UnwrapKeyWrapHandler
+        auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
+        auth::unwrap_key_wrap::UnwrapKeyWrapHandler
     ),
     handler_route!(
         "purge_deleted_message",

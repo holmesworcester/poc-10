@@ -165,8 +165,8 @@ fn content_read_model_rows_materialize_into_typed_tables() {
     conn.execute(
         "INSERT INTO content_messages
          (workspace_id, message_id, author_user_id, created_at_ms, signer_id, frontier_id,
-          minute, leaf_id, deleted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+          minute, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
         params![
             &[1u8; 32][..],
             &[9u8; 32][..],
@@ -175,7 +175,6 @@ fn content_read_model_rows_materialize_into_typed_tables() {
             &[6u8; 32][..],
             &[3u8; 32][..],
             1_i64,
-            &[4u8; 32][..],
         ],
     )
     .expect("insert content message row");

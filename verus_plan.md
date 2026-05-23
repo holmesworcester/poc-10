@@ -46,7 +46,7 @@ A single proof file per event/fact module is allowed and preferred at first:
 ```text
 src/protocol/facts/connection/request/proof.rs
 src/protocol/facts/connection/response/proof.rs
-src/protocol/facts/identity/admin/proof.rs
+src/protocol/auth/admin/proof.rs
 ```
 
 Proofs should not live directly in `project.rs`, `commands.rs`, `create.rs`, or
@@ -117,7 +117,7 @@ matched payloads are loaded from offer.payload_ref
 ```
 
 These core proofs intentionally do not know protocol roles such as
-`identity_admin` or `connection_request`.
+`auth_admin` or `connection_request`.
 
 ## Event Module Proof Contract
 
@@ -204,7 +204,7 @@ single projector.
 Auth relationships should be modeled as a least authorized closure, not as broad
 store queries.
 
-Identity predicates:
+Auth authority predicates:
 
 ```text
 valid_workspace_offer(workspace_offer, workspace_fact)
@@ -222,7 +222,7 @@ workspace root
   -> user / invite / endpoint authority
 ```
 
-The proof should show that an `identity_admin` offer can appear only from one of
+The proof should show that an `auth_admin` offer can appear only from one of
 two cases:
 
 ```text
@@ -243,7 +243,7 @@ delegated:
 Cycles of admin facts do not bootstrap authority because the induction requires
 an already valid authority offer before a delegated admin offer can be emitted.
 
-Current caveat: identity signed-envelope validation is still a known parity gap.
+Current caveat: auth signed-envelope validation is still a known parity gap.
 The Verus proof should not claim final shared authority soundness until
 `signed_fact` verification is part of these projector contracts.
 
@@ -292,7 +292,7 @@ connection_response projector
 Known implementation issue to resolve before the end-to-end handshake proof:
 connection request/response projectors currently need the
 `connection_invite_secret` role, while the invite-secret projector emits
-`identity_invite_secret`. Tests can manufacture the context directly, but a
+`auth_invite_secret`. Tests can manufacture the context directly, but a
 runtime proof should require the producer and consumer roles to line up.
 
 ## Runner And Build Plan
@@ -312,7 +312,7 @@ connection_ephemeral_secret proof
 connection_fact_receipt proof
 connection_request proof
 connection_response proof
-identity_admin proof
+auth_admin proof
 ```
 
 Keep Rust tests and Verus proofs complementary:
@@ -349,4 +349,4 @@ Use this template when assigning proof work to a worktree:
 5. Fix the invite-secret role mismatch for connection proof composition.
 6. Prove connection request offer validity.
 7. Prove connection response row validity.
-8. Add identity admin closure predicates after signed-fact validation lands.
+8. Add auth admin closure predicates after signed-fact validation lands.

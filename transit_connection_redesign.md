@@ -113,7 +113,7 @@ connection response, or connection frame. It does not open frames; it publishes
 fact-receipt context that
 semantic projectors validate.
 
-`connection`, `identity`, `encryption`, `content`, and `sync` fact families own
+`connection`, `auth`, `content`, and `sync` fact families own
 the semantic validity of their own facts. Connection-frame projection only
 decides whether encrypted carrier bytes can be opened into durable child fact
 candidates and receipts.

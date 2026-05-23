@@ -1,8 +1,8 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId, FactScope};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+use topo::protocol::auth;
 use topo::protocol::content;
-use topo::protocol::identity;
 
 const WORKSPACE: FactId = [7; 32];
 const CONTENT_SIGNING_KEY: [u8; 32] = [9; 32];
@@ -34,7 +34,7 @@ fn signed_content_event_waits_for_endpoint_shared_signer_context() {
         .needs
         .contains(&topo::core::context::ContextNeed::range(
             fact.id,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             topo::core::facts::FactScope::Global,
             signer.id,
             signer.id
@@ -66,7 +66,7 @@ fn signed_content_event_defers_signature_check_until_signer_context_exists() {
         .needs
         .contains(&topo::core::context::ContextNeed::range(
             fact.id,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             topo::core::facts::FactScope::Global,
             signer.id,
             signer.id
@@ -121,7 +121,6 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
         expires_at_minute: u64::MAX,
         disappearing_setting_id: [0; 32],
         minute: 1,
-        leaf_id: [4; 32],
         nonce: [5; content::message::fact::NONCE_BYTES],
         ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
     };
@@ -175,7 +174,7 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         .needs
         .contains(&topo::core::context::ContextNeed::range(
             fact.id,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             topo::core::facts::FactScope::Global,
             signer.id,
             signer.id
@@ -257,6 +256,8 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         workspace_id: WORKSPACE,
         created_at_ms: 90_000,
         target_message_id: target.id,
+        target_frontier_id: [3; 32],
+        target_minute: 1,
         author_user_id: author.id,
     };
     let fact = signed_fact_in_workspace(
@@ -282,7 +283,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         .needs
         .contains(&topo::core::context::ContextNeed::range(
             fact.id,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             topo::core::facts::FactScope::Global,
             signer.id,
             signer.id
@@ -323,26 +324,26 @@ fn endpoint_shared_fact(
     user_authority_fact_id: FactId,
     content_signing_key: [u8; 32],
 ) -> Fact {
-    let endpoint = identity::endpoint_shared::fact::EndpointSharedFact {
+    let endpoint = auth::endpoint_shared::fact::EndpointSharedFact {
         created_at_ms: 1,
         workspace_id,
         user_authority_fact_id,
         endpoint_id: CONTENT_ENDPOINT_ID,
         signing_public_key: crypto::ed25519_public_key(&content_signing_key),
-        endpoint_role: identity::endpoint_shared::fact::EndpointRole::Device,
+        endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
         device_name: "laptop".to_string(),
     };
-    let bytes = identity::signed_fact::create::sign_payload_bytes(
+    let bytes = auth::signed_fact::create::sign_payload_bytes(
         [8; 32],
         &ENDPOINT_AUTHORITY_KEY,
-        identity::endpoint_shared::layout::encode_fact(&endpoint).expect("encode endpoint_shared"),
+        auth::endpoint_shared::layout::encode_fact(&endpoint).expect("encode endpoint_shared"),
     )
     .expect("sign endpoint_shared");
     Fact::new(FactScope::Global, endpoint.created_at_ms, bytes)
 }
 
 fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact {
-    let user = identity::user::fact::UserFact {
+    let user = auth::user::fact::UserFact {
         created_at_ms: 2,
         workspace_id,
         public_key,
@@ -351,7 +352,7 @@ fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact
     Fact::new(
         FactScope::Global,
         user.created_at_ms,
-        identity::user::layout::encode_fact(&user).expect("encode user"),
+        auth::user::layout::encode_fact(&user).expect("encode user"),
     )
 }
 
@@ -366,12 +367,11 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         expires_at_minute: u64::MAX,
         disappearing_setting_id: [0; 32],
         minute: 1,
-        leaf_id: [4; 32],
         nonce: [5; content::message::fact::NONCE_BYTES],
         ciphertext: vec![6; content::message::fact::CIPHERTEXT_BYTES],
     };
     Fact::new(
-        topo::protocol::identity::workspace::scope(workspace_id),
+        topo::protocol::auth::workspace::scope(workspace_id),
         message.created_at_ms,
         content::message::layout::encode_fact(&message).expect("encode message"),
     )
@@ -391,7 +391,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         sealed_metadata: b"sealed".to_vec(),
     };
     Fact::new(
-        topo::protocol::identity::workspace::scope(workspace_id),
+        topo::protocol::auth::workspace::scope(workspace_id),
         file.created_at_ms,
         content::file::layout::encode_fact(&file).expect("encode file"),
     )
@@ -404,9 +404,9 @@ fn signed_fact_in_workspace(
     timestamp: u64,
 ) -> Fact {
     Fact::new(
-        topo::protocol::identity::workspace::scope(WORKSPACE),
+        topo::protocol::auth::workspace::scope(WORKSPACE),
         timestamp,
-        identity::signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
+        auth::signed_fact::create::sign_payload_bytes(signer_id, &private_key, payload)
             .expect("sign content fact"),
     )
 }
@@ -424,14 +424,14 @@ fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {
     MatchedContext {
         need: topo::core::context::ContextNeed::range(
             owner.id,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             topo::core::facts::FactScope::Global,
             signer.id,
             signer.id,
         ),
         offer: topo::core::context::ContextOffer::range(
             signer.id,
-            "identity_endpoint_shared",
+            "auth_endpoint_shared",
             topo::core::facts::FactScope::Global,
             signer.id,
             signer.id,
@@ -449,14 +449,14 @@ fn message_signer_match(
         need: topo::core::context::ContextNeed::range(
             owner.id,
             "content_signer",
-            topo::protocol::identity::workspace::scope(message.workspace_id),
+            topo::protocol::auth::workspace::scope(message.workspace_id),
             message.signer_id,
             message.signer_id,
         ),
         offer: topo::core::context::ContextOffer::range(
             signer.id,
             "content_signer",
-            topo::protocol::identity::workspace::scope(message.workspace_id),
+            topo::protocol::auth::workspace::scope(message.workspace_id),
             message.signer_id,
             message.signer_id,
         ),
@@ -468,14 +468,14 @@ fn author_match(owner: &Fact, author: &Fact) -> MatchedContext {
     MatchedContext {
         need: topo::core::context::ContextNeed::range(
             owner.id,
-            "identity_user",
+            "auth_user",
             topo::core::facts::FactScope::Global,
             author.id,
             author.id,
         ),
         offer: topo::core::context::ContextOffer::range(
             author.id,
-            "identity_user",
+            "auth_user",
             topo::core::facts::FactScope::Global,
             author.id,
             author.id,
@@ -489,14 +489,14 @@ fn message_match(owner: &Fact, message: &Fact) -> MatchedContext {
         need: topo::core::context::ContextNeed::range(
             owner.id,
             "content_message",
-            topo::protocol::identity::workspace::scope(WORKSPACE),
+            topo::protocol::auth::workspace::scope(WORKSPACE),
             message.id,
             message.id,
         ),
         offer: topo::core::context::ContextOffer::range(
             message.id,
             "content_message",
-            topo::protocol::identity::workspace::scope(WORKSPACE),
+            topo::protocol::auth::workspace::scope(WORKSPACE),
             message.id,
             message.id,
         ),

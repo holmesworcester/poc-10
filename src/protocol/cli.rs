@@ -28,7 +28,7 @@ use crate::core::command_context::{
 use crate::core::daemon;
 use crate::core::runtime::Runtime;
 use crate::protocol::sync;
-use crate::protocol::{content, encryption, identity};
+use crate::protocol::{auth, content};
 use std::path::PathBuf;
 
 const COMMAND_SETTLE_ROUNDS: usize = 4;
@@ -113,10 +113,10 @@ impl MatchCliContext {
 pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept")?)?;
     let output = ctx.with_command_context(|command_context| {
-        identity::invite::cli::accept(command_context, args, from_listen_addr)
+        auth::invite::cli::accept(command_context, args, from_listen_addr)
     })?;
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
-    Ok(identity::invite::cli::accept_output(&receipt))
+    Ok(auth::invite::cli::accept_output(&receipt))
 }
 
 pub(crate) fn accept_invite_server(
@@ -125,10 +125,10 @@ pub(crate) fn accept_invite_server(
 ) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept-invite-server")?)?;
     let output = ctx.with_command_context(|command_context| {
-        identity::invite::cli::accept_invite_server(command_context, args, from_listen_addr)
+        auth::invite::cli::accept_invite_server(command_context, args, from_listen_addr)
     })?;
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
-    Ok(identity::invite::cli::accept_output(&receipt))
+    Ok(auth::invite::cli::accept_output(&receipt))
 }
 
 pub(crate) fn accept_link(
@@ -137,30 +137,29 @@ pub(crate) fn accept_link(
 ) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept-link")?)?;
     let output = ctx.with_command_context(|command_context| {
-        identity::invite::cli::accept_link(command_context, args, from_listen_addr)
+        auth::invite::cli::accept_link(command_context, args, from_listen_addr)
     })?;
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
-    Ok(identity::invite::cli::accept_output(&receipt))
+    Ok(auth::invite::cli::accept_output(&receipt))
 }
 
 pub(crate) fn identity(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     ctx.with_command_context(|command_context| {
-        identity::endpoint_shared::cli::identity(command_context, args)
+        auth::endpoint_shared::cli::identity(command_context, args)
     })
 }
 
 pub(crate) fn peers(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     ctx.with_command_context(|command_context| {
-        identity::endpoint_shared::cli::peers(command_context, args)
+        auth::endpoint_shared::cli::peers(command_context, args)
     })
 }
 
 pub(crate) fn invite(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx.with_command_context(|command_context| {
-        identity::invite::cli::invite(command_context, args)
-    })?;
+    let output = ctx
+        .with_command_context(|command_context| auth::invite::cli::invite(command_context, args))?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(identity::invite::cli::invite_output(&receipt))
+    Ok(auth::invite::cli::invite_output(&receipt))
 }
 
 pub(crate) fn invite_server(
@@ -168,18 +167,17 @@ pub(crate) fn invite_server(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        identity::invite::cli::invite_server(command_context, args)
+        auth::invite::cli::invite_server(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(identity::invite::cli::invite_output(&receipt))
+    Ok(auth::invite::cli::invite_output(&receipt))
 }
 
 pub(crate) fn link(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx.with_command_context(|command_context| {
-        identity::invite::cli::link(command_context, args)
-    })?;
+    let output =
+        ctx.with_command_context(|command_context| auth::invite::cli::link(command_context, args))?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(identity::invite::cli::invite_output(&receipt))
+    Ok(auth::invite::cli::invite_output(&receipt))
 }
 
 pub(crate) fn create_workspace(
@@ -187,20 +185,18 @@ pub(crate) fn create_workspace(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        identity::workspace::cli::create_workspace(command_context, args)
+        auth::workspace::cli::create_workspace(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    let workspace = identity::workspace::queries::workspace_by_id(
+    let workspace = auth::workspace::queries::workspace_by_id(
         ctx.runtime().store(),
         receipt.workspace_fact_id,
     )?;
-    let bootstrap_user_id = identity::user::queries::users_in_workspace(
-        ctx.runtime().store(),
-        receipt.workspace_fact_id,
-    )?
-    .first()
-    .map(|user| user.user_id);
-    Ok(identity::workspace::cli::created_workspace_output(
+    let bootstrap_user_id =
+        auth::user::queries::users_in_workspace(ctx.runtime().store(), receipt.workspace_fact_id)?
+            .first()
+            .map(|user| user.user_id);
+    Ok(auth::workspace::cli::created_workspace_output(
         &workspace,
         bootstrap_user_id,
     ))
@@ -211,22 +207,21 @@ pub(crate) fn workspaces(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        identity::workspace::cli::workspaces(command_context, args)
+        auth::workspace::cli::workspaces(command_context, args)
     })?;
-    Ok(identity::workspace::cli::workspaces_output(&output))
+    Ok(auth::workspace::cli::workspaces_output(&output))
 }
 
 pub(crate) fn count(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    args.require_len(0, identity::workspace::cli::COUNT_USAGE)?;
-    let report = identity::workspace::queries::runtime_count_report(ctx.runtime())?;
-    Ok(identity::workspace::cli::count_report_output(&report))
+    args.require_len(0, auth::workspace::cli::COUNT_USAGE)?;
+    let report = auth::workspace::queries::runtime_count_report(ctx.runtime())?;
+    Ok(auth::workspace::cli::count_report_output(&report))
 }
 
 pub(crate) fn users(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx.with_command_context(|command_context| {
-        identity::user::cli::users(command_context, args)
-    })?;
-    Ok(identity::user::cli::users_output(&output))
+    let output =
+        ctx.with_command_context(|command_context| auth::user::cli::users(command_context, args))?;
+    Ok(auth::user::cli::users_output(&output))
 }
 
 pub(crate) fn key_recipient(
@@ -234,10 +229,10 @@ pub(crate) fn key_recipient(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        encryption::key_wrap::cli::key_recipient(command_context, args)
+        auth::key_wrap::cli::key_recipient(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(encryption::key_wrap::cli::key_recipient_output(&receipt))
+    Ok(auth::key_wrap::cli::key_recipient_output(&receipt))
 }
 
 pub(crate) fn key_recipient_rotation(
@@ -246,17 +241,17 @@ pub(crate) fn key_recipient_rotation(
 ) -> Result<CliOutput, String> {
     let workspace_id = args
         .get(0)
-        .ok_or_else(|| encryption::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
+        .ok_or_else(|| auth::key_wrap::cli::KEY_ROTATE_RECIPIENT_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     ctx.settle_local_command_work()?;
     let previous =
-        encryption::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
+        auth::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
             .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
     let output = ctx.with_command_context(|command_context| {
-        encryption::key_wrap::cli::key_recipient_rotation(command_context, args, previous)
+        auth::key_wrap::cli::key_recipient_rotation(command_context, args, previous)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    let mut output = encryption::key_wrap::cli::key_recipient_output(&receipt);
+    let mut output = auth::key_wrap::cli::key_recipient_output(&receipt);
     output
         .lines
         .push("old_active_recipient_keys: 1".to_string());
@@ -271,39 +266,39 @@ pub(crate) fn key_frontier(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        encryption::key_wrap::cli::key_frontier(command_context, args)
+        auth::key_wrap::cli::key_frontier(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(encryption::key_wrap::cli::key_frontier_output(&receipt))
+    Ok(auth::key_wrap::cli::key_frontier_output(&receipt))
 }
 
 pub(crate) fn key_wrap(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let query = encryption::key_wrap::cli::key_wrap_args(args)?;
+    let query = auth::key_wrap::cli::key_wrap_args(args)?;
     ctx.settle_local_command_work()?;
-    let lookup = encryption::key_wrap::commands::lookup_key_wrap(ctx.runtime(), query)?;
-    Ok(encryption::key_wrap::cli::key_wrap_lookup_output(&lookup))
+    let lookup = auth::key_wrap::commands::lookup_key_wrap(ctx.runtime(), query)?;
+    Ok(auth::key_wrap::cli::key_wrap_lookup_output(&lookup))
 }
 
 pub(crate) fn key_access(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let query = encryption::key_wrap::cli::key_access_args(args)?;
+    let query = auth::key_wrap::cli::key_access_args(args)?;
     ctx.settle_local_command_work()?;
-    let status = encryption::key_wrap::commands::key_access(ctx.runtime(), query)?;
-    Ok(encryption::key_wrap::cli::key_access_status_output(&status))
+    let status = auth::key_wrap::commands::key_access(ctx.runtime(), query)?;
+    Ok(auth::key_wrap::cli::key_access_status_output(&status))
 }
 
 pub(crate) fn key_derive(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let limit = encryption::key_wrap::cli::key_derive_limit(args)?;
-    let before = encryption::key_wrap::commands::local_key_secret_count(ctx.runtime());
-    let scanned_key_wraps = encryption::key_wrap::commands::key_wrap_count(ctx.runtime())?;
+    let limit = auth::key_wrap::cli::key_derive_limit(args)?;
+    let before = auth::key_wrap::commands::local_key_secret_count(ctx.runtime());
+    let scanned_key_wraps = auth::key_wrap::commands::key_wrap_count(ctx.runtime())?;
     ctx.runtime_mut()
         .process_command_work_until_idle(4, limit)?;
-    let after = encryption::key_wrap::commands::local_key_secret_count(ctx.runtime());
+    let after = auth::key_wrap::commands::local_key_secret_count(ctx.runtime());
     Ok(CliOutput::lines(vec![
         format!("scanned_key_wraps: {scanned_key_wraps}"),
         format!("derived_key_secrets: {}", after.saturating_sub(before)),
@@ -313,11 +308,11 @@ pub(crate) fn key_derive(
 }
 
 pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let args = encryption::key_wrap::cli::key_node_args(args)?;
+    let args = auth::key_wrap::cli::key_node_args(args)?;
     ctx.settle_local_command_work()?;
-    let output = encryption::key_wrap::commands::create_history_node(
+    let output = auth::key_wrap::commands::create_history_node(
         ctx.runtime(),
-        encryption::key_wrap::commands::CreateHistoryNode {
+        auth::key_wrap::commands::CreateHistoryNode {
             created_at_ms: SystemClock.next_timestamp(),
             workspace_id: args.workspace_id,
             removal_frontier_id: args.removal_frontier_id,
@@ -328,42 +323,42 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
         },
     )?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(encryption::key_wrap::cli::history_node_output(&receipt))
+    Ok(auth::key_wrap::cli::history_node_output(&receipt))
 }
 
 pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let workspace_id = encryption::key_wrap::cli::keys_workspace_id(args)?;
+    let workspace_id = auth::key_wrap::cli::keys_workspace_id(args)?;
     ctx.settle_local_command_work()?;
-    let report = encryption::key_wrap::commands::key_status_report(ctx.runtime(), workspace_id)?;
-    Ok(encryption::key_wrap::cli::keys_output(&report))
+    let report = auth::key_wrap::commands::key_status_report(ctx.runtime(), workspace_id)?;
+    Ok(auth::key_wrap::cli::keys_output(&report))
 }
 
 pub(crate) fn chop_now(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let args = encryption::key_wrap::cli::chop_now_args(args)?;
+    let args = auth::key_wrap::cli::chop_now_args(args)?;
     ctx.settle_local_command_work()?;
-    let receipt = encryption::key_wrap::commands::chop_now(
+    let receipt = auth::key_wrap::commands::chop_now(
         ctx.runtime_mut(),
-        encryption::key_wrap::commands::ChopNow {
+        auth::key_wrap::commands::ChopNow {
             workspace_id: args.workspace_id,
             floor_minute: args.floor_minute,
             created_at_ms: SystemClock.next_timestamp(),
         },
     )?;
-    Ok(encryption::key_wrap::cli::chop_now_output(&receipt))
+    Ok(auth::key_wrap::cli::chop_now_output(&receipt))
 }
 
 pub(crate) fn disappearing_set(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = encryption::disappearing_messages_setting::cli::parse_disappearing_set_args(
+    let args = content::disappearing_messages_setting::cli::parse_disappearing_set_args(
         cli_args.values(),
     )?;
     ctx.settle_local_command_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
-    let output = encryption::disappearing_messages_setting::commands::author_set_with_auto_floor(
+    let output = content::disappearing_messages_setting::commands::author_set_with_auto_floor(
         ctx.runtime().store(),
-        encryption::disappearing_messages_setting::commands::AuthorSetting {
+        content::disappearing_messages_setting::commands::AuthorSetting {
             workspace_id: args.workspace_id,
             now_ms,
             ttl_minutes: args.ttl_minutes,
@@ -390,20 +385,22 @@ pub(crate) fn disappearing_status(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let workspace_id = encryption::disappearing_messages_setting::cli::status_workspace_id(args)?;
+    let workspace_id = content::disappearing_messages_setting::cli::status_workspace_id(args)?;
     ctx.settle_local_command_work()?;
-    let report = encryption::disappearing_messages_setting::commands::status_report(
+    let report = content::disappearing_messages_setting::commands::status_report(
         ctx.runtime().store(),
         workspace_id,
     )?;
-    Ok(encryption::disappearing_messages_setting::cli::status_output(&report))
+    Ok(content::disappearing_messages_setting::cli::status_output(
+        &report,
+    ))
 }
 
 pub(crate) fn disappearing_tighten(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = encryption::disappearing_messages_setting::cli::parse_disappearing_tighten_args(
+    let args = content::disappearing_messages_setting::cli::parse_disappearing_tighten_args(
         cli_args.values(),
     )?;
     if !args.yes {
@@ -411,21 +408,21 @@ pub(crate) fn disappearing_tighten(
     }
     ctx.settle_local_command_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
-    let input = encryption::disappearing_messages_setting::commands::AuthorTighten {
+    let input = content::disappearing_messages_setting::commands::AuthorTighten {
         workspace_id: args.workspace_id,
         now_ms,
         ttl_minutes: args.ttl_minutes,
     };
-    let plan = encryption::disappearing_messages_setting::commands::plan_tighten(
+    let plan = content::disappearing_messages_setting::commands::plan_tighten(
         ctx.runtime().store(),
         input,
     )?;
-    let output = encryption::disappearing_messages_setting::commands::author_tighten(
+    let output = content::disappearing_messages_setting::commands::author_tighten(
         ctx.runtime().store(),
         input,
     )?;
     let receipt = ctx.submit_and_settle(output)?;
-    encryption::disappearing_messages_setting::commands::enqueue_floor_retention(
+    content::disappearing_messages_setting::commands::enqueue_floor_retention(
         ctx.runtime_mut(),
         args.workspace_id,
         receipt.setting_fact_id,
@@ -448,12 +445,12 @@ pub(crate) fn disappearing_compact(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let workspace_id = encryption::disappearing_messages_setting::cli::compact_workspace_id(args)?;
+    let workspace_id = content::disappearing_messages_setting::cli::compact_workspace_id(args)?;
     ctx.settle_local_command_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
-    let output = encryption::disappearing_messages_setting::commands::author_compact(
+    let output = content::disappearing_messages_setting::commands::author_compact(
         ctx.runtime().store(),
-        encryption::disappearing_messages_setting::commands::AuthorCompact {
+        content::disappearing_messages_setting::commands::AuthorCompact {
             workspace_id,
             now_ms,
         },
@@ -581,11 +578,11 @@ pub(crate) fn grant_admin(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        identity::admin::cli::grant_admin(command_context, args)
+        auth::admin::cli::grant_admin(command_context, args)
     })?;
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
     ctx.runtime_mut().process_projection_until_idle(8, 64)?;
-    Ok(identity::admin::cli::grant_admin_output(&receipt))
+    Ok(auth::admin::cli::grant_admin_output(&receipt))
 }
 
 pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {

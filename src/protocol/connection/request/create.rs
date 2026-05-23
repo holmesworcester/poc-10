@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::core::crypto;
 use crate::core::wire;
-use crate::protocol::identity::invite::fact::InviteSecretFact;
+use crate::protocol::auth::invite::fact::InviteSecretFact;
 
 use super::fact::ConnectionRequestFact;
 

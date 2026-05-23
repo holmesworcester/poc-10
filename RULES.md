@@ -128,7 +128,7 @@ keys already observed before retirement.
   `CommandContext`.
 - Commands may read allowed local capabilities such as signer or encryption
   secrets from the context. They must not mint capabilities unless the owning
-  identity/encryption fact module explicitly owns that command.
+  auth fact module explicitly owns that command.
 - Commands do not write the store, drive `WakeLoop`, dispatch handlers, call
   workers, parse CLI argv, or format user output.
 - Any invariant required for accepting received/shared facts must be enforced by
@@ -156,5 +156,5 @@ obvious code.
 Do not reference transient delivery state in source comments: branch names,
 commit hashes, task numbers, slice numbers, "before/after merge" phrasing, or
 abandoned plan filenames. Stable architecture docs such as this file,
-`new_architecture.md`, and `encryption.md` may be referenced when the comment is
+`new_architecture.md`, and `auth.md` may be referenced when the comment is
 pinning a lasting invariant.

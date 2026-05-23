@@ -25,10 +25,10 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
+use crate::protocol::auth::invite;
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
 use crate::protocol::connection::request;
-use crate::protocol::identity::invite;
 use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
 
 use super::create;
@@ -370,6 +370,8 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::auth::endpoint::fact::EndpointFact;
+    use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
@@ -382,8 +384,6 @@ mod projector_tests {
         fact::ConnectionRequestFact, layout as request_layout,
     };
     use topo::protocol::connection::response::{create, layout, project, rows};
-    use topo::protocol::identity::endpoint::fact::EndpointFact;
-    use topo::protocol::identity::invite::{fact::InviteSecretFact, layout as invite_layout};
 
     struct Scenario {
         request_fact: Fact,

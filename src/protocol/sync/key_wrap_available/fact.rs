@@ -3,7 +3,7 @@
 //! This is a compact convergence signal. It lets sync advertise that a specific
 //! key-wrap fact can be requested for a workspace without duplicating the wrap
 //! payload here. The fact carries identifiers only; validation of the signed
-//! wrap and its recipient remains in the encryption modules.
+//! wrap and its recipient remains in the auth modules.
 
 use crate::core::facts::FactId;
 

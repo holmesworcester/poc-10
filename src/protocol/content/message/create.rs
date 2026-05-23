@@ -17,16 +17,15 @@ use crate::core::runtime::Runtime;
 use crate::core::select::Value;
 use crate::core::store::{Store, TableName};
 use crate::core::wire;
-use crate::protocol::content::message;
+use crate::protocol::auth;
+use crate::protocol::auth::signed_fact::{self, create as signed_fact_create};
 use crate::protocol::content::message::fact::{
     ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::content::message::layout;
 use crate::protocol::content::message::queries;
 use crate::protocol::content::message::rows;
-use crate::protocol::encryption;
-use crate::protocol::identity;
-use crate::protocol::identity::signed_fact::{self, create as signed_fact_create};
+use crate::protocol::content::{disappearing_messages_setting, message};
 
 pub const TEXT_LENGTH_PREFIX_BYTES: usize = 4;
 pub const PLAINTEXT_SLOT_BYTES: usize = CIPHERTEXT_BYTES - XCHACHA20_POLY1305_TAG_BYTES;
@@ -65,10 +64,8 @@ pub fn send_message(
 
     let created_at_ms = ctx.next_timestamp();
     let minute = created_at_ms / UNIX_MINUTE_MS;
-    let active_setting = encryption::disappearing_messages_setting::queries::active_for_workspace(
-        ctx.store(),
-        workspace_id,
-    )?;
+    let active_setting =
+        disappearing_messages_setting::queries::active_for_workspace(ctx.store(), workspace_id)?;
     if let Some(setting) = &active_setting {
         if minute < setting.retire_minute {
             return Err("send_message minute is below the active disappearing floor".to_string());
@@ -112,7 +109,6 @@ pub fn send_message(
         expires_at_minute,
         disappearing_setting_id,
         minute,
-        leaf_id: [0; 32],
         nonce,
         ciphertext,
     };
@@ -143,7 +139,7 @@ fn local_author_user_id(
     workspace_id: WorkspaceId,
 ) -> Result<Option<crate::core::facts::FactId>, String> {
     Ok(
-        identity::workspace::queries::local_membership(ctx.store(), workspace_id)?
+        auth::workspace::queries::local_membership(ctx.store(), workspace_id)?
             .map(|membership| membership.user_authority_fact_id),
     )
 }
@@ -229,9 +225,9 @@ pub struct ContentMessageVault {
 
 impl ContentMessageVault {
     pub fn for_workspace(runtime: &Runtime, workspace_id: [u8; 32]) -> Result<Self, String> {
-        let endpoint = identity::endpoint::create::local_endpoint(runtime.store())?
+        let endpoint = auth::endpoint::create::local_endpoint(runtime.store())?
             .ok_or_else(|| "local endpoint is not initialized".to_string())?;
-        identity::workspace::queries::local_membership(runtime.store(), workspace_id)?
+        auth::workspace::queries::local_membership(runtime.store(), workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
         let encryption = latest_local_key_secret(runtime, workspace_id)?;
         Ok(Self {
@@ -279,11 +275,11 @@ impl IdentityVault for ContentMessageVault {
 fn latest_local_key_secret(
     runtime: &Runtime,
     workspace_id: [u8; 32],
-) -> Result<encryption::local_key_secret::fact::LocalKeySecretFact, String> {
+) -> Result<auth::local_key_secret::fact::LocalKeySecretFact, String> {
     runtime
         .facts()
         .filter_map(|fact| {
-            encryption::local_key_secret::layout::decode_local_key_secret(fact.body())
+            auth::local_key_secret::layout::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == workspace_id)
         })
@@ -310,6 +306,7 @@ pub struct MessageRetentionFact {
     pub workspace_id: FactId,
     pub created_at_ms: u64,
     pub author_user_id: FactId,
+    pub frontier_id: FactId,
     pub minute: u64,
     pub expires_at_minute: u64,
 }
@@ -318,6 +315,7 @@ pub trait RetentionMessageView {
     fn workspace_id(&self) -> FactId;
     fn created_at_ms(&self) -> u64;
     fn author_user_id(&self) -> FactId;
+    fn frontier_id(&self) -> FactId;
     fn minute(&self) -> u64;
     fn expires_at_minute(&self) -> u64;
 }
@@ -333,6 +331,10 @@ impl RetentionMessageView for MessageRetentionFact {
 
     fn author_user_id(&self) -> FactId {
         self.author_user_id
+    }
+
+    fn frontier_id(&self) -> FactId {
+        self.frontier_id
     }
 
     fn minute(&self) -> u64 {
@@ -424,6 +426,7 @@ fn content_message_retention(
         workspace_id: message.workspace_id,
         created_at_ms: message.created_at_ms,
         author_user_id: message.author_user_id,
+        frontier_id: message.frontier_id,
         minute: message.minute,
         expires_at_minute: message.expires_at_minute,
     })

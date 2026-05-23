@@ -3,8 +3,8 @@
 //! `EncryptedRootFact` ties a workspace fact id to the dependency and key wrap
 //! needed before that fact can be opened by a peer. The sync layer uses this as
 //! routing metadata; it does not interpret encrypted payloads or decide who is
-//! authorized to decrypt them. Those responsibilities stay in encryption facts
-//! and context projection.
+//! authorized to decrypt them. Those responsibilities stay in auth facts and
+//! context projection.
 
 use crate::core::facts::FactId;
 

@@ -1,11 +1,12 @@
 //! Content scope: fact and intent modules.
 //!
-//! Content facts are the user-visible workspace data: messages, reactions,
-//! file metadata, file slices, generic content events, and tombstones. The
-//! modules here own both authoring flows and projection rules for materialized
-//! content rows.
+//! Content facts are the user-visible workspace data and policy: messages,
+//! reactions, file metadata, file slices, generic content events, deletion
+//! facts, purge coordinates, and disappearing-message settings. The modules
+//! here own both authoring flows and projection rules for materialized content
+//! rows.
 //!
-//! Most content facts are gated by identity and encryption context. Projectors
+//! Most content facts are gated by auth context. Projectors
 //! wait for workspace membership, signer authority, key material, deletion
 //! facts, or retention settings before they publish rows. Commands should build
 //! facts through the constructors in these modules; they should not update
@@ -15,12 +16,14 @@
 //! `layout.rs` and `project.rs`. To change what the CLI shows, start in
 //! `queries.rs` and the leaf `cli.rs`.
 
+pub mod disappearing_messages_setting;
 pub mod event;
 pub mod file;
 pub mod file_deletion;
 pub mod file_slice;
 pub mod message;
 pub mod message_deletion;
+pub mod purge;
 pub mod reaction;
 
 // Intents: delayed cleanup after projection establishes that a message, file,

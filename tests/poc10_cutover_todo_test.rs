@@ -113,7 +113,7 @@ fn matching_lines_with_comment_mode(
     matches
 }
 
-const SCOPE_NAMES: [&str; 5] = ["connection", "content", "encryption", "identity", "sync"];
+const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
 const INTENT_HANDLER_FILES: [&str; 17] = [
@@ -126,9 +126,9 @@ const INTENT_HANDLER_FILES: [&str; 17] = [
     "src/protocol/content/purge_deleted_message.rs",
     "src/protocol/content/purge_expired_message.rs",
     "src/protocol/content/purge_message_child.rs",
-    "src/protocol/encryption/create_key_wrap.rs",
-    "src/protocol/encryption/purge_retired_recipient_material.rs",
-    "src/protocol/encryption/unwrap_key_wrap.rs",
+    "src/protocol/auth/create_key_wrap.rs",
+    "src/protocol/auth/purge_retired_recipient_material.rs",
+    "src/protocol/auth/unwrap_key_wrap.rs",
     "src/protocol/sync/seed_connection.rs",
     "src/protocol/sync/send_compare_response.rs",
     "src/protocol/sync/send_needed_fact_id.rs",
@@ -182,7 +182,7 @@ fn imported_black_box_behavior_files(root: &Path) -> Vec<PathBuf> {
         "content_cli_test.rs",
         "daemon_lifecycle_cli_test.rs",
         "disappearing_messages_cli_test.rs",
-        "encryption_cli_test.rs",
+        "auth_cli_test.rs",
         "generate_cli_test.rs",
         "invite_accept_cli_test.rs",
         "leaf_coord_cli_test.rs",
@@ -624,9 +624,9 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 }
 
 #[test]
-fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
+fn cutover_auth_family_facade_delegates_to_named_fact_slices() {
     let root = root();
-    // Each encryption fact family is its own module: a `<family>.rs` manifest
+    // Each auth key-material fact family is its own module: a `<family>.rs` manifest
     // plus a `<family>/` directory that owns the family's layout and projector.
     let required_families = [
         "recipient_key",
@@ -640,9 +640,9 @@ fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
     let mut missing = Vec::new();
     for family in required_families {
         for path in [
-            format!("src/protocol/encryption/{family}.rs"),
-            format!("src/protocol/encryption/{family}/project.rs"),
-            format!("src/protocol/encryption/{family}/layout.rs"),
+            format!("src/protocol/auth/{family}.rs"),
+            format!("src/protocol/auth/{family}/project.rs"),
+            format!("src/protocol/auth/{family}/layout.rs"),
         ] {
             if !root.join(&path).exists() {
                 missing.push(path);
@@ -651,19 +651,18 @@ fn cutover_encryption_family_facade_delegates_to_named_fact_slices() {
     }
     assert!(
         missing.is_empty(),
-        "encryption fact-family behavior must live in named family modules, not one undifferentiated projector:\n{}",
+        "auth key-material fact-family behavior must live in named family modules, not one undifferentiated projector:\n{}",
         missing.join("\n")
     );
 
     // There is no shared facade projector: each family registers its own.
     assert!(
-        !root.join("src/protocol/encryption/project.rs").exists(),
-        "encryption must not have a shared facade projector module"
+        !root.join("src/protocol/auth/project.rs").exists(),
+        "auth must not have a shared facade projector module"
     );
 
     // The removal-frontier projector authority-gates its owner endpoint.
-    let removal_frontier =
-        source_text(&root.join("src/protocol/encryption/removal_frontier/project.rs"));
+    let removal_frontier = source_text(&root.join("src/protocol/auth/removal_frontier/project.rs"));
     for needle in [
         "validate_frontier_endpoint_shared_owner",
         "validate_frontier_local_owner",

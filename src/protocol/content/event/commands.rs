@@ -6,8 +6,8 @@
 use crate::core::clock;
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::{Fact, FactId};
+use crate::protocol::auth;
 use crate::protocol::content::event::{fact::ContentEventFact, layout, queries};
-use crate::protocol::identity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateReceipt {
@@ -31,7 +31,7 @@ pub fn generate(
     if event_size_bytes == 0 {
         return Err("generate event size must be positive".to_string());
     }
-    identity::workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
+    auth::workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
 
     let observed_max = queries::max_timestamp(ctx.store())?;
     let first_timestamp = clock::next_timestamp(ctx.store(), observed_max)?;
@@ -52,7 +52,7 @@ pub fn generate(
             payload,
         };
         let fact = Fact::new(
-            crate::protocol::identity::workspace::scope(workspace_id),
+            crate::protocol::auth::workspace::scope(workspace_id),
             timestamp,
             layout::encode_fact(&event)?,
         );
@@ -98,7 +98,7 @@ mod tests {
     use super::*;
     use crate::core::command_context::{FnClock, IdentityVault};
     use crate::core::store::Store;
-    use crate::protocol::identity;
+    use crate::protocol::auth;
 
     struct EmptyVault;
 
@@ -128,13 +128,13 @@ mod tests {
         let clock = FnClock(|| 1);
         let vault = EmptyVault;
         let ctx = CommandContext::new(&store, &clock, &vault);
-        let workspace = identity::workspace::commands::create_workspace(&ctx, [7; 32], "workspace")
+        let workspace = auth::workspace::commands::create_workspace(&ctx, [7; 32], "workspace")
             .expect("workspace command");
         let workspace_fact = workspace.effects.facts.first().expect("workspace fact");
         let workspace_body =
-            identity::workspace::layout::decode_fact(&workspace_fact.bytes).expect("decode");
+            auth::workspace::layout::decode_fact(&workspace_fact.bytes).expect("decode");
         store
-            .insert_table_rows(vec![identity::workspace::rows::workspace_row(
+            .insert_table_rows(vec![auth::workspace::rows::workspace_row(
                 workspace_fact.id,
                 &workspace_body,
             )

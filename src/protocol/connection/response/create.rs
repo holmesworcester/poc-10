@@ -17,10 +17,10 @@ use crate::core::facts::{Fact, FactScope};
 
 use super::fact::ConnectionResponseFact;
 use super::layout;
+use crate::protocol::auth::endpoint::fact::EndpointFact;
+use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::request::fact::ConnectionRequestFact;
-use crate::protocol::identity::endpoint::fact::EndpointFact;
-use crate::protocol::identity::invite::fact::InviteSecretFact;
 
 const HANDSHAKE_PURPOSE: &[u8] = b"topo-connection-handshake-v1";
 const CONNECTION_SECRET_PURPOSE: &[u8] = b"topo-connection-secret-v1";

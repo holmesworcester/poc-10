@@ -23,6 +23,8 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageDeletionF
 pub struct MessageDeletionView {
     pub workspace_id: crate::core::facts::FactId,
     pub target_message_id: crate::core::facts::FactId,
+    pub target_frontier_id: crate::core::facts::FactId,
+    pub target_minute: u64,
     pub author_user_id: crate::core::facts::FactId,
 }
 
@@ -31,8 +33,8 @@ pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<MessageDeletio
         Some(layout::TYPE_CONTENT_MESSAGE_DELETION) => {
             semantic_message_deletion(layout::decode_fact(fact.body())?)
         }
-        Some(crate::protocol::identity::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = crate::protocol::identity::signed_fact::decode_envelope(fact.body())?;
+        Some(crate::protocol::auth::signed_fact::TYPE_SIGNED_FACT) => {
+            let envelope = crate::protocol::auth::signed_fact::decode_envelope(fact.body())?;
             match envelope.inner_type {
                 layout::TYPE_CONTENT_MESSAGE_DELETION => {
                     semantic_message_deletion(layout::decode_fact(&envelope.payload)?)
@@ -50,6 +52,8 @@ fn semantic_message_deletion(
     Ok(MessageDeletionView {
         workspace_id: deletion.workspace_id,
         target_message_id: deletion.target_message_id,
+        target_frontier_id: deletion.target_frontier_id,
+        target_minute: deletion.target_minute,
         author_user_id: deletion.author_user_id,
     })
 }

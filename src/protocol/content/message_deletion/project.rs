@@ -8,7 +8,7 @@
 //!      This uses authenticated message metadata, so deletes do not wait for
 //!      encrypted message text to open.
 //!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
-//!      content_deleted offer, and share the deletion fact.
+//!      content_purged offer, and share the deletion fact.
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
@@ -16,10 +16,10 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::content::message;
+use crate::protocol::auth;
+use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, DecodedPayload};
-use crate::protocol::identity;
-use crate::protocol::identity::user;
+use crate::protocol::content::{message, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{message_deletion_row, MessageDeletionRow};
@@ -56,7 +56,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             signer,
             envelope,
         } = decoded;
-        let scope = crate::protocol::identity::workspace::scope(deletion.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
@@ -70,7 +70,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         );
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "identity_user",
+            "auth_user",
             crate::core::facts::FactScope::Global,
             deletion.author_user_id,
             deletion.author_user_id,
@@ -121,12 +121,13 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         });
         Ok(
             output_with_needs([signer_need, Some(target_need), Some(author_need)])
-                .offer(crate::core::context::ContextOffer::for_key_parts(
+                .offer(content_purge::target_purged_offer(
                     fact.id,
-                    "content_deleted",
                     scope,
-                    [&deletion.target_message_id, &deletion.author_user_id],
-                )?)
+                    deletion.target_frontier_id,
+                    deletion.target_minute,
+                    deletion.target_message_id,
+                ))
                 .row_mutation(RowMutation::InsertValues(row))
                 .intent(share_fact_with_workspace_intent_for_fact(
                     deletion.workspace_id,
@@ -170,6 +171,12 @@ fn validate_target_message(
     if target.workspace_id != deletion.workspace_id {
         return Err("message deletion target workspace does not match deletion".to_string());
     }
+    if target.frontier_id != deletion.target_frontier_id {
+        return Err("message deletion target frontier does not match deletion".to_string());
+    }
+    if target.minute != deletion.target_minute {
+        return Err("message deletion target minute does not match deletion".to_string());
+    }
     if target.author_user_id != deletion.author_user_id {
         return Err("message deletion author is not the target message author".to_string());
     }
@@ -198,7 +205,7 @@ fn maybe_signed_payload(
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(identity::signed_fact::TYPE_SIGNED_FACT) {
+    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
         project::decode_raw_or_signed(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
@@ -228,7 +235,7 @@ mod projector_tests {
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::{layout, project, rows};
 
-    use topo::protocol::identity::user::{fact::UserFact, layout as user_layout};
+    use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
 
     #[test]
     fn content_message_deletion_projector_materializes_authorized_author_delete() {
@@ -247,7 +254,7 @@ mod projector_tests {
 
         assert_eq!(output.needs.len(), 2);
         assert_eq!(output.offers.len(), 1);
-        assert_eq!(output.offers[0].role, "content_deleted");
+        assert_eq!(output.offers[0].role, "content_purged");
         assert_eq!(output.effects.intents.len(), 1);
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
@@ -291,7 +298,7 @@ mod projector_tests {
             .contains(&crate::core::context::ContextNeed::range(
                 fact.id,
                 "content_message_meta",
-                crate::protocol::identity::workspace::scope(deletion.workspace_id),
+                crate::protocol::auth::workspace::scope(deletion.workspace_id),
                 deletion.target_message_id,
                 deletion.target_message_id
             )));
@@ -299,7 +306,7 @@ mod projector_tests {
             .needs
             .contains(&crate::core::context::ContextNeed::range(
                 fact.id,
-                "identity_user",
+                "auth_user",
                 crate::core::facts::FactScope::Global,
                 deletion.author_user_id,
                 deletion.author_user_id
@@ -328,7 +335,7 @@ mod projector_tests {
             .contains(&crate::core::context::ContextNeed::range(
                 fact.id,
                 "content_message_meta",
-                crate::protocol::identity::workspace::scope(deletion.workspace_id),
+                crate::protocol::auth::workspace::scope(deletion.workspace_id),
                 deletion.target_message_id,
                 deletion.target_message_id
             )));
@@ -336,7 +343,7 @@ mod projector_tests {
             .needs
             .contains(&crate::core::context::ContextNeed::range(
                 fact.id,
-                "identity_user",
+                "auth_user",
                 crate::core::facts::FactScope::Global,
                 deletion.author_user_id,
                 deletion.author_user_id
@@ -398,10 +405,12 @@ mod projector_tests {
             workspace_id,
             created_at_ms,
             target_message_id,
+            target_frontier_id: [3; 32],
+            target_minute: 12,
             author_user_id,
         };
         let fact = Fact::new(
-            crate::protocol::identity::workspace::scope(deletion.workspace_id),
+            crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
             layout::encode_fact(&deletion).expect("encode deletion"),
         );
@@ -419,12 +428,11 @@ mod projector_tests {
             expires_at_minute: u64::MAX,
             disappearing_setting_id: [0; 32],
             minute: 12,
-            leaf_id: [4; 32],
             nonce: [5; crate::protocol::content::message::fact::NONCE_BYTES],
             ciphertext: vec![6; crate::protocol::content::message::fact::CIPHERTEXT_BYTES],
         };
         Fact::new(
-            crate::protocol::identity::workspace::scope(workspace_id),
+            crate::protocol::auth::workspace::scope(workspace_id),
             message.created_at_ms,
             message_layout::encode_fact(&message).expect("encode message"),
         )
@@ -457,7 +465,7 @@ mod projector_tests {
 
     fn target_match(deletion_fact: &Fact, target_fact: &Fact) -> MatchedContext {
         let deletion = layout::decode_fact(&deletion_fact.bytes).expect("decode deletion");
-        let scope = crate::protocol::identity::workspace::scope(deletion.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
                 deletion_fact.id,
@@ -481,14 +489,14 @@ mod projector_tests {
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
                 deletion_fact.id,
-                "identity_user",
+                "auth_user",
                 crate::core::facts::FactScope::Global,
                 author_fact.id,
                 author_fact.id,
             ),
             offer: crate::core::context::ContextOffer::range(
                 author_fact.id,
-                "identity_user",
+                "auth_user",
                 crate::core::facts::FactScope::Global,
                 author_fact.id,
                 author_fact.id,

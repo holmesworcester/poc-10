@@ -17,7 +17,7 @@
 
 mod cli_harness;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::Child;
 use std::thread;
 use std::time::Duration;
@@ -40,12 +40,25 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
 
 struct RunningDaemon {
     child: Child,
+    label: String,
+    stdout: Option<thread::JoinHandle<String>>,
+    stderr: Option<thread::JoinHandle<String>>,
 }
 
 impl Drop for RunningDaemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(stdout) = self.stdout.take() {
+            let _ = stdout.join();
+        }
+        if let Some(stderr) = self.stderr.take() {
+            if let Ok(text) = stderr.join() {
+                if !text.trim().is_empty() {
+                    eprintln!("[daemon-stderr label={}] {}", self.label, text.trim_end());
+                }
+            }
+        }
     }
 }
 
@@ -444,7 +457,7 @@ fn cli_delete_message_cascades_to_attached_file_leaf() {
 #[allow(dead_code)]
 fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     let port = port.to_string();
-    let mut child = spawn_topo(&[
+    let child = spawn_topo(&[
         "--db",
         db,
         "start",
@@ -456,15 +469,7 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
         "--quiet-ms",
         "50",
     ]);
-    let stdout = child.stdout.take().expect("daemon stdout");
-    let mut reader = BufReader::new(stdout);
-    let mut first = String::new();
-    reader.read_line(&mut first).expect("daemon first line");
-    assert!(
-        first.starts_with("listening: "),
-        "daemon did not report listening: {first}"
-    );
-    RunningDaemon { child }
+    finish_spawned_daemon(child, format!("{db}@{port}"))
 }
 
 #[allow(dead_code)]
@@ -727,7 +732,7 @@ fn spawn_pair_daemon(db: &str, port: u16) -> RunningDaemon {
     // Same shape as `spawn_daemon` above but uses `--sync-ms` so periodic
     // outbound sync runs at the same cadence as content_cli tests.
     let port = port.to_string();
-    let mut child = spawn_topo(&[
+    let child = spawn_topo(&[
         "--db",
         db,
         "start",
@@ -739,15 +744,36 @@ fn spawn_pair_daemon(db: &str, port: u16) -> RunningDaemon {
         "--quiet-ms",
         "100",
     ]);
+    finish_spawned_daemon(child, format!("{db}@{port}"))
+}
+
+fn finish_spawned_daemon(mut child: Child, label: String) -> RunningDaemon {
     let stdout = child.stdout.take().expect("daemon stdout");
+    let stderr = child.stderr.take().expect("daemon stderr");
     let mut reader = BufReader::new(stdout);
     let mut first = String::new();
     reader.read_line(&mut first).expect("daemon first line");
     assert!(
         first.starts_with("listening: "),
-        "daemon did not report listening: {first}"
+        "daemon {label} did not report listening: {first}"
     );
-    RunningDaemon { child }
+    let stdout = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = reader.read_to_string(&mut text);
+        text
+    });
+    let stderr = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut text = String::new();
+        let _ = reader.read_to_string(&mut text);
+        text
+    });
+    RunningDaemon {
+        child,
+        label,
+        stdout: Some(stdout),
+        stderr: Some(stderr),
+    }
 }
 
 fn grant_content_key_to_peer(alice: &str, peer: &str, workspace_id: &str) {

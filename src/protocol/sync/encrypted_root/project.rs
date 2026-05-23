@@ -4,7 +4,7 @@
 //!   1. STRUCTURAL. The body decodes and the outer fact scope matches its
 //!      workspace id.
 //!   2. CONTEXT. No incoming context is required; this fact advertises a root
-//!      summary already produced by local encryption/sync.
+//!      summary already produced by local auth key-material/sync.
 //!   3. MATERIALIZE. Publish an exact-fact offer for this encrypted-root payload.
 
 use crate::core::facts::{Fact, FactScope};
@@ -39,7 +39,7 @@ impl TypedProjector<super::Codec> for SyncEncryptedRootProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = crate::protocol::identity::workspace::scope(root.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(root.workspace_id);
         require_fact_scope(fact, &scope)?;
         // 3. Materialize.
         Ok(

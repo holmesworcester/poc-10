@@ -6,7 +6,7 @@
 //!   2. CONTEXT. Projection waits for the parent file, rejects out-of-range
 //!      indexes, and watches parent deletion context.
 //!   3. MATERIALIZE. Live slices write one row and share the fact; deleted
-//!      parents delete the slice row. AEAD opening stays in encryption code.
+//!      parents delete the slice row. AEAD opening stays in auth key-material code.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId};
@@ -18,6 +18,10 @@ use crate::core::select::Value;
 
 use crate::protocol::content::file;
 use crate::protocol::content::file_deletion;
+use crate::protocol::content::message;
+use crate::protocol::content::message::fact::unix_minute_for;
+use crate::protocol::content::message::project as message_project;
+use crate::protocol::content::purge::project as content_purge;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
@@ -49,7 +53,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = crate::protocol::identity::workspace::scope(slice.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
@@ -77,18 +81,42 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         if slice.slice_index >= file.total_slices {
             return Err("file slice index is out of range for parent file".to_string());
         }
-        let file_deletion_need = ContextNeed::for_key_parts(
+        let message_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "content_deleted",
+            "content_message",
+            scope.clone(),
+            file.message_id,
+            file.message_id,
+        );
+        let Some(message_payload) =
+            context_payload(context, &message_need, "file slice message parent")?
+        else {
+            return Ok(ProjectionOutput::new().need(file_need).need(message_need));
+        };
+        let parent_message = message_project::decode_raw_or_signed_fact(
+            message_payload,
+            message::TYPE_CONTENT_MESSAGE,
+            "file slice message parent",
+            message::decode_fact_payload,
+        )?
+        .payload;
+        if parent_message.workspace_id != slice.workspace_id {
+            return Err("file slice message parent workspace does not match slice".to_string());
+        }
+        let file_deletion_need = content_purge::target_purged_need(
+            fact.id,
             scope,
-            [&parent.id, &file.author_user_id],
-        )?;
+            parent_message.frontier_id,
+            unix_minute_for(file.created_at_ms),
+            parent.id,
+        );
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
             return Ok(ProjectionOutput::new()
                 .need(file_need)
+                .need(message_need)
                 .need(file_deletion_need)
                 .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
                     slice.workspace_id,
@@ -100,6 +128,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(file_need)
+            .need(message_need)
             .need(file_deletion_need)
             .row_mutation(RowMutation::InsertValues(content_file_slice_row(
                 fact.id, &slice,

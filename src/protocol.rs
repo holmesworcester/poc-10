@@ -19,18 +19,16 @@
 //! constructors. Intents own their payload layout, idempotence key, exact fact
 //! inputs, and handler.
 //!
-//! Scopes are: identity and membership authority, encryption and retention,
-//! content (user-visible workspace data), connection protocol, and sync
-//! convergence. `payload` holds intent payload machinery shared across scope
-//! intent modules.
+//! Scopes are: auth authority and key material, content and retention,
+//! connection protocol, and sync convergence. `payload` holds intent payload
+//! machinery shared across scope intent modules.
 
 pub mod app;
 pub(crate) mod cli;
 pub mod payload;
 pub mod registry;
 
+pub mod auth;
 pub mod connection;
 pub mod content;
-pub mod encryption;
-pub mod identity;
 pub mod sync;

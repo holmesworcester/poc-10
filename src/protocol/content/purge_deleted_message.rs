@@ -137,6 +137,12 @@ impl IntentHandler for PurgeDeletedMessageHandler {
         if deletion.target_message_id != input.target_id {
             return Ok(PipelineEffects::new());
         }
+        if deletion.target_frontier_id != message.frontier_id {
+            return Ok(PipelineEffects::new());
+        }
+        if deletion.target_minute != message.minute {
+            return Ok(PipelineEffects::new());
+        }
         if deletion.author_user_id != message.author_user_id {
             return Ok(PipelineEffects::new());
         }

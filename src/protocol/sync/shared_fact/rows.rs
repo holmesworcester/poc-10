@@ -12,7 +12,7 @@
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::{Store, TableName, TableRow};
-use crate::protocol::{connection, identity};
+use crate::protocol::{auth, connection};
 use std::collections::BTreeSet;
 
 pub const SHAREABLE_FACT_ROWS: TableName = TableName::new("sync_shareable_fact_rows");
@@ -127,7 +127,7 @@ pub fn shareable_facts_for_connection(
     let Some(connection) = connection_response_row(store, connection_id)? else {
         return Ok(Vec::new());
     };
-    let Some(local_endpoint) = identity::endpoint::create::local_endpoint(store)? else {
+    let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
         return Ok(Vec::new());
     };
     let Some(remote_endpoint) =
@@ -170,7 +170,7 @@ pub fn connection_ids_for_shareable_fact(
 ) -> Result<Vec<FactId>, String> {
     let mut connection_ids = Vec::new();
     let workspace_ids = shareable_workspaces_for_fact(store, fact)?;
-    let Some(local_endpoint) = identity::endpoint::create::local_endpoint(store)? else {
+    let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
         return Ok(Vec::new());
     };
     let endpoint_memberships = endpoint_memberships(store)?;
@@ -240,11 +240,11 @@ fn connection_response_row(
 
 fn endpoint_memberships(store: &Store) -> Result<BTreeSet<(FactId, FactId)>, String> {
     store
-        .table_rows(identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
+        .table_rows(auth::endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
         .map_err(|err| format!("load endpoint memberships for shareable sync: {err}"))?
         .into_iter()
         .map(|(key, value)| {
-            identity::endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
+            auth::endpoint_shared::rows::decode_endpoint_shared_row(&key, &value)
                 .map(|row| (row.workspace_id, row.endpoint_id))
         })
         .collect()
@@ -259,7 +259,7 @@ fn connection_workspaces(
         return Ok(workspace_ids);
     };
     if let Some(invite_secret) = persisted_fact(store, &invite_secret_id)? {
-        let invite = identity::invite::layout::decode_fact(&invite_secret.bytes)
+        let invite = auth::invite::layout::decode_fact(&invite_secret.bytes)
             .map_err(|_| "connection invite context is not an invite secret".to_string())?;
         if let Some(workspace_id) = invite.workspace_id {
             workspace_ids.insert(workspace_id);

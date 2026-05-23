@@ -51,7 +51,8 @@ fn delete_message_emits_decodable_target_fact() {
     let vault = EmptyVault;
     let ctx = ctx(&store, &clock, &vault);
 
-    let output = delete_message(&ctx, [1; 32], [2; 32], [3; 32]).expect("delete message");
+    let output =
+        delete_message(&ctx, [1; 32], [2; 32], [7; 32], 1, [3; 32]).expect("delete message");
 
     assert_eq!(output.effects.facts.len(), 1);
     assert!(output.effects.intents.is_empty());
@@ -63,6 +64,8 @@ fn delete_message_emits_decodable_target_fact() {
     assert_eq!(decoded.workspace_id, [1; 32]);
     assert_eq!(decoded.created_at_ms, 100);
     assert_eq!(decoded.target_message_id, [2; 32]);
+    assert_eq!(decoded.target_frontier_id, [7; 32]);
+    assert_eq!(decoded.target_minute, 1);
     assert_eq!(decoded.author_user_id, [3; 32]);
 }
 
@@ -95,7 +98,8 @@ fn deletion_commands_reject_empty_ids() {
     let vault = EmptyVault;
     let ctx = ctx(&store, &clock, &vault);
 
-    let err = delete_message(&ctx, [0; 32], [2; 32], [3; 32]).expect_err("empty workspace");
+    let err =
+        delete_message(&ctx, [0; 32], [2; 32], [7; 32], 1, [3; 32]).expect_err("empty workspace");
     assert!(err.contains("workspace_id"), "{err}");
 
     let err = delete_file(&ctx, [4; 32], [0; 32], [6; 32]).expect_err("empty target");

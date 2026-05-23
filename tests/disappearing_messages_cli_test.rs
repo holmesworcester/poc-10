@@ -170,14 +170,14 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: later admin-signed `encryption::disappearing_messages_setting` events
+// Test 3: later admin-signed `content::disappearing_messages_setting` events
 // supersede earlier ones; messages stamped under an earlier setting
 // retain their stamped TTL. `workspace::commands::create` emits the
 // workspace's initial setting alongside the workspace event, so the
 // "first" setting and any later admin `disappearing-set` form a chain
 // of settings — there is no separate "workspace TTL fallback" anymore.
 //
-// This is the load-bearing invariant from `encryption.md`:
+// This is the load-bearing invariant from `auth.md`:
 // "Late arrivals do not retroactively change message expiry."
 // ---------------------------------------------------------------------------
 
@@ -546,7 +546,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 //
 // Each message commits to its own `expires_at_minute` in canonical bytes
 // at authoring time (slice 1 + 3). The admin-signed
-// `encryption::disappearing_messages_setting` event tightens the TTL used for
+// `content::disappearing_messages_setting` event tightens the TTL used for
 // SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
 // messages. The deletion floor is intentionally NOT advanced here — the
 // CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
@@ -1269,7 +1269,7 @@ fn key_wrap_with_retry(
     panic!("key-wrap never succeeded: {last}");
 }
 
-// --- two-peer setup helpers (mirrored from tests/encryption_cli_test.rs) ---
+// --- two-peer setup helpers (mirrored from tests/auth_cli_test.rs) ---
 
 /// Join `joiner` to `host`'s workspace through the daemon-served invite flow.
 ///

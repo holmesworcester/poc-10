@@ -3,7 +3,7 @@
 //! A file fact describes the encrypted file object attached to a message:
 //! workspace, message, author, root hash, slice count, and sealed metadata.
 //! File slices carry the bytes separately. Projection waits for message,
-//! signer, deletion, and encryption context before publishing file rows used by
+//! signer, deletion, and auth key-material context before publishing file rows used by
 //! file queries and save flows.
 
 pub mod fact;

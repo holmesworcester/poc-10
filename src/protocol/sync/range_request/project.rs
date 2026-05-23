@@ -40,7 +40,7 @@ impl TypedProjector<super::Codec> for SyncRangeRequestProjector {
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let scope = crate::protocol::identity::workspace::scope(request.workspace_id);
+        let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
         encrypted_root_project::require_fact_scope(fact, &scope)?;
 
         // 2. Materialize.

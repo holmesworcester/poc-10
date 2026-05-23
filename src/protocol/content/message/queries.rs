@@ -67,7 +67,7 @@ pub fn content_message_rows(
     let mut stmt = store
         .conn()
         .prepare(
-            "SELECT message_id, author_user_id, created_at_ms, signer_id, frontier_id, minute, leaf_id
+            "SELECT message_id, author_user_id, created_at_ms, signer_id, frontier_id, minute
              FROM content_messages
              WHERE workspace_id = ?1 AND deleted = 0
              ORDER BY created_at_ms, message_id",
@@ -83,13 +83,41 @@ pub fn content_message_rows(
                 signer_id: row.get(3)?,
                 frontier_id: row.get(4)?,
                 minute: row.get::<_, i64>(5)? as u64,
-                leaf_id: row.get(6)?,
             })
         })
         .map_err(|err| format!("load message rows: {err}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("decode message rows: {err}"))?;
     Ok(rows)
+}
+
+pub fn content_message_row(
+    store: &Store,
+    workspace_id: FactId,
+    message_id: FactId,
+) -> Result<Option<rows::ContentMessageRow>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT author_user_id, created_at_ms, signer_id, frontier_id, minute
+             FROM content_messages
+             WHERE workspace_id = ?1 AND message_id = ?2 AND deleted = 0
+             LIMIT 1",
+            params![workspace_id, message_id],
+            |row| {
+                Ok(rows::ContentMessageRow {
+                    workspace_id,
+                    message_id,
+                    author_user_id: row.get(0)?,
+                    created_at_ms: row.get::<_, i64>(1)? as u64,
+                    signer_id: row.get(2)?,
+                    frontier_id: row.get(3)?,
+                    minute: row.get::<_, i64>(4)? as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| format!("load message row: {err}"))
 }
 
 pub(crate) fn message_author_user_id(
