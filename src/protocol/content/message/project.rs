@@ -771,7 +771,15 @@ mod projector_tests {
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
         assert_eq!(output.effects.intents.len(), 1);
-        assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
+        let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content metadata row");
+        assert_eq!(
+            row.values[0],
+            topo::core::intents::Value::Bytes(message.workspace_id.to_vec())
+        );
+        assert_eq!(
+            row.values[1],
+            topo::core::intents::Value::Bytes(fact.id.to_vec())
+        );
         assert!(put_row!(output, rows::OPENED_MESSAGE_ROWS).is_none());
     }
 
