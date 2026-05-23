@@ -68,17 +68,6 @@ impl MatchCliContext {
         run(&command_context)
     }
 
-    fn with_fixed_clock_context<T>(
-        &self,
-        timestamp: u64,
-        run: impl FnOnce(&CommandContext<'_>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let clock = FixedClock(timestamp);
-        let vault = EmptyVault;
-        let command_context = self.runtime.command_context(&clock, &vault);
-        run(&command_context)
-    }
-
     fn with_content_message_context<T>(
         &self,
         workspace_id: WorkspaceId,
@@ -498,8 +487,12 @@ pub(crate) fn send(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
 }
 
 pub(crate) fn react(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    let workspace_id = args
+        .get(0)
+        .ok_or_else(|| content::message::cli::REACT_USAGE.to_string())
+        .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let timestamp = next_cli_timestamp(ctx.runtime())?;
-    let output = ctx.with_fixed_clock_context(timestamp, |command_context| {
+    let output = ctx.with_content_message_context(workspace_id, timestamp, |command_context| {
         content::message::cli::react(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
@@ -546,7 +539,7 @@ pub(crate) fn delete_file(
         args.get(1).unwrap(),
     )?;
     let timestamp = next_cli_timestamp(ctx.runtime())?;
-    let output = ctx.with_fixed_clock_context(timestamp, |command_context| {
+    let output = ctx.with_content_message_context(workspace_id, timestamp, |command_context| {
         content::file_deletion::commands::delete_file(
             command_context,
             workspace_id,
@@ -562,8 +555,12 @@ pub(crate) fn delete_message(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
+    let workspace_id = args
+        .get(0)
+        .ok_or_else(|| content::message::cli::DELETE_MESSAGE_USAGE.to_string())
+        .and_then(|value| decode_hex_32(value, "workspace id"))?;
     let timestamp = next_cli_timestamp(ctx.runtime())?;
-    let output = ctx.with_fixed_clock_context(timestamp, |command_context| {
+    let output = ctx.with_content_message_context(workspace_id, timestamp, |command_context| {
         content::message::cli::delete_message(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;

@@ -69,7 +69,13 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
-        let file = file::decode_fact_payload(&parent.bytes)
+        let file = message_project::decode_signed_payload(
+            parent,
+            file::TYPE_CONTENT_FILE,
+            "file slice parent",
+        )?
+        .payload;
+        let file = file::decode_fact_payload(&file)
             .map_err(|_| "file slice parent context is not a content file".to_string())?;
         if parent.scope != scope {
             return Err("file slice parent scope does not match slice".to_string());
@@ -95,7 +101,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         else {
             return Ok(ProjectionOutput::new().need(file_need).need(message_need));
         };
-        let parent_message = message_project::decode_raw_or_signed_fact(
+        let parent_message = message_project::decode_signed_fact(
             message_payload,
             message::TYPE_CONTENT_MESSAGE,
             "file slice message parent",
@@ -191,7 +197,12 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = file_deletion::decode_fact_payload(payload.body()).map_err(|_| {
+    let deletion_payload = message_project::decode_signed_payload(
+        payload,
+        file_deletion::TYPE_CONTENT_FILE_DELETION,
+        "file slice parent deletion",
+    )?;
+    let deletion = file_deletion::decode_fact_payload(&deletion_payload.payload).map_err(|_| {
         "file slice parent deletion context is not a content file deletion".to_string()
     })?;
     if deletion.workspace_id != workspace_id {
@@ -216,7 +227,7 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_project::decode_raw_or_signed_fact(
+    let deletion = message_project::decode_signed_fact(
         payload,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "file slice message parent deletion",

@@ -3,8 +3,8 @@
 //! Rows are keyed by `workspace_id || reaction_id` so display queries can scan
 //! all reactions in a workspace without secondary indices. The value carries
 //! the sealed envelope (target message, author, created_at_ms, nonce,
-//! ciphertext); plaintext emoji projection is deferred to a later slice that
-//! resolves the per-message decryption secret.
+//! ciphertext); CLI display opens the emoji after resolving the target
+//! message content key.
 
 use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;

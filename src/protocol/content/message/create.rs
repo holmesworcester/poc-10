@@ -383,11 +383,11 @@ fn latest_local_key_secret(
 // Message retention (expiry, deletion, and floor support).
 //
 // Retention is the point where message state intentionally stops being a live
-// row. These helpers decode either raw or signed message facts into the fields
-// needed for expiration, write tombstones that preserve deletion history, and
-// remove live message rows through the same atomic effect commit path used by
-// normal projection. Message projection invokes them when matched context
-// tells the message fact to self-delete.
+// row. These helpers decode signed message facts into the fields needed for
+// expiration, write tombstones that preserve deletion history, and remove live
+// message rows through the same atomic effect commit path used by normal
+// projection. Message projection invokes them when matched context tells the
+// message fact to self-delete.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,9 +437,6 @@ impl RetentionMessageView for MessageRetentionFact {
 
 pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> {
     match fact.bytes.first().copied() {
-        Some(layout::TYPE_CONTENT_MESSAGE) => {
-            content_message_retention(layout::decode_fact(fact.body())?)
-        }
         Some(signed_fact::TYPE_SIGNED_FACT) => {
             let envelope = signed_fact::decode_envelope(fact.body())?;
             match envelope.inner_type {
@@ -449,7 +446,7 @@ pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> 
                 _ => Err("signed fact does not contain a message".to_string()),
             }
         }
-        _ => Err("expected message fact".to_string()),
+        _ => Err("message fact must be signed".to_string()),
     }
 }
 

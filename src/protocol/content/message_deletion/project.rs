@@ -1,7 +1,7 @@
 //! Poc-10 content-message-deletion projector.
 //!
 //! POLICY. A content_message_deletion is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
 //!      deletion payload for one message and author user.
 //!   2. AUTHORITY. The signer, target message, and author contexts prove the
 //!      deletion author is the target message author in the same workspace.
@@ -60,7 +60,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
-        let signer_need = project::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, deletion.workspace_id, signer);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message_meta",
@@ -161,7 +161,7 @@ fn validate_target_message(
     if target_fact.id != deletion.target_message_id {
         return Err("message deletion target context payload id mismatch".to_string());
     }
-    let target_payload = maybe_signed_payload(
+    let target_payload = project::decode_signed_payload(
         target_fact,
         message::TYPE_CONTENT_MESSAGE,
         "message deletion target",
@@ -191,7 +191,7 @@ fn validate_author_user(
         return Err("message deletion author context payload id mismatch".to_string());
     }
     let author_payload =
-        maybe_signed_payload(author_fact, user::TYPE_USER, "message deletion author")?;
+        decode_context_payload(author_fact, user::TYPE_USER, "message deletion author")?;
     let author = user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "message deletion author context must be an identity user".to_string())?;
     if author.workspace_id != deletion.workspace_id {
@@ -200,13 +200,13 @@ fn validate_author_user(
     Ok(())
 }
 
-fn maybe_signed_payload(
+fn decode_context_payload(
     payload: &Fact,
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        project::decode_raw_or_signed(payload, expected_type, label)
+        project::decode_signed_payload(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
@@ -228,14 +228,24 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 mod projector_tests {
     use crate as topo;
 
+    use topo::core::crypto;
     use topo::core::facts::{Fact, FactId, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::protocol::auth;
+    use topo::protocol::auth::endpoint_shared::{
+        fact::{EndpointRole, EndpointSharedFact},
+        layout as endpoint_shared_layout,
+    };
     use topo::protocol::content::message::{fact::ContentMessageFact, layout as message_layout};
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::{layout, project, rows};
 
     use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
+
+    const CONTENT_SIGNING_KEY: [u8; 32] = [7; 32];
+    const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [13; 32];
+    const CONTENT_SIGNER_ID: FactId = [8; 32];
 
     #[test]
     fn content_message_deletion_projector_materializes_authorized_author_delete() {
@@ -252,7 +262,7 @@ mod projector_tests {
             )
             .expect("project deletion");
 
-        assert_eq!(output.needs.len(), 2);
+        assert_eq!(output.needs.len(), 3);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_purged");
         assert_eq!(output.effects.intents.len(), 1);
@@ -292,7 +302,16 @@ mod projector_tests {
 
         assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
-        assert_eq!(output.needs.len(), 2);
+        assert_eq!(output.needs.len(), 3);
+        assert!(output
+            .needs
+            .contains(&crate::core::context::ContextNeed::range(
+                fact.id,
+                "content_signer",
+                crate::protocol::auth::workspace::scope(deletion.workspace_id),
+                CONTENT_SIGNER_ID,
+                CONTENT_SIGNER_ID
+            )));
         assert!(output
             .needs
             .contains(&crate::core::context::ContextNeed::range(
@@ -319,17 +338,21 @@ mod projector_tests {
         let author_user_id = [22; 32];
         let message_fact = message_fact(workspace_id, author_user_id);
         let (deletion, fact) = deletion_fact(workspace_id, message_fact.id, author_user_id, 12_345);
+        let signer_fact = signer_fact(workspace_id, author_user_id);
 
         let output = project::ContentMessageDeletionProjector::new()
             .project(
                 &fact,
-                &ProjectionContext::from_matches(vec![target_match(&fact, &message_fact)]),
+                &ProjectionContext::from_matches(vec![
+                    signer_match(&fact, &signer_fact),
+                    target_match(&fact, &message_fact),
+                ]),
             )
             .expect("missing author is a need, not an unauthorized delete");
 
         assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
-        assert_eq!(output.needs.len(), 2);
+        assert_eq!(output.needs.len(), 3);
         assert!(output
             .needs
             .contains(&crate::core::context::ContextNeed::range(
@@ -412,7 +435,12 @@ mod projector_tests {
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
-            layout::encode_fact(&deletion).expect("encode deletion"),
+            auth::signed_fact::create::sign_payload_bytes(
+                CONTENT_SIGNER_ID,
+                &CONTENT_SIGNING_KEY,
+                layout::encode_fact(&deletion).expect("encode deletion"),
+            )
+            .expect("sign deletion"),
         );
         (deletion, fact)
     }
@@ -422,7 +450,7 @@ mod projector_tests {
             workspace_id,
             author_user_id,
             created_at_ms: 12_000,
-            signer_id: [8; 32],
+            signer_id: CONTENT_SIGNER_ID,
             frontier_id: [3; 32],
             local_history_node_secret_id: [0; 32],
             expires_at_minute: u64::MAX,
@@ -434,7 +462,34 @@ mod projector_tests {
         Fact::new(
             crate::protocol::auth::workspace::scope(workspace_id),
             message.created_at_ms,
-            message_layout::encode_fact(&message).expect("encode message"),
+            auth::signed_fact::create::sign_payload_bytes(
+                CONTENT_SIGNER_ID,
+                &CONTENT_SIGNING_KEY,
+                message_layout::encode_fact(&message).expect("encode message"),
+            )
+            .expect("sign message"),
+        )
+    }
+
+    fn signer_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
+        let signer = EndpointSharedFact {
+            created_at_ms: 7_000,
+            workspace_id,
+            user_authority_fact_id: author_user_id,
+            endpoint_id: CONTENT_SIGNER_ID,
+            signing_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
+            endpoint_role: EndpointRole::Device,
+            device_name: "alice-device".to_string(),
+        };
+        Fact::new(
+            FactScope::Global,
+            signer.created_at_ms,
+            auth::signed_fact::create::sign_payload_bytes(
+                [1; 32],
+                &ENDPOINT_AUTHORITY_KEY,
+                endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
+            )
+            .expect("sign endpoint shared"),
         )
     }
 
@@ -457,14 +512,39 @@ mod projector_tests {
         target_fact: &Fact,
         author_fact: &Fact,
     ) -> ProjectionContext {
+        let deletion = deletion_from_fact(deletion_fact);
+        let signer_fact = signer_fact(deletion.workspace_id, author_fact.id);
         ProjectionContext::from_matches(vec![
+            signer_match(deletion_fact, &signer_fact),
             target_match(deletion_fact, target_fact),
             author_match(deletion_fact, author_fact),
         ])
     }
 
+    fn signer_match(deletion_fact: &Fact, signer_fact: &Fact) -> MatchedContext {
+        let deletion = deletion_from_fact(deletion_fact);
+        let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
+        MatchedContext {
+            need: crate::core::context::ContextNeed::range(
+                deletion_fact.id,
+                "content_signer",
+                scope.clone(),
+                CONTENT_SIGNER_ID,
+                CONTENT_SIGNER_ID,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                signer_fact.id,
+                "content_signer",
+                scope,
+                CONTENT_SIGNER_ID,
+                CONTENT_SIGNER_ID,
+            ),
+            payload: signer_fact.clone(),
+        }
+    }
+
     fn target_match(deletion_fact: &Fact, target_fact: &Fact) -> MatchedContext {
-        let deletion = layout::decode_fact(&deletion_fact.bytes).expect("decode deletion");
+        let deletion = deletion_from_fact(deletion_fact);
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
@@ -483,6 +563,12 @@ mod projector_tests {
             ),
             payload: target_fact.clone(),
         }
+    }
+
+    fn deletion_from_fact(deletion_fact: &Fact) -> ContentMessageDeletionFact {
+        let envelope =
+            auth::signed_fact::layout::decode_signed_fact(&deletion_fact.bytes).expect("signed");
+        layout::decode_fact(&envelope.payload).expect("decode deletion")
     }
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {

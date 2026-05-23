@@ -1,7 +1,7 @@
 //! Poc-10 content-file-deletion projector.
 //!
 //! POLICY. A content_file_deletion is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
 //!      deletion payload for one target file and author user.
 //!   2. AUTHORITY. The signer, target file, and author user contexts must all
 //!      validate against the same workspace and target.
@@ -59,7 +59,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Authority.
-        let signer_need = project::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, deletion.workspace_id, signer);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
             "sync_exact_fact",
@@ -186,8 +186,11 @@ fn validate_target_file(
     if &target_fact.scope != expected_scope {
         return Err("file deletion target scope does not match deletion".to_string());
     }
-    let target_payload =
-        maybe_signed_payload(target_fact, file::TYPE_CONTENT_FILE, "file deletion target")?;
+    let target_payload = project::decode_signed_payload(
+        target_fact,
+        file::TYPE_CONTENT_FILE,
+        "file deletion target",
+    )?;
     let target = file::decode_fact_payload(&target_payload.payload)
         .map_err(|_| "file deletion target context must be a content file".to_string())?;
     if target.workspace_id != deletion.workspace_id {
@@ -210,7 +213,7 @@ fn validate_parent_message(
     if &parent_fact.scope != expected_scope {
         return Err("file deletion parent scope does not match deletion".to_string());
     }
-    let parent_payload = maybe_signed_payload(
+    let parent_payload = project::decode_signed_payload(
         parent_fact,
         message::TYPE_CONTENT_MESSAGE,
         "file deletion parent",
@@ -231,7 +234,7 @@ fn validate_author_user(
         return Err("file deletion author context payload id mismatch".to_string());
     }
     let author_payload =
-        maybe_signed_payload(author_fact, user::TYPE_USER, "file deletion author")?;
+        decode_context_payload(author_fact, user::TYPE_USER, "file deletion author")?;
     let author = user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "file deletion author context must be an identity user".to_string())?;
     if author.workspace_id != deletion.workspace_id {
@@ -240,13 +243,13 @@ fn validate_author_user(
     Ok(())
 }
 
-fn maybe_signed_payload(
+fn decode_context_payload(
     payload: &Fact,
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        project::decode_raw_or_signed(payload, expected_type, label)
+        project::decode_signed_payload(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),

@@ -1,7 +1,7 @@
 //! Semantic content-message projector.
 //!
 //! POLICY. A content_message is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped and contains a raw or signed
+//!   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
 //!      message payload with encrypted text.
 //!   2. CONTEXT. The projector records sync liveness immediately, then waits
 //!      for signer, author, deletion, retention-floor, secret, and time
@@ -66,11 +66,13 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         } = decoded;
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         require_fact_scope(fact, &scope)?;
-        if let Some(envelope) = envelope.as_ref() {
-            if envelope.signer_id != message.signer_id {
-                return Err("content message signer does not match signed envelope".to_string());
-            }
+        let envelope = envelope
+            .as_ref()
+            .ok_or_else(|| "content message fact must be signed".to_string())?;
+        if envelope.signer_id != message.signer_id {
+            return Err("content message signer does not match signed envelope".to_string());
         }
+        verify_envelope(Some(envelope), "message")?;
 
         // 2. Context and deletion gates.
         let signer_need = crate::core::context::ContextNeed::range(
@@ -118,12 +120,11 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         let Some(signer_payload) = context.payload_for(&signer_need) else {
             return Ok(base_output);
         };
-        validate_message_signer_context(signer_payload, &signer_need, &message, envelope.as_ref())?;
+        validate_message_signer_context(signer_payload, &signer_need, &message, Some(envelope))?;
         let Some(author) = context_payload(context, &author_need, "message author")? else {
             return Ok(base_output);
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
-        verify_envelope(envelope.as_ref(), "message")?;
 
         let metadata_output = base_output
             .offer(crate::core::context::ContextOffer::range(
@@ -231,7 +232,13 @@ fn validate_message_signer_context(
 fn endpoint_shared_signer(
     payload: &Fact,
 ) -> Option<auth::endpoint_shared::fact::EndpointSharedFact> {
-    auth::endpoint_shared::decode_raw_or_signed_fact(payload).ok()
+    decode_signed_payload(
+        payload,
+        auth::endpoint_shared::TYPE_ENDPOINT_SHARED,
+        "content signer context",
+    )
+    .ok()
+    .and_then(|signed| auth::endpoint_shared::decode_fact_payload(&signed.payload).ok())
 }
 
 fn validate_author_user(
@@ -242,7 +249,8 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("message author context payload id mismatch".to_string());
     }
-    let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "message author context")?;
+    let author_payload =
+        decode_context_payload(payload, user::TYPE_USER, "message author context")?;
     let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "message author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
@@ -259,7 +267,7 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    if let Ok(deletion_payload) = maybe_signed_payload(
+    if let Ok(deletion_payload) = decode_signed_payload(
         payload,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "message deletion context",
@@ -484,13 +492,13 @@ fn author_deletion_output(
         .purge_self(message_id)
 }
 
-fn maybe_signed_payload(
+fn decode_context_payload(
     payload: &Fact,
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        decode_raw_or_signed(payload, expected_type, label)
+        decode_signed_payload(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),
@@ -509,14 +517,12 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 }
 
 // ===========================================================================
-// Authority: raw/signed payload unwrapping and signer validation.
+// Authority: signed payload unwrapping and signer validation.
 //
-// Content messages may arrive as raw local facts during command construction
-// or as signed envelopes when another endpoint authored them. This section
-// unwraps either shape, verifies signed envelopes when validation reaches the
-// point where a payload is meant to become durable state, and asks the context
-// system for the `endpoint_shared` fact that proves the signer belongs to the
-// same workspace. Message, file, and deletion projection depend on this.
+// Content events arrive as signed envelopes. This section unwraps that shape,
+// verifies the envelope, and asks the context system for the `endpoint_shared`
+// fact that proves the signer belongs to the same workspace. Message, file, and
+// deletion projection depend on this.
 // ===========================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,9 +545,9 @@ pub struct SignedSigner {
     pub signer_public_key: [u8; 32],
 }
 
-/// Returns the payload a projector should decode, preserving the signer
-/// evidence when the fact was wrapped in a signed envelope.
-pub fn decode_raw_or_signed(
+/// Returns the payload a content projector should decode, preserving signer
+/// evidence from the required signed envelope.
+pub fn decode_signed_payload(
     fact: &Fact,
     expected_type: u8,
     label: &str,
@@ -562,11 +568,7 @@ pub fn decode_raw_or_signed(
         });
     }
 
-    Ok(DecodedPayload {
-        payload: fact.bytes.clone(),
-        signer: None,
-        envelope: None,
-    })
+    Err(format!("{label} fact must be signed"))
 }
 
 pub fn verify_signature<T>(decoded: &DecodedFact<T>, label: &str) -> Result<(), String> {
@@ -584,13 +586,13 @@ pub fn verify_envelope(
         .map_err(|err| format!("{label} signed fact is invalid: {err}"))
 }
 
-pub fn decode_raw_or_signed_fact<T>(
+pub fn decode_signed_fact<T>(
     fact: &Fact,
     expected_type: u8,
     label: &str,
     decode: impl FnOnce(&[u8]) -> Result<T, String>,
 ) -> Result<DecodedFact<T>, String> {
-    let decoded = decode_raw_or_signed(fact, expected_type, label)?;
+    let decoded = decode_signed_payload(fact, expected_type, label)?;
     let payload = decode(&decoded.payload)?;
     Ok(DecodedFact {
         payload,
@@ -599,12 +601,16 @@ pub fn decode_raw_or_signed_fact<T>(
     })
 }
 
-pub fn signer_need(owner: FactId, signer: Option<SignedSigner>) -> Option<ContextNeed> {
+pub fn signer_need(
+    owner: FactId,
+    workspace_id: FactId,
+    signer: Option<SignedSigner>,
+) -> Option<ContextNeed> {
     signer.map(|signer| {
         crate::core::context::ContextNeed::range(
             owner,
-            "auth_endpoint_shared",
-            crate::core::facts::FactScope::Global,
+            "content_signer",
+            crate::protocol::auth::workspace::scope(workspace_id),
             signer.signer_id,
             signer.signer_id,
         )
@@ -624,11 +630,6 @@ pub fn validate_signer_context(
     let Some(payload) = context_payload(context, need, &format!("{label} signer"))? else {
         return Ok(false);
     };
-    if payload.id != signer.signer_id {
-        return Err(format!(
-            "{label} signer endpoint context payload id mismatch"
-        ));
-    }
     let envelope = auth::signed_fact::decode_envelope(payload.body())
         .map_err(|_| format!("{label} signer context is not a signed endpoint_shared"))?;
     if envelope.inner_type != auth::endpoint_shared::TYPE_ENDPOINT_SHARED {
@@ -641,6 +642,11 @@ pub fn validate_signer_context(
     if endpoint.workspace_id != workspace_id {
         return Err(format!(
             "{label} signer endpoint_shared workspace does not match {label}"
+        ));
+    }
+    if endpoint.endpoint_id != signer.signer_id {
+        return Err(format!(
+            "{label} signer endpoint id does not match signed fact"
         ));
     }
     if endpoint.signing_public_key != signer.signer_public_key {
@@ -685,6 +691,9 @@ mod projector_tests {
     use topo::protocol::content::purge::project as content_purge;
 
     use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
+
+    const CONTENT_SIGNING_KEY: [u8; 32] = [7; 32];
+    const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [13; 32];
 
     macro_rules! put_row {
         ($output:expr, $table:expr) => {
@@ -858,7 +867,12 @@ mod projector_tests {
         let deletion_fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
-            deletion_layout::encode_fact(&deletion).expect("encode deletion"),
+            topo::protocol::auth::signed_fact::create::sign_payload_bytes(
+                message.signer_id,
+                &CONTENT_SIGNING_KEY,
+                deletion_layout::encode_fact(&deletion).expect("encode deletion"),
+            )
+            .expect("sign deletion"),
         );
 
         let output = project::ContentMessageProjector::new()
@@ -938,7 +952,12 @@ mod projector_tests {
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
+            topo::protocol::auth::signed_fact::create::sign_payload_bytes(
+                message.signer_id,
+                &CONTENT_SIGNING_KEY,
+                layout::encode_fact(&message).expect("encode content message"),
+            )
+            .expect("sign content message"),
         );
         (message, fact, key)
     }
@@ -949,14 +968,19 @@ mod projector_tests {
             workspace_id: message.workspace_id,
             user_authority_fact_id: message.author_user_id,
             endpoint_id: message.signer_id,
-            signing_public_key: [6; 32],
+            signing_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
             endpoint_role: EndpointRole::Device,
             device_name: "alice-device".to_string(),
         };
         Fact::new(
             FactScope::Global,
             message.created_at_ms,
-            endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
+            topo::protocol::auth::signed_fact::create::sign_payload_bytes(
+                [1; 32],
+                &ENDPOINT_AUTHORITY_KEY,
+                endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
+            )
+            .expect("sign endpoint shared"),
         )
     }
 

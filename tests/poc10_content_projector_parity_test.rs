@@ -10,6 +10,78 @@ const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [11; 32];
 const CONTENT_ENDPOINT_ID: FactId = [21; 32];
 
 #[test]
+fn raw_content_events_reject_projection() {
+    let message = message_fact(WORKSPACE, [31; 32]);
+    assert_must_be_signed(
+        content::message::project::ContentMessageProjector::new()
+            .project(&message, &ProjectionContext::default())
+            .expect_err("raw message must reject"),
+    );
+
+    let file = file_fact(WORKSPACE, [31; 32]);
+    assert_must_be_signed(
+        content::file::project::ContentFileProjector::new()
+            .project(&file, &ProjectionContext::default())
+            .expect_err("raw file must reject"),
+    );
+
+    let reaction = content::reaction::fact::ContentReactionFact {
+        workspace_id: WORKSPACE,
+        created_at_ms: 80_000,
+        target_message_id: [55; 32],
+        author_user_id: [31; 32],
+        nonce: [6; content::reaction::fact::REACTION_NONCE_BYTES],
+        ciphertext: b"sealed-reaction".to_vec(),
+    };
+    let reaction = Fact::new(
+        topo::protocol::auth::workspace::scope(WORKSPACE),
+        reaction.created_at_ms,
+        content::reaction::layout::encode_fact(&reaction).expect("encode reaction"),
+    );
+    assert_must_be_signed(
+        content::reaction::project::ContentReactionProjector::new()
+            .project(&reaction, &ProjectionContext::default())
+            .expect_err("raw reaction must reject"),
+    );
+
+    let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
+        workspace_id: WORKSPACE,
+        created_at_ms: 90_000,
+        target_message_id: [55; 32],
+        target_frontier_id: [3; 32],
+        target_minute: 1,
+        author_user_id: [31; 32],
+    };
+    let deletion = Fact::new(
+        topo::protocol::auth::workspace::scope(WORKSPACE),
+        deletion.created_at_ms,
+        content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
+    );
+    assert_must_be_signed(
+        content::message_deletion::project::ContentMessageDeletionProjector::new()
+            .project(&deletion, &ProjectionContext::default())
+            .expect_err("raw message deletion must reject"),
+    );
+
+    let deletion = content::file_deletion::fact::ContentFileDeletionFact {
+        workspace_id: WORKSPACE,
+        created_at_ms: 100_000,
+        target_file_id: [33; 32],
+        author_user_id: [31; 32],
+    };
+    let deletion = Fact::new(
+        topo::protocol::auth::workspace::scope(WORKSPACE),
+        deletion.created_at_ms,
+        content::file_deletion::layout::encode_fact(&deletion).expect("encode file deletion"),
+    );
+    assert_must_be_signed(
+        content::file_deletion::project::ContentFileDeletionProjector::new()
+            .project(&deletion, &ProjectionContext::default())
+            .expect_err("raw file deletion must reject"),
+    );
+}
+
+#[test]
 fn signed_content_message_rejects_signer_not_authorized_by_author() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
     let wrong_author = user_fact(WORKSPACE, [32; 32], "mallory");
@@ -47,7 +119,6 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
 #[test]
 fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
-    let signer = endpoint_shared_fact(WORKSPACE, author.id, CONTENT_SIGNING_KEY);
     let file = content::file::fact::ContentFileFact {
         workspace_id: WORKSPACE,
         created_at_ms: 70_000,
@@ -61,7 +132,7 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         sealed_metadata: b"sealed".to_vec(),
     };
     let fact = signed_fact_in_workspace(
-        signer.id,
+        CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::file::layout::encode_fact(&file).expect("encode file"),
         file.created_at_ms,
@@ -77,10 +148,10 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         .needs
         .contains(&topo::core::context::ContextNeed::range(
             fact.id,
-            "auth_endpoint_shared",
-            topo::core::facts::FactScope::Global,
-            signer.id,
-            signer.id
+            "content_signer",
+            topo::protocol::auth::workspace::scope(WORKSPACE),
+            CONTENT_ENDPOINT_ID,
+            CONTENT_ENDPOINT_ID
         )));
 }
 
@@ -102,7 +173,7 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
         sealed_metadata: b"sealed".to_vec(),
     };
     let fact = signed_fact_in_workspace(
-        signer.id,
+        CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::file::layout::encode_fact(&file).expect("encode file"),
         file.created_at_ms,
@@ -134,7 +205,7 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
         ciphertext: b"sealed-reaction".to_vec(),
     };
     let fact = signed_fact_in_workspace(
-        signer.id,
+        CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::reaction::layout::encode_fact(&reaction).expect("encode reaction"),
         reaction.created_at_ms,
@@ -153,7 +224,6 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
 #[test]
 fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
     let author = user_fact(WORKSPACE, [31; 32], "alice");
-    let signer = endpoint_shared_fact(WORKSPACE, author.id, CONTENT_SIGNING_KEY);
     let target = message_fact(WORKSPACE, author.id);
     let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
         workspace_id: WORKSPACE,
@@ -164,7 +234,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         author_user_id: author.id,
     };
     let fact = signed_fact_in_workspace(
-        signer.id,
+        CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
         deletion.created_at_ms,
@@ -186,10 +256,10 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         .needs
         .contains(&topo::core::context::ContextNeed::range(
             fact.id,
-            "auth_endpoint_shared",
-            topo::core::facts::FactScope::Global,
-            signer.id,
-            signer.id
+            "content_signer",
+            topo::protocol::auth::workspace::scope(WORKSPACE),
+            CONTENT_ENDPOINT_ID,
+            CONTENT_ENDPOINT_ID
         )));
 }
 
@@ -206,7 +276,7 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
         author_user_id: deleter.id,
     };
     let fact = signed_fact_in_workspace(
-        signer.id,
+        CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::file_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
         deletion.created_at_ms,
@@ -314,21 +384,25 @@ fn signed_fact_in_workspace(
     )
 }
 
+fn assert_must_be_signed(err: String) {
+    assert!(err.contains("must be signed"), "{err}");
+}
+
 fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {
     MatchedContext {
         need: topo::core::context::ContextNeed::range(
             owner.id,
-            "auth_endpoint_shared",
-            topo::core::facts::FactScope::Global,
-            signer.id,
-            signer.id,
+            "content_signer",
+            topo::protocol::auth::workspace::scope(WORKSPACE),
+            CONTENT_ENDPOINT_ID,
+            CONTENT_ENDPOINT_ID,
         ),
         offer: topo::core::context::ContextOffer::range(
             signer.id,
-            "auth_endpoint_shared",
-            topo::core::facts::FactScope::Global,
-            signer.id,
-            signer.id,
+            "content_signer",
+            topo::protocol::auth::workspace::scope(WORKSPACE),
+            CONTENT_ENDPOINT_ID,
+            CONTENT_ENDPOINT_ID,
         ),
         payload: signer.clone(),
     }

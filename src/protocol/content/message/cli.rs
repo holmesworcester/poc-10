@@ -13,7 +13,8 @@ use crate::core::cli::{
     decode_hex_32, encode_hex_32, read_file_bytes, write_file_bytes, CliArgs, CliOutput,
 };
 use crate::core::command_context::{CommandContext, CommandOutput};
-use crate::core::crypto;
+use crate::core::crypto::{self, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
+use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
 use crate::protocol::auth;
@@ -120,25 +121,39 @@ pub fn react(
     if emoji.is_empty() {
         return Err("reaction emoji must not be empty".to_string());
     }
-    if emoji.len() > reaction::fact::REACTION_CIPHERTEXT_BYTES {
+    if emoji.len()
+        > reaction::fact::REACTION_CIPHERTEXT_BYTES - crypto::XCHACHA20_POLY1305_TAG_BYTES
+    {
         return Err("reaction emoji is too long".to_string());
     }
 
     let author_user_id = local_author_user_id(ctx.store(), workspace_id)?;
+    let encryption = ctx.local_encryption_capability(workspace_id)?;
     let created_at_ms = ctx.next_timestamp();
+    let nonce = deterministic_nonce(b"topo:reaction-nonce:v1", workspace_id, created_at_ms);
+    let ciphertext = seal_bytes(
+        &encryption.key_secret,
+        &nonce,
+        emoji.as_bytes(),
+        "reaction emoji",
+    )?;
+    if ciphertext.len() > reaction::fact::REACTION_CIPHERTEXT_BYTES {
+        return Err("reaction emoji is too long".to_string());
+    }
     let reaction = reaction::fact::ContentReactionFact {
         workspace_id,
         created_at_ms,
         target_message_id: target.message_id,
         author_user_id,
-        nonce: deterministic_nonce(b"topo:reaction-nonce:v1", workspace_id, created_at_ms),
-        ciphertext: emoji.as_bytes().to_vec(),
+        nonce,
+        ciphertext,
     };
-    let fact = Fact::new(
-        crate::protocol::auth::workspace::scope(workspace_id),
+    let fact = signed_content_fact(
+        ctx,
+        workspace_id,
         created_at_ms,
         reaction::layout::encode_fact(&reaction)?,
-    );
+    )?;
     Ok(CommandOutput::new(ReactReceipt {
         workspace_id,
         reaction_fact_id: fact.id,
@@ -178,6 +193,7 @@ pub fn send_file(
     let message_receipt = message_output.receipt.clone();
     let author_user_id = local_author_user_id(ctx.store(), parsed.workspace_id)?;
     let created_at_ms = message_receipt.created_at_ms.saturating_add(1);
+    let encryption = ctx.local_encryption_capability(parsed.workspace_id)?;
     let root_hash = crypto::hash(&payload);
     let total_slices = if payload.is_empty() {
         0
@@ -191,6 +207,16 @@ pub fn send_file(
         &filename,
         &root_hash,
     );
+    let metadata_nonce = deterministic_nonce_for_parts(
+        b"topo:file-metadata-nonce:v1",
+        &[&parsed.workspace_id, &file_id],
+    );
+    let sealed_metadata = seal_bytes(
+        &encryption.key_secret,
+        &metadata_nonce,
+        &encode_file_metadata(&filename, &parsed.mime)?,
+        "file metadata",
+    )?;
     let descriptor = file::fact::ContentFileFact {
         workspace_id: parsed.workspace_id,
         created_at_ms,
@@ -201,22 +227,33 @@ pub fn send_file(
         total_slices,
         slice_bytes: FILE_SLICE_BYTES as u32,
         root_hash,
-        sealed_metadata: encode_file_metadata(&filename, &parsed.mime)?,
+        sealed_metadata,
     };
-    let descriptor_fact = Fact::new(
-        crate::protocol::auth::workspace::scope(parsed.workspace_id),
+    let descriptor_fact = signed_content_fact(
+        ctx,
+        parsed.workspace_id,
         created_at_ms,
         file::layout::encode_fact(&descriptor)?,
     );
+    let descriptor_fact = descriptor_fact?;
     let mut facts = message_output.effects.facts;
     facts.push(descriptor_fact.clone());
     for (slice_index, chunk) in payload.chunks(FILE_SLICE_BYTES).enumerate() {
+        let slice_nonce = deterministic_nonce_for_parts(
+            b"topo:file-slice-nonce:v1",
+            &[
+                &parsed.workspace_id,
+                &file_id,
+                &(slice_index as u64).to_be_bytes(),
+            ],
+        );
+        let ciphertext = seal_bytes(&encryption.key_secret, &slice_nonce, chunk, "file slice")?;
         let slice = file_slice::fact::ContentFileSliceFact {
             workspace_id: parsed.workspace_id,
             created_at_ms: created_at_ms.saturating_add(1 + slice_index as u64),
             file_id,
             slice_index: slice_index as u32,
-            ciphertext: chunk.to_vec(),
+            ciphertext,
         };
         facts.push(Fact::new(
             crate::protocol::auth::workspace::scope(parsed.workspace_id),
@@ -260,26 +297,21 @@ pub fn delete_message(
     args.require_len(2, DELETE_MESSAGE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let target = resolve_message_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
-    let created_at_ms = ctx.next_timestamp();
-    let deletion = message_deletion::fact::ContentMessageDeletionFact {
+    let output = message_deletion::commands::delete_message(
+        ctx,
         workspace_id,
-        created_at_ms,
-        target_message_id: target.message_id,
-        target_frontier_id: target.frontier_id,
-        target_minute: target.minute,
-        author_user_id: target.author_user_id,
-    };
-    let fact = Fact::new(
-        crate::protocol::auth::workspace::scope(workspace_id),
-        created_at_ms,
-        message_deletion::layout::encode_fact(&deletion)?,
-    );
+        target.message_id,
+        target.frontier_id,
+        target.minute,
+        target.author_user_id,
+    )?;
+    let receipt = output.receipt.clone();
     Ok(CommandOutput::new(DeleteMessageReceipt {
         workspace_id,
-        deletion_fact_id: fact.id,
+        deletion_fact_id: receipt.deletion_fact_id,
         target_message_id: target.message_id,
     })
-    .with_facts(vec![fact]))
+    .with_facts(output.effects.facts))
 }
 
 pub fn delete_message_output(receipt: &DeleteMessageReceipt) -> CliOutput {
@@ -403,8 +435,25 @@ pub fn save_file(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutpu
         ));
     }
     let mut bytes = Vec::new();
+    let message = queries::content_message_row(ctx.store(), workspace_id, file.message_id)?
+        .ok_or_else(|| "file parent message is not visible".to_string())?;
+    let key = local_content_key(
+        ctx.store(),
+        workspace_id,
+        message.frontier_id,
+        message.minute,
+    )?;
     for slice in file_slices(ctx.store(), workspace_id, file.file_id)? {
-        bytes.extend_from_slice(&slice.ciphertext);
+        let nonce = deterministic_nonce_for_parts(
+            b"topo:file-slice-nonce:v1",
+            &[
+                &workspace_id,
+                &file.file_id,
+                &u64::from(slice.slice_index).to_be_bytes(),
+            ],
+        );
+        let plaintext = open_bytes(&key, &nonce, &slice.ciphertext, "file slice")?;
+        bytes.extend_from_slice(&plaintext);
     }
     bytes.truncate(file.blob_bytes as usize);
     write_file_bytes(args.get(2).unwrap(), &bytes)?;
@@ -692,7 +741,14 @@ fn reactions_by_message(
 ) -> Result<BTreeMap<FactId, Vec<ReactionDisplayRow>>, String> {
     let mut grouped: BTreeMap<FactId, Vec<ReactionDisplayRow>> = BTreeMap::new();
     for row in reaction::rows::reaction_rows_for_workspace(store, workspace_id)? {
-        let emoji = String::from_utf8(row.ciphertext.clone())
+        let Some(message) =
+            queries::content_message_row(store, workspace_id, row.target_message_id)?
+        else {
+            continue;
+        };
+        let key = local_content_key(store, workspace_id, message.frontier_id, message.minute)?;
+        let plaintext = open_bytes(&key, &row.nonce, &row.ciphertext, "reaction emoji")?;
+        let emoji = String::from_utf8(plaintext)
             .map_err(|err| format!("reaction emoji is not utf8: {err}"))?;
         grouped
             .entry(row.target_message_id)
@@ -732,7 +788,19 @@ fn visible_files(store: &Store, workspace_id: FactId) -> Result<Vec<FileDisplayR
             if !message_is_visible(store, workspace_id, row.message_id)? {
                 return Ok(None);
             }
-            let metadata = decode_file_metadata(&row.sealed_metadata)?;
+            let message = queries::content_message_row(store, workspace_id, row.message_id)?
+                .ok_or_else(|| "file parent message is not visible".to_string())?;
+            let key = local_content_key(store, workspace_id, message.frontier_id, message.minute)?;
+            let nonce = deterministic_nonce_for_parts(
+                b"topo:file-metadata-nonce:v1",
+                &[&workspace_id, &row.file_id],
+            );
+            let metadata = decode_file_metadata(&open_bytes(
+                &key,
+                &nonce,
+                &row.sealed_metadata,
+                "file metadata",
+            )?)?;
             let slices_received = file_slices(store, workspace_id, row.file_id)?.len() as u32;
             Ok(Some(FileDisplayRow {
                 file_fact_id: row.file_fact_id,
@@ -845,6 +913,81 @@ fn decode_file_metadata(bytes: &[u8]) -> Result<FileMetadata, String> {
     })
 }
 
+fn signed_content_fact(
+    ctx: &CommandContext<'_>,
+    workspace_id: FactId,
+    created_at_ms: u64,
+    payload: Vec<u8>,
+) -> Result<Fact, String> {
+    let signing = ctx.local_signing_capability(workspace_id)?;
+    if signing.workspace_id != workspace_id {
+        return Err("signing capability is not bound to this workspace".to_string());
+    }
+    let bytes = auth::signed_fact::create::sign_payload_bytes(
+        signing.signer_id,
+        &signing.private_key,
+        payload,
+    )?;
+    Ok(Fact::new(
+        crate::protocol::auth::workspace::scope(workspace_id),
+        created_at_ms,
+        bytes,
+    ))
+}
+
+fn seal_bytes(
+    key: &XChaCha20Poly1305Key,
+    nonce: &XChaCha20Poly1305Nonce,
+    plaintext: &[u8],
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    crypto::xchacha20poly1305_encrypt(key, b"", nonce, plaintext)
+        .map_err(|err| format!("{label} encryption failed: {err}"))
+}
+
+fn open_bytes(
+    key: &XChaCha20Poly1305Key,
+    nonce: &XChaCha20Poly1305Nonce,
+    ciphertext: &[u8],
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    crypto::xchacha20poly1305_decrypt(key, b"", nonce, ciphertext)
+        .map_err(|err| format!("{label} decryption failed: {err}"))
+}
+
+fn local_content_key(
+    store: &Store,
+    workspace_id: FactId,
+    frontier_id: FactId,
+    minute: u64,
+) -> Result<XChaCha20Poly1305Key, String> {
+    let facts = persisted_facts(store)?;
+    for fact in &facts {
+        if let Ok(secret) = auth::local_key_secret::layout::decode_local_key_secret(fact.body()) {
+            if secret.workspace_id == workspace_id && secret.frontier_id == frontier_id {
+                return Ok(secret.key_secret);
+            }
+        }
+    }
+    for fact in facts {
+        if let Ok(secret) =
+            auth::local_history_node_secret::layout::decode_local_history_node_secret(fact.body())
+        {
+            let end_minute = secret
+                .range_start
+                .saturating_add(secret.range_width.saturating_sub(1));
+            if secret.workspace_id == workspace_id
+                && secret.frontier_id == frontier_id
+                && minute >= secret.range_start
+                && minute <= end_minute
+            {
+                return Ok(secret.node_secret);
+            }
+        }
+    }
+    Err("no local content key covers encrypted content".to_string())
+}
+
 fn file_id_for(
     workspace_id: FactId,
     message_id: FactId,
@@ -873,6 +1016,19 @@ fn deterministic_nonce(
     let hash = crypto::hash(&input);
     let mut nonce = [0; reaction::fact::REACTION_NONCE_BYTES];
     nonce.copy_from_slice(&hash[..reaction::fact::REACTION_NONCE_BYTES]);
+    nonce
+}
+
+fn deterministic_nonce_for_parts(domain: &[u8], parts: &[&[u8]]) -> XChaCha20Poly1305Nonce {
+    let mut input =
+        Vec::with_capacity(domain.len() + parts.iter().map(|part| part.len()).sum::<usize>());
+    input.extend_from_slice(domain);
+    for part in parts {
+        input.extend_from_slice(part);
+    }
+    let hash = crypto::hash(&input);
+    let mut nonce = [0; crypto::XCHACHA20_POLY1305_NONCE_BYTES];
+    nonce.copy_from_slice(&hash[..crypto::XCHACHA20_POLY1305_NONCE_BYTES]);
     nonce
 }
 

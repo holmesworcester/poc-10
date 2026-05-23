@@ -25,7 +25,15 @@ pub fn delete_file(
     author_user_id: AuthorId,
 ) -> Result<CommandOutput<DeleteFileReceipt>, String> {
     let created_at_ms = ctx.next_timestamp();
-    let fact = create::delete_file(workspace_id, created_at_ms, target_file_id, author_user_id)?;
+    create::validate_delete_file(workspace_id, target_file_id, author_user_id)?;
+    let signing = ctx.local_signing_capability(workspace_id)?;
+    let fact = create::delete_file(
+        &signing,
+        workspace_id,
+        created_at_ms,
+        target_file_id,
+        author_user_id,
+    )?;
     Ok(CommandOutput::new(DeleteFileReceipt {
         workspace_id,
         deletion_fact_id: fact.id,

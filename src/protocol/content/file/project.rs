@@ -1,8 +1,8 @@
 //! Content-file projector.
 //!
 //! POLICY. A content_file is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped, has valid descriptor fields,
-//!      and contains a raw or signed content_file payload.
+//!   1. STRUCTURAL. The fact is workspace-scoped, signed, has valid descriptor
+//!      fields, and contains a content_file payload.
 //!   2. CONTEXT. Projection waits for signer, parent content message, deletion,
 //!      parent deletion, and author context; deletion context removes the
 //!      descriptor row and purges this file fact.
@@ -64,7 +64,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         require_fact_scope(fact, &scope)?;
 
         // 2. Context and deletion gates.
-        let signer_need = project::signer_need(fact.id, signer);
+        let signer_need = project::signer_need(fact.id, file.workspace_id, signer);
         let parent_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message",
@@ -300,7 +300,7 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("file author context payload id mismatch".to_string());
     }
-    let author_payload = maybe_signed_payload(payload, user::TYPE_USER, "file author")?;
+    let author_payload = decode_context_payload(payload, user::TYPE_USER, "file author")?;
     let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
         .map_err(|_| "file author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
@@ -315,7 +315,7 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = maybe_signed_payload(
+    let deletion_payload = project::decode_signed_payload(
         payload,
         file_deletion::TYPE_CONTENT_FILE_DELETION,
         "file deletion",
@@ -342,7 +342,7 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = maybe_signed_payload(
+    let deletion_payload = project::decode_signed_payload(
         payload,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "parent deletion",
@@ -380,7 +380,8 @@ struct ParentMessage {
 }
 
 fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMessage, String> {
-    let message_payload = maybe_signed_payload(payload, message::TYPE_CONTENT_MESSAGE, label)?;
+    let message_payload =
+        project::decode_signed_payload(payload, message::TYPE_CONTENT_MESSAGE, label)?;
     let message = message::decode_fact_payload(&message_payload.payload)
         .map_err(|_| format!("{label} context is not a content message"))?;
     Ok(ParentMessage {
@@ -391,13 +392,13 @@ fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMe
     })
 }
 
-fn maybe_signed_payload(
+fn decode_context_payload(
     payload: &Fact,
     expected_type: u8,
     label: &str,
 ) -> Result<DecodedPayload, String> {
     if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        project::decode_raw_or_signed(payload, expected_type, label)
+        project::decode_signed_payload(payload, expected_type, label)
     } else {
         Ok(DecodedPayload {
             payload: payload.bytes.clone(),

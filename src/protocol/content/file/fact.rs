@@ -5,14 +5,13 @@
 //! parent message, author, file id, blob byte count, slice budget, and the
 //! BLAKE3 root hash of the encrypted blob (carried in plaintext per the design
 //! note in `new_architecture.md`). Filename, mime, and other descriptor secrets
-//! ride inside an opaque `sealed_metadata` slot whose AEAD framing is owned by
-//! auth key-material code in a later wave.
+//! ride inside an opaque `sealed_metadata` slot encrypted with the parent
+//! message content key.
 //!
 //! Current boundaries:
 //! - Signed envelope verification is owned by `auth::signed_fact`.
 //! - Descriptor secrecy is limited to the opaque sealed metadata slot here;
-//!   key selection and per-file content-key context belong to the auth
-//!   wave.
+//!   CLI display resolves the parent message key before opening it.
 //! - Slice integrity is checked by the file-slice admit pipeline.
 
 use crate::core::facts::FactId;
@@ -38,8 +37,6 @@ pub struct ContentFileFact {
     pub total_slices: u32,
     pub slice_bytes: u32,
     pub root_hash: RootHash,
-    /// Opaque sealed descriptor metadata (filename + mime + AEAD tag). Treated
-    /// as an opaque byte blob in this slice; auth key-material code owns the
-    /// inner framing in a later wave.
+    /// Opaque sealed descriptor metadata (filename + mime + AEAD tag).
     pub sealed_metadata: Vec<u8>,
 }

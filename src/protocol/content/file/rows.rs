@@ -2,9 +2,8 @@
 //!
 //! Rows are keyed by `workspace_id || file_fact_id` so callers can scan a
 //! single workspace's file descriptors without secondary indices. The value
-//! carries the public envelope plus the opaque sealed metadata; plaintext
-//! filename/mime projection is deferred to a later slice that resolves the
-//! per-file decryption secret.
+//! carries the public descriptor envelope plus opaque sealed metadata; CLI
+//! display opens filename/mime only after resolving the parent message key.
 
 use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;

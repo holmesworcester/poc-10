@@ -2,7 +2,7 @@
 //!
 //! Messages are the primary user-visible content records. This module owns the
 //! stable message layout, authoring constructors (`create`), authority checks
-//! for raw or signed payloads, projection into opened-message/tombstone rows,
+//! for signed payloads, projection into opened-message/tombstone rows,
 //! retention scheduling, queries, and CLI formatting. Authority and retention
 //! machinery live in `project`; other content facts depend on message context
 //! rather than duplicating message authority rules.
@@ -64,7 +64,7 @@ impl crate::core::projectors::FactCodec for Codec {
         crate::protocol::content::message::project::DecodedFact<fact::ContentMessageFact>;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        project::decode_raw_or_signed_fact(
+        project::decode_signed_fact(
             fact,
             layout::TYPE_CONTENT_MESSAGE,
             "content message",

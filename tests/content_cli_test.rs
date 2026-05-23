@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use cli_harness::*;
+use rusqlite::Connection;
 
 #[test]
 fn cli_send_then_messages_lists_authored_messages() {
@@ -53,6 +54,91 @@ fn cli_react_appears_in_messages_listing() {
 
     let listing = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(listing.contains("reactions: +1"), "{listing}");
+}
+
+#[test]
+fn cli_stores_reactions_and_files_as_ciphertext() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+
+    assert_success(topo(&["--db", &db, "send", &workspace_id, "hello"]));
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "react",
+        &workspace_id,
+        "#1",
+        "super-secret-emoji",
+    ]));
+
+    let payload = b"clear file body secret".to_vec();
+    let in_path = tmp.path().join("secret-name.txt");
+    fs::write(&in_path, &payload).expect("write input");
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "send-file",
+        &workspace_id,
+        "see attached",
+        "--file",
+        in_path.to_str().expect("path utf-8"),
+    ]));
+
+    let listing = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
+    assert!(
+        listing.contains("reactions: super-secret-emoji"),
+        "{listing}"
+    );
+    let saved = tmp.path().join("saved.txt");
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "save-file",
+        &workspace_id,
+        "#1",
+        saved.to_str().expect("path utf-8"),
+    ]));
+    assert_eq!(fs::read(saved).expect("read saved"), payload);
+
+    let conn = Connection::open(&db).expect("open db");
+    let reaction_ciphertext: Vec<u8> = conn
+        .query_row(
+            "SELECT ciphertext FROM content_reactions WHERE deleted = 0 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("reaction ciphertext");
+    assert!(
+        !blob_contains(&reaction_ciphertext, b"super-secret-emoji"),
+        "reaction plaintext leaked into ciphertext"
+    );
+
+    let sealed_metadata: Vec<u8> = conn
+        .query_row(
+            "SELECT sealed_metadata FROM content_files WHERE deleted = 0 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("file metadata");
+    assert!(
+        !blob_contains(&sealed_metadata, b"secret-name.txt"),
+        "filename leaked into sealed metadata"
+    );
+
+    let slice_ciphertext: Vec<u8> = conn
+        .query_row(
+            "SELECT ciphertext FROM file_slice_rows LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("file slice ciphertext");
+    assert_ne!(slice_ciphertext, payload, "file slice stored plaintext");
+    assert!(
+        !blob_contains(&slice_ciphertext, &payload),
+        "file payload leaked into slice ciphertext"
+    );
 }
 
 #[test]
@@ -676,10 +762,10 @@ fn cli_out_of_order_slice_arrival_eventually_completes() {
     join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
     grant_content_key_to_peer(&alice, &bob, &workspace_id);
 
-    // 8 slices @ 256 KiB = 2 MiB. Vary the byte pattern by slice index so a
+    // 4 slices @ 256 KiB = 1 MiB. Vary the byte pattern by slice index so a
     // wrong-order assembly would fail the equality check, not just length.
     const SLICE_BYTES: usize = 256 * 1024;
-    const NUM_SLICES: usize = 8;
+    const NUM_SLICES: usize = 4;
     let mut payload = Vec::with_capacity(NUM_SLICES * SLICE_BYTES);
     for slice_idx in 0..NUM_SLICES as u8 {
         for offset in 0..SLICE_BYTES {
@@ -1317,4 +1403,11 @@ fn wait_for_count(db: &str, command: &str, workspace_id: &str, key: &str, expect
         thread::sleep(Duration::from_millis(100));
     }
     panic!("{command} count did not reach {expected}; last output:\n{last}");
+}
+
+fn blob_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }

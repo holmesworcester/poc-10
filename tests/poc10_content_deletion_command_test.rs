@@ -6,7 +6,9 @@ use topo::core::command_context::{
     CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
     WorkspaceId,
 };
+use topo::core::crypto;
 use topo::core::store::Store;
+use topo::protocol::auth::signed_fact;
 use topo::protocol::content::file_deletion::commands::delete_file;
 use topo::protocol::content::file_deletion::layout as file_deletion_layout;
 use topo::protocol::content::message_deletion::commands::delete_message;
@@ -22,14 +24,20 @@ impl CommandClock for FixedClock {
     }
 }
 
-struct EmptyVault;
+struct TestVault;
 
-impl IdentityVault for EmptyVault {
+impl IdentityVault for TestVault {
     fn local_signing_capability(
         &self,
-        _workspace_id: WorkspaceId,
+        workspace_id: WorkspaceId,
     ) -> Result<LocalSigningCapability, String> {
-        Err("no signing capability".to_string())
+        let private_key = [9; 32];
+        Ok(LocalSigningCapability {
+            workspace_id,
+            signer_id: [8; 32],
+            public_key: crypto::ed25519_public_key(&private_key),
+            private_key,
+        })
     }
 
     fn local_encryption_capability(
@@ -40,7 +48,7 @@ impl IdentityVault for EmptyVault {
     }
 }
 
-fn ctx<'a>(store: &'a Store, clock: &'a FixedClock, vault: &'a EmptyVault) -> CommandContext<'a> {
+fn ctx<'a>(store: &'a Store, clock: &'a FixedClock, vault: &'a TestVault) -> CommandContext<'a> {
     CommandContext::new(store, clock, vault)
 }
 
@@ -48,7 +56,7 @@ fn ctx<'a>(store: &'a Store, clock: &'a FixedClock, vault: &'a EmptyVault) -> Co
 fn delete_message_emits_decodable_target_fact() {
     let store = Store::open_memory().expect("store");
     let clock = FixedClock(Cell::new(100));
-    let vault = EmptyVault;
+    let vault = TestVault;
     let ctx = ctx(&store, &clock, &vault);
 
     let output =
@@ -59,8 +67,14 @@ fn delete_message_emits_decodable_target_fact() {
     assert_eq!(output.receipt.created_at_ms, 100);
     assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let decoded = message_deletion_layout::decode_fact(&output.effects.facts[0].bytes)
-        .expect("decode deletion");
+    let envelope = signed_fact::layout::decode_signed_fact(&output.effects.facts[0].bytes)
+        .expect("decode signed deletion");
+    signed_fact::layout::verify_signed_fact(&envelope).expect("verify signed deletion");
+    assert_eq!(
+        envelope.inner_type,
+        message_deletion_layout::TYPE_CONTENT_MESSAGE_DELETION
+    );
+    let decoded = message_deletion_layout::decode_fact(&envelope.payload).expect("decode deletion");
     assert_eq!(decoded.workspace_id, [1; 32]);
     assert_eq!(decoded.created_at_ms, 100);
     assert_eq!(decoded.target_message_id, [2; 32]);
@@ -73,7 +87,7 @@ fn delete_message_emits_decodable_target_fact() {
 fn delete_file_emits_decodable_target_fact() {
     let store = Store::open_memory().expect("store");
     let clock = FixedClock(Cell::new(200));
-    let vault = EmptyVault;
+    let vault = TestVault;
     let ctx = ctx(&store, &clock, &vault);
 
     let output = delete_file(&ctx, [4; 32], [5; 32], [6; 32]).expect("delete file");
@@ -83,8 +97,14 @@ fn delete_file_emits_decodable_target_fact() {
     assert_eq!(output.receipt.created_at_ms, 200);
     assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let decoded =
-        file_deletion_layout::decode_fact(&output.effects.facts[0].bytes).expect("decode deletion");
+    let envelope = signed_fact::layout::decode_signed_fact(&output.effects.facts[0].bytes)
+        .expect("decode signed deletion");
+    signed_fact::layout::verify_signed_fact(&envelope).expect("verify signed deletion");
+    assert_eq!(
+        envelope.inner_type,
+        file_deletion_layout::TYPE_CONTENT_FILE_DELETION
+    );
+    let decoded = file_deletion_layout::decode_fact(&envelope.payload).expect("decode deletion");
     assert_eq!(decoded.workspace_id, [4; 32]);
     assert_eq!(decoded.created_at_ms, 200);
     assert_eq!(decoded.target_file_id, [5; 32]);
@@ -95,7 +115,7 @@ fn delete_file_emits_decodable_target_fact() {
 fn deletion_commands_reject_empty_ids() {
     let store = Store::open_memory().expect("store");
     let clock = FixedClock(Cell::new(0));
-    let vault = EmptyVault;
+    let vault = TestVault;
     let ctx = ctx(&store, &clock, &vault);
 
     let err =

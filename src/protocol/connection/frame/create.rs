@@ -327,20 +327,10 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             );
         }
         content::reaction::TYPE_CONTENT_REACTION => {
-            return admit_with_codec::<content::reaction::Codec>(bytes, |decoded| {
-                Ok(Admission::workspace(
-                    decoded.payload.workspace_id,
-                    decoded.payload.created_at_ms,
-                ))
-            });
+            return Err("received content reaction fact must be signed".to_string());
         }
         content::file::TYPE_CONTENT_FILE => {
-            return admit_with_codec::<content::file::Codec>(bytes, |decoded| {
-                Ok(Admission::workspace(
-                    decoded.payload.workspace_id,
-                    decoded.payload.created_at_ms,
-                ))
-            });
+            return Err("received content file fact must be signed".to_string());
         }
         content::file_slice::TYPE_CONTENT_FILE_SLICE => {
             return admit_with_codec::<content::file_slice::Codec>(bytes, |slice| {
@@ -351,28 +341,13 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             });
         }
         content::message::TYPE_CONTENT_MESSAGE => {
-            return admit_with_codec::<content::message::Codec>(bytes, |decoded| {
-                Ok(Admission::workspace(
-                    decoded.payload.workspace_id,
-                    decoded.payload.created_at_ms,
-                ))
-            });
+            return Err("received content message fact must be signed".to_string());
         }
         content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => {
-            return admit_with_codec::<content::message_deletion::Codec>(bytes, |decoded| {
-                Ok(Admission::workspace(
-                    decoded.payload.workspace_id,
-                    decoded.payload.created_at_ms,
-                ))
-            });
+            return Err("received content message deletion fact must be signed".to_string());
         }
         content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
-            return admit_with_codec::<content::file_deletion::Codec>(bytes, |decoded| {
-                Ok(Admission::workspace(
-                    decoded.payload.workspace_id,
-                    decoded.payload.created_at_ms,
-                ))
-            });
+            return Err("received content file deletion fact must be signed".to_string());
         }
         auth::recipient_key::layout::TYPE_RECIPIENT_KEY => {
             return admit_with_codec::<auth::recipient_key::Codec>(bytes, |recipient| {
@@ -520,6 +495,30 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             })
         }
+        content::reaction::TYPE_CONTENT_REACTION => {
+            admit_with_codec::<content::reaction::Codec>(bytes, |signed| {
+                Ok(Admission::workspace(
+                    signed.payload.workspace_id,
+                    signed.payload.created_at_ms,
+                ))
+            })
+        }
+        content::file::TYPE_CONTENT_FILE => {
+            admit_with_codec::<content::file::Codec>(bytes, |signed| {
+                Ok(Admission::workspace(
+                    signed.payload.workspace_id,
+                    signed.payload.created_at_ms,
+                ))
+            })
+        }
+        content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
+            admit_with_codec::<content::file_deletion::Codec>(bytes, |signed| {
+                Ok(Admission::workspace(
+                    signed.payload.workspace_id,
+                    signed.payload.created_at_ms,
+                ))
+            })
+        }
         other => Err(format!(
             "unsupported signed connection::frame payload type {other}"
         )),
@@ -607,8 +606,10 @@ mod tests {
             target_minute: 1,
             author_user_id: [11; 32],
         };
-        let bytes =
+        let payload =
             content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion");
+        let bytes = auth::signed_fact::create::sign_payload_bytes([8; 32], &[9; 32], payload)
+            .expect("sign deletion");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit deletion");
 
