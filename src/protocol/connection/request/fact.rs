@@ -1,13 +1,13 @@
-//! Connection-request fact shape for the poc-10 target tree.
+//! Connection-request payload.
 //!
-//! The request names both endpoints, carries a transcript-bound invite
-//! signature, and pins the dependency edges that bootstrap authorisation will
-//! validate. The optional listen address is the requester's advertised
-//! steady-state listener, used by connection::frame handlers as a route hint after the
-//! bootstrap stream closes.
+//! A request names the initiator and target endpoints, carries a nonce and
+//! invite signature over the handshake transcript, pins invite/secret
+//! dependency fact ids, records the initiator ephemeral public key, and may
+//! include listen-address hints for both sides.
 //!
-//! This fact is the canonical body of a connection request. Signed-envelope
-//! wrapping is owned by the `identity::signed_fact` module and is wired in a later wave.
+//! The payload is the semantic request body before projection. It does not
+//! prove the invite, receipt, or local secret by itself; `project.rs` matches
+//! those context witnesses and decides which branch can materialize.
 
 use std::net::SocketAddr;
 

@@ -1,21 +1,15 @@
-//! Outbound network-send handler.
+//! Established-connection network-send intent.
 //!
-//! Owns the local-queue intent that asks the runtime to push an already-packaged
-//! connection frame onto a connection's TCP socket. The handler resolves the
-//! connection route from the fact context, hands the opaque frame to core's
-//! network boundary, and attempts one bounded TCP write. If route
-//! context or the socket is unavailable, the handler keeps the ephemeral
-//! intent visible in the current process so the next sync/daemon pass can
-//! try again without making network delivery durable protocol state. There is
-//! intentionally no protocol-level peer ACK here: TCP handles stream delivery
-//! for a single write, and duplicated connection frames are harmless because fact
-//! admission is idempotent.
-
-//! Send-network-frame intent layout.
+//! This local intent is the final outgoing boundary for already-packaged
+//! connection-frame bytes. The handler resolves the connection route from local
+//! context, stages the opaque frame in core networking, and attempts one bounded
+//! TCP write. If route context or the socket is unavailable, it asks the intent
+//! runtime to retry instead of making network delivery durable protocol truth.
 //!
-//! The intent carries a routing key (connection id) and the opaque connection
-//! frame bytes that the runtime should push onto that connection's socket.
-//! Payload bytes remain opaque to this handler.
+//! The payload is only `(routing_key, frame bytes)`, and the idempotence key is
+//! deterministic over both fields. Change this file for route lookup, retry
+//! behavior, or outbound network queue interaction. Change `connection::frame`
+//! for frame byte semantics.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
@@ -30,8 +24,8 @@ pub const SEND_NETWORK_FRAME: &str = "send_network_frame";
 pub const MAX_FRAME_BYTES: usize = 1 << 21; // 2 MiB
 
 /// 32-byte routing key. May be a connection id or any other handle the
-/// connection-layer dispatcher uses to select a socket. The handler does not
-/// interpret the bits — they are only an idempotence dimension.
+/// connection-layer dispatcher uses to select a socket. The handler treats the
+/// bits only as an idempotence dimension.
 pub type RoutingKey = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

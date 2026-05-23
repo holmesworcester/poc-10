@@ -1,10 +1,14 @@
-//! Connection response fact family.
+//! Connection response family.
 //!
-//! Responses complete the connection handshake after a request has enough
-//! matched context. Projection validates the request side, responder secret,
-//! and endpoint relationship, then materializes connection-response rows used
-//! by connection networking and sync. The response intent creates these facts; this module
-//! owns their layout and projection semantics.
+//! A response completes a handshake and is the local connection fact: its fact
+//! id is the connection id, and its body contains the connection secret used to
+//! open established frames. Projection validates request and secret context,
+//! writes connection rows, publishes local connection context, and seeds sync.
+//!
+//! This family owns response payload bytes, responder key-schedule
+//! construction, row materialization, and response admission policy. Frame
+//! sending and sync fact selection use the materialized connection but do not
+//! define it.
 
 pub mod create;
 pub mod fact;

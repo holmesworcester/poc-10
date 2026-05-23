@@ -1,4 +1,10 @@
-//! Poc-10 encrypted connection-frame projector.
+//! Encrypted connection-frame projector.
+//!
+//! Frame projection is the receive-side bridge from ephemeral encrypted carrier
+//! bytes to durable semantic facts. It reads the public connection id from the
+//! frame header, waits only for the exact local `connection::response` context,
+//! opens the frame, and emits durable child facts and receipts in the same
+//! projection transaction.
 //!
 //! POLICY. A `connection::frame` fact is admitted iff:
 //!   1. STRUCTURAL. The fact is a local ephemeral small or large connection
@@ -11,6 +17,10 @@
 //!      each with a durable `connection::fact_receipt`. The child
 //!      facts project immediately or park on their own durable context in the
 //!      same projection transaction.
+//!
+//! Change this projector when frame admission, connection-context proof, or
+//! child materialization changes. Frame byte compatibility belongs in
+//! `layout.rs`; sendability and child admission helpers belong in `create.rs`.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};

@@ -1,8 +1,12 @@
-//! Connection ephemeral-secret projection rows.
+//! Durable rows for local connection ephemeral secrets.
 //!
-//! Rows are keyed by the secret fact id. The value records the owner endpoint,
-//! the matching public key, the private key bytes, and the creation timestamp
-//! so handlers can resolve the ephemeral material from the row alone.
+//! Rows are keyed by the secret fact id. The value stores the owner endpoint,
+//! public key, private key, and creation time so response construction can load
+//! the local handshake material without re-decoding fact bytes.
+//!
+//! These rows contain private material and are meaningful only inside the local
+//! store. Change this file for row key/value compatibility; projector admission
+//! and context offers belong in `project.rs`.
 
 use crate::core::crypto::{
     X25519PrivateKey, X25519PublicKey, X25519_PRIVATE_KEY_BYTES, X25519_PUBLIC_KEY_BYTES,

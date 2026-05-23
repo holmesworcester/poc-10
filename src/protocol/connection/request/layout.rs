@@ -1,13 +1,14 @@
-//! Connection-request fact layout.
+//! Stable bytes for connection-request facts.
 //!
-//! Fixed-width header: tag, two endpoint ids, nonce, invite event id, bootstrap
-//! hash, 64-byte invite signature, invite-secret event id, initiator ephemeral
-//! secret event id, initiator ephemeral public key, then two address blocks of
-//! `1 + 16 + 2` bytes. The first carries the requester's listen socket; the
-//! second carries the invite target's listen socket. The address family byte
-//! selects how the 16-byte slot is interpreted; absent and present addresses
-//! consume the same bytes so the fact stays self-describing without a length
-//! prefix.
+//! The request layout is fixed width: tag, endpoint ids, nonce, invite fact id,
+//! bootstrap hash, invite signature, dependency ids, initiator ephemeral public
+//! key, and two fixed listen-address blocks. Address blocks use one family byte,
+//! a 16-byte address slot, and a two-byte port so absent and present addresses
+//! occupy identical byte widths.
+//!
+//! Change this file for request wire compatibility only. Signature transcript
+//! construction and address conversion helpers live in `create.rs`; context and
+//! authority validation belong in `project.rs`.
 
 use super::create::{decode_optional_addr, encode_optional_addr, ADDR_BLOCK_BYTES};
 use crate::core::crypto::ED25519_SIGNATURE_BYTES;

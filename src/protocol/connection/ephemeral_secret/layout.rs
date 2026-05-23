@@ -1,7 +1,14 @@
-//! Fixed-width layout for the local connection ephemeral-secret fact.
+//! Stable bytes for local connection ephemeral-secret facts.
 //!
-//! Layout: `tag(1) || owner_endpoint(32) || ephemeral_private_key(32) ||
-//! ephemeral_public_key(32) || created_at_ms(8)`.
+//! The layout is fixed width: `tag(1) || owner_endpoint(32) ||
+//! ephemeral_private_key(32) || ephemeral_public_key(32) ||
+//! created_at_ms(8)`. Encoding and decoding preserve byte shape only; they do
+//! not decide whether the keypair is valid or whether the local fact should be
+//! admitted.
+//!
+//! Change this file only for wire compatibility of the secret fact. Keypair
+//! validation belongs in `project.rs`, and durable row shape belongs in
+//! `rows.rs`.
 
 use crate::core::crypto::{X25519_PRIVATE_KEY_BYTES, X25519_PUBLIC_KEY_BYTES};
 use crate::core::wire;

@@ -1,13 +1,15 @@
-//! Encrypted connection-frame projection and envelope helpers.
+//! Established connection-frame family.
 //!
-//! Connection frames bundle protocol facts after a connection has been
-//! bootstrapped. Inbound network bytes are first classified by the receive
-//! handler: bootstrap request/response bytes become their durable semantic
-//! facts directly, while encrypted established-connection bytes become
-//! ephemeral small or large connection-frame facts. This module owns the fixed
-//! frame layout, sendability checks, decryption, and projection that turns an
-//! opened frame into durable child facts plus `connection::fact_receipt`
-//! records.
+//! Connection frames are encrypted carriers used after a `connection::response`
+//! has materialized local connection context. The receive handler classifies
+//! raw network bytes into ephemeral small or large frame facts; the projector
+//! opens those bytes with the connection secret and emits durable child facts
+//! plus `connection::fact_receipt` records.
+//!
+//! This family owns frame fact tags, fixed outer layout, sendability checks,
+//! sealing/opening helpers, and frame projection. Core owns socket IO, and the
+//! child fact families own semantic validation of the facts opened from a
+//! frame.
 
 pub mod create;
 pub mod fact;

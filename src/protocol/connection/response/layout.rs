@@ -1,8 +1,13 @@
-//! Connection-response fact layout.
+//! Stable bytes for connection-response facts.
 //!
-//! Fixed-width body: tag byte followed by nine 32-byte ids (the two endpoints,
-//! the request id, three dependency edges, the responder ephemeral public key,
-//! the handshake hash, and the connection secret).
+//! The response layout is fixed width: tag byte followed by nine 32-byte
+//! fields for endpoints, request/dependency ids, responder ephemeral public
+//! key, handshake hash, and connection secret. Encoding preserves exactly that
+//! order so the response fact id is stable.
+//!
+//! Change this file for response wire compatibility only. Key-schedule
+//! construction belongs in `create.rs`, and context validation belongs in
+//! `project.rs`.
 
 use crate::core::wire;
 

@@ -1,11 +1,13 @@
-//! Shared connection-request construction and validation helpers.
+//! Connection-request construction helpers.
 //!
-//! Commands construct signed requests; projectors and receive handlers verify
-//! them. The transcript and signature checks live here so reactive paths do not
-//! call user-facing `commands.rs`. The optional listen-addr block conversion
-//! also lives here: it needs `std::net` types, which `layout.rs` may not own,
-//! and it is request-specific construction machinery shared by the layout
-//! codec, projection, and the bootstrap-request handler.
+//! Commands use this module to sign canonical request transcripts and encode
+//! optional listen-address blocks. Projectors and receive paths use the same
+//! helpers to verify invite signatures and decode fixed address blocks without
+//! calling user-facing command code.
+//!
+//! Keep request-specific crypto transcripts and address-block conversion here.
+//! `layout.rs` owns stable fact byte order, `commands.rs` owns CLI-facing
+//! construction, and `project.rs` owns admission and context proofs.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -15,15 +17,8 @@ use crate::protocol::identity::invite::fact::InviteSecretFact;
 
 use super::fact::ConnectionRequestFact;
 
-// ---------------------------------------------------------------------------
-// Optional listen-addr block.
-//
-// Conversion between optional `SocketAddr` listen hints and the fixed 19-byte
-// addr block (`1` family byte + `16` address bytes + `2` port bytes) used
-// inside the connection-request fact bytes. The family byte selects how the
-// 16-byte slot is interpreted; absent and present addresses consume the same
-// bytes so the fact stays self-describing without a length prefix.
-// ---------------------------------------------------------------------------
+// Optional listen-address conversion is request construction logic because it
+// interprets `std::net::SocketAddr`; `layout.rs` only consumes fixed bytes.
 
 pub const ADDR_BLOCK_BYTES: usize = 19;
 pub const ADDR_FAMILY_NONE: u8 = 0;

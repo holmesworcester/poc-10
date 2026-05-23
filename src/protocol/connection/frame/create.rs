@@ -1,13 +1,17 @@
-//! Connection-frame construction, receive classification, and admission helpers.
+//! Connection-frame sealing, classification, and child admission.
 //!
-//! Send handlers ask this module whether fact bytes may leave the local store
-//! and use it to seal encrypted established-connection frames. The receive
-//! handler uses the same module for one mechanical classification step:
-//! bootstrap request/response bytes become their durable semantic facts, while
-//! encrypted established-connection bytes become ephemeral small or large
-//! connection-frame facts. Cryptographic opening and child-fact admission stay
-//! here because they depend on the frame layout and receive receipt shape;
-//! socket IO belongs in core network handlers.
+//! Outbound connection sends call this module to reject private/local payloads
+//! and seal an ordered fact bundle into fixed small or large frame bytes.
+//! Inbound receive handling calls the same module to classify raw network bytes
+//! into bootstrap request/response facts or ephemeral frame facts. Frame
+//! projection calls it again to open a frame and turn each inner payload into a
+//! durable child fact plus receipt.
+//!
+//! The invariants are deliberately split: socket metadata enters only through
+//! `ReceivedNetworkFrame`, connection secrets come only from matched local
+//! `connection::response` context, and child facts are admitted through their
+//! owning typed codecs. Keep cryptographic frame mechanics here; keep socket IO
+//! in core/network handlers and semantic child validation in each child family.
 
 use crate::core::crypto;
 use crate::core::effects::PipelineEffects;

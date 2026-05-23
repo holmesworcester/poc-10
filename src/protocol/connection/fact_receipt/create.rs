@@ -1,8 +1,14 @@
-//! Canonical receive-origin address construction.
+//! Receive-origin address normalization.
 //!
-//! Connection fact receipts store the observed peer socket address as canonical
-//! `SocketAddr::to_string()` bytes. Ingress can accept the invite-link-friendly
-//! `IP_PORT` spelling, but stored facts must use one byte representation.
+//! Connection fact receipts store origin addresses as canonical
+//! `SocketAddr::to_string()` bytes so duplicate receives compare by one stable
+//! representation. Boundary input may arrive as a socket address or as the
+//! invite-link-friendly `IP_PORT` spelling; normalization accepts both and
+//! emits only canonical bytes.
+//!
+//! Keep parsing rules here because they are part of receipt fact construction.
+//! The layout module stores already-normalized bytes, and receive handlers
+//! decide when an observed origin should become a receipt.
 
 use std::net::SocketAddr;
 use std::str;

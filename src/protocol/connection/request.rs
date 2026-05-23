@@ -1,11 +1,14 @@
-//! Connection request fact family.
+//! Connection request family.
 //!
-//! Requests start a peer handshake from a local endpoint to an invite or known
-//! endpoint. Commands and constructors build the request, `layout` fixes its
-//! wire bytes, and projection waits for invite/receipt plus local ephemeral
-//! context before materializing a request row and emitting response work.
-//! Change this root when the request family gains a new submodule; change
-//! `project.rs` for handshake admission policy.
+//! A request starts a connection handshake from one endpoint to another using
+//! invite-backed authorization and initiator ephemeral material. Local commands
+//! construct request facts, received network bytes can become durable request
+//! facts, and projection validates the branch-specific context before writing a
+//! request row or scheduling response work.
+//!
+//! This family owns request payload bytes, optional listen-address encoding,
+//! request row materialization, and request admission policy. Response creation,
+//! frame sending, and socket IO belong to the downstream connection modules.
 
 pub mod commands;
 pub mod create;

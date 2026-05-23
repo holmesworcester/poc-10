@@ -1,10 +1,14 @@
-//! Fixed-width layout for local connection fact receipts.
+//! Stable bytes for connection fact receipts.
 //!
-//! Fact receipts are local audit records: they say which semantic fact arrived,
-//! from which origin address, on which connection receive path, under which
-//! connection or request, and when the local node observed it. The layout
-//! canonicalizes origin addresses so repeated receives compare by stable bytes.
-//! It should not validate the received payload itself.
+//! Fact receipts are fixed-width local audit records. The layout encodes the
+//! received fact id, canonical origin address slot, endpoint pair, receive
+//! path, optional connection and request ids, frame hash, and local receive
+//! time. Origin addresses are normalized during encoding and decoding so equal
+//! observations have equal bytes.
+//!
+//! Change this file for receipt wire compatibility or receive-path byte
+//! vocabulary. Do not add semantic validation here; received-payload admission
+//! belongs to the owning fact projector.
 
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};

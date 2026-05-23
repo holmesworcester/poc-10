@@ -1,9 +1,12 @@
-//! Connection-request projection rows.
+//! Durable rows for admitted connection requests.
 //!
-//! Rows are keyed by the request fact id. The value records the endpoint pair
-//! and the dependency edges (invite fact, invite secret, initiator ephemeral
-//! secret) so downstream consumers can resolve the request without re-decoding
-//! the full fact body.
+//! Rows are keyed by request fact id and store the endpoint pair plus the
+//! invite, invite-secret, and initiator ephemeral-secret dependency ids. That
+//! compact row lets response projection and diagnostics resolve request
+//! dependencies without re-decoding the full fact body.
+//!
+//! Change this file for request row compatibility. Projection owns when the row
+//! is written, and layout owns canonical request fact bytes.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};

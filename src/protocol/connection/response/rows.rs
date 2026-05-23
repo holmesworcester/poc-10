@@ -1,11 +1,13 @@
-//! Connection-response projection rows.
+//! Durable rows for materialized connection responses.
 //!
-//! The response fact id is the connection id, so rows are keyed by the
-//! response fact id. The value records the endpoint pair, the answered
-//! request id, the responder ephemeral public key, the public handshake hash,
-//! and the connection secret. The secret is durable here because the response
-//! fact is local-only; later TTL purge handlers retire the row when the
-//! connection ends.
+//! The response fact id is the connection id, so rows are keyed by that id. The
+//! value stores endpoint ids, answered request id, responder ephemeral public
+//! key, handshake hash, and the local connection secret used for frame opening
+//! and sealing.
+//!
+//! These rows are local connection capability state. Change this file for row
+//! key/value compatibility; projection owns when rows are written and when
+//! connection context is offered.
 
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};

@@ -1,10 +1,14 @@
-//! Build a `connection::response` fact from validated handshake inputs.
+//! Connection-response construction helpers.
 //!
 //! This module owns the responder-side native key schedule and canonical
-//! response fact construction. Handlers call into here after projection has
-//! supplied the validated request, invite, endpoint, and ephemeral secret, so
-//! `Fact::new` construction and crypto helpers stay outside
-//! `src/protocol/intents/` per the intent-cleanliness guardrail.
+//! response fact construction. Given validated request, invite, endpoint, and
+//! responder ephemeral material, it computes the handshake hash and connection
+//! secret, then returns the local `connection::response` fact.
+//!
+//! The helpers are pure constructors: no store reads, no projection, no socket
+//! IO. Callers must already have proved dependency consistency. Change this file
+//! for handshake transcript or key-schedule changes; change `project.rs` for
+//! admission policy.
 
 use crate::core::crypto::{
     self, x25519_diffie_hellman, x25519_public_key, X25519PrivateKey, X25519PublicKey,
@@ -56,9 +60,9 @@ pub struct HandshakeMaterial {
 /// Compute the responder handshake schedule and emit the canonical
 /// `connection::response` fact.
 ///
-/// This is a pure constructor — no IO, no store reads. The caller has
-/// already validated dependency cross-checks (invite bootstrap hash matches
-/// the request, endpoint is the request's `to_endpoint`).
+/// This is a pure constructor: no IO and no store reads. The caller has already
+/// validated dependency cross-checks, including invite bootstrap hash and
+/// endpoint ownership.
 pub fn build_responder_response(
     input: BuildResponderResponse<'_>,
 ) -> Result<BuildResponderResult, String> {

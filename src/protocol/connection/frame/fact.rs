@@ -1,11 +1,13 @@
-//! Ephemeral encrypted connection-frame facts.
+//! Ephemeral connection-frame projection inputs.
 //!
-//! A connection frame is already classified by its public size-class byte when
-//! it enters the fact pipeline. The small and large fact types carry the same
-//! local receive metadata and raw encrypted frame bytes; the type tag records
-//! which fixed outer shape was observed. Projection uses durable connection
-//! context to open the frame and emits durable child facts plus connection fact
-//! receipts.
+//! Small and large frame facts store the same local receive metadata and raw
+//! encrypted frame bytes. The public size-class byte chooses which fact tag is
+//! emitted before projection, so the projector can decode the expected fixed
+//! outer frame shape without durable storage of the raw network input.
+//!
+//! These facts are local and ephemeral. They may use durable connection context
+//! to open the frame, but they must not publish standing durable context
+//! themselves; opened child facts and receipts carry the durable result.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameSmallFact {

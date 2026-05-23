@@ -1,17 +1,13 @@
-//! Command constructors for bootstrap connection requests.
+//! User-facing constructors for connection requests.
 //!
-//! Accepting an invite creates local bootstrap context and one shared
-//! connection request:
+//! Accepting an invite creates the local facts needed to start a handshake:
+//! scoped invite secret, initiator ephemeral secret, and global connection
+//! request. The command returns those facts plus a typed receipt so the caller
+//! can submit them through the normal runtime path.
 //!
-//! ```text
-//! invite link + local endpoint
-//!   -> local scoped invite-secret fact
-//!   -> local connection-ephemeral-secret fact
-//!   -> global connection-request fact
-//! ```
-//!
-//! The command does not open sockets. The CLI/runtime submits the returned
-//! facts and lets a bootstrap-send handler perform the network attempt.
+//! Commands do not project, open sockets, or send bytes. Projection decides when
+//! the request is admissible and emits bootstrap network work; this file owns
+//! only user-facing construction and receipt shape.
 
 use std::net::SocketAddr;
 

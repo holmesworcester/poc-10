@@ -1,9 +1,15 @@
-//! Send bootstrap connection request handler.
+//! Bootstrap request network-send intent.
 //!
-//! This handler owns the one pre-connection network effect: sending a validated
-//! `connection::request` fact to the address carried by an invite link. Once the
-//! request/response handshake establishes a connection, ordinary connection
-//! frames and `connection::send_network_frame` take over.
+//! Before a connection exists, the only outbound network operation is sending a
+//! validated `connection::request` fact to the invite link's socket address.
+//! The request projector emits this local intent after it has materialized the
+//! request row; the handler loads exactly that request fact, resolves the
+//! explicit socket address from the intent payload, stages the bytes in core
+//! networking, and attempts one bounded write.
+//!
+//! The intent key is `(request_id, addr)`, so retries are idempotent for the
+//! same bootstrap target. Change this file for pre-connection send payload or
+//! retry behavior. Established connection frames use `send_network_frame`.
 
 use std::net::SocketAddr;
 

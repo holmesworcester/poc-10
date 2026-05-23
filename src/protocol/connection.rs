@@ -1,22 +1,23 @@
-//! Connection protocol scope: handshake, receipt, frame, and network intents.
+//! Connection protocol scope.
 //!
-//! Connection facts turn invite or endpoint context into an encrypted network
-//! relationship. A local endpoint emits an ephemeral secret and request; a peer
-//! projects that request after matching invite and fact-receipt context;
-//! responses complete the handshake and seed sync.
-//! Established connections then carry encrypted `connection::frame` facts whose
-//! projector opens the frame, validates receive context, and emits the child
-//! facts admitted by the connection protocol.
+//! A connection is the protocol relationship that starts with an invite-backed
+//! request, completes with a local response fact, and then carries encrypted
+//! frame bytes for sync and application facts. This scope owns the handshake
+//! facts, receive receipts, established-frame facts, and the network-facing
+//! intents that turn opaque socket bytes into pipeline input or socket writes.
 //!
-//! The handshake is deliberately fact-driven. Projectors wait through context
-//! needs instead of calling directly into identity, network, or sync code.
-//! When enough context exists, they materialize connection rows and emit intents
-//! such as response creation or sync seeding.
+//! The mechanism is fact-driven. Requests, responses, receipts, and frames all
+//! enter projection through typed facts; projectors wait on explicit context
+//! needs instead of calling into identity, sync, or core networking directly.
+//! Network handlers remain thin boundaries: they normalize metadata, package or
+//! stage bytes, and leave semantic validation to the fact family that owns the
+//! payload.
 //!
-//! Change these modules for request/response layout, connection-row
-//! materialization, receipt policy, frame admission rules, or connection-frame
-//! layout. Change connection network-intent modules when socket queues send or
-//! receive already-classified connection bytes.
+//! Change these modules for connection handshake layout, connection-row
+//! materialization, receive receipt policy, established-frame admission, or
+//! connection network intent behavior. Core owns socket mechanics, sync owns
+//! which fact ids should move, and the receiving fact families own the meaning
+//! of child facts opened from a frame.
 
 pub mod ephemeral_secret;
 pub mod fact_receipt;

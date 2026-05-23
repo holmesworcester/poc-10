@@ -1,4 +1,10 @@
-//! Poc-10 connection-response projector.
+//! Connection-response projector.
+//!
+//! Response projection turns a validated handshake answer into local connection
+//! context. Both local and received responses prove exact request and
+//! invite-secret context; received responses additionally prove a fact receipt
+//! and the initiator ephemeral secret, while local responses prove responder
+//! ephemeral material.
 //!
 //! POLICY. A connection_response is admitted iff:
 //!   1. STRUCTURAL. The fact is local-only, response fields are non-empty, and
@@ -8,6 +14,10 @@
 //!      initiator secret; local responses require responder secret.
 //!   3. MATERIALIZE. Valid responses write the connection_response row, publish
 //!      local connection context, and seed sync for the materialized connection.
+//!
+//! Change this projector for response admission, parking behavior, connection
+//! context offers, or sync seeding. Response byte compatibility belongs in
+//! `layout.rs`; key-schedule construction belongs in `create.rs`.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;

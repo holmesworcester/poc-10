@@ -1,14 +1,15 @@
-//! Intent handler that packages exact facts into encrypted connection frames.
+//! Connection fact-bundle send intent.
 //!
-//! Sync decides which fact ids should move; this connection intent decides how
-//! to move their bytes. It supports explicit fact-id sends and bucketed
-//! shareable-range sends, loads the facts, batches them under the frame size
-//! limit, seals each batch with the connection secret, and queues ephemeral
-//! network-frame sends.
+//! Sync chooses which fact ids should move on a connection; this handler decides
+//! how those fact bytes are packaged. It loads the named connection and payload
+//! facts, verifies local endpoint ownership and sendability, batches facts into
+//! fixed connection-frame budgets, seals each batch, and emits local
+//! `send_network_frame` intents.
 //!
-//! Keep connection framing here. Sync visibility is resolved by `shared_fact`,
-//! sendability checks live in the connection-frame family, and the lower
-//! network intent only carries already-sealed frames.
+//! This is not socket IO and it is not sync visibility policy. Sync owns the
+//! shareable index and requested ids, `connection::frame` owns byte-level
+//! sendability and sealing, and `send_network_frame` owns the final opaque
+//! socket write.
 
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,

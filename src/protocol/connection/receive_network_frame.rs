@@ -1,11 +1,15 @@
-//! Receive network-frame intent layout.
+//! Inbound network-frame intent.
 //!
-//! Receive-network handlers own decoding inbound network metadata and handing
-//! the raw bytes to the connection classifier. The classifier only uses the
-//! bootstrap fact tag or the public connection-frame header: connection
-//! requests and responses become durable semantic facts immediately, while
-//! encrypted established-connection frames become ephemeral small or large
-//! connection-frame facts.
+//! The daemon turns each accepted TCP frame into this local intent with the raw
+//! bytes, observed origin address, and local receive time. The handler decodes
+//! and validates that boundary metadata, then delegates byte classification to
+//! `connection::frame::create`; it does not open established frames or validate
+//! child facts itself.
+//!
+//! The intent key is deterministic over origin, receive time, and frame bytes
+//! so duplicate local submissions collapse while distinct observations remain
+//! separate. Change this file for receive-intent payload shape or metadata
+//! normalization. Change `connection::frame` for protocol byte classification.
 
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
@@ -85,10 +89,8 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid receive_network_frame payload: {err}")
 }
 
-// Handler for inbound network frame admission.
-//
-// Decodes the receive intent and delegates the mechanical byte classification
-// to the connection-frame module.
+// The handler is the incoming socket boundary. It has no input facts because
+// raw network bytes are not authorized by durable context until projection.
 
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::connection::frame::create::{

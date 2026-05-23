@@ -1,26 +1,17 @@
-//! Create-connection-response intent handler and payload.
+//! Responder-side connection-response intent.
 //!
-//! Drives the responder side of the connection handshake: given a validated
-//! inbound connection request fact, invite secret, fact receipt, and the
-//! local endpoint capability, create fresh responder ephemeral material and
-//! produce the canonical connection response fact using the native key schedule:
-//! `DH(eph_r, eph_i)`, `DH(static_r, eph_i)`, invite bootstrap secret, and
-//! transcript-bound HKDF. The response bytes are sent back over the bootstrap
-//! return route; the emitted facts are admitted through the usual fact pipeline.
-
-//! Intent codec for the `create_connection_response` handler.
+//! A validated inbound request does not create its response inline during
+//! request projection. The request projector emits this intent with the
+//! request, invite-secret, and receive-receipt fact ids; the handler loads
+//! exactly those facts, creates fresh responder ephemeral material, builds the
+//! canonical `connection::response` fact, and emits follow-up work through the
+//! normal pipeline.
 //!
-//! Payload layout (fixed-width, with each id explicitly tagged by position):
-//! three 32-byte fields concatenated in order:
-//!
-//! 1. `request_id` — fact id of the inbound connection request fact.
-//! 2. `invite_secret_id` — fact id of the local `invite_secret` fact whose
-//!    `bootstrap_hash` matches the request.
-//! 3. `receive_id` — fact id of the `connection::fact_receipt`
-//!    fact receipt proving the request was observed locally.
-//!
-//! This module intentionally does not pull in the core wire vocabulary:
-//! the layout is a simple concatenation of fixed-width 32-byte ids.
+//! The payload is three fixed 32-byte ids in order: request id, invite-secret
+//! id, and fact-receipt id. This file owns intent identity, idempotence,
+//! input-fact declaration, and bounded handler orchestration. The native
+//! handshake schedule lives in `response::create`; request and receipt
+//! admission live in their projectors.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
@@ -150,16 +141,9 @@ mod tests {
     }
 }
 
-// Handler for the target `create_connection_response` handler.
-//
-// The handler decodes its intent, loads the three dependency facts (the
-// inbound connection request, the local invite secret it matches, and the
-// fact-receipt fact), reloads the local endpoint capability from the
-// store, and runs the cross-checks that depend on those decoded shapes. It then
-// delegates the handshake key schedule plus response-fact construction to
-// `facts::connection::response::create`. The cleanliness guardrail keeps fact
-// construction and AEAD / HKDF helpers under `src/protocol/facts/`; the handler
-// stays a bounded effect that wires intent dispatch to the constructor.
+// The handler stays at the orchestration boundary: it proves that the queued
+// dependency ids still name the expected facts, then delegates native handshake
+// construction to `response::create`.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};

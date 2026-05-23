@@ -1,10 +1,16 @@
-//! Fixed-width wire layouts for poc-10 encrypted connection frames.
+//! Fixed wire layout for encrypted connection frames.
 //!
-//! Connection frames have exactly two outer shapes: `ConnectionFrameSmallV1`
-//! and `ConnectionFrameLargeV1`. They share a fixed public header and differ
-//! only in encrypted payload-slot capacity. The receive handler stores the
-//! observed shape as one of two ephemeral fact tags; the encrypted frame bytes
-//! remain opaque until projection has local connection context.
+//! Connection frames have two outer shapes, `ConnectionFrameSmallV1` and
+//! `ConnectionFrameLargeV1`. Both share a public header containing tag,
+//! version, size class, endpoint ids, connection id, and nonce; only the
+//! encrypted payload slot capacity differs. Received-frame fact encoding also
+//! stores normalized origin metadata around the raw frame bytes for ephemeral
+//! projection.
+//!
+//! This file owns byte compatibility, size-class constants, AEAD associated
+//! data, nonce derivation, and inner-bundle packing. It does not decide which
+//! semantic facts are allowed to travel or whether an opened child fact is
+//! valid; those checks live in `create.rs` and the child fact projectors.
 
 use crate::core::crypto::{
     self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,

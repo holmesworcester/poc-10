@@ -1,8 +1,13 @@
-//! Connection ephemeral-secret fact shape for the poc-10 target tree.
+//! Connection ephemeral-secret fact payload.
 //!
-//! This is a local-only fact: it carries an X25519 private key that bootstraps
-//! a connection handshake for a single endpoint. The matching public key is
-//! also recorded so projection can validate the pair without re-deriving it.
+//! The payload records the endpoint that owns the handshake secret, the X25519
+//! private key, the matching public key, and the local creation time. It is
+//! valid only as a local fact; the projector checks that the public key derives
+//! from the private key before offering the secret as context.
+//!
+//! Keep this file to the typed payload shape. Byte layout belongs in
+//! `layout.rs`, row storage belongs in `rows.rs`, and admission policy belongs
+//! in `project.rs`.
 
 use crate::core::crypto::{X25519PrivateKey, X25519PublicKey};
 

@@ -1,11 +1,14 @@
-//! Connection fact-receipt fact family.
+//! Connection fact-receipt family.
 //!
-//! A fact receipt records that one semantic fact entered this node through the
-//! connection protocol. The receipt stores the normalized network origin,
-//! local receive time, receive path, and optional connection/request witnesses.
-//! It projects a local context offer keyed by the received fact id; the
-//! semantic projector for that fact validates the receipt against its own
-//! admission policy.
+//! A fact receipt is durable local evidence that a semantic fact entered this
+//! node through the connection protocol. Receipts record normalized origin
+//! metadata, receive time, receive path, and optional connection/request
+//! witnesses; they publish context keyed by the received fact id.
+//!
+//! Receipts do not authorize the received payload. The semantic projector for
+//! the received fact decides whether the receipt proves the right path. Change
+//! this family for receipt bytes, receive-path vocabulary, or receipt context
+//! offers.
 
 pub mod create;
 pub mod fact;

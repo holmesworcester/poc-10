@@ -1,11 +1,12 @@
-//! Local connection fact receipts.
+//! Connection fact-receipt payload.
 //!
-//! A `ConnectionFactReceipt` is a local about-fact for one received semantic
-//! fact. It records the connection receive path and observational metadata that
-//! projectors use as proof that the fact entered through the connection
-//! protocol. It does not validate or authorize the received fact; the owning
-//! projector performs that check. `origin_addr` is stored as canonical
-//! `SocketAddr::to_string()` bytes.
+//! A receipt is a local about-fact for one received semantic fact. It names the
+//! received fact, observed origin, local endpoint, sender endpoint, receive
+//! path, optional connection/request witnesses, frame hash, and receive time.
+//!
+//! The payload is observational evidence only. It does not validate or
+//! authorize the received fact; the projector for that fact matches the receipt
+//! context and decides whether it proves the required path.
 
 use crate::core::facts::FactId;
 

@@ -1,4 +1,10 @@
-//! Poc-10 connection-request projector.
+//! Connection-request projector.
+//!
+//! Request projection validates the two handshake entry paths. Local requests
+//! prove invite-secret and initiator ephemeral-secret context before
+//! materializing and emitting bootstrap send work. Received requests prove
+//! invite-secret, local endpoint, and fact-receipt context before materializing
+//! and emitting deferred response work.
 //!
 //! POLICY. A connection_request is admitted iff:
 //!   1. STRUCTURAL. The fact is local or global, the request fields are
@@ -9,6 +15,11 @@
 //!      that endpoint.
 //!   3. MATERIALIZE. Valid requests write the request row and offer request
 //!      context; received bootstrap requests also emit deferred response work.
+//!
+//! Change this projector for request admission, branch-specific context proofs,
+//! parking behavior, or materialized request rows. Request byte layout belongs
+//! in `layout.rs`, and response construction belongs in `create_response.rs`
+//! plus `response::create`.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};

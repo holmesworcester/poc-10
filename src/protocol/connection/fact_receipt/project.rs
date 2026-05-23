@@ -1,11 +1,20 @@
 //! Connection fact-receipt projector.
 //!
+//! Receipts publish local observation context for the semantic fact they
+//! mention. Projection does not inspect the received payload; it only validates
+//! that the receipt is local, decodes cleanly, and can offer
+//! `connection_fact_receipt` context keyed by `received_fact_id`.
+//!
 //! POLICY. A connection_fact_receipt is admitted iff:
 //!   1. STRUCTURAL. The fact is local-only and its receipt payload decodes.
 //!   2. CONTEXT. No authority context is loaded here; higher-level projectors
 //!      validate the receipt against their target fact.
 //!   3. MATERIALIZE. Publish a local connection_fact_receipt offer for the
 //!      received fact so the owning projector can continue.
+//!
+//! Change this projector when receipt context shape changes. Request, response,
+//! and frame-child projectors own the path-specific proof that consumes the
+//! offer.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{

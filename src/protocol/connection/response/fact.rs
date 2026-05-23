@@ -1,9 +1,14 @@
-//! Connection-response fact shape for the poc-10 target tree.
+//! Connection-response payload.
 //!
-//! A response is the connection fact: its id is the connection id, and its
-//! body carries the connection secret used to derive short-lived connection::frame keys.
-//! The response also copies the request's dependency edges so receive-side
-//! validation does not need to walk transitive dependency context.
+//! A response is the connection fact. Its id is the connection id, and the
+//! payload records the endpoint pair, answered request id, dependency ids,
+//! responder ephemeral public key, handshake hash, and connection secret. The
+//! connection secret is local capability material used by established frame
+//! handling.
+//!
+//! This file owns only the typed payload shape. Byte order belongs in
+//! `layout.rs`, construction belongs in `create.rs`, and admission belongs in
+//! `project.rs`.
 
 use crate::core::facts::FactId;
 

@@ -1,4 +1,10 @@
-//! Poc-10 connection ephemeral-secret projector.
+//! Connection ephemeral-secret projector.
+//!
+//! Ephemeral secrets are local handshake capabilities. Projection turns a
+//! decoded local secret fact into a durable local row plus an exact context
+//! offer that request/response projectors can match by secret fact id. No
+//! remote or authority context is consulted because possession of the local
+//! private key is the capability being recorded.
 //!
 //! POLICY. A connection_ephemeral_secret is admitted iff:
 //!   1. STRUCTURAL. The local-only body decodes and the stored public key
@@ -7,6 +13,10 @@
 //!      material only.
 //!   3. MATERIALIZE. Publish a local ephemeral-secret offer and write the local
 //!      secret row keyed by this fact id.
+//!
+//! Change this file when the local capability proof or materialized row changes.
+//! Request and response projectors own the context checks that consume this
+//! offer.
 
 use crate::core::crypto;
 use crate::core::facts::Fact;
