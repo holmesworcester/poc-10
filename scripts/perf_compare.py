@@ -343,6 +343,7 @@ class Runner:
                 invite = invite_for(binary, worktree, alice, workspace, alice_port)
                 accept_retry(binary, worktree, bob, invite, "bob", "bob-phone")
                 wait_content(binary, worktree, bob, workspace, 0, self.args.sync_timeout)
+                run_cli(binary, worktree, "--db", alice, "key-frontier", workspace)
 
                 gen_started = time.perf_counter()
                 run_cli(binary, worktree, "--db", alice, "generate", workspace,

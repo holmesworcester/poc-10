@@ -503,7 +503,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         identity::admin::cli::GRANT_ADMIN_USAGE,
         grant_admin
     ),
-    cli_command!("generate", content::event::cli::GENERATE_USAGE, generate),
+    cli_command!("generate", content::message::cli::GENERATE_USAGE, generate),
     cli_command!(
         "generate-deps",
         sync::cascade_test_fact::cli::GENERATE_DEPS_USAGE,
@@ -526,7 +526,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!(
         "content-count",
-        content::event::cli::CONTENT_COUNT_USAGE,
+        content::message::cli::CONTENT_COUNT_USAGE,
         content_count
     ),
     cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),

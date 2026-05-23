@@ -589,11 +589,16 @@ pub(crate) fn grant_admin(
 }
 
 pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output = ctx.with_command_context(|command_context| {
-        content::event::cli::generate(command_context, args)
+    let workspace_id = args
+        .get(0)
+        .ok_or_else(|| content::message::cli::GENERATE_USAGE.to_string())
+        .and_then(|value| decode_hex_32(value, "workspace id"))?;
+    let timestamp = next_cli_timestamp(ctx.runtime())?;
+    let output = ctx.with_content_message_context(workspace_id, timestamp, |command_context| {
+        content::message::cli::generate(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
-    Ok(content::event::cli::generated_output(
+    Ok(content::message::cli::generated_output(
         &receipt,
         receipt.generated_facts,
     ))
@@ -648,13 +653,13 @@ pub(crate) fn content_count(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx.with_command_context(|command_context| {
-        content::event::cli::content_count(command_context, args)
+        content::message::cli::content_count(command_context, args)
     })?;
-    Ok(content::event::cli::content_count_output(output))
+    Ok(content::message::cli::content_count_output(output))
 }
 
 pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let observed_max = content::event::queries::max_timestamp(ctx.runtime().store())?;
+    let observed_max = max_cli_timestamp(ctx.runtime().store())?;
     clock::run_cli(ctx.runtime().store(), args, observed_max)
 }
 

@@ -11,9 +11,8 @@ use cli_harness::*;
 #[test]
 #[ignore = "manual sync throughput fixture; run with --ignored when measuring two-daemon catch-up"]
 fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
-    // There is no batch message CLI today. A high-count actual-message fixture
-    // would mostly measure one process start per `send`, so this uses the
-    // existing `generate` CLI content-event path for the large black-box batch.
+    // `generate` authors real message facts in one process so this can measure
+    // sync throughput without paying one process start per `send`.
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-sync-perf.db");
     let bob = temp_db(&tmp, "bob-sync-perf.db");
@@ -34,6 +33,7 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
     poll_for_workspace_member(&bob, &workspace, "bob", 10_000);
+    create_local_content_key(&alice, &workspace);
 
     alice_daemon.stop_with_cli();
     bob_daemon.stop_with_cli();
@@ -256,6 +256,11 @@ fn poll_for_workspace_member(db: &str, workspace_id: &str, username: &str, timeo
         thread::sleep(Duration::from_millis(250));
     }
     panic!("user {username} did not converge into {db}; last users output:\n{last}");
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let frontier = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    line_value(&frontier, "removal_frontier_id")
 }
 
 fn generate(db: &str, workspace: &str, count: usize, size: usize) -> String {

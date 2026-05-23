@@ -95,6 +95,8 @@ fn cli_invite_server_syncs_but_cannot_be_a_key_recipient() {
         stderr(&denied)
     );
 
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     assert_success(topo(&[
         "--db",
         &alice,
@@ -105,8 +107,6 @@ fn cli_invite_server_syncs_but_cannot_be_a_key_recipient() {
     ]));
     wait_for_content_count(&server, &workspace_id, "2");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(
         line_value(

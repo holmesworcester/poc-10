@@ -10,7 +10,7 @@ use crate::core::facts::FactId;
 use crate::core::store::Store;
 use rusqlite::{params, OptionalExtension};
 
-use super::rows;
+use super::{fact::CIPHERTEXT_BYTES, rows};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenedMessage {
@@ -19,6 +19,13 @@ pub struct OpenedMessage {
     pub author_user_id: FactId,
     pub signer_id: FactId,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentCount {
+    pub content_events: usize,
+    pub content_payload_bytes: u64,
+    pub max_timestamp: u64,
 }
 
 pub fn opened_messages(store: &Store, workspace_id: FactId) -> Result<Vec<OpenedMessage>, String> {
@@ -47,6 +54,26 @@ pub fn opened_messages(store: &Store, workspace_id: FactId) -> Result<Vec<Opened
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("decode opened message rows: {err}"))?;
     Ok(rows)
+}
+
+pub fn count_for_workspace(store: &Store, workspace_id: FactId) -> Result<ContentCount, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(created_at_ms), 0)
+             FROM content_messages
+             WHERE workspace_id = ?1 AND deleted = 0",
+            params![workspace_id],
+            |row| {
+                let content_events = row.get::<_, i64>(0)? as usize;
+                Ok(ContentCount {
+                    content_events,
+                    content_payload_bytes: content_events as u64 * CIPHERTEXT_BYTES as u64,
+                    max_timestamp: row.get::<_, i64>(1)? as u64,
+                })
+            },
+        )
+        .map_err(|err| format!("read content message rows: {err}"))
 }
 
 pub(crate) fn max_created_at_ms(store: &Store) -> Result<u64, String> {
