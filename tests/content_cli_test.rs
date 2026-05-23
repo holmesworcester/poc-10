@@ -1083,8 +1083,18 @@ fn join_workspace_on_daemons(
         .unwrap_or_else(|err| panic!("workspace invite accept failed: {err}"));
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
     wait_for_local_workspace_join(joiner, workspace_id, username);
-    wait_for_users_contains(host, workspace_id, username);
-    wait_for_peers_contains(host, workspace_id, device_name);
+    wait_for_users_contains(
+        host,
+        workspace_id,
+        username,
+        &[("host", host), ("joiner", joiner)],
+    );
+    wait_for_peers_contains(
+        host,
+        workspace_id,
+        device_name,
+        &[("host", host), ("joiner", joiner)],
+    );
 }
 
 fn join_workspace(
@@ -1104,8 +1114,18 @@ fn join_workspace(
     };
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
     wait_for_local_workspace_join(joiner, workspace_id, username);
-    wait_for_users_contains(host, workspace_id, username);
-    wait_for_peers_contains(host, workspace_id, device_name);
+    wait_for_users_contains(
+        host,
+        workspace_id,
+        username,
+        &[("host", host), ("joiner", joiner)],
+    );
+    wait_for_peers_contains(
+        host,
+        workspace_id,
+        device_name,
+        &[("host", host), ("joiner", joiner)],
+    );
 }
 
 fn workspace_invite_for_addr(db: &str, workspace_id: &str, port: u16) -> String {
@@ -1145,7 +1165,7 @@ fn wait_for_local_workspace_join(db: &str, workspace_id: &str, username: &str) {
     panic!("workspace join never projected for {username}: {last}");
 }
 
-fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
+fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str, daemons: &[(&str, &str)]) {
     let mut last = String::new();
     for _ in 0..300 {
         let users = topo(&["--db", db, "users", workspace_id]);
@@ -1160,10 +1180,18 @@ fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("user {username} never appeared in {db}: {last}");
+    panic!(
+        "user {username} never appeared in {db}: {last}\n\n{}",
+        daemon_diagnostics_block(daemons)
+    );
 }
 
-fn wait_for_peers_contains(db: &str, workspace_id: &str, device_name: &str) {
+fn wait_for_peers_contains(
+    db: &str,
+    workspace_id: &str,
+    device_name: &str,
+    daemons: &[(&str, &str)],
+) {
     let mut last = String::new();
     for _ in 0..300 {
         let peers = topo(&["--db", db, "peers", workspace_id]);
@@ -1178,7 +1206,10 @@ fn wait_for_peers_contains(db: &str, workspace_id: &str, device_name: &str) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("peer device {device_name} never appeared in {db}: {last}");
+    panic!(
+        "peer device {device_name} never appeared in {db}: {last}\n\n{}",
+        daemon_diagnostics_block(daemons)
+    );
 }
 
 fn try_accept_with_identity_retry(
@@ -1224,18 +1255,22 @@ impl Drop for RunningDaemon {
 
 fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     let port = port.to_string();
-    let mut child = spawn_topo(&[
-        "--db",
-        db,
-        "start",
-        "--listen",
-        "127.0.0.1",
-        &port,
-        "--tick-ms",
-        "50",
-        "--quiet-ms",
-        "50",
-    ]);
+    let stderr_path = daemon_stderr_path(db);
+    let mut child = spawn_topo_with_stderr_file(
+        &[
+            "--db",
+            db,
+            "start",
+            "--listen",
+            "127.0.0.1",
+            &port,
+            "--tick-ms",
+            "50",
+            "--quiet-ms",
+            "50",
+        ],
+        &stderr_path,
+    );
     let stdout = child.stdout.take().expect("daemon stdout");
     let mut reader = BufReader::new(stdout);
     let mut first = String::new();
@@ -1323,7 +1358,7 @@ fn content_message_count(db: &str, workspace_id: &str) -> String {
 }
 
 fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
-    assert_success(topo(&[
+    let output = topo(&[
         "--db",
         db,
         "assert",
@@ -1337,7 +1372,14 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "30000",
         "--poll-ms",
         "100",
-    ]));
+    ]);
+    assert!(
+        output.status.success(),
+        "content count did not reach {expected}\nstdout={}\nstderr={}\n\n{}",
+        stdout(&output),
+        stderr(&output),
+        daemon_diagnostics_block(&[("db", db)])
+    );
 }
 
 fn wait_for_files_count(db: &str, workspace_id: &str, expected: &str) {
@@ -1376,7 +1418,10 @@ fn wait_for_messages_contains(db: &str, workspace_id: &str, expected: &str) {
         last = out;
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("messages never contained `{expected}`; last output:\n{last}");
+    panic!(
+        "messages never contained `{expected}`; last output:\n{last}\n\n{}",
+        daemon_diagnostics_block(&[("db", db)])
+    );
 }
 
 fn wait_for_save_file(db: &str, workspace_id: &str, selector: &str, out_path: &str) -> String {
@@ -1402,7 +1447,10 @@ fn wait_for_count(db: &str, command: &str, workspace_id: &str, key: &str, expect
         last = out;
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("{command} count did not reach {expected}; last output:\n{last}");
+    panic!(
+        "{command} count did not reach {expected}; last output:\n{last}\n\n{}",
+        daemon_diagnostics_block(&[("db", db)])
+    );
 }
 
 fn blob_contains(haystack: &[u8], needle: &[u8]) -> bool {

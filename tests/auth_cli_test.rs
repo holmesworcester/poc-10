@@ -118,7 +118,12 @@ fn cli_invite_server_syncs_but_cannot_be_a_key_recipient() {
         "2",
         "64",
     ]));
-    wait_for_content_count(&server, &workspace_id, "2");
+    wait_for_content_count(
+        &server,
+        &workspace_id,
+        "2",
+        &[("alice", alice.as_str()), ("server", server.as_str())],
+    );
 
     thread::sleep(Duration::from_millis(1200));
     assert_eq!(
@@ -694,18 +699,22 @@ impl Drop for RunningDaemon {
 
 fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     let port = port.to_string();
-    let mut child = spawn_topo(&[
-        "--db",
-        db,
-        "start",
-        "--listen",
-        "127.0.0.1",
-        &port,
-        "--tick-ms",
-        "50",
-        "--quiet-ms",
-        "50",
-    ]);
+    let stderr_path = daemon_stderr_path(db);
+    let mut child = spawn_topo_with_stderr_file(
+        &[
+            "--db",
+            db,
+            "start",
+            "--listen",
+            "127.0.0.1",
+            &port,
+            "--tick-ms",
+            "50",
+            "--quiet-ms",
+            "50",
+        ],
+        &stderr_path,
+    );
     let stdout = child.stdout.take().expect("daemon stdout");
     let mut reader = BufReader::new(stdout);
     let mut first = String::new();
@@ -795,8 +804,8 @@ fn wait_for_messages_contains(db: &str, workspace_id: &str, expected: &str) {
     panic!("messages never contained `{expected}`: {last}");
 }
 
-fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
-    assert_success(topo(&[
+fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str, daemons: &[(&str, &str)]) {
+    let output = topo(&[
         "--db",
         db,
         "assert",
@@ -810,5 +819,12 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "30000",
         "--poll-ms",
         "100",
-    ]));
+    ]);
+    assert!(
+        output.status.success(),
+        "content count did not reach {expected}\nstdout={}\nstderr={}\n\n{}",
+        stdout(&output),
+        stderr(&output),
+        daemon_diagnostics_block(daemons)
+    );
 }

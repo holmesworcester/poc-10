@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
@@ -29,6 +29,26 @@ pub fn spawn_con(args: &[&str]) -> Child {
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn con")
+}
+
+pub fn spawn_topo_with_stderr_file(args: &[&str], stderr_path: &Path) -> Child {
+    spawn_con_with_stderr_file(args, stderr_path)
+}
+
+pub fn spawn_con_with_stderr_file(args: &[&str], stderr_path: &Path) -> Child {
+    if let Some(parent) = stderr_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).expect("create daemon stderr log dir");
+    }
+    let stderr = File::create(stderr_path).expect("create daemon stderr log");
+    Command::new(con_bin())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr))
         .spawn()
         .expect("spawn con")
 }
@@ -170,6 +190,98 @@ impl Drop for FileLock {
 
 pub fn temp_db(dir: &tempfile::TempDir, name: &str) -> String {
     dir.path().join(name).to_string_lossy().to_string()
+}
+
+pub fn daemon_lock_path(db: &str) -> PathBuf {
+    sibling_file_name_path(Path::new(db), ".daemon.lock", "daemon.lock")
+}
+
+pub fn daemon_stderr_path(db: &str) -> PathBuf {
+    sibling_file_name_path(Path::new(db), ".daemon.stderr", "daemon.stderr")
+}
+
+pub fn daemon_diagnostics(label: &str, db: &str) -> String {
+    let lock_path = daemon_lock_path(db);
+    let stderr_path = daemon_stderr_path(db);
+    let mut lines = vec![
+        format!("{label} daemon diagnostics:"),
+        format!("db_path: {db}"),
+        format!("lock_path: {}", lock_path.display()),
+    ];
+
+    match fs::read_to_string(&lock_path) {
+        Ok(lock) => {
+            let mut lock_lines = lock.lines();
+            let pid_text = lock_lines.next().unwrap_or("").trim();
+            let addr_text = lock_lines.next().unwrap_or("").trim();
+            lines.push(format!(
+                "lock_pid: {}",
+                if pid_text.is_empty() {
+                    "<missing>"
+                } else {
+                    pid_text
+                }
+            ));
+            if !addr_text.is_empty() {
+                lines.push(format!("lock_addr: {addr_text}"));
+            }
+            match pid_text.parse::<u32>() {
+                Ok(pid) if pid > 0 => lines.push(format!("process_alive: {}", process_alive(pid))),
+                _ => lines.push("process_alive: unknown (invalid lock pid)".to_string()),
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            lines.push("lock_state: missing".to_string());
+        }
+        Err(err) => {
+            lines.push(format!("lock_state: unreadable ({err})"));
+        }
+    }
+
+    lines.push(format!("stderr_path: {}", stderr_path.display()));
+    lines.push(format!("stderr_tail:\n{}", file_tail(&stderr_path, 4096)));
+    lines.join("\n")
+}
+
+pub fn daemon_diagnostics_block(daemons: &[(&str, &str)]) -> String {
+    daemons
+        .iter()
+        .map(|(label, db)| daemon_diagnostics(label, db))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn sibling_file_name_path(path: &Path, suffix: &str, fallback: &str) -> PathBuf {
+    let mut sibling = path.to_path_buf();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}{suffix}"))
+        .unwrap_or_else(|| fallback.to_string());
+    sibling.set_file_name(name);
+    sibling
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn file_tail(path: &Path, max_bytes: usize) -> String {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(max_bytes);
+            String::from_utf8_lossy(&bytes[start..]).to_string()
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => "<missing>".to_string(),
+        Err(err) => format!("<read error: {err}>"),
+    }
 }
 
 pub fn line_value(output: &str, key: &str) -> String {
