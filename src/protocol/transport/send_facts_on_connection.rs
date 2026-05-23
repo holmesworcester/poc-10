@@ -18,14 +18,14 @@ use crate::core::{effects::PipelineEffects, facts::Fact};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::transport::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::{
-    connection::response,
-    identity::endpoint,
-    sync::shared_fact,
-    transport::connection_frame::{
+    connection::frame::{
         create,
         frame::{self, ConnectionFrameFactBundle},
         layout::CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES,
     },
+    connection::response,
+    identity::endpoint,
+    sync::shared_fact,
 };
 
 pub type HandlerId = [u8; 32];

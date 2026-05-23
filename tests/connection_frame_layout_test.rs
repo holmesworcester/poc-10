@@ -1,4 +1,4 @@
-//! Golden-bytes tests for the fixed transport::connection_frame frame layouts.
+//! Golden-bytes tests for the fixed connection::frame frame layouts.
 //!
 //! These tests lock the public header byte layout, the size-class discriminator,
 //! and the rejection behaviour for wrong-length, trailing-byte, and mismatched
@@ -6,10 +6,10 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
-use topo::protocol::transport::connection_frame::frame::{
+use topo::protocol::connection::frame::frame::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
-use topo::protocol::transport::connection_frame::layout::{
+use topo::protocol::connection::frame::layout::{
     decode_frame_parts, peek_frame_header, ConnectionFrameHeader, ConnectionFrameLargeV1,
     ConnectionFrameSmallV1, CONNECTION_FRAME_HEADER_BYTES, CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES,
     CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES, CONNECTION_FRAME_LARGE_WIRE_BYTES,
@@ -344,7 +344,7 @@ fn sealed_small_connection_frame_fills_fixed_ciphertext_slot() {
     );
 
     let opened = connection_frame::open_connection_frame(&frame, &SECRET)
-        .expect("open small transport::connection_frame frame");
+        .expect("open small connection::frame frame");
     assert_eq!(
         opened.facts.into_iter().collect::<Vec<_>>(),
         vec![b"alpha".to_vec(), b"beta".to_vec()]
@@ -374,7 +374,7 @@ fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
         );
 
         let opened = connection_frame::open_connection_frame(&frame, &SECRET)
-            .expect("open large transport::connection_frame frame");
+            .expect("open large connection::frame frame");
         assert_eq!(
             opened.facts.into_iter().collect::<Vec<_>>(),
             vec![large_fact]
@@ -384,7 +384,7 @@ fn sealed_large_connection_frame_fills_fixed_ciphertext_slot() {
 
 #[test]
 fn opening_rejects_variable_length_ciphertext_slot() {
-    let frame = topo::protocol::transport::connection_frame::layout::encode_frame_bytes(
+    let frame = topo::protocol::connection::frame::layout::encode_frame_bytes(
         CONNECTION_FRAME_SIZE_CLASS_SMALL,
         FixedBytes(SENDER),
         FixedBytes(RECEIVER),

@@ -649,8 +649,8 @@ projector_routes! {
     project_sync_compare => sync::compare::layout::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector;
     project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector;
     project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector;
-    project_connection_frame_small => transport::connection_frame::layout::TYPE_CONNECTION_FRAME_SMALL, transport::connection_frame::project::ConnectionFrameProjector;
-    project_connection_frame_large => transport::connection_frame::layout::TYPE_CONNECTION_FRAME_LARGE, transport::connection_frame::project::ConnectionFrameProjector;
+    project_connection_frame_small => connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL, connection::frame::project::ConnectionFrameProjector;
+    project_connection_frame_large => connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE, connection::frame::project::ConnectionFrameProjector;
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
     project_user_invite => identity::user_invite::layout::TYPE_USER_INVITE, identity::user_invite::project::UserInviteProjector;
     project_user => identity::user::layout::TYPE_USER, identity::user::project::UserProjector;

@@ -1365,7 +1365,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
 
     assert!(
         offenders.is_empty(),
-        "connection intents must treat transport::connection_frame frames as opaque transport bytes:\n{}",
+        "connection intents must treat connection::frame frames as opaque transport bytes:\n{}",
         offenders.join("\n")
     );
 }

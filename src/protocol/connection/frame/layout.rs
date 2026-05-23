@@ -23,10 +23,10 @@ pub const TYPE_CONNECTION_FRAME_SMALL: u8 = 168;
 /// Ephemeral projection-input tag for one received large connection frame.
 pub const TYPE_CONNECTION_FRAME_LARGE: u8 = 169;
 
-/// Public tag prefix shared by both transport::connection_frame frame variants.
+/// Public tag prefix shared by both connection::frame frame variants.
 pub const CONNECTION_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
 
-/// Current transport::connection_frame frame version.
+/// Current connection::frame frame version.
 pub const CONNECTION_FRAME_VERSION: u8 = 1;
 
 /// Size class byte for [`ConnectionFrameSmallV1`].
@@ -35,13 +35,13 @@ pub const CONNECTION_FRAME_SIZE_CLASS_SMALL: u8 = 0;
 /// Size class byte for [`ConnectionFrameLargeV1`].
 pub const CONNECTION_FRAME_SIZE_CLASS_LARGE: u8 = 1;
 
-/// Plaintext capacity of a small transport::connection_frame frame (4 KiB).
+/// Plaintext capacity of a small connection::frame frame (4 KiB).
 ///
 /// Small frames carry control traffic and single events; the batcher chooses
 /// this class when the packed inner bytes fit in the small budget.
 pub const CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES: usize = 4 * 1024;
 
-/// Plaintext capacity of a large transport::connection_frame frame (1 MiB).
+/// Plaintext capacity of a large connection::frame frame (1 MiB).
 ///
 /// Large frames carry batched events. The batcher chooses this class for any
 /// batch that exceeds the small plaintext budget. The architecture doc does
@@ -161,7 +161,7 @@ fn require_frame_size_class(frame: &[u8], expected_size_class: u8) -> Result<(),
     Ok(())
 }
 
-/// Fixed-width small transport::connection_frame frame.
+/// Fixed-width small connection::frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameSmallV1 {
     pub sender_endpoint_id: Id32,
@@ -171,7 +171,7 @@ pub struct ConnectionFrameSmallV1 {
     pub ciphertext: Ciphertext<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>,
 }
 
-/// Fixed-width large transport::connection_frame frame.
+/// Fixed-width large connection::frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameLargeV1 {
     pub sender_endpoint_id: Id32,
@@ -255,7 +255,7 @@ pub struct ConnectionFrameHeader {
     pub nonce: Nonce24,
 }
 
-/// Borrowed transport::connection_frame frame payload recovered without materializing a large
+/// Borrowed connection::frame frame payload recovered without materializing a large
 /// fixed-slot value on the stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameParts<'a> {
@@ -263,7 +263,7 @@ pub struct ConnectionFrameParts<'a> {
     pub ciphertext: &'a [u8],
 }
 
-/// Inspect just the public header of a transport::connection_frame frame.
+/// Inspect just the public header of a connection::frame frame.
 ///
 /// Returns the size class byte and addressing fields. The caller decides which
 /// of [`ConnectionFrameSmallV1::decode`] or [`ConnectionFrameLargeV1::decode`] to run based on
@@ -330,7 +330,7 @@ pub fn decode_frame_parts(bytes: &[u8]) -> Result<ConnectionFrameParts<'_>, Wire
     })
 }
 
-/// Encode a transport::connection_frame frame for either size class from already-encrypted bytes.
+/// Encode a connection::frame frame for either size class from already-encrypted bytes.
 pub fn encode_frame_bytes(
     size_class: u8,
     sender_endpoint_id: Id32,
@@ -449,7 +449,7 @@ const _: () = {
 // Connection-frame sealing and inner bundle helpers.
 // ---------------------------------------------------------------------------
 
-const FRAME_PURPOSE: &[u8] = b"topo transport::connection_frame frame v1";
+const FRAME_PURPOSE: &[u8] = b"topo connection::frame frame v1";
 const INNER_BUNDLE_TAG: &[u8; 4] = b"TIB1";
 const INNER_BUNDLE_VERSION: u8 = 1;
 const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 4;
@@ -539,7 +539,7 @@ pub struct OpenedConnectionFrame {
 
 pub fn connection_send_nonce(connection_id: FactId, fact_ids: &[FactId]) -> XChaCha20Poly1305Nonce {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"topo:transport::connection_frame-connection-send-nonce:v1:");
+    hash.update(b"topo:connection::frame-connection-send-nonce:v1:");
     hash.update(&connection_id);
     hash.update(&(fact_ids.len() as u32).to_be_bytes());
     for fact_id in fact_ids {
@@ -613,7 +613,7 @@ pub fn open_connection_frame(
     let expected_ciphertext_len = ciphertext_len_for_size_class(parts.header.size_class)?;
     if parts.ciphertext.len() != expected_ciphertext_len {
         return Err(format!(
-            "transport::connection_frame frame ciphertext must fill fixed slot: expected {} got {}",
+            "connection::frame frame ciphertext must fill fixed slot: expected {} got {}",
             expected_ciphertext_len,
             parts.ciphertext.len()
         ));
@@ -634,7 +634,7 @@ pub fn open_connection_frame(
     let expected_plaintext_len = plaintext_len_for_size_class(parts.header.size_class)?;
     if plaintext.len() != expected_plaintext_len {
         return Err(format!(
-            "transport::connection_frame frame plaintext must fill fixed slot: expected {} got {}",
+            "connection::frame frame plaintext must fill fixed slot: expected {} got {}",
             expected_plaintext_len,
             plaintext.len()
         ));
@@ -655,7 +655,7 @@ fn frame_size_class_for_plaintext(len: usize) -> Result<u8, String> {
         Ok(CONNECTION_FRAME_SIZE_CLASS_LARGE)
     } else {
         Err(format!(
-            "transport::connection_frame inner payload too large: max {} got {len}",
+            "connection::frame inner payload too large: max {} got {len}",
             CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES
         ))
     }
@@ -666,7 +666,7 @@ fn plaintext_len_for_size_class(size_class: u8) -> Result<usize, String> {
         CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES),
         CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok(CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES),
         other => Err(format!(
-            "unknown transport::connection_frame frame size class {other}"
+            "unknown connection::frame frame size class {other}"
         )),
     }
 }
@@ -676,7 +676,7 @@ fn ciphertext_len_for_size_class(size_class: u8) -> Result<usize, String> {
         CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok(CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES),
         CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok(CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES),
         other => Err(format!(
-            "unknown transport::connection_frame frame size class {other}"
+            "unknown connection::frame frame size class {other}"
         )),
     }
 }
@@ -700,22 +700,17 @@ fn frame_associated_data(
 
 fn inner_bundle_packed_len(facts: &ConnectionFrameFactBundle) -> Result<usize, String> {
     if facts.is_empty() {
-        return Err(
-            "transport::connection_frame inner bundle must contain at least one fact".to_string(),
-        );
+        return Err("connection::frame inner bundle must contain at least one fact".to_string());
     }
     let mut len = INNER_BUNDLE_HEADER_BYTES;
     for fact in facts.iter() {
         let fact_len = fact.len();
-        u32::try_from(fact_len).map_err(|_| {
-            format!("transport::connection_frame inner length too large: {fact_len}")
-        })?;
+        u32::try_from(fact_len)
+            .map_err(|_| format!("connection::frame inner length too large: {fact_len}"))?;
         len = len
             .checked_add(INNER_FACT_LEN_BYTES)
             .and_then(|len| len.checked_add(fact_len))
-            .ok_or_else(|| {
-                "transport::connection_frame inner bundle length overflow".to_string()
-            })?;
+            .ok_or_else(|| "connection::frame inner bundle length overflow".to_string())?;
     }
     Ok(len)
 }
@@ -727,7 +722,7 @@ fn encode_inner_bundle(
     let packed_len = inner_bundle_packed_len(facts)?;
     if packed_len > plaintext_len {
         return Err(format!(
-            "transport::connection_frame inner payload too large: max {} got {packed_len}",
+            "connection::frame inner payload too large: max {} got {packed_len}",
             plaintext_len
         ));
     }
@@ -747,19 +742,17 @@ fn encode_inner_bundle(
 fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != INNER_BUNDLE_TAG {
-        return Err("expected transport::connection_frame inner bundle".to_string());
+        return Err("expected connection::frame inner bundle".to_string());
     }
     let version = reader.u8()?;
     if version != INNER_BUNDLE_VERSION {
         return Err(format!(
-            "unsupported transport::connection_frame inner bundle version {version}"
+            "unsupported connection::frame inner bundle version {version}"
         ));
     }
     let count = reader.u32()? as usize;
     if count == 0 {
-        return Err(
-            "transport::connection_frame inner bundle must contain at least one fact".to_string(),
-        );
+        return Err("connection::frame inner bundle must contain at least one fact".to_string());
     }
     let mut facts = ConnectionFrameFactBundle::new();
     for _ in 0..count {
@@ -771,16 +764,16 @@ fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String
 
 fn put_u32(out: &mut [u8], offset: &mut usize, value: usize) -> Result<(), String> {
     let value = u32::try_from(value)
-        .map_err(|_| format!("transport::connection_frame inner length too large: {value}"))?;
+        .map_err(|_| format!("connection::frame inner length too large: {value}"))?;
     put(out, offset, &value.to_be_bytes())
 }
 
 fn put(out: &mut [u8], offset: &mut usize, bytes: &[u8]) -> Result<(), String> {
     let end = offset
         .checked_add(bytes.len())
-        .ok_or_else(|| "transport::connection_frame inner bundle length overflow".to_string())?;
+        .ok_or_else(|| "connection::frame inner bundle length overflow".to_string())?;
     if end > out.len() {
-        return Err("transport::connection_frame inner bundle exceeds fixed slot".to_string());
+        return Err("connection::frame inner bundle exceeds fixed slot".to_string());
     }
     out[*offset..end].copy_from_slice(bytes);
     *offset = end;
@@ -815,11 +808,12 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self.offset.checked_add(len).ok_or_else(|| {
-            "transport::connection_frame inner bundle length overflow".to_string()
-        })?;
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| "connection::frame inner bundle length overflow".to_string())?;
         if end > self.bytes.len() {
-            return Err("truncated transport::connection_frame inner bundle".to_string());
+            return Err("truncated connection::frame inner bundle".to_string());
         }
         let bytes = &self.bytes[self.offset..end];
         self.offset = end;
@@ -830,7 +824,7 @@ impl<'a> Reader<'a> {
         if self.bytes[self.offset..].iter().all(|byte| *byte == 0) {
             Ok(())
         } else {
-            Err("transport::connection_frame inner bundle has nonzero padding".to_string())
+            Err("connection::frame inner bundle has nonzero padding".to_string())
         }
     }
 }

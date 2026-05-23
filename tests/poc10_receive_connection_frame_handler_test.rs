@@ -7,6 +7,14 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::FixedBytes;
 use topo::protocol::connection;
+use topo::protocol::connection::frame::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use topo::protocol::connection::frame::frame::{
+    self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
+};
+use topo::protocol::connection::frame::layout::{
+    self as frame_layout, CONNECTION_FRAME_SIZE_CLASS_LARGE,
+};
+use topo::protocol::connection::frame::project::ConnectionFrameProjector;
 use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
@@ -22,16 +30,6 @@ use topo::protocol::identity::invite::fact::InviteSecretFact;
 use topo::protocol::identity::invite::layout as invite_layout;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::sync::compare::layout as sync_compare_layout;
-use topo::protocol::transport::connection_frame::fact::{
-    ConnectionFrameLargeFact, ConnectionFrameSmallFact,
-};
-use topo::protocol::transport::connection_frame::frame::{
-    self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
-};
-use topo::protocol::transport::connection_frame::layout::{
-    self as frame_layout, CONNECTION_FRAME_SIZE_CLASS_LARGE,
-};
-use topo::protocol::transport::connection_frame::project::ConnectionFrameProjector;
 use topo::protocol::transport::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
@@ -175,7 +173,7 @@ fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
         nonce: [19; 24],
         facts: ConnectionFrameFactBundle::from_bytes([signed_wrap.clone()]),
     })
-    .expect("seal transport::connection_frame frame");
+    .expect("seal connection::frame frame");
     (frame, connection_fact, connection, signed_wrap)
 }
 
@@ -309,7 +307,7 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&intent, &HandlerContext::new())
-        .expect("receive transport::connection_frame stages input");
+        .expect("receive connection::frame stages input");
 
     let input = frame_layout::decode_small_fact(output.ephemeral_facts[0].body())
         .expect("decode small connection frame");
@@ -337,7 +335,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
         nonce: [29; 24],
         facts: ConnectionFrameFactBundle::from_bytes([compare_bytes.clone()]),
     })
-    .expect("seal transport::connection_frame frame");
+    .expect("seal connection::frame frame");
     let input_fact = connection_frame_small_fact(frame);
     let context = ProjectionContext::from_matches(vec![exact_match(
         input_fact.id,

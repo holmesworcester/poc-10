@@ -211,13 +211,14 @@ src/
 
     transport.rs
     transport/
-      connection_frame/
-      fact_receipt/
       receive_network_frame.rs
       send_facts_on_connection.rs
       send_network_frame.rs
 
-    connection.rs   connection/
+    connection.rs
+    connection/
+      frame/
+      fact_receipt/
     encryption.rs   encryption/
     identity.rs     identity/
     sync.rs         sync/

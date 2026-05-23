@@ -5,7 +5,7 @@
 //! collapse into one route-level response.
 //!
 //! Connection-frame wrapping (delivering the request on a connection and answering
-//! it by queuing the requested fact) is owned by transport::connection_frame handlers; this
+//! it by queuing the requested fact) is owned by connection::frame handlers; this
 //! module owns only the fact shape and projection row.
 
 use crate::core::facts::FactId;

@@ -21,9 +21,9 @@ Looking across the 30-plus modules in `src/protocol/facts/`:
   small crypto-bearing minority that runs real protocol work.
 
 The boilerplate share is mechanical. The repo already has the right primitives
-(`src/core/wire.rs` — `FixedLayout`, `Id32`, `U64be`, `Nonce24`, `FixedSlot<N>`,
+(`src/core/wire.rs` - `FixedLayout`, `Id32`, `U64be`, `Nonce24`, `FixedSlot<N>`,
 `Ciphertext<N>`) and a schema DSL parser (`src/core/schema_dsl.rs`). The newer
-modules (`connection_frame`, `signed_fact`, parts of `encryption`) already use the
+modules (`connection::frame`, `signed_fact`, parts of `encryption`) already use the
 `FixedLayout` trait; the older ones (`content_message`, `content_file`,
 `connection_response`) still hand-write byte-offset arithmetic that describes
 the same thing the schema would.

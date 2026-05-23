@@ -389,7 +389,7 @@ fn cutover_legacy_island_is_deleted() {
         .collect::<Vec<_>>();
     assert!(
         remaining.is_empty(),
-        "delete the legacy compatibility island as one cut after target runtime, CLI, daemon, sync, transport::connection_frame, purge, and tests are cut over:\n{}",
+        "delete the legacy compatibility island as one cut after target runtime, CLI, daemon, sync, connection::frame, purge, and tests are cut over:\n{}",
         remaining.join("\n")
     );
 }
@@ -423,8 +423,8 @@ fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots(
     let paths = vec![
         root.join("src/protocol/transport/send_facts_on_connection.rs"),
         root.join("src/protocol/transport/send_network_frame.rs"),
-        root.join("src/protocol/transport/connection_frame/create.rs"),
-        root.join("src/protocol/transport/connection_frame/layout.rs"),
+        root.join("src/protocol/connection/frame/create.rs"),
+        root.join("src/protocol/connection/frame/layout.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -439,7 +439,7 @@ fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots(
     );
     assert!(
         offenders.is_empty(),
-        "transport::connection_frame send still has placeholder packaging or variable payload slots:\n{}",
+        "connection::frame send still has placeholder packaging or variable payload slots:\n{}",
         offenders.join("\n")
     );
 }
@@ -809,7 +809,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
     paths.extend(intent_handler_files(&root));
-    paths.push(root.join("src/protocol/transport/connection_frame/create.rs"));
+    paths.push(root.join("src/protocol/connection/frame/create.rs"));
 
     let offenders = matching_code_lines(
         &root,

@@ -1,6 +1,6 @@
 //! Local endpoint fact shape for the poc-10 target tree.
 //!
-//! An endpoint fact stores the transport::connection_frame X25519 keypair together with the
+//! An endpoint fact stores the connection::frame X25519 keypair together with the
 //! Ed25519 signing keypair for events authorised by this endpoint's
 //! workspace membership. Endpoint facts are local-only.
 

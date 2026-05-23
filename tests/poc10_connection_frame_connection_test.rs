@@ -4,6 +4,7 @@ use topo::core::intents::IntentKind;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::connection::frame::frame as connection_frame;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
 use topo::protocol::encryption;
@@ -12,7 +13,6 @@ use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::transport::connection_frame::frame as connection_frame;
 use topo::protocol::transport::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,

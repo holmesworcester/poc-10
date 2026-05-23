@@ -42,7 +42,7 @@ not point at an owner whose payload disappears on restart.
 
 `transport::receive_network_frame` owns intent payload decoding and origin
 normalization. It does not construct facts inline. It delegates the mechanical
-classification to `transport::connection_frame::create`:
+classification to `connection::frame::create`:
 
 1. If the first byte is `connection_request`, decode the request payload,
    create the durable global request fact, and create durable
@@ -69,7 +69,7 @@ classification admitted the raw request bytes before semantic validation.
 require request, invite, initiator ephemeral-secret, and connection-response
 fact-receipt context before they materialize a local connection.
 
-`transport::connection_frame` owns established-connection frame projection.
+`connection::frame` owns established-connection frame projection.
 Its projector accepts only local ephemeral small/large frame facts, reads the
 connection id from the public header, and needs the exact local
 `connection_response` fact for that connection. If that context is not already
@@ -103,7 +103,7 @@ publish durable standing context.
 `transport::receive_network_frame` owns network receive intent decoding and
 delegates fact creation to protocol modules.
 
-`transport::connection_frame` owns encrypted frame fact layout, fixed frame
+`connection::frame` owns encrypted frame fact layout, fixed frame
 layout, sendability checks, frame opening, and established-connection frame
 projection.
 
@@ -124,7 +124,7 @@ Core tests cover ephemeral projection, one-shot durable context use, discard
 without standing needs, rejection of ephemeral offers, immediate child
 projection, child parking as success, and rollback on child projection failure.
 
-Transport tests cover receive-handler classification, durable bootstrap request
-admission, connection-frame opening, origin normalization, sync control payload
-admission, large-frame parking before ciphertext materialization, and discard of
-malformed raw network bytes.
+Connection and transport tests cover receive-handler classification, durable
+bootstrap request admission, connection-frame opening, origin normalization,
+sync control payload admission, large-frame parking before ciphertext
+materialization, and discard of malformed raw network bytes.

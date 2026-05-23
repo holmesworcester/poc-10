@@ -13,12 +13,12 @@ use crate::core::crypto;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::FactCodec;
-use crate::protocol::{connection, content, encryption, identity, sync, transport};
+use crate::protocol::{connection, content, encryption, identity, sync};
 
 use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
 use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 
-/// Return the bytes that may be packaged into a transport::connection_frame frame.
+/// Return the bytes that may be packaged into a connection::frame frame.
 ///
 /// Local facts and private/local fact tags are never transport payloads. A
 /// signed envelope is parsed here as a defensive check that the envelope is
@@ -27,20 +27,19 @@ use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
     if fact.scope == FactScope::Local {
         return Err(format!(
-            "transport::connection_frame send refused local fact {:?}",
+            "connection::frame send refused local fact {:?}",
             fact.id
         ));
     }
 
-    let tag = fact.bytes.first().copied().ok_or_else(|| {
-        format!(
-            "transport::connection_frame send refused empty fact {:?}",
-            fact.id
-        )
-    })?;
+    let tag = fact
+        .bytes
+        .first()
+        .copied()
+        .ok_or_else(|| format!("connection::frame send refused empty fact {:?}", fact.id))?;
     if is_private_local_fact_tag(tag) {
         return Err(format!(
-            "transport::connection_frame send refused private/local fact tag {tag} for {:?}",
+            "connection::frame send refused private/local fact tag {tag} for {:?}",
             fact.id
         ));
     }
@@ -49,13 +48,13 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
         let envelope =
             identity::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
                 format!(
-                    "transport::connection_frame send refused invalid signed fact {:?}: {err}",
+                    "connection::frame send refused invalid signed fact {:?}: {err}",
                     fact.id
                 )
             })?;
         if is_private_local_fact_tag(envelope.inner_type) {
             return Err(format!(
-                "transport::connection_frame send refused private/local signed payload tag {} for {:?}",
+                "connection::frame send refused private/local signed payload tag {} for {:?}",
                 envelope.inner_type, fact.id
             ));
         }
@@ -76,8 +75,8 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
             | encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
-            | transport::connection_frame::layout::TYPE_CONNECTION_FRAME_SMALL
-            | transport::connection_frame::layout::TYPE_CONNECTION_FRAME_LARGE
+            | connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL
+            | connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE
             | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
     )
 }
@@ -239,8 +238,7 @@ pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, St
     let opened = frame::open_connection_frame(input.frame, &connection.connection_secret)?;
     if input.connection_fact.id != opened.connection_id {
         return Err(
-            "transport::connection_frame frame connection id does not match connection fact"
-                .to_string(),
+            "connection::frame frame connection id does not match connection fact".to_string(),
         );
     }
     require_connection_endpoints(
@@ -272,7 +270,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
     let tag = bytes
         .first()
         .copied()
-        .ok_or_else(|| "received transport::connection_frame fact bytes are empty".to_string())?;
+        .ok_or_else(|| "received connection::frame fact bytes are empty".to_string())?;
     match tag {
         identity::workspace::TYPE_WORKSPACE => {
             return admit_with_codec::<identity::workspace::Codec>(bytes, |workspace| {
@@ -410,8 +408,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         }
         encryption::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             return Err(
-                "received transport::connection_frame payload is local history-node secret"
-                    .to_string(),
+                "received connection::frame payload is local history-node secret".to_string(),
             );
         }
         sync::compare::TYPE_SYNC_COMPARE => {
@@ -426,7 +423,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         identity::signed_fact::TYPE_SIGNED_FACT => {}
         _ => {
             return Err(format!(
-                "unsupported received transport::connection_frame fact type {tag}"
+                "unsupported received connection::frame fact type {tag}"
             ))
         }
     }
@@ -534,7 +531,7 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             })
         }
         other => Err(format!(
-            "unsupported signed transport::connection_frame payload type {other}"
+            "unsupported signed connection::frame payload type {other}"
         )),
     }
 }
@@ -618,7 +615,7 @@ fn require_connection_endpoints(
     if forward || reverse {
         Ok(())
     } else {
-        Err("transport::connection_frame frame endpoints do not match connection fact".to_string())
+        Err("connection::frame frame endpoints do not match connection fact".to_string())
     }
 }
 

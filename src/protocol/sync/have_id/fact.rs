@@ -4,7 +4,7 @@
 //! range compare that exposed it. Receivers verify presence by fact id
 //! before asking for bytes, so this fact is cheap to duplicate and dedupe.
 //!
-//! Connection-frame wrapping (routing on a connection) is owned by a transport::connection_frame handler;
+//! Connection-frame wrapping (routing on a connection) is owned by a connection::frame handler;
 //! this module owns only the fact shape and projection row.
 
 use crate::core::facts::FactId;

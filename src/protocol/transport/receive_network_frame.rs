@@ -1,7 +1,7 @@
 //! Receive network-frame intent layout.
 //!
 //! Receive-network handlers own decoding inbound network metadata and handing
-//! the raw bytes to the transport classifier. The classifier only uses the
+//! the raw bytes to the connection classifier. The classifier only uses the
 //! bootstrap fact tag or the public connection-frame header: connection
 //! requests and responses become durable semantic facts immediately, while
 //! encrypted established-connection frames become ephemeral small or large
@@ -91,7 +91,7 @@ fn payload_error(err: PayloadError) -> String {
 // to the connection-frame module.
 
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
-use crate::protocol::transport::connection_frame::create::{
+use crate::protocol::connection::frame::create::{
     received_network_frame_effect, ReceivedNetworkFrame as ClassifiedNetworkFrame,
 };
 

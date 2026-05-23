@@ -1,6 +1,6 @@
 //! Sync compare projection rows.
 //!
-//! Rows are keyed by `connection_id || fact_id` so transport::connection_frame handlers can scan a
+//! Rows are keyed by `connection_id || fact_id` so connection::frame handlers can scan a
 //! single connection's outstanding compare queries. The value stores the
 //! timestamp range, the summary (count + fingerprint), and the
 //! response-requested flag.

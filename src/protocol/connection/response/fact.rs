@@ -1,7 +1,7 @@
 //! Connection-response fact shape for the poc-10 target tree.
 //!
 //! A response is the connection fact: its id is the connection id, and its
-//! body carries the connection secret used to derive short-lived transport::connection_frame keys.
+//! body carries the connection secret used to derive short-lived connection::frame keys.
 //! The response also copies the request's dependency edges so receive-side
 //! validation does not need to walk transitive dependency context.
 

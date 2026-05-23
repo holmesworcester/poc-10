@@ -1,6 +1,6 @@
 //! Poc-10 encrypted connection-frame projector.
 //!
-//! POLICY. A connection_frame fact is admitted iff:
+//! POLICY. A `connection::frame` fact is admitted iff:
 //!   1. STRUCTURAL. The fact is a local ephemeral small or large connection
 //!      frame whose body encodes the corresponding fixed outer frame shape.
 //!   2. CONTEXT. The public frame header names an exact local
@@ -49,7 +49,7 @@ impl TypedProjector<super::Codec> for ConnectionFrameProjector {
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
-            return Err("connection_frame fact must have local scope".to_string());
+            return Err("connection::frame fact must have local scope".to_string());
         }
 
         let (origin_addr, received_at_local_ms, frame) = match input {
@@ -75,10 +75,10 @@ impl TypedProjector<super::Codec> for ConnectionFrameProjector {
             return Ok(waiting_output([connection_need]));
         };
         if connection_fact.id != connection_id {
-            return Err("connection_frame connection context id does not match frame".to_string());
+            return Err("connection::frame connection context id does not match frame".to_string());
         }
         if connection_fact.scope != FactScope::Local {
-            return Err("connection_frame connection context must be local".to_string());
+            return Err("connection::frame connection context must be local".to_string());
         }
 
         // 3. Materialize.

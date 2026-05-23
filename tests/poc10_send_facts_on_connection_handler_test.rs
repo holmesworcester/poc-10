@@ -5,13 +5,13 @@ use topo::core::facts::Fact;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::connection::frame::frame as connection_frame;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::transport::connection_frame::frame as connection_frame;
 use topo::protocol::transport::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -63,7 +63,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
             &intent,
             &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_store(&store),
         )
-        .expect("transport::connection_frame packaging succeeds");
+        .expect("connection::frame packaging succeeds");
 
     assert!(output.facts.is_empty());
     assert!(output.intents.is_empty());
@@ -73,7 +73,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     assert_eq!(send.routing_key, connection_fact.id);
     let opened =
         connection_frame::open_connection_frame(&send.frame, &connection.connection_secret)
-            .expect("open fixed transport::connection_frame frame");
+            .expect("open fixed connection::frame frame");
     assert_eq!(opened.connection_id, connection_fact.id);
     assert_eq!(opened.sender_endpoint_id, connection.from_endpoint);
     assert_eq!(opened.receiver_endpoint_id, connection.to_endpoint);
