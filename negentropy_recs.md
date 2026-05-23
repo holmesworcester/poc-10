@@ -155,6 +155,25 @@ This keeps dep-aware sync bounded. The expensive semantic choice of what counts
 as context was already made by projectors during projection. Sync handlers only
 walk indexed range rows and exact leaf-context rows.
 
+## Range Sync CLI
+
+Implementation needs a black-box CLI surface for bounded range sync. The
+command should drive the real runtime and connection/sync facts, not test-only
+row seeding, and it should make dependency behavior observable:
+
+```text
+sync-range <peer-or-connection> --workspace <id> --start-ms <ms> --end-ms <ms>
+  --with-deps
+sync-range <peer-or-connection> --workspace <id> --start-ms <ms> --end-ms <ms>
+  --without-deps
+```
+
+Exact spelling can follow the CLI's local conventions, but the behavior must be
+available. `--with-deps` sends the owner leaves plus projector-supplied
+`context_have` and `context_need` closure for those leaves. `--without-deps`
+sends only the owner leaves in the requested range. That second mode exists to
+prove the test is not accidentally passing because a full-range sync happened.
+
 ## Purge And Retraction
 
 Removal must use the same ownership boundary. When a target projector observes
@@ -209,6 +228,12 @@ Add focused tests with the implementation:
 - two-peer sync tests where an in-range message depends on out-of-range
   authority/key context and the receiver projects or opens it without a second
   manual range request.
+- black-box CLI range-sync tests where the message timestamp is inside the
+  requested range, the signer/authority fact required to validate that message
+  is outside the range, and `sync-range --with-deps` makes the message arrive
+  and appear in `messages` without syncing the full range. The paired
+  `--without-deps` case must not make the message viewable, proving the signer
+  context came from dep-aware leaf closure rather than an accidental full sync.
 - guardrail tests proving sync compare/response code reads the durable
   negentropy tables instead of scanning all facts or context rows for closure.
 - final worktree step: commit the completed work on that same worktree branch
