@@ -43,6 +43,7 @@ use super::context::{
     insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
     stored_matching_context, wake_context_matches_in_tx,
 };
+use super::insert_select;
 use super::WorkStatus;
 use crate::core::context::{diff_context_sets, ContextOffer, ContextSet, ContextSetDelta};
 use crate::core::effects::PipelineEffects;
@@ -55,7 +56,6 @@ use crate::core::projectors::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
 use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
-use crate::core::select;
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
@@ -210,21 +210,21 @@ fn enqueue_due_time_wakes_in_tx(
     let has_start = range.start_exclusive.is_some();
     let start_exclusive = range.start_exclusive.unwrap_or(0);
     let params = vec![
-        select::Param::text(":timeline", range.timeline.as_str()),
-        select::Param::bool(":has_start", has_start),
-        select::Param::u64(":start_exclusive", start_exclusive),
-        select::Param::u64(":end_inclusive", range.end_inclusive),
-        select::Param::u64(":limit", limit as u64),
+        insert_select::Param::text(":timeline", range.timeline.as_str()),
+        insert_select::Param::bool(":has_start", has_start),
+        insert_select::Param::u64(":start_exclusive", start_exclusive),
+        insert_select::Param::u64(":end_inclusive", range.end_inclusive),
+        insert_select::Param::u64(":limit", limit as u64),
     ];
 
-    let inserted = select::insert_select_in_tx(
+    let inserted = insert_select::insert_select_in_tx(
         store,
         PENDING_PROJECTION,
         &["owner"],
-        &select::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
+        &insert_select::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
     )?;
 
-    select::insert_select_in_tx(
+    insert_select::insert_select_in_tx(
         store,
         PENDING_TIME_RANGES,
         &[
@@ -234,7 +234,7 @@ fn enqueue_due_time_wakes_in_tx(
             "start_exclusive",
             "end_inclusive",
         ],
-        &select::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
+        &insert_select::Select::new(DUE_TIME_RANGE_SQL, TIME_WAKE_TABLES, params),
     )?;
 
     Ok(inserted)

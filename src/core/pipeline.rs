@@ -11,6 +11,7 @@
 mod commit_effects;
 pub(crate) mod context;
 mod dispatch;
+mod insert_select;
 mod project_pending_facts;
 
 /// Public outcome returned by runtime pipeline calls.

@@ -10,11 +10,11 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId};
+use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::core::select::Value;
 
 use crate::protocol::content::file;
 use crate::protocol::content::file_deletion;
