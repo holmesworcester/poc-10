@@ -1,0 +1,7 @@
+[env]
+# The integration suite starts real daemon processes and TCP listeners. Running
+# those tests concurrently makes normal `cargo test` depend on host scheduling,
+# which is why isolated reruns pass after suite flakes. Keep the Rust harness
+# serial by default in this worktree; explicit `-- --test-threads N` remains an
+# opt-in stress mode.
+RUST_TEST_THREADS = { value = "1", force = true }
