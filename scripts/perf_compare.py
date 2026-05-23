@@ -539,7 +539,7 @@ def line_value(output: str, key: str) -> str:
 
 
 def binary_name(worktree_key: str) -> str:
-    return "match" if worktree_key == "poc10" else "topo"
+    return "con" if worktree_key == "poc10" else "topo"
 
 
 def run_cli(binary: Path, cwd: Path, *args: object, timeout: int = 120) -> str:

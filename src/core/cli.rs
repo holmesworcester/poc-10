@@ -92,16 +92,18 @@ pub struct CliCommand<C> {
 
 /// Dispatch argv to one of the supplied command specs.
 pub fn run<C>(
+    program_name: &str,
     commands: &[CliCommand<C>],
     context: &mut C,
     args: &[String],
 ) -> Result<CliOutput, String> {
     validate_command_names(commands)?;
     let Some(command_name) = args.first() else {
-        return Err(usage(commands, "missing command"));
+        return Err(usage(program_name, commands, "missing command"));
     };
     let Some(command) = commands.iter().find(|command| command.name == command_name) else {
         return Err(usage(
+            program_name,
             commands,
             &format!("unknown command `{command_name}`"),
         ));
@@ -123,10 +125,10 @@ fn validate_command_names<C>(commands: &[CliCommand<C>]) -> Result<(), String> {
 }
 
 /// Build usage text for a command registry.
-pub fn usage<C>(commands: &[CliCommand<C>], reason: &str) -> String {
+pub fn usage<C>(program_name: &str, commands: &[CliCommand<C>], reason: &str) -> String {
     let mut lines = vec![reason.to_string(), "usage:".to_string()];
     for command in commands {
-        lines.push(format!("  match --db PATH {}", command.usage));
+        lines.push(format!("  {program_name} --db PATH {}", command.usage));
     }
     lines.join("\n")
 }
@@ -253,7 +255,7 @@ mod tests {
                 run: ok_command,
             },
         ];
-        let err = run(&commands, &mut 0, &[String::from("same")])
+        let err = run("test", &commands, &mut 0, &[String::from("same")])
             .expect_err("duplicate command names fail centrally");
 
         assert_eq!(err, "duplicate CLI command `same`");
@@ -267,10 +269,10 @@ mod tests {
             help: "",
             run: ok_command,
         }];
-        let err = run(&commands, &mut 0, &[String::from("missing")])
+        let err = run("test", &commands, &mut 0, &[String::from("missing")])
             .expect_err("unknown command fails centrally");
 
         assert!(err.contains("unknown command `missing`"), "{err}");
-        assert!(err.contains("match --db PATH known ARG"), "{err}");
+        assert!(err.contains("test --db PATH known ARG"), "{err}");
     }
 }

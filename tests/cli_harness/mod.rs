@@ -10,32 +10,32 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 pub fn topo(args: &[&str]) -> Output {
-    match_cli(args)
+    con_cli(args)
 }
 
-pub fn match_cli(args: &[&str]) -> Output {
-    Command::new(match_bin())
+pub fn con_cli(args: &[&str]) -> Output {
+    Command::new(con_bin())
         .args(args)
         .output()
-        .expect("run match")
+        .expect("run con")
 }
 
 pub fn spawn_topo(args: &[&str]) -> Child {
-    spawn_match(args)
+    spawn_con(args)
 }
 
-pub fn spawn_match(args: &[&str]) -> Child {
-    Command::new(match_bin())
+pub fn spawn_con(args: &[&str]) -> Child {
+    Command::new(con_bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn match")
+        .expect("spawn con")
 }
 
-fn match_bin() -> &'static Path {
-    static MATCH_BIN: OnceLock<PathBuf> = OnceLock::new();
-    MATCH_BIN.get_or_init(|| {
+fn con_bin() -> &'static Path {
+    static CON_BIN: OnceLock<PathBuf> = OnceLock::new();
+    CON_BIN.get_or_init(|| {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let target_dir = manifest_dir.join("target").join("cli-black-box");
         let profile = std::env::var("TOPO_CLI_PROFILE").unwrap_or_else(|_| "release".to_string());
@@ -48,7 +48,7 @@ fn match_bin() -> &'static Path {
             .arg("build")
             .arg("--quiet")
             .arg("--bin")
-            .arg("match")
+            .arg("con")
             .arg("--manifest-path")
             .arg(manifest_dir.join("Cargo.toml"))
             .arg("--target-dir")
@@ -56,9 +56,9 @@ fn match_bin() -> &'static Path {
         if profile == "release" {
             build.arg("--release");
         }
-        let status = build.status().expect("build match binary");
-        assert!(status.success(), "build match binary");
-        target_dir.join(profile).join("match")
+        let status = build.status().expect("build con binary");
+        assert!(status.success(), "build con binary");
+        target_dir.join(profile).join("con")
     })
 }
 

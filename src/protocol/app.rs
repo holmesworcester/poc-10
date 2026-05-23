@@ -1,6 +1,6 @@
 //! Concrete protocol description exported to core.
 //!
-//! This is the one place that assembles the match protocol as an executable
+//! This is the one place that assembles the Context protocol as an executable
 //! application: runtime declarations, daemon declarations, and command table.
 //! The binary selects this description; core consumes it generically.
 //!
@@ -37,7 +37,8 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
 };
 
 pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {
-    name: "match",
+    display_name: "Context",
+    command_name: "con",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
         inbound_network_intent: Some(receive_network_frame_intent),

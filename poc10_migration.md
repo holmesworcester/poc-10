@@ -5,7 +5,7 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 
 ## Current State
 
-- Production entry is `match`, implemented by `src/main.rs` and a thin root
+- Production entry is `con`, implemented by `src/main.rs` and a thin root
   app boundary.
 - Product commands route through the core runtime/app facade configured by
   `src/protocol.rs`.
@@ -19,7 +19,7 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
   is no root `src/commands` module.
 - Module manifests live under `src/protocol/facts.rs` and
   `src/protocol/intents.rs`, with the concrete registry in `src/protocol.rs`.
-- Smoke coverage belongs in black-box CLI tests against the real `match`
+- Smoke coverage belongs in black-box CLI tests against the real `con`
   binary; there is no product `demo` or `smoke` command.
 - The old source island and its boundary test were deleted.
 

@@ -36,12 +36,12 @@ The architecture holds when:
   to call another stage directly.
 - There is no event-bus layer. The runtime coordinates explicit SQL-backed
   queues: pending facts, time wakes, durable intents, and ephemeral intents.
-- The product-facing binary is `match`; the package may still be named `topo`.
+- The product-facing binary is `con`; the package may still be named `topo`.
 - Product entry is a thin root function that supplies the CLI name and protocol
   registry to generic core runtime/app code. It must not contain
   product-specific runtime logic.
 - There is no product `demo` or `smoke` command. Smoke coverage belongs in
-  black-box CLI tests against the real `match` binary.
+  black-box CLI tests against the real `con` binary.
 - Protocol state is organized by scope, not by layer. Each scope is one
   module: `src/protocol/<scope>.rs` is the scope manifest and
   `src/protocol/<scope>/` holds that scope's fact families and intent handlers
@@ -70,10 +70,10 @@ The architecture holds when:
 
 ## Current Runtime Shape
 
-- `src/main.rs` delegates to the product-facing `match` entrypoint.
+- `src/main.rs` delegates to the product-facing Context entrypoint.
 - Product commands run through the generic core runtime/app facade configured
   by `src/protocol/registry.rs`.
-- Smoke behavior is tested through black-box CLI tests on the real `match`
+- Smoke behavior is tested through black-box CLI tests on the real `con`
   binary, not through a demo command or demo source file.
 - The runtime calls SQL-backed core pipeline workers under
   `src/core/pipeline/`: `project_pending_facts.rs` projects pending facts and
@@ -81,7 +81,7 @@ The architecture holds when:
   `dispatch.rs` claims durable or ephemeral intents, and `commit_effects.rs`
   commits shared facts, purges, row mutations, and queued work.
 - Scope modules under `src/protocol/<scope>/` own both fact families and intent
-  handlers; they are exercised by poc-10 tests and route production `match`
+  handlers; they are exercised by poc-10 tests and route production Context
   behavior through the target runtime. Each scope manifest
   `src/protocol/<scope>.rs` declares its fact families and intent handlers.
 - Connection-frame receive can open fixed connection frames that carry signed key-wrap
@@ -147,7 +147,7 @@ The target source tree makes ownership visible at the top level:
 src/
   lib.rs
   main.rs
-  match_app.rs
+  context_app.rs
   core.rs
   protocol.rs
 
@@ -301,7 +301,8 @@ fixed daemon cycle:
 
 ```rust
 pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {
-    name: "match",
+    display_name: "Context",
+    command_name: "con",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
         inbound_network_intent: Some(receive_network_frame_intent),

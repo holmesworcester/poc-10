@@ -19,7 +19,7 @@ has been removed; new behavior belongs in `src/core` or `src/protocol`.
   declared fact inputs, then return facts, purged fact ids, and follow-up
   intents. They must not own protocol fact layouts or read-model projection
   rows.
-- The product-facing binary is `match`. `src/match_app.rs` should stay a thin
+- The product-facing binary is `con`. `src/context_app.rs` should stay a thin
   app boundary around the core runtime and protocol registry.
 
 ## File Ownership
@@ -137,7 +137,7 @@ keys already observed before retirement.
 
 ## Tests And Proof
 
-- Functional behavior is proven by black-box `match` CLI/network tests or by
+- Functional behavior is proven by black-box `con` CLI/network tests or by
   focused target projector/handler tests.
 - Boundary tests are part of the architecture. If a new file shape or import is
   correct, update the boundary test with the rule that makes it correct.

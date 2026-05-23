@@ -32,7 +32,7 @@ Reviewer instructions:
 
 ## Source Shape
 
-- [x] Product binary is `match`, not `topo`, `demo`, or `smoke`.
+- [x] Product binary is `con`, not `topo`, `demo`, or `smoke`.
 - [x] The old source island has been removed from the target tree.
 - [x] The old root command/fact/handler manifests are gone; manifests live
   under `src/protocol/`.
@@ -224,13 +224,13 @@ Reviewer instructions:
   display joins live in an explicit read-model/query module, not hidden inside
   a leaf event module's `queries.rs`.
 - [ ] `cli.rs` only parses user input and formats output.
-- [x] Product `match_app.rs` is routing and lifecycle only. It must not contain
+- [x] Product `context_app.rs` is routing and lifecycle only. It must not contain
   command business logic, protocol-specific row scans, key derivation, purge
   logic, or command chaining that belongs in fact-module commands/read models
   or handlers.
 - [ ] Commands return ids/output only after submitted facts/intents are drained
   enough for read-your-writes behavior.
-- [ ] Black-box CLI tests use the real `match` binary and real daemon/runtime
+- [ ] Black-box CLI tests use the real `con` binary and real daemon/runtime
   path. They do not seed rows or assert removed queue state.
 - [x] First make poc-8 CLI suites true black-box behavior tests, prove them
   green there, then port those contracts to poc-10 unchanged except for harness
@@ -293,7 +293,7 @@ Reviewer instructions:
   `users`, `peers`, and normal black-box multi-daemon membership flows are
   ported to the target runtime and covered by `invite_accept_cli_test`.
 - [x] Target `generate`, `content-count`, `send`, and `messages` have active
-  black-box coverage through the `match` binary.
+  black-box coverage through the `con` binary.
 - [x] Encryption CLI flows for recipient rotation, key wrap/access, chop, and
   invite-server key-recipient denial are active and green.
 - [ ] `view`, `react`, file send/save/listing, disappearing-message
@@ -320,7 +320,7 @@ Reviewer instructions:
   in-range encrypted messages whose deps/key offers are out of range.
 - [ ] Purge is not fully decomposed into bounded cascade, physical byte purge,
   retained-secret retirement, and sync-index repair handlers.
-- [ ] `match_app.rs` still owns product command routing directly. Active
+- [ ] `context_app.rs` still owns product command routing directly. Active
   guardrail now proves it does not own protocol command business logic; end
   state is a generic core app facade driven by protocol command registries.
 - [ ] Content projector parity review found remaining real checks to add:

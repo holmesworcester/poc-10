@@ -285,7 +285,7 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
 }
 
 #[test]
-fn cutover_target_runtime_facade_owns_match_app() {
+fn cutover_target_runtime_facade_owns_context_app() {
     let root = root();
     assert!(
         root.join("src/core/runtime.rs").is_file(),
@@ -296,7 +296,7 @@ fn cutover_target_runtime_facade_owns_match_app() {
         "delete product-specific src/match_runtime.rs after moving its logic into generic core runtime/app plus protocol registry"
     );
 
-    let match_app = source_text(&root.join("src/match_app.rs"));
+    let context_app = source_text(&root.join("src/context_app.rs"));
     let forbidden = [
         "MatchRuntime",
         "match_runtime",
@@ -307,11 +307,11 @@ fn cutover_target_runtime_facade_owns_match_app() {
     ];
     let offenders = forbidden
         .into_iter()
-        .filter(|needle| match_app.contains(needle))
+        .filter(|needle| context_app.contains(needle))
         .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
-        "match_app still exposes product-specific runtime or legacy bridge logic: {}",
+        "context_app still exposes product-specific runtime or legacy bridge logic: {}",
         offenders.join(", ")
     );
 }
@@ -323,7 +323,9 @@ fn cutover_demo_and_smoke_surfaces_are_removed() {
         "src/demo.rs",
         "src/demo",
         "examples/match_demo.rs",
+        "examples/con_demo.rs",
         "tests/match_smoke.rs",
+        "tests/con_smoke.rs",
     ]
     .into_iter()
     .filter(|path| root.join(path).exists())
@@ -334,14 +336,14 @@ fn cutover_demo_and_smoke_surfaces_are_removed() {
         stale_paths.join("\n")
     );
 
-    let app = source_text(&root.join("src/match_app.rs"));
+    let app = source_text(&root.join("src/context_app.rs"));
     let offenders = ["Some(\"demo\")", "Some(\"smoke\")", "\"demo\"", "\"smoke\""]
         .into_iter()
         .filter(|needle| app.contains(needle))
         .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
-        "match_app should not expose demo or smoke commands: {}",
+        "context_app should not expose demo or smoke commands: {}",
         offenders.join(", ")
     );
 }
@@ -802,9 +804,9 @@ fn cutover_queries_are_not_context_capability_or_cross_module_dumping_grounds() 
 }
 
 #[test]
-fn cutover_match_app_does_not_own_command_business_logic() {
+fn cutover_context_app_does_not_own_command_business_logic() {
     let root = root();
-    let app = root.join("src/match_app.rs");
+    let app = root.join("src/context_app.rs");
     let offenders = matching_code_lines(
         &root,
         vec![app],
@@ -824,7 +826,7 @@ fn cutover_match_app_does_not_own_command_business_logic() {
     );
     assert!(
         offenders.is_empty(),
-        "match_app.rs should route CLI commands through module-local command/read-model surfaces; protocol business logic is still embedded here:\n{}",
+        "context_app.rs should route CLI commands through module-local command/read-model surfaces; protocol business logic is still embedded here:\n{}",
         offenders.join("\n")
     );
 }

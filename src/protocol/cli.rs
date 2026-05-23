@@ -1,4 +1,4 @@
-//! Command host functions for the concrete `match` protocol.
+//! Command host functions for the concrete Context protocol.
 //!
 //! Fact-scope `cli.rs` modules own argv parsing, text formatting, and command
 //! output construction. Core owns runtime opening and final printing. These

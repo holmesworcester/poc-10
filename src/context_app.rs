@@ -1,4 +1,4 @@
-//! Product-facing `match` binary entrypoint.
+//! Product-facing Context binary entrypoint.
 //!
 //! The binary chooses the concrete protocol description. Core does the generic
 //! CLI/daemon plumbing from that description; protocol modules own the actual

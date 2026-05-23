@@ -17,7 +17,7 @@
 //! shape: `--db`, daemon lifecycle commands, help, runtime opening, and command
 //! dispatch. Change this file when every protocol should gain a new hosting
 //! behavior. Change the protocol registry or command modules when only the
-//! concrete `match` protocol changes.
+//! concrete protocol changes.
 //!
 //! The runner deliberately returns display lines only at the edge. Commands
 //! produce facts, intents, rows, or query output through their own modules; core
@@ -33,8 +33,10 @@ use std::time::{Duration, Instant};
 
 /// Complete protocol declaration needed by the generic CLI runner.
 pub struct ProtocolDescription<C: 'static> {
+    /// Product name used in help text.
+    pub display_name: &'static str,
     /// Program name used in usage output.
-    pub name: &'static str,
+    pub command_name: &'static str,
     /// Runtime schema, projection, matching, and handler declarations.
     pub runtime: RuntimeDescription,
     /// Long-running daemon declarations.
@@ -62,7 +64,7 @@ pub fn run<C: 'static>(
     {
         println!(
             "{}",
-            usage(description, &format!("Topo {} CLI", description.name))
+            usage(description, &format!("{} CLI", description.display_name))
         );
         return Ok(());
     }
@@ -80,19 +82,19 @@ pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> 
     lines.extend([
         format!(
             "  {} --db PATH start --listen IP PORT [--tick-ms N] [--quiet-ms N]",
-            description.name
+            description.command_name
         ),
-        format!("  {} --db PATH stop", description.name),
-        format!("  {} --db PATH reset", description.name),
+        format!("  {} --db PATH stop", description.command_name),
+        format!("  {} --db PATH reset", description.command_name),
         format!(
             "  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
-            description.name
+            description.command_name
         ),
     ]);
     for command in description.commands {
         lines.push(format!(
             "  {} --db PATH {}",
-            description.name, command.usage
+            description.command_name, command.usage
         ));
     }
     lines.push(String::new());
@@ -224,8 +226,13 @@ fn run_protocol_command<C: 'static>(
         .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
     let runtime = Runtime::open_disk(&description.runtime, &db)?;
     let mut context = (description.context)(runtime, parsed.db);
-    cli::run(description.commands, &mut context, &parsed.command)
-        .map_err(|err| with_usage_footer(description, err))
+    cli::run(
+        description.command_name,
+        description.commands,
+        &mut context,
+        &parsed.command,
+    )
+    .map_err(|err| with_usage_footer(description, err))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,7 +336,7 @@ fn parse_positive_u64<C: 'static>(
 fn assert_usage<C: 'static>(description: &ProtocolDescription<C>) -> String {
     format!(
         "assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]\nusage:\n  {} --db PATH assert eventually COMMAND [ARGS...] FIELD OP VALUE [--timeout-ms N] [--poll-ms N]",
-        description.name
+        description.command_name
     )
 }
 

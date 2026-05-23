@@ -21,7 +21,8 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn executable_protocol_tables_name_the_target_surfaces() {
-    assert_eq!(MATCH_PROTOCOL.name, "match");
+    assert_eq!(MATCH_PROTOCOL.display_name, "Context");
+    assert_eq!(MATCH_PROTOCOL.command_name, "con");
     assert_eq!(MATCH_RUNTIME.schema_sources.len(), 2);
     assert!(MATCH_RUNTIME
         .schema_sources

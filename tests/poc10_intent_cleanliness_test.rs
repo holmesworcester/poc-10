@@ -1582,23 +1582,23 @@ fn protocol_cli_files_do_not_own_app_runtime_effects() {
 }
 
 #[test]
-fn match_app_selects_protocol_description() {
+fn context_app_selects_protocol_description() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/match_app.rs");
+    let path = root.join("src/context_app.rs");
     let text = source_text(&path);
     let production = strip_line_comments(production_text_before_unit_tests(&text));
 
     assert!(
         production.contains("core::app::run(&crate::protocol::app::MATCH_PROTOCOL"),
-        "match_app.rs should only choose the concrete protocol description"
+        "context_app.rs should only choose the concrete protocol description"
     );
     assert!(
         !production.contains("match parsed.command.first"),
-        "match_app.rs must not restore the broad manual command-name router"
+        "context_app.rs must not restore the broad manual command-name router"
     );
     assert!(
         !production.contains("MATCH_COMMANDS") && !production.contains("MATCH_CLI_COMMANDS"),
-        "match_app.rs should not manually wire the protocol command table"
+        "context_app.rs should not manually wire the protocol command table"
     );
     for command in [
         "create-workspace",
@@ -1611,7 +1611,7 @@ fn match_app_selects_protocol_description() {
         let needle = format!("Some(\"{command}\")");
         assert!(
             !production.contains(&needle),
-            "match_app.rs must not dispatch protocol command {command:?} through a broad top-level match"
+            "context_app.rs must not dispatch protocol command {command:?} through a broad top-level match"
         );
     }
     let core_app = source_text(&root.join("src/core/app.rs"));

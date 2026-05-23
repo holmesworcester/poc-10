@@ -5,7 +5,7 @@ edition = "2021"
 autobins = false
 
 [[bin]]
-name = "match"
+name = "con"
 path = "src/main.rs"
 
 [dependencies]

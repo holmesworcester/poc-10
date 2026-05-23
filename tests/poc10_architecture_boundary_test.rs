@@ -274,7 +274,7 @@ fn poc10_root_exports_protocol_owned_manifests() {
     }
 
     let lib = source_text(&root.join("src/lib.rs"));
-    for required in ["pub mod core;", "pub mod match_app;", "pub mod protocol;"] {
+    for required in ["pub mod context_app;", "pub mod core;", "pub mod protocol;"] {
         assert!(
             lib.contains(required),
             "src/lib.rs must expose only root crate manifests: missing {required}"
@@ -290,7 +290,9 @@ fn poc10_has_no_product_demo_or_smoke_command_surface() {
         "src/demo.rs",
         "src/demo",
         "examples/match_demo.rs",
+        "examples/con_demo.rs",
         "tests/match_smoke.rs",
+        "tests/con_smoke.rs",
     ] {
         assert!(
             !root.join(forbidden).exists(),
@@ -298,7 +300,7 @@ fn poc10_has_no_product_demo_or_smoke_command_surface() {
         );
     }
 
-    let app = source_text(&root.join("src/match_app.rs"));
+    let app = source_text(&root.join("src/context_app.rs"));
     let forbidden = ["Some(\"demo\")", "\"demo\"", "Some(\"smoke\")", "\"smoke\""];
     let offenders = forbidden
         .into_iter()
