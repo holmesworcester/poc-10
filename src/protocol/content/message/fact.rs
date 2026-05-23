@@ -23,7 +23,7 @@ pub struct ContentMessageFact {
     pub frontier_id: FrontierId,
     pub local_history_node_secret_id: FactId,
     pub expires_at_minute: u64,
-    pub disappearing_setting_id: FactId,
+    pub retention_policy_id: FactId,
     pub minute: u64,
     pub nonce: [u8; NONCE_BYTES],
     pub ciphertext: Vec<u8>,

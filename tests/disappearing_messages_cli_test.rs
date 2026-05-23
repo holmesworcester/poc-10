@@ -170,25 +170,25 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: later admin-signed `content::disappearing_messages_setting` facts
-// supersede earlier ones; messages stamped under an earlier setting
+// Test 3: later admin-signed `content::retention_policy` facts
+// supersede earlier ones; messages stamped under an earlier policy
 // retain their stamped TTL. `workspace::commands::create` emits the
-// workspace's initial setting alongside the workspace fact, so the
-// "first" setting and any later admin `disappearing-set` form a chain
-// of settings — there is no separate "workspace TTL fallback" anymore.
+// workspace's initial retention policy alongside the workspace fact, so the
+// first policy and any later admin `disappearing-set` form a chain
+// of policies — there is no separate "workspace TTL fallback" anymore.
 //
 // This is the load-bearing invariant from `auth.md`:
 // "Late arrivals do not retroactively change message expiry."
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_old_messages() {
+fn cli_retention_policy_supersedes_workspace_ttl_without_rewriting_old_messages() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let alice_port = free_port();
 
     // Workspace TTL = 1 minute at creation.
-    let workspace_id = create_workspace_with_ttl(&alice, "Setting", "alice", "alice-laptop", 1);
+    let workspace_id = create_workspace_with_ttl(&alice, "Policy", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Pin the clock and author the first message at minute 100. This is
@@ -198,7 +198,7 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "early"]));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
 
-    // Admin authors a setting fact raising TTL to 5. After the setting
+    // Admin authors a retention policy fact raising TTL to 5. After the policy
     // is admitted, subsequent messages are stamped with TTL=5; the
     // previously-authored "early" message's stamped expiry is unchanged.
     assert_success(topo(&[
@@ -210,15 +210,15 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
     ]));
 
     // Author the second message at the same minute 100 but after the new
-    // setting. It should be stamped with expires_at_minute = 100 + 5 = 105.
-    // (No clock advance — the setting takes effect immediately for the
+    // policy. It should be stamped with expires_at_minute = 100 + 5 = 105.
+    // (No clock advance — the policy takes effect immediately for the
     // next authoring.)
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "late"]));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
 
     // Spawn the daemon and advance the clock past minute 101 but before
     // minute 105: the "early" message must expire, but the "late" message
-    // must remain visible. This is the key claim — the setting did not
+    // must remain visible. This is the key claim — the policy did not
     // retroactively rewrite "early"'s expiry to 105, and the new message
     // really did pick up the new TTL.
     let _alice_daemon = spawn_daemon(&alice, alice_port);
@@ -546,11 +546,11 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 //
 // Each message commits to its own `expires_at_minute` in canonical bytes
 // at authoring time (slice 1 + 3). The admin-signed
-// `content::disappearing_messages_setting` fact tightens the TTL used for
+// `content::retention_policy` fact tightens the TTL used for
 // SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
 // messages. The deletion floor is intentionally NOT advanced here — the
 // CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
-// so the setting's only effect is on the future-stamping TTL, not on the
+// so the policy's only effect is on the future-stamping TTL, not on the
 // dispatcher's chop floor.
 //
 // What this test proves:
@@ -558,7 +558,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 //     minute retire independently (Y first, then X), rather than coalescing
 //     by minute, which would be incorrect under mutable TTL because the two
 //     leaves carry different per-message deadlines.
-//   * The setting tightening is a future-stamping change only: it does
+//   * The policy tightening is a future-stamping change only: it does
 //     not retroactively rewrite X's stamped expiry, and it does not
 //     trigger a chop (the floor stays at 0).
 // ---------------------------------------------------------------------------

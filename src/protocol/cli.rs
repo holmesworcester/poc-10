@@ -334,14 +334,12 @@ pub(crate) fn disappearing_set(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = content::disappearing_messages_setting::cli::parse_disappearing_set_args(
-        cli_args.values(),
-    )?;
+    let args = content::retention_policy::cli::parse_disappearing_set_args(cli_args.values())?;
     ctx.settle_local_command_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
-    let output = content::disappearing_messages_setting::commands::author_set_with_auto_floor(
+    let output = content::retention_policy::commands::author_set_with_auto_floor(
         ctx.runtime().store(),
-        content::disappearing_messages_setting::commands::AuthorSetting {
+        content::retention_policy::commands::AuthorPolicy {
             workspace_id: args.workspace_id,
             now_ms,
             ttl_minutes: args.ttl_minutes,
@@ -353,10 +351,7 @@ pub(crate) fn disappearing_set(
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
     Ok(CliOutput::lines(vec![
-        format!(
-            "setting_fact_id: {}",
-            encode_hex_32(&receipt.setting_fact_id)
-        ),
+        format!("policy_fact_id: {}", encode_hex_32(&receipt.policy_fact_id)),
         format!("ttl_minutes: {}", args.ttl_minutes),
         format!("previous_floor_minute: {}", receipt.previous_floor_minute),
         format!("new_floor_minute: {}", receipt.new_floor_minute),
@@ -368,23 +363,19 @@ pub(crate) fn disappearing_status(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let workspace_id = content::disappearing_messages_setting::cli::status_workspace_id(args)?;
+    let workspace_id = content::retention_policy::cli::status_workspace_id(args)?;
     ctx.settle_local_command_work()?;
     settle_due_message_time_wakes(ctx)?;
-    let report = content::disappearing_messages_setting::commands::status_report(
-        ctx.runtime().store(),
-        workspace_id,
-    )?;
-    Ok(content::disappearing_messages_setting::cli::status_output(
-        &report,
-    ))
+    let report =
+        content::retention_policy::commands::status_report(ctx.runtime().store(), workspace_id)?;
+    Ok(content::retention_policy::cli::status_output(&report))
 }
 
 fn settle_due_message_time_wakes(ctx: &mut MatchCliContext) -> Result<(), String> {
     let Some(now_ms) = clock::logical_time(ctx.runtime().store())? else {
         return Ok(());
     };
-    let now_minute = now_ms / content::disappearing_messages_setting::commands::UNIX_MINUTE_MS;
+    let now_minute = now_ms / content::retention_policy::commands::UNIX_MINUTE_MS;
     for _ in 0..COMMAND_SETTLE_ROUNDS {
         let due = ctx.runtime_mut().process_due_time_range(
             content::message::expiration_timeline(),
@@ -404,34 +395,23 @@ pub(crate) fn disappearing_tighten(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = content::disappearing_messages_setting::cli::parse_disappearing_tighten_args(
-        cli_args.values(),
-    )?;
+    let args = content::retention_policy::cli::parse_disappearing_tighten_args(cli_args.values())?;
     if !args.yes {
         return Err("disappearing-tighten requires --yes in the target CLI".to_string());
     }
     ctx.settle_local_command_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
-    let input = content::disappearing_messages_setting::commands::AuthorTighten {
+    let input = content::retention_policy::commands::AuthorTighten {
         workspace_id: args.workspace_id,
         now_ms,
         ttl_minutes: args.ttl_minutes,
     };
-    let plan = content::disappearing_messages_setting::commands::plan_tighten(
-        ctx.runtime().store(),
-        input,
-    )?;
-    let output = content::disappearing_messages_setting::commands::author_tighten(
-        ctx.runtime().store(),
-        input,
-    )?;
+    let plan = content::retention_policy::commands::plan_tighten(ctx.runtime().store(), input)?;
+    let output = content::retention_policy::commands::author_tighten(ctx.runtime().store(), input)?;
     let receipt = ctx.submit_and_settle(output)?;
     ctx.settle_local_command_work()?;
     Ok(CliOutput::lines(vec![
-        format!(
-            "setting_fact_id: {}",
-            encode_hex_32(&receipt.setting_fact_id)
-        ),
+        format!("policy_fact_id: {}", encode_hex_32(&receipt.policy_fact_id)),
         format!("ttl_minutes: {}", args.ttl_minutes),
         format!("previous_floor_minute: {}", receipt.previous_floor_minute),
         format!("new_floor_minute: {}", receipt.target_floor_minute),
@@ -443,12 +423,12 @@ pub(crate) fn disappearing_compact(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let workspace_id = content::disappearing_messages_setting::cli::compact_workspace_id(args)?;
+    let workspace_id = content::retention_policy::cli::compact_workspace_id(args)?;
     ctx.settle_local_command_work()?;
     let now_ms = next_cli_timestamp(ctx.runtime())?;
-    let output = content::disappearing_messages_setting::commands::author_compact(
+    let output = content::retention_policy::commands::author_compact(
         ctx.runtime().store(),
-        content::disappearing_messages_setting::commands::AuthorCompact {
+        content::retention_policy::commands::AuthorCompact {
             workspace_id,
             now_ms,
         },
@@ -458,10 +438,7 @@ pub(crate) fn disappearing_compact(
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
     Ok(CliOutput::lines(vec![
-        format!(
-            "setting_fact_id: {}",
-            encode_hex_32(&receipt.setting_fact_id)
-        ),
+        format!("policy_fact_id: {}", encode_hex_32(&receipt.policy_fact_id)),
         format!("ttl_minutes: {}", receipt.ttl_minutes),
         format!("previous_floor_minute: {}", receipt.previous_floor_minute),
         format!("new_floor_minute: {}", receipt.new_floor_minute),

@@ -61,7 +61,7 @@ fixed-length already or open deviations that should be fixed:
 - `auth/key_wrap/layout.rs:476` `mask_prefix_to_depth` validates that
   `event_id_prefix` (a fixed `[u8; 32]`) is masked to `bit_depth`. Content
   invariant on a fixed field; expressible as a schema constraint.
-- `disappearing_messages_setting/layout.rs` encodes `Option<FactId>` as a zero
+- `retention_policy/layout.rs` encodes `Option<FactId>` as a zero
   sentinel on a fixed `[u8; 32]`. Encoding convention; schema can declare it.
 - `auth_workspace/layout.rs` uses `FixedSlot<WORKSPACE_NAME_BYTES>` with
   NUL-terminated decode. Already guardrail-compliant.

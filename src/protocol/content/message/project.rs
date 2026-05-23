@@ -23,7 +23,7 @@ use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
 use crate::protocol::auth::user;
 use crate::protocol::content::{
-    disappearing_messages_setting, message_deletion, purge::project as content_purge,
+    message_deletion, purge::project as content_purge, retention_policy,
 };
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -372,12 +372,13 @@ fn retention_floor_reached(
 ) -> Result<Option<u64>, String> {
     let mut floor = 0u64;
     for (_offer, payload) in context.matched_payloads_for(need) {
-        let setting = disappearing_messages_setting::decode_fact_payload(payload.body())
-            .map_err(|_| "content message retention floor context is not a setting".to_string())?;
-        if setting.workspace_id != message.workspace_id {
+        let policy = retention_policy::decode_fact_payload(payload.body()).map_err(|_| {
+            "content message retention floor context is not a retention policy".to_string()
+        })?;
+        if policy.workspace_id != message.workspace_id {
             return Err("content message retention floor workspace mismatch".to_string());
         }
-        floor = floor.max(setting.retire_minute);
+        floor = floor.max(policy.retire_minute);
     }
     Ok((message.minute < floor).then_some(floor))
 }
@@ -944,7 +945,7 @@ mod projector_tests {
             frontier_id,
             local_history_node_secret_id: [0; 32],
             expires_at_minute: u64::MAX,
-            disappearing_setting_id: [0; 32],
+            retention_policy_id: [0; 32],
             minute,
             nonce,
             ciphertext,

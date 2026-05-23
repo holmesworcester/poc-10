@@ -1,8 +1,8 @@
-//! Command-facing disappearing-messages setting constructors.
+//! Command-facing retention policy constructors.
 //!
 //! These helpers read projected state, compute the monotonic floor, and return
-//! a proposed setting fact. Projection and purge execution stay in the target
-//! runtime.
+//! a proposed retention policy fact. Projection and purge execution stay in the
+//! target runtime.
 
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
@@ -11,13 +11,13 @@ use crate::core::store::Store;
 use crate::protocol::{auth, content};
 use std::collections::BTreeSet;
 
-use super::fact::{DisappearingMessagesSettingFact, SCOPE_KIND_WORKSPACE};
+use super::fact::{RetentionPolicyFact, SCOPE_KIND_WORKSPACE};
 use super::{layout, queries};
 
 pub const UNIX_MINUTE_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AuthorSetting {
+pub struct AuthorPolicy {
     pub workspace_id: FactId,
     pub now_ms: u64,
     pub ttl_minutes: u32,
@@ -26,7 +26,7 @@ pub struct AuthorSetting {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorSetReport {
-    pub setting_fact_id: FactId,
+    pub policy_fact_id: FactId,
     pub previous_floor_minute: u64,
     pub new_floor_minute: u64,
 }
@@ -47,7 +47,7 @@ pub struct TightenPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorTightenReport {
-    pub setting_fact_id: FactId,
+    pub policy_fact_id: FactId,
     pub previous_floor_minute: u64,
     pub target_floor_minute: u64,
 }
@@ -60,7 +60,7 @@ pub struct AuthorCompact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorCompactReport {
-    pub setting_fact_id: FactId,
+    pub policy_fact_id: FactId,
     pub ttl_minutes: u32,
     pub previous_floor_minute: u64,
     pub new_floor_minute: u64,
@@ -69,9 +69,9 @@ pub struct AuthorCompactReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusReport {
     pub workspace_id: FactId,
-    pub setting_fact_id: Option<FactId>,
+    pub policy_fact_id: Option<FactId>,
     pub ttl_minutes: Option<u32>,
-    pub setting_floor_minute: u64,
+    pub policy_floor_minute: u64,
     pub last_chopped_floor: Option<u64>,
     pub now_minute: Option<u64>,
     pub horizon_floor: u64,
@@ -82,35 +82,35 @@ pub struct StatusReport {
 
 pub fn author_set_with_auto_floor(
     store: &Store,
-    input: AuthorSetting,
+    input: AuthorPolicy,
 ) -> Result<CommandOutput<AuthorSetReport>, String> {
     if input.ttl_minutes == 0 {
-        return Err("disappearing setting ttl_minutes must be non-zero".to_string());
+        return Err("retention policy ttl_minutes must be non-zero".to_string());
     }
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
-    let previous_setting_id = previous.as_ref().map(|row| row.setting_id);
+    let previous_policy_id = previous.as_ref().map(|row| row.policy_id);
     let previous_floor = previous.as_ref().map(|row| row.retire_minute).unwrap_or(0);
     let now_minute = input.now_ms / UNIX_MINUTE_MS;
     let auto_floor = previous_floor.max(now_minute.saturating_sub(u64::from(input.ttl_minutes)));
     let new_floor = match input.explicit_floor {
         Some(floor) if floor < previous_floor => {
-            return Err("disappearing setting floor must be monotonic non-decreasing".to_string());
+            return Err("retention policy floor must be monotonic non-decreasing".to_string());
         }
         Some(floor) => floor,
         None => auto_floor,
     };
 
-    let fact = setting_fact(
+    let fact = policy_fact(
         input.workspace_id,
-        previous_setting_id,
+        previous_policy_id,
         input.ttl_minutes,
         new_floor,
         author_user_id,
         input.now_ms,
     )?;
     Ok(CommandOutput::new(AuthorSetReport {
-        setting_fact_id: fact.id,
+        policy_fact_id: fact.id,
         previous_floor_minute: previous_floor,
         new_floor_minute: new_floor,
     })
@@ -119,7 +119,7 @@ pub fn author_set_with_auto_floor(
 
 pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, String> {
     if input.ttl_minutes == 0 {
-        return Err("disappearing setting ttl_minutes must be non-zero".to_string());
+        return Err("retention policy ttl_minutes must be non-zero".to_string());
     }
     let _author_user_id = local_admin_user_id(store, input.workspace_id)?;
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
@@ -128,7 +128,7 @@ pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, 
     let target_floor = now_minute.saturating_sub(u64::from(input.ttl_minutes));
     if target_floor < previous_floor {
         return Err(
-            "disappearing setting floor must be monotonic non-decreasing (current floor \
+            "retention policy floor must be monotonic non-decreasing (current floor \
              already exceeds now_minute - new_ttl_minutes; use disappearing-set instead)"
                 .to_string(),
         );
@@ -146,27 +146,27 @@ pub fn author_tighten(
 ) -> Result<CommandOutput<AuthorTightenReport>, String> {
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
-    let previous_setting_id = previous.as_ref().map(|row| row.setting_id);
+    let previous_policy_id = previous.as_ref().map(|row| row.policy_id);
     let previous_floor = previous.as_ref().map(|row| row.retire_minute).unwrap_or(0);
     let now_minute = input.now_ms / UNIX_MINUTE_MS;
     let target_floor = now_minute.saturating_sub(u64::from(input.ttl_minutes));
     if target_floor < previous_floor {
         return Err(
-            "disappearing setting floor must be monotonic non-decreasing (current floor \
+            "retention policy floor must be monotonic non-decreasing (current floor \
              already exceeds now_minute - new_ttl_minutes; use disappearing-set instead)"
                 .to_string(),
         );
     }
-    let fact = setting_fact(
+    let fact = policy_fact(
         input.workspace_id,
-        previous_setting_id,
+        previous_policy_id,
         input.ttl_minutes,
         target_floor,
         author_user_id,
         input.now_ms,
     )?;
     Ok(CommandOutput::new(AuthorTightenReport {
-        setting_fact_id: fact.id,
+        policy_fact_id: fact.id,
         previous_floor_minute: previous_floor,
         target_floor_minute: target_floor,
     })
@@ -177,24 +177,23 @@ pub fn author_compact(
     store: &Store,
     input: AuthorCompact,
 ) -> Result<CommandOutput<AuthorCompactReport>, String> {
-    let active = queries::active_for_workspace(store, input.workspace_id)?.ok_or_else(|| {
-        "no active disappearing-messages setting; use disappearing-set first".to_string()
-    })?;
+    let active = queries::active_for_workspace(store, input.workspace_id)?
+        .ok_or_else(|| "no active retention policy; use disappearing-set first".to_string())?;
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
     let now_minute = input.now_ms / UNIX_MINUTE_MS;
     let target_floor = active
         .retire_minute
         .max(now_minute.saturating_sub(u64::from(active.ttl_minutes)));
-    let fact = setting_fact(
+    let fact = policy_fact(
         input.workspace_id,
-        Some(active.setting_id),
+        Some(active.policy_id),
         active.ttl_minutes,
         target_floor,
         author_user_id,
         input.now_ms,
     )?;
     Ok(CommandOutput::new(AuthorCompactReport {
-        setting_fact_id: fact.id,
+        policy_fact_id: fact.id,
         ttl_minutes: active.ttl_minutes,
         previous_floor_minute: active.retire_minute,
         new_floor_minute: target_floor,
@@ -225,14 +224,14 @@ pub fn count_messages_below_minute(
 
 pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport, String> {
     let active = queries::active_for_workspace(store, workspace_id)?;
-    let setting_fact_id = active.as_ref().map(|row| row.setting_id);
+    let policy_fact_id = active.as_ref().map(|row| row.policy_id);
     let ttl_minutes = active.as_ref().map(|row| row.ttl_minutes);
-    let setting_floor_minute = active.as_ref().map(|row| row.retire_minute).unwrap_or(0);
+    let policy_floor_minute = active.as_ref().map(|row| row.retire_minute).unwrap_or(0);
     let now_minute = clock::logical_time(store)?.map(|ms| ms / UNIX_MINUTE_MS);
     let horizon_floor = now_minute
         .map(|minute| minute.saturating_sub(30 * 24 * 60))
         .unwrap_or(0);
-    let effective_floor = setting_floor_minute.max(horizon_floor);
+    let effective_floor = policy_floor_minute.max(horizon_floor);
     let message_tombstones = content::message::queries::message_tombstone_count_at_or_after(
         store,
         workspace_id,
@@ -243,13 +242,13 @@ pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport
         .filter(|row| row.minute >= horizon_floor)
         .count();
     let last_chopped_floor =
-        (horizon_floor > setting_floor_minute && horizon_floor > 0).then_some(horizon_floor);
+        (horizon_floor > policy_floor_minute && horizon_floor > 0).then_some(horizon_floor);
 
     Ok(StatusReport {
         workspace_id,
-        setting_fact_id,
+        policy_fact_id,
         ttl_minutes,
-        setting_floor_minute,
+        policy_floor_minute,
         last_chopped_floor,
         now_minute,
         horizon_floor,
@@ -259,17 +258,17 @@ pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport
     })
 }
 
-fn setting_fact(
+fn policy_fact(
     workspace_id: FactId,
-    supersedes_setting_id: Option<FactId>,
+    supersedes_policy_id: Option<FactId>,
     ttl_minutes: u32,
     retire_minute: u64,
     author_user_id: FactId,
     created_at_ms: u64,
 ) -> Result<Fact, String> {
-    let payload = DisappearingMessagesSettingFact {
+    let payload = RetentionPolicyFact {
         workspace_id,
-        supersedes_setting_id,
+        supersedes_policy_id,
         ttl_minutes,
         retire_minute,
         scope_kind: SCOPE_KIND_WORKSPACE,

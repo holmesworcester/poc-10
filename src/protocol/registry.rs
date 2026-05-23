@@ -312,7 +312,7 @@ CREATE TABLE IF NOT EXISTS file_deletion_rows (
 CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
     ON file_deletion_rows (deletion_id);
 
-CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 "#,
     row_tables: &[
         auth::workspace::rows::WORKSPACE_ROWS,
@@ -337,7 +337,7 @@ CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIM
         sync::have_id::rows::SYNC_HAVE_ID_ROWS,
         sync::need_id::rows::SYNC_NEED_ID_ROWS,
         sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
-        content::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
+        content::retention_policy::rows::RETENTION_POLICY_ROWS,
     ],
 };
 
@@ -423,22 +423,22 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("chop-now", auth::key_wrap::cli::CHOP_NOW_USAGE, chop_now),
     cli_command!(
         "disappearing-set",
-        content::disappearing_messages_setting::cli::DISAPPEARING_SET_USAGE,
+        content::retention_policy::cli::DISAPPEARING_SET_USAGE,
         disappearing_set
     ),
     cli_command!(
         "disappearing-status",
-        content::disappearing_messages_setting::cli::DISAPPEARING_STATUS_USAGE,
+        content::retention_policy::cli::DISAPPEARING_STATUS_USAGE,
         disappearing_status
     ),
     cli_command!(
         "disappearing-tighten",
-        content::disappearing_messages_setting::cli::DISAPPEARING_TIGHTEN_USAGE,
+        content::retention_policy::cli::DISAPPEARING_TIGHTEN_USAGE,
         disappearing_tighten
     ),
     cli_command!(
         "disappearing-compact",
-        content::disappearing_messages_setting::cli::DISAPPEARING_COMPACT_USAGE,
+        content::retention_policy::cli::DISAPPEARING_COMPACT_USAGE,
         disappearing_compact
     ),
     cli_command!("send", content::message::cli::SEND_USAGE, send),
@@ -515,7 +515,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     read_models::CONTENT_MESSAGE_ROWS,
     read_models::MESSAGE_DELETION_ROWS,
     read_models::REACTION_ROWS,
-    content::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
+    content::retention_policy::rows::RETENTION_POLICY_ROWS,
     auth::key_wrap::rows::KEY_WRAP_ROWS,
     auth::admin::rows::ADMIN_ROWS,
     auth::device_invite::rows::DEVICE_INVITE_ROWS,
@@ -604,7 +604,7 @@ projector_routes! {
     project_invite_server => auth::invite_server::layout::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector;
     project_admin => auth::admin::layout::TYPE_ADMIN, auth::admin::project::AdminProjector;
     project_invite_accepted => auth::invite_accepted::layout::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector;
-    project_disappearing_messages_setting => content::disappearing_messages_setting::layout::TYPE_DISAPPEARING_MESSAGES_SETTING, content::disappearing_messages_setting::project::DisappearingMessagesSettingProjector;
+    project_retention_policy => content::retention_policy::layout::TYPE_RETENTION_POLICY, content::retention_policy::project::RetentionPolicyProjector;
     project_sync_range_request => sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector;
     project_sync_encrypted_root => sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT, sync::encrypted_root::project::SyncEncryptedRootProjector;
     project_sync_shared_fact => sync::shared_fact::layout::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector;

@@ -9,7 +9,7 @@
 //!   frontier_id (32)
 //!   local_history_node_secret_id (32)
 //!   expires_at_minute (u64be)
-//!   disappearing_setting_id (32)
+//!   retention_policy_id (32)
 //!   minute (u64be)
 //!   nonce (24)
 //!   ciphertext (fixed slot)
@@ -33,7 +33,7 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.fixed(&fact.frontier_id);
     out.fixed(&fact.local_history_node_secret_id);
     out.u64be(fact.expires_at_minute);
-    out.fixed(&fact.disappearing_setting_id);
+    out.fixed(&fact.retention_policy_id);
     out.u64be(fact.minute);
     out.fixed(&fact.nonce);
     out.fixed_slot::<CIPHERTEXT_BYTES>(&fact.ciphertext)
@@ -56,7 +56,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
         frontier_id: reader.array().map_err(wire_err)?,
         local_history_node_secret_id: reader.array().map_err(wire_err)?,
         expires_at_minute: reader.u64be().map_err(wire_err)?,
-        disappearing_setting_id: reader.array().map_err(wire_err)?,
+        retention_policy_id: reader.array().map_err(wire_err)?,
         minute: reader.u64be().map_err(wire_err)?,
         nonce: reader.array().map_err(wire_err)?,
         ciphertext: reader.fixed_slot::<CIPHERTEXT_BYTES>().map_err(wire_err)?,
@@ -82,7 +82,7 @@ mod tests {
             frontier_id: [4; 32],
             local_history_node_secret_id: [5; 32],
             expires_at_minute: u64::MAX,
-            disappearing_setting_id: [6; 32],
+            retention_policy_id: [6; 32],
             minute: 3,
             nonce: [8; NONCE_BYTES],
             ciphertext: b"sealed".to_vec(),

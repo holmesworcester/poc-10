@@ -315,16 +315,13 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 Ok(Admission::global(server.created_at_ms))
             });
         }
-        content::disappearing_messages_setting::TYPE_DISAPPEARING_MESSAGES_SETTING => {
-            return admit_with_codec::<content::disappearing_messages_setting::Codec>(
-                bytes,
-                |setting| {
-                    Ok(Admission::workspace(
-                        setting.workspace_id,
-                        setting.created_at_ms,
-                    ))
-                },
-            );
+        content::retention_policy::TYPE_RETENTION_POLICY => {
+            return admit_with_codec::<content::retention_policy::Codec>(bytes, |policy| {
+                Ok(Admission::workspace(
+                    policy.workspace_id,
+                    policy.created_at_ms,
+                ))
+            });
         }
         content::reaction::TYPE_CONTENT_REACTION => {
             return Err("received content reaction fact must be signed".to_string());

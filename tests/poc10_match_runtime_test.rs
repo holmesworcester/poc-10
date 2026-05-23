@@ -211,7 +211,7 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
         frontier_id: input.frontier_id,
         local_history_node_secret_id: [0; 32],
         expires_at_minute: u64::MAX,
-        disappearing_setting_id: [0; 32],
+        retention_policy_id: [0; 32],
         minute,
         nonce,
         ciphertext,

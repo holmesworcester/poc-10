@@ -1,12 +1,13 @@
-//! Disappearing-messages setting projector (poc-10 target tree).
+//! Disappearing-messages retention policy projector (poc-10 target tree).
 //!
-//! POLICY. A disappearing_messages_setting is admitted iff:
+//! POLICY. A retention_policy is admitted iff:
 //!   1. STRUCTURAL. The body decodes, TTL/created time are non-zero, and
-//!      workspace-scoped settings name the workspace as their scope id.
+//!      workspace-scoped policies name the workspace as their scope id.
 //!   2. AUTHORITY. The authority context is either root workspace bootstrap or
 //!      an admin grant for the author; predecessor context must match scope.
-//!   3. MATERIALIZE. Once monotonicity is validated, write the setting row,
-//!      publish exact-fact context, and share the fact with the workspace.
+//!   3. MATERIALIZE. Once monotonicity is validated, write the retention
+//!      policy row, publish exact-fact context, and share the fact with the
+//!      workspace.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -17,19 +18,19 @@ use crate::protocol::auth;
 use crate::protocol::content::message;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
-use super::fact::DisappearingMessagesSettingFact;
-use super::rows::setting_row;
+use super::fact::RetentionPolicyFact;
+use super::rows::policy_row;
 
 #[derive(Debug, Clone, Default)]
-pub struct DisappearingMessagesSettingProjector;
+pub struct RetentionPolicyProjector;
 
-impl DisappearingMessagesSettingProjector {
+impl RetentionPolicyProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for DisappearingMessagesSettingProjector {
+impl Projector for RetentionPolicyProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -39,49 +40,47 @@ impl Projector for DisappearingMessagesSettingProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
+impl TypedProjector<super::Codec> for RetentionPolicyProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        setting: DisappearingMessagesSettingFact,
+        policy: RetentionPolicyFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        if setting.ttl_minutes == 0 {
-            return Err("disappearing setting ttl_minutes must be non-zero".to_string());
+        if policy.ttl_minutes == 0 {
+            return Err("retention policy ttl_minutes must be non-zero".to_string());
         }
-        if setting.created_at_ms == 0 {
-            return Err("disappearing setting created_at_ms must be non-zero".to_string());
+        if policy.created_at_ms == 0 {
+            return Err("retention policy created_at_ms must be non-zero".to_string());
         }
-        if setting.scope_kind == super::fact::SCOPE_KIND_WORKSPACE
-            && setting.scope_id != setting.workspace_id
+        if policy.scope_kind == super::fact::SCOPE_KIND_WORKSPACE
+            && policy.scope_id != policy.workspace_id
         {
-            return Err(
-                "disappearing setting workspace-scope id must match workspace_id".to_string(),
-            );
+            return Err("retention policy workspace-scope id must match workspace_id".to_string());
         }
 
         // 2. Authority and predecessor context.
-        let authority_need = if setting.supersedes_setting_id.is_none()
-            && setting.author_user_id == setting.workspace_id
+        let authority_need = if policy.supersedes_policy_id.is_none()
+            && policy.author_user_id == policy.workspace_id
         {
             crate::core::context::ContextNeed::range(
                 fact.id,
                 "auth_workspace",
                 crate::core::facts::FactScope::Global,
-                setting.workspace_id,
-                setting.workspace_id,
+                policy.workspace_id,
+                policy.workspace_id,
             )
         } else {
             crate::core::context::ContextNeed::range(
                 fact.id,
                 "auth_admin",
-                auth::workspace::scope(setting.workspace_id),
-                setting.author_user_id,
-                setting.author_user_id,
+                auth::workspace::scope(policy.workspace_id),
+                policy.author_user_id,
+                policy.author_user_id,
             )
         };
-        let previous_need = setting.supersedes_setting_id.map(|previous_id| {
+        let previous_need = policy.supersedes_policy_id.map(|previous_id| {
             crate::core::context::ContextNeed::range(
                 fact.id,
                 "sync_exact_fact",
@@ -107,13 +106,13 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
             None
         };
 
-        validate_authority(authority_fact, &setting)?;
+        validate_authority(authority_fact, &policy)?;
         if let Some(previous) = previous_fact {
-            validate_previous(previous, &setting)?;
+            validate_previous(previous, &policy)?;
         }
 
         // 3. Materialize.
-        let row = setting_row(fact.id, &setting)?;
+        let row = policy_row(fact.id, &policy)?;
         Ok(waiting
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
@@ -122,41 +121,35 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
                 fact.id,
                 fact.id,
             ))
-            .offer(message::retention_floor_offer(
-                fact.id,
-                setting.workspace_id,
-            ))
+            .offer(message::retention_floor_offer(fact.id, policy.workspace_id))
             .row_mutation(RowMutation::PutRow(row))
             .intent(share_fact_with_workspace_intent_for_fact(
-                setting.workspace_id,
+                policy.workspace_id,
                 fact,
             )))
     }
 }
 
-fn validate_authority(
-    authority_fact: &Fact,
-    setting: &DisappearingMessagesSettingFact,
-) -> Result<(), String> {
+fn validate_authority(authority_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
     if let Ok(admin) = decode_admin_payload(authority_fact) {
-        if admin.workspace_id != setting.workspace_id {
-            return Err("disappearing setting authority admin workspace mismatch".to_string());
+        if admin.workspace_id != policy.workspace_id {
+            return Err("retention policy authority admin workspace mismatch".to_string());
         }
-        if admin.user_fact_id != setting.author_user_id {
-            return Err("disappearing setting authority admin user mismatch".to_string());
+        if admin.user_fact_id != policy.author_user_id {
+            return Err("retention policy authority admin user mismatch".to_string());
         }
         return Ok(());
     }
 
-    if setting.supersedes_setting_id.is_none()
-        && authority_fact.id == setting.workspace_id
-        && setting.author_user_id == setting.workspace_id
+    if policy.supersedes_policy_id.is_none()
+        && authority_fact.id == policy.workspace_id
+        && policy.author_user_id == policy.workspace_id
         && auth::workspace::decode_fact_payload(&authority_fact.bytes).is_ok()
     {
         return Ok(());
     }
 
-    Err("disappearing setting authority context is not valid admin authority".to_string())
+    Err("retention policy authority context is not valid admin authority".to_string())
 }
 
 fn decode_admin_payload(fact: &Fact) -> Result<auth::admin::fact::AdminFact, String> {
@@ -173,23 +166,21 @@ fn decode_admin_payload(fact: &Fact) -> Result<auth::admin::fact::AdminFact, Str
     }
 }
 
-fn validate_previous(
-    previous_fact: &Fact,
-    setting: &DisappearingMessagesSettingFact,
-) -> Result<(), String> {
-    if Some(previous_fact.id) != setting.supersedes_setting_id {
-        return Err("disappearing setting previous context payload id mismatch".to_string());
+fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
+    if Some(previous_fact.id) != policy.supersedes_policy_id {
+        return Err("retention policy previous context payload id mismatch".to_string());
     }
-    let previous = super::decode_fact_payload(&previous_fact.bytes)
-        .map_err(|_| "disappearing setting previous context must be a setting fact".to_string())?;
-    if previous.workspace_id != setting.workspace_id
-        || previous.scope_kind != setting.scope_kind
-        || previous.scope_id != setting.scope_id
+    let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
+        "retention policy previous context must be a retention policy fact".to_string()
+    })?;
+    if previous.workspace_id != policy.workspace_id
+        || previous.scope_kind != policy.scope_kind
+        || previous.scope_id != policy.scope_id
     {
-        return Err("disappearing setting previous scope mismatch".to_string());
+        return Err("retention policy previous scope mismatch".to_string());
     }
-    if setting.retire_minute < previous.retire_minute {
-        return Err("disappearing setting retire_minute regresses previous setting".to_string());
+    if policy.retire_minute < previous.retire_minute {
+        return Err("retention policy retire_minute regresses previous policy".to_string());
     }
     Ok(())
 }
@@ -204,16 +195,16 @@ mod projector_tests {
     use topo::protocol::auth;
     use topo::protocol::auth::admin;
     use topo::protocol::auth::admin::fact::AdminFact;
-    use topo::protocol::content::disappearing_messages_setting::fact::{
-        DisappearingMessagesSettingFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
+    use topo::protocol::content::retention_policy::fact::{
+        RetentionPolicyFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
     };
-    use topo::protocol::content::disappearing_messages_setting::{layout, project, rows};
+    use topo::protocol::content::retention_policy::{layout, project, rows};
     use topo::protocol::sync::share_fact_with_workspace;
 
-    fn workspace_setting() -> DisappearingMessagesSettingFact {
-        DisappearingMessagesSettingFact {
+    fn workspace_policy() -> RetentionPolicyFact {
+        RetentionPolicyFact {
             workspace_id: [1; 32],
-            supersedes_setting_id: None,
+            supersedes_policy_id: None,
             ttl_minutes: 60,
             retire_minute: 12_345,
             scope_kind: SCOPE_KIND_WORKSPACE,
@@ -224,11 +215,11 @@ mod projector_tests {
     }
 
     #[test]
-    fn setting_projector_waits_for_authority_then_materializes_row() {
-        let setting = workspace_setting();
-        let fact = setting_fact(&setting);
-        let authority = admin_fact(setting.workspace_id, setting.author_user_id);
-        let projector = project::DisappearingMessagesSettingProjector::new();
+    fn policy_projector_waits_for_authority_then_materializes_row() {
+        let policy = workspace_policy();
+        let fact = policy_fact(&policy);
+        let authority = admin_fact(policy.workspace_id, policy.author_user_id);
+        let projector = project::RetentionPolicyProjector::new();
 
         let waiting = projector
             .project(&fact, &ProjectionContext::default())
@@ -240,54 +231,54 @@ mod projector_tests {
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![authority_match(
-                    fact.id, &setting, authority,
+                    fact.id, &policy, authority,
                 )]),
             )
-            .expect("project setting");
+            .expect("project policy");
         assert_eq!(projected.effects.intents.len(), 1);
         assert_eq!(projected.effects.row_mutations.len(), 1);
         assert!(projected
             .offers
             .iter()
             .any(|offer| offer.role == "sync_exact_fact"));
-        assert_share_intent(&projected.effects.intents, setting.workspace_id, fact.id);
+        assert_share_intent(&projected.effects.intents, policy.workspace_id, fact.id);
 
         let row = decode_single_put_row(&projected.effects.row_mutations[0]);
-        assert_eq!(row.workspace_id, setting.workspace_id);
-        assert_eq!(row.setting_id, fact.id);
+        assert_eq!(row.workspace_id, policy.workspace_id);
+        assert_eq!(row.policy_id, fact.id);
         assert_eq!(row.scope_kind, SCOPE_KIND_WORKSPACE);
-        assert_eq!(row.scope_id, setting.workspace_id);
-        assert_eq!(row.ttl_minutes, setting.ttl_minutes);
-        assert_eq!(row.retire_minute, setting.retire_minute);
-        assert_eq!(row.author_user_id, setting.author_user_id);
-        assert_eq!(row.supersedes_setting_id, None);
-        assert_eq!(row.created_at_ms, setting.created_at_ms);
+        assert_eq!(row.scope_id, policy.workspace_id);
+        assert_eq!(row.ttl_minutes, policy.ttl_minutes);
+        assert_eq!(row.retire_minute, policy.retire_minute);
+        assert_eq!(row.author_user_id, policy.author_user_id);
+        assert_eq!(row.supersedes_policy_id, None);
+        assert_eq!(row.created_at_ms, policy.created_at_ms);
     }
 
     #[test]
-    fn setting_projector_requires_previous_setting_and_enforces_monotonic_retire_minute() {
-        let previous = DisappearingMessagesSettingFact {
+    fn policy_projector_requires_previous_policy_and_enforces_monotonic_retire_minute() {
+        let previous = RetentionPolicyFact {
             scope_kind: SCOPE_KIND_CHANNEL,
             scope_id: [9; 32],
             retire_minute: 99_000,
-            ..workspace_setting()
+            ..workspace_policy()
         };
-        let previous_fact = setting_fact(&previous);
-        let setting = DisappearingMessagesSettingFact {
-            supersedes_setting_id: Some(previous_fact.id),
+        let previous_fact = policy_fact(&previous);
+        let policy = RetentionPolicyFact {
+            supersedes_policy_id: Some(previous_fact.id),
             retire_minute: 99_999,
             ..previous.clone()
         };
-        let fact = setting_fact(&setting);
-        let authority = admin_fact(setting.workspace_id, setting.author_user_id);
-        let projector = project::DisappearingMessagesSettingProjector::new();
+        let fact = policy_fact(&policy);
+        let authority = admin_fact(policy.workspace_id, policy.author_user_id);
+        let projector = project::RetentionPolicyProjector::new();
 
         let waiting = projector
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![authority_match(
                     fact.id,
-                    &setting,
+                    &policy,
                     authority.clone(),
                 )]),
             )
@@ -299,23 +290,23 @@ mod projector_tests {
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
-                    authority_match(fact.id, &setting, authority.clone()),
+                    authority_match(fact.id, &policy, authority.clone()),
                     previous_match(fact.id, previous_fact.clone()),
                 ]),
             )
             .expect("matched previous projects");
-        assert_share_intent(&projected.effects.intents, setting.workspace_id, fact.id);
+        assert_share_intent(&projected.effects.intents, policy.workspace_id, fact.id);
         let row = decode_single_put_row(&projected.effects.row_mutations[0]);
         assert_eq!(row.scope_kind, SCOPE_KIND_CHANNEL);
         assert_eq!(row.scope_id, [9; 32]);
-        assert_eq!(row.supersedes_setting_id, Some(previous_fact.id));
+        assert_eq!(row.supersedes_policy_id, Some(previous_fact.id));
         assert_eq!(row.retire_minute, 99_999);
 
-        let regressing = DisappearingMessagesSettingFact {
+        let regressing = RetentionPolicyFact {
             retire_minute: 98_999,
-            ..setting
+            ..policy
         };
-        let regressing_fact = setting_fact(&regressing);
+        let regressing_fact = policy_fact(&regressing);
         let err = projector
             .project(
                 &regressing_fact,
@@ -329,44 +320,44 @@ mod projector_tests {
     }
 
     #[test]
-    fn setting_projector_rejects_zero_ttl() {
-        let mut setting = workspace_setting();
-        setting.ttl_minutes = 0;
-        let fact = setting_fact(&setting);
-        let err = project::DisappearingMessagesSettingProjector::new()
+    fn policy_projector_rejects_zero_ttl() {
+        let mut policy = workspace_policy();
+        policy.ttl_minutes = 0;
+        let fact = policy_fact(&policy);
+        let err = project::RetentionPolicyProjector::new()
             .project(&fact, &ProjectionContext::default())
             .expect_err("zero ttl must fail");
         assert!(err.to_lowercase().contains("ttl"), "{err}");
     }
 
     #[test]
-    fn setting_projector_rejects_workspace_scope_with_mismatched_scope_id() {
-        let mut setting = workspace_setting();
-        setting.scope_id = [99; 32];
-        let fact = setting_fact(&setting);
-        let err = project::DisappearingMessagesSettingProjector::new()
+    fn policy_projector_rejects_workspace_scope_with_mismatched_scope_id() {
+        let mut policy = workspace_policy();
+        policy.scope_id = [99; 32];
+        let fact = policy_fact(&policy);
+        let err = project::RetentionPolicyProjector::new()
             .project(&fact, &ProjectionContext::default())
             .expect_err("workspace-scope mismatch must fail");
         assert!(err.to_lowercase().contains("workspace"), "{err}");
     }
 
     #[test]
-    fn setting_projector_rejects_malformed_fact_bytes() {
+    fn policy_projector_rejects_malformed_fact_bytes() {
         let fact = Fact::new(FactScope::Global, 0, vec![0; 8]);
-        let err = project::DisappearingMessagesSettingProjector::new()
+        let err = project::RetentionPolicyProjector::new()
             .project(&fact, &ProjectionContext::default())
             .expect_err("malformed bytes must fail projection");
         assert!(
-            err.to_lowercase().contains("setting") || err.to_lowercase().contains("length"),
+            err.to_lowercase().contains("policy") || err.to_lowercase().contains("length"),
             "{err}"
         );
     }
 
-    fn setting_fact(setting: &DisappearingMessagesSettingFact) -> Fact {
+    fn policy_fact(policy: &RetentionPolicyFact) -> Fact {
         Fact::new(
             FactScope::Global,
-            setting.created_at_ms,
-            layout::encode_fact(setting).expect("encode setting"),
+            policy.created_at_ms,
+            layout::encode_fact(policy).expect("encode policy"),
         )
     }
 
@@ -387,23 +378,23 @@ mod projector_tests {
 
     fn authority_match(
         owner: [u8; 32],
-        setting: &DisappearingMessagesSettingFact,
+        policy: &RetentionPolicyFact,
         authority: Fact,
     ) -> MatchedContext {
         matched(
             crate::core::context::ContextNeed::range(
                 owner,
                 "auth_admin",
-                auth::workspace::scope(setting.workspace_id),
-                setting.author_user_id,
-                setting.author_user_id,
+                auth::workspace::scope(policy.workspace_id),
+                policy.author_user_id,
+                policy.author_user_id,
             ),
             crate::core::context::ContextOffer::range(
                 authority.id,
                 "auth_admin",
-                auth::workspace::scope(setting.workspace_id),
-                setting.author_user_id,
-                setting.author_user_id,
+                auth::workspace::scope(policy.workspace_id),
+                policy.author_user_id,
+                policy.author_user_id,
             ),
             authority,
         )
@@ -441,10 +432,11 @@ mod projector_tests {
         }
     }
 
-    fn decode_single_put_row(mutation: &RowMutation) -> rows::DisappearingMessagesSettingRow {
+    fn decode_single_put_row(mutation: &RowMutation) -> rows::RetentionPolicyRow {
         match mutation {
-            RowMutation::PutRow(row) => rows::decode_setting_row(&row.key, &row.value)
-                .expect("decode disappearing setting row"),
+            RowMutation::PutRow(row) => {
+                rows::decode_policy_row(&row.key, &row.value).expect("decode retention policy row")
+            }
             _ => panic!("expected opaque put row"),
         }
     }

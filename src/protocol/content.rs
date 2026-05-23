@@ -2,12 +2,12 @@
 //!
 //! Content facts are the user-visible workspace data and policy: messages,
 //! reactions, file metadata, file slices, deletion facts, purge coordinates,
-//! and disappearing-message settings. The modules here own both authoring flows
+//! and retention policies. The modules here own both authoring flows
 //! and projection rules for materialized content rows.
 //!
 //! Most content facts are gated by auth context. Projectors
 //! wait for workspace membership, signer authority, key material, deletion
-//! facts, or retention settings before they publish rows. When deletion or
+//! facts, or retention policies before they publish rows. When deletion or
 //! retention context matches, the target projector deletes only its own rows and
 //! fact bytes. Commands should build facts through the constructors in these
 //! modules; they should not update content read models directly.
@@ -16,7 +16,6 @@
 //! `layout.rs` and `project.rs`. To change what the CLI shows, start in
 //! `queries.rs` and the leaf `cli.rs`.
 
-pub mod disappearing_messages_setting;
 pub mod file;
 pub mod file_deletion;
 pub mod file_slice;
@@ -24,3 +23,4 @@ pub mod message;
 pub mod message_deletion;
 pub mod purge;
 pub mod reaction;
+pub mod retention_policy;

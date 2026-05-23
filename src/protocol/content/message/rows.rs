@@ -114,7 +114,7 @@ mod tests {
             frontier_id: [4; 32],
             local_history_node_secret_id: [5; 32],
             expires_at_minute: u64::MAX,
-            disappearing_setting_id: [6; 32],
+            retention_policy_id: [6; 32],
             minute: 1,
             nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
             ciphertext: b"sealed".to_vec(),

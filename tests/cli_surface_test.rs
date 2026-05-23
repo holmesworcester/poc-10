@@ -10,7 +10,7 @@
 //!   * `disappearing-set` auto-advances the floor every call (and
 //!     rejects regressing the floor when `--floor` is supplied below
 //!     the previous value).
-//!   * `disappearing-status` round-trips the active setting,
+//!   * `disappearing-status` round-trips the active policy,
 //!     dispatcher chop progress, and message + tombstone counts.
 //!   * `disappearing-tighten --yes` advances the floor and the
 //!     dispatcher then deletes pre-floor messages.
@@ -73,8 +73,8 @@ fn cli_disappearing_set_advances_floor_automatically() {
 // ---------------------------------------------------------------------------
 // Test 2: `disappearing-set --floor <below-previous>` exits non-zero
 // with the projector's monotonicity error and does NOT mutate the
-// active setting. This is the operator-facing equivalent of the
-// projector test `rejects_setting_whose_floor_is_below_previous_floor`.
+// active policy. This is the operator-facing equivalent of the
+// projector test that rejects a policy whose floor is below the previous floor.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -118,7 +118,7 @@ fn cli_disappearing_set_explicit_floor_below_previous_is_rejected() {
         "error must surface the projector's wording:\n{err}"
     );
 
-    // The active setting must be unchanged: status still shows 95.
+    // The active policy must be unchanged: status still shows 95.
     let status = assert_success(topo(&[
         "--db",
         &alice,
@@ -152,7 +152,7 @@ fn cli_disappearing_status_round_trips_known_setup() {
         &workspace_id,
         "5",
     ]));
-    let setting_fact_id = line_value(&set_out, "setting_fact_id");
+    let policy_fact_id = line_value(&set_out, "policy_fact_id");
 
     // Author 2 messages so live_messages == 2.
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "hello"]));
@@ -165,7 +165,7 @@ fn cli_disappearing_status_round_trips_known_setup() {
         &workspace_id,
     ]));
     assert_eq!(line_value(&status, "workspace"), workspace_id);
-    assert_eq!(line_value(&status, "setting_fact_id"), setting_fact_id);
+    assert_eq!(line_value(&status, "policy_fact_id"), policy_fact_id);
     assert_eq!(line_value(&status, "current_ttl_minutes"), "5");
     assert_eq!(line_value(&status, "current_floor_minute"), "95");
     assert_eq!(line_value(&status, "now_minute"), "100");
@@ -310,7 +310,7 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
     assert_eq!(line_value(&compact, "new_floor_minute"), "170");
     assert_eq!(line_value(&compact, "floor_delta_minutes"), "100");
 
-    // Active setting reflects the new floor; TTL is unchanged.
+    // Active policy reflects the new floor; TTL is unchanged.
     let post = assert_success(topo(&[
         "--db",
         &alice,

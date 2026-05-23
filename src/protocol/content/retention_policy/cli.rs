@@ -1,4 +1,4 @@
-//! CLI parsing and rendering for disappearing-message retention settings.
+//! CLI parsing and rendering for disappearing-message retention policies.
 //!
 //! Disappearing-message commands expose retention as workspace policy: set a
 //! TTL, tighten it with confirmation, compact old tombstones, or inspect the
@@ -107,8 +107,8 @@ pub fn compact_workspace_id(args: CliArgs<'_>) -> Result<[u8; 32], String> {
 }
 
 pub fn status_output(report: &StatusReport) -> CliOutput {
-    let setting_fact_id = report
-        .setting_fact_id
+    let policy_fact_id = report
+        .policy_fact_id
         .as_ref()
         .map(encode_hex_32)
         .unwrap_or_else(|| "none".to_string());
@@ -127,9 +127,9 @@ pub fn status_output(report: &StatusReport) -> CliOutput {
 
     CliOutput::lines(vec![
         format!("workspace: {}", encode_hex_32(&report.workspace_id)),
-        format!("setting_fact_id: {setting_fact_id}"),
+        format!("policy_fact_id: {policy_fact_id}"),
         format!("current_ttl_minutes: {ttl}"),
-        format!("current_floor_minute: {}", report.setting_floor_minute),
+        format!("current_floor_minute: {}", report.policy_floor_minute),
         format!("last_chopped_floor: {last_chopped_floor}"),
         format!("now_minute: {now_minute}"),
         format!("horizon_floor: {}", report.horizon_floor),

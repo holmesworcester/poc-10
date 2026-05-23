@@ -23,7 +23,7 @@ use crate::protocol::content::message::fact::{
 use crate::protocol::content::message::layout;
 use crate::protocol::content::message::queries;
 use crate::protocol::content::message::rows;
-use crate::protocol::content::{disappearing_messages_setting, message};
+use crate::protocol::content::{message, retention_policy};
 
 pub const TEXT_LENGTH_PREFIX_BYTES: usize = 4;
 pub const PLAINTEXT_SLOT_BYTES: usize = CIPHERTEXT_BYTES - XCHACHA20_POLY1305_TAG_BYTES;
@@ -131,23 +131,22 @@ fn build_message_fact(
     }
 
     let minute = created_at_ms / UNIX_MINUTE_MS;
-    let active_setting =
-        disappearing_messages_setting::queries::active_for_workspace(ctx.store(), workspace_id)?;
-    if let Some(setting) = &active_setting {
-        if minute < setting.retire_minute {
+    let active_policy = retention_policy::queries::active_for_workspace(ctx.store(), workspace_id)?;
+    if let Some(policy) = &active_policy {
+        if minute < policy.retire_minute {
             return Err("send_message minute is below the active disappearing floor".to_string());
         }
     }
     if minute < retained_floor_from_tombstones(ctx, workspace_id)? {
         return Err("no retained ancestor covers message minute".to_string());
     }
-    let expires_at_minute = active_setting
+    let expires_at_minute = active_policy
         .as_ref()
-        .map(|setting| minute.saturating_add(u64::from(setting.ttl_minutes)))
+        .map(|policy| minute.saturating_add(u64::from(policy.ttl_minutes)))
         .unwrap_or(u64::MAX);
-    let disappearing_setting_id = active_setting
+    let retention_policy_id = active_policy
         .as_ref()
-        .map(|setting| setting.setting_id)
+        .map(|policy| policy.policy_id)
         .unwrap_or([0; 32]);
 
     let nonce = deterministic_nonce(workspace_id, signing.signer_id, created_at_ms);
@@ -174,7 +173,7 @@ fn build_message_fact(
         frontier_id: encryption.frontier_id,
         local_history_node_secret_id: [0; 32],
         expires_at_minute,
-        disappearing_setting_id,
+        retention_policy_id,
         minute,
         nonce,
         ciphertext,

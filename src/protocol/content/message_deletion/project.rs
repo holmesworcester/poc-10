@@ -454,7 +454,7 @@ mod projector_tests {
             frontier_id: [3; 32],
             local_history_node_secret_id: [0; 32],
             expires_at_minute: u64::MAX,
-            disappearing_setting_id: [0; 32],
+            retention_policy_id: [0; 32],
             minute: 12,
             nonce: [5; crate::protocol::content::message::fact::NONCE_BYTES],
             ciphertext: vec![6; crate::protocol::content::message::fact::CIPHERTEXT_BYTES],

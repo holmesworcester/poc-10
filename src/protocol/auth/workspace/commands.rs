@@ -107,7 +107,7 @@ pub fn create_workspace_with_identity(
         endpoint_shared,
     ];
     if identity.ttl_minutes != Some(0) {
-        facts.push(initial_disappearing_setting_fact(
+        facts.push(initial_retention_policy_fact(
             created_at_ms + 7,
             workspace_id,
             identity.ttl_minutes.unwrap_or(60),
@@ -274,17 +274,17 @@ fn device_invite_fact(
     Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
 }
 
-fn initial_disappearing_setting_fact(
+fn initial_retention_policy_fact(
     created_at_ms: u64,
     workspace_id: FactId,
     ttl_minutes: u32,
 ) -> Result<Fact, String> {
-    let payload = content::disappearing_messages_setting::fact::DisappearingMessagesSettingFact {
+    let payload = content::retention_policy::fact::RetentionPolicyFact {
         workspace_id,
-        supersedes_setting_id: None,
+        supersedes_policy_id: None,
         ttl_minutes,
         retire_minute: 0,
-        scope_kind: content::disappearing_messages_setting::fact::SCOPE_KIND_WORKSPACE,
+        scope_kind: content::retention_policy::fact::SCOPE_KIND_WORKSPACE,
         scope_id: workspace_id,
         author_user_id: workspace_id,
         created_at_ms,
@@ -292,6 +292,6 @@ fn initial_disappearing_setting_fact(
     Ok(Fact::new(
         FactScope::Global,
         created_at_ms,
-        content::disappearing_messages_setting::layout::encode_fact(&payload)?,
+        content::retention_policy::layout::encode_fact(&payload)?,
     ))
 }
