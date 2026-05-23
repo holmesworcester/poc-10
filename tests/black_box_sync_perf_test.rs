@@ -18,10 +18,10 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     let bob = temp_db(&tmp, "bob-sync-perf.db");
     let alice_port = free_port();
     let bob_port = free_port();
-    let event_count = env_usize("TOPO_SYNC_PERF_EVENTS").unwrap_or(10_000);
-    let event_size = env_usize("TOPO_SYNC_PERF_EVENT_BYTES").unwrap_or(128);
+    let message_count = env_usize("TOPO_SYNC_PERF_MESSAGES").unwrap_or(10_000);
+    let message_text_bytes = env_usize("TOPO_SYNC_PERF_MESSAGE_TEXT_BYTES").unwrap_or(128);
     let timeout_ms = env_u64("TOPO_SYNC_PERF_TIMEOUT_MS")
-        .unwrap_or_else(|| 120_000_u64.max(event_count as u64 * 120));
+        .unwrap_or_else(|| 120_000_u64.max(message_count as u64 * 120));
 
     let workspace = create_workspace(&alice, "sync-perf", "alice", "alice-laptop");
     let invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
@@ -39,11 +39,11 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     bob_daemon.stop_with_cli();
 
     let authoring_started = Instant::now();
-    let generated = generate(&alice, &workspace, event_count, event_size);
+    let generated = generate(&alice, &workspace, message_count, message_text_bytes);
     let authoring_elapsed = authoring_started.elapsed();
     assert_eq!(
         line_value(&generated, "generated_facts"),
-        event_count.to_string()
+        message_count.to_string()
     );
 
     assert_content_count(&bob, &workspace, 0);
@@ -55,24 +55,24 @@ fn black_box_generated_content_sync_perf_uses_daemon_restart_boundary() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
 
-    let projected = poll_for_content_count(&bob, &workspace, event_count, timeout_ms);
+    let projected = poll_for_content_count(&bob, &workspace, message_count, timeout_ms);
     let sync_elapsed = sync_started.elapsed();
     let ready_elapsed = daemons_ready_at.elapsed();
-    assert_eq!(projected.content_events, event_count);
+    assert_eq!(projected.content_messages, message_count);
 
     let seconds = sync_elapsed.as_secs_f64().max(0.001);
-    let events_per_second = event_count as f64 / seconds;
+    let messages_per_second = message_count as f64 / seconds;
     eprintln!(
-        "black_box_generated_content_sync_perf events={} event_bytes={} timeout_ms={} authoring_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} events_per_s={:.2}",
-        event_count,
-        event_size,
+        "black_box_generated_content_sync_perf messages={} message_text_bytes={} timeout_ms={} authoring_ms={} sync_enable_to_projected_ms={} daemons_ready_to_projected_ms={} messages_per_s={:.2}",
+        message_count,
+        message_text_bytes,
         timeout_ms,
         authoring_elapsed.as_millis(),
         sync_elapsed.as_millis(),
         ready_elapsed.as_millis(),
-        events_per_second
+        messages_per_second
     );
-    assert!(events_per_second.is_finite() && events_per_second > 0.0);
+    assert!(messages_per_second.is_finite() && messages_per_second > 0.0);
 }
 
 struct RunningDaemon {
@@ -272,8 +272,8 @@ fn generate(db: &str, workspace: &str, count: usize, size: usize) -> String {
 fn assert_content_count(db: &str, workspace: &str, expected: usize) {
     let count = content_count(db, workspace);
     assert_eq!(
-        count.content_events, expected,
-        "content-count events mismatch for {db}"
+        count.content_messages, expected,
+        "content-count messages mismatch for {db}"
     );
 }
 
@@ -292,7 +292,7 @@ fn poll_for_content_count(
         "eventually",
         "content-count",
         workspace,
-        "content_events",
+        "content_messages",
         ">=",
         &expected,
         "--timeout-ms",
@@ -301,7 +301,7 @@ fn poll_for_content_count(
         "500",
     ]));
     ContentCount {
-        content_events: line_value(&out, "observed")
+        content_messages: line_value(&out, "observed")
             .parse()
             .expect("observed content count"),
     }
@@ -309,15 +309,15 @@ fn poll_for_content_count(
 
 #[derive(Debug)]
 struct ContentCount {
-    content_events: usize,
+    content_messages: usize,
 }
 
 fn content_count(db: &str, workspace: &str) -> ContentCount {
     let out = assert_success(topo(&["--db", db, "content-count", workspace]));
     ContentCount {
-        content_events: line_value(&out, "content_events")
+        content_messages: line_value(&out, "content_messages")
             .parse()
-            .expect("content_events usize"),
+            .expect("content_messages usize"),
     }
 }
 

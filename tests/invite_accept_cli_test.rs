@@ -537,7 +537,7 @@ fn same_endpoint_can_join_multiple_workspaces_but_not_same_workspace_twice() {
 }
 
 #[test]
-fn forged_workspace_invite_does_not_authorize_or_exfiltrate_events() {
+fn forged_workspace_invite_does_not_authorize_or_exfiltrate_messages() {
     let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let attacker = temp_db(&tmp, "attacker.db");
@@ -590,7 +590,7 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_events() {
         "content-count",
         &victim_workspace_id,
     ]));
-    assert_eq!(line_value(&attacker_content, "content_events"), "0");
+    assert_eq!(line_value(&attacker_content, "content_messages"), "0");
 }
 
 fn invite_accept_test_guard() -> MutexGuard<'static, ()> {

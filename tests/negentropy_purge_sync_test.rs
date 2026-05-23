@@ -732,7 +732,7 @@ fn message_lines(db: &str, workspace_id: &str) -> Vec<String> {
 
 fn content_fact_count(db: &str, workspace_id: &str) -> String {
     let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
-    line_value(&out, "content_facts")
+    line_value(&out, "message_facts")
 }
 
 fn wait_for_leaf_count(db: &str, workspace_id: &str, expected: &str) {
@@ -756,7 +756,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "eventually",
         "content-count",
         workspace_id,
-        "content_facts",
+        "message_facts",
         "eq",
         expected,
         "--timeout-ms",

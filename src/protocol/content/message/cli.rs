@@ -22,7 +22,7 @@ use crate::protocol::content::{file, file_slice, message, message_deletion, reac
 use super::queries;
 
 pub const SEND_USAGE: &str = "send WORKSPACE_ID_HEX TEXT";
-pub const GENERATE_USAGE: &str = "generate WORKSPACE_ID_HEX COUNT EVENT_SIZE_BYTES";
+pub const GENERATE_USAGE: &str = "generate WORKSPACE_ID_HEX COUNT MESSAGE_TEXT_BYTES";
 pub const REACT_USAGE: &str = "react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI";
 pub const SEND_FILE_USAGE: &str = "send-file WORKSPACE_ID_HEX TEXT --file PATH [--mime MIME]";
 pub const FILES_USAGE: &str = "files WORKSPACE_ID_HEX [LIMIT]";
@@ -91,8 +91,8 @@ pub fn generate(
     args.require_len(3, GENERATE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let count = args.parse_positive_usize(1, GENERATE_USAGE)?;
-    let event_size_bytes = args.parse_positive_usize(2, GENERATE_USAGE)?;
-    message::create::generate_messages(ctx, workspace_id, count, event_size_bytes)
+    let message_text_bytes = args.parse_positive_usize(2, GENERATE_USAGE)?;
+    message::create::generate_messages(ctx, workspace_id, count, message_text_bytes)
 }
 
 pub fn generated_output(
@@ -103,7 +103,6 @@ pub fn generated_output(
         format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
         format!("generated_facts: {}", receipt.generated_facts),
         format!("applied_facts: {applied_facts}"),
-        format!("event_size_bytes: {}", receipt.event_size_bytes),
         format!("message_text_bytes: {}", receipt.message_text_bytes),
         format!("first_timestamp: {}", receipt.first_timestamp),
         format!("last_timestamp: {}", receipt.last_timestamp),
@@ -348,11 +347,10 @@ pub fn content_count(
 
 pub fn content_count_output(count: queries::ContentCount) -> CliOutput {
     CliOutput::lines(vec![
-        format!("content_events: {}", count.content_events),
-        format!("content_facts: {}", count.content_events),
-        format!("content_messages: {}", count.content_events),
-        format!("content_payload_bytes: {}", count.content_payload_bytes),
-        format!("max_event_timestamp: {}", count.max_timestamp),
+        format!("content_messages: {}", count.content_messages),
+        format!("message_facts: {}", count.content_messages),
+        format!("message_payload_bytes: {}", count.message_payload_bytes),
+        format!("max_message_timestamp: {}", count.max_created_at_ms),
     ])
 }
 

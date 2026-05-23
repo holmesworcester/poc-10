@@ -98,14 +98,6 @@ pub(crate) mod read_models {
     );
 
     typed_table!(
-        CONTENT_EVENTS,
-        CONTENT_EVENT_ROWS,
-        "content_event_rows",
-        columns ["workspace_id", "fact_id", "timestamp", "payload_bytes"],
-        key ["workspace_id", "fact_id"]
-    );
-
-    typed_table!(
         CONTENT_MESSAGES,
         CONTENT_MESSAGE_ROWS,
         "content_messages",
@@ -233,16 +225,6 @@ CREATE TABLE IF NOT EXISTS local_endpoint_secret_rows (row_key BLOB PRIMARY KEY 
 CREATE TABLE IF NOT EXISTS local_endpoint_signing_public_key_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS local_endpoint_signing_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_endpoint_shared_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-
-CREATE TABLE IF NOT EXISTS content_event_rows (
-    workspace_id BLOB NOT NULL,
-    fact_id BLOB NOT NULL,
-    timestamp INTEGER NOT NULL,
-    payload_bytes INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, fact_id)
-);
-CREATE INDEX IF NOT EXISTS content_event_rows_by_workspace_time
-    ON content_event_rows (workspace_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS cascade_staged_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -491,12 +473,12 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("generate", content::message::cli::GENERATE_USAGE, generate),
     cli_command!(
-        "generate-deps",
+        "test-generate-deps",
         sync::cascade_test_fact::cli::GENERATE_DEPS_USAGE,
         generate_deps
     ),
     cli_command!(
-        "replay-deps-reverse",
+        "test-replay-deps-reverse",
         sync::cascade_test_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
         replay_deps_reverse
     ),
@@ -532,7 +514,6 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,
     connection::response::rows::CONNECTION_RESPONSE_ROWS,
-    read_models::CONTENT_EVENT_ROWS,
     read_models::FILE_ROWS,
     read_models::FILE_DELETION_ROWS,
     read_models::FILE_SLICE_ROWS,
@@ -605,7 +586,6 @@ projector_routes! {
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
     project_connection_request => connection::request::layout::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector;
     project_connection_response => connection::response::layout::TYPE_CONNECTION_RESPONSE, connection::response::project::ConnectionResponseProjector;
-    project_content_event => content::event::layout::TYPE_CONTENT_EVENT, content::event::project::ContentEventProjector;
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;

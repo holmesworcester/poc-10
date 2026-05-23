@@ -238,11 +238,11 @@ class Runner:
 
     def run_cascade(self) -> None:
         suite = "cascade"
-        if self.args.cascade_events == 10_000:
+        if self.args.cascade_facts == 10_000:
             p7_test = "topo_cascade_10k"
             ignored: list[str] = []
-        elif self.args.cascade_events in {50_000, 200_000, 500_000}:
-            p7_test = f"topo_cascade_{self.args.cascade_events // 1000}k"
+        elif self.args.cascade_facts in {50_000, 200_000, 500_000}:
+            p7_test = f"topo_cascade_{self.args.cascade_facts // 1000}k"
             ignored = ["--ignored"]
         else:
             self.skip(
@@ -271,18 +271,18 @@ class Runner:
                 timeout=self.args.command_timeout,
             )
 
-        if self.args.cascade_events == 10_000:
-            test_name = "cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_10k"
+        if self.args.cascade_facts == 10_000:
+            test_name = "cascade_cli_replays_fact_with_deps_out_of_order_and_unblocks_10k"
             ignored = []
-        elif self.args.cascade_events == 50_000:
-            test_name = "cascade_cli_replays_event_with_deps_out_of_order_and_unblocks_50k"
+        elif self.args.cascade_facts == 100_000:
+            test_name = "cascade_cli_replays_fact_with_deps_out_of_order_and_unblocks_100k"
             ignored = ["--ignored"]
         else:
             for key in ["poc8", "poc10"]:
                 self.skip(
                     suite,
                     key,
-                    "CLI cascade tests expose 10k and 50k; add a new ignored test for this scale",
+                    "CLI cascade tests expose 10k and 100k; add a new ignored test for this scale",
                 )
             return
         for key in ["poc8", "poc10"]:
@@ -347,7 +347,7 @@ class Runner:
 
                 gen_started = time.perf_counter()
                 run_cli(binary, worktree, "--db", alice, "generate", workspace,
-                        str(message_count), str(self.args.event_size))
+                        str(message_count), str(self.args.message_text_bytes))
                 gen_seconds = time.perf_counter() - gen_started
 
                 sync_started = time.perf_counter()
@@ -356,7 +356,7 @@ class Runner:
                 wall = time.perf_counter() - started
                 rate = message_count / max(sync_seconds, 0.001)
                 summary = [
-                    f"cli_sync messages={message_count} event_size_bytes={self.args.event_size}",
+                    f"cli_sync messages={message_count} message_text_bytes={self.args.message_text_bytes}",
                     f"generate_seconds={gen_seconds:.3f}",
                     f"sync_wait_seconds={sync_seconds:.3f}",
                     f"msgs_s={rate:.2f}",
@@ -654,7 +654,7 @@ def wait_content(
     while time.monotonic() < deadline:
         out = run_cli(binary, cwd, "--db", db, "content-count", workspace)
         last = out
-        if line_value(out, "content_events") == str(expected):
+        if line_value(out, "content_messages") == str(expected):
             return
         time.sleep(0.1)
     raise RuntimeError(f"content count did not reach {expected}; last output:\n{last}")
@@ -703,8 +703,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sync-messages", type=int, default=100, help="CLI sync message count.")
     parser.add_argument("--display-messages", type=int, default=100)
     parser.add_argument("--display-limit", type=int, default=20)
-    parser.add_argument("--cascade-events", type=int, default=10_000)
-    parser.add_argument("--event-size", type=int, default=128)
+    parser.add_argument("--cascade-facts", type=int, default=10_000)
+    parser.add_argument("--message-text-bytes", type=int, default=128)
     parser.add_argument("--sync-timeout", type=int, default=300)
     parser.add_argument("--command-timeout", type=int, default=1800)
     parser.add_argument("--keep-going", action="store_true")

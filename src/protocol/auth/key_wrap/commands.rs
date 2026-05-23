@@ -128,7 +128,7 @@ pub struct ChopNowReceipt {
     pub subtree_tombstones_written: usize,
     pub boundary_descend_tombstones_written: usize,
     pub right_side_siblings_materialized: usize,
-    pub purged_event_bytes: usize,
+    pub purged_secret_bytes: usize,
     pub subsumed_message_tombstones_gcd: usize,
     pub subsumed_leaf_tombstones_gcd: usize,
 }
@@ -580,7 +580,7 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
         subtree_tombstones_written: local_key_secret_ids.len(),
         boundary_descend_tombstones_written: 0,
         right_side_siblings_materialized: 0,
-        purged_event_bytes: 0,
+        purged_secret_bytes: 0,
         subsumed_message_tombstones_gcd: 0,
         subsumed_leaf_tombstones_gcd: 0,
     })

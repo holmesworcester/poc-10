@@ -666,9 +666,7 @@ fn next_cli_timestamp(runtime: &Runtime) -> Result<u64, String> {
 }
 
 fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
-    let mut max_timestamp = content::event::queries::max_timestamp(store)?;
-    max_timestamp = max_timestamp.max(content::message::queries::max_created_at_ms(store)?);
-    Ok(max_timestamp)
+    content::message::queries::max_created_at_ms(store)
 }
 
 struct SystemClock;

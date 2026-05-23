@@ -49,7 +49,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     wait_for_content_count(&alice, &workspace_id, "0");
 
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
 
     // Stop the daemon and confirm the on-disk state still resists recovery.
@@ -62,7 +62,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     );
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
     // Remaining gap: no non-dev CLI recovery attempt targets a specific
     // message id or minute coordinate. The old assertion used `key-node` and
     // `cover_summary`, which are internal tree probes, to prove the retired
@@ -73,7 +73,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     assert_success(topo(&["--db", &alice, "clock", "set", "6120001"]));
     thread::sleep(Duration::from_millis(300));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
     drop(alice_daemon_again);
 }
@@ -300,7 +300,7 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
         !post_view.contains("secret") && !post_view.contains("🌶️ alice"),
         "view must not show the expired message or cascaded reaction:\n{post_view}"
     );
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
 }
 
 // ---------------------------------------------------------------------------
@@ -791,25 +791,25 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
     // unchanged after we restart alice's daemon and let sync attempt
     // to deliver X.
     let bob_messages_before = message_lines(&bob, &workspace_id).len();
-    let bob_content_before = content_event_count(&bob, &workspace_id);
+    let bob_content_before = content_message_count(&bob, &workspace_id);
     let bob_disappearing_before =
         assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     // `live_messages` = opened + sealed; the sealed projection is the only
     // place X could land on bob without a full decryption path.
     let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
-    // Bob must not already have the canonical bytes of X — i.e. EVENTS
+    // Bob must not already have the canonical bytes of X: the message listing
     // must not contain `message_fact_id` before the redelivery attempt.
     // If bob's messages output already contains the id, the test setup
     // failed to isolate the wedge.
     let bob_messages_listing_before = messages_text(&bob, &workspace_id);
-    let bob_already_had_event_bytes = bob_messages_listing_before.contains(&message_fact_id);
+    let bob_already_had_message_bytes = bob_messages_listing_before.contains(&message_fact_id);
     // The test isolates the late-delivery path: bob must NOT have admitted
     // X before alice's daemon was killed. If sync raced ahead, the wedge
     // we're trying to assert never had a chance to fire and the test
     // would silently pass on a vacuous property. Since Alice's daemon was
     // stopped before X was authored, this should only fail if another route
     // delivered X unexpectedly.
-    let setup_race_bob_already_saw_x = bob_messages_before > 0 || bob_already_had_event_bytes;
+    let setup_race_bob_already_saw_x = bob_messages_before > 0 || bob_already_had_message_bytes;
     assert!(
         !setup_race_bob_already_saw_x,
         "setup failure: bob saw X before the late-delivery phase, so the \
@@ -823,14 +823,14 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
         "bob must have no visible messages before redelivery"
     );
     assert_eq!(
-        content_event_count(&bob, &workspace_id),
+        content_message_count(&bob, &workspace_id),
         bob_content_before,
         "bob must have no content before redelivery"
     );
     assert_eq!(bob_live_messages_before, "0");
-    // Remaining gap: there is no `events get <id>` or filtered
-    // `sync-status --event <id>` command that reports admit/drop state without
-    // healing or projecting the event. Reconnecting Alice here is not a stable
+    // Remaining gap: there is no fact-id filtered command that reports
+    // admit/drop state without healing or projecting the message. Reconnecting
+    // Alice here is not a stable
     // black-box rejection proof because public key-healing behavior can also
     // run during the reconnect and make the old message visible.
 }
@@ -838,7 +838,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
 // ---------------------------------------------------------------------------
 // Test 8b (recipient-key-triggered proactive wrap): when a member publishes a
 // recipient key and a frontier exists, the frontier owner proactively
-// materializes the deterministic wrap. If a content event races ahead of the
+// materializes the deterministic wrap. If a message fact races ahead of the
 // key material, sync keeps comparing and the message becomes visible once the
 // wrap arrives and F is derived.
 //
@@ -850,11 +850,11 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
 // The gate-specific behavior (drop-at-admit when no cover) is verified by
 // the unit-level `admit_drops_message_with_no_covering_ancestor` and
 // `admit_recovers_after_frontier_root_is_seeded` tests in
-// `message/schema.rs`. Those tests assert the EVENTS row is absent and
+// `message/schema.rs`. Those tests assert the message row is absent and
 // no tombstone is written on the drop, and that the same bytes admit
 // after F appears.
 //
-// At the CLI level, the new event-native path removes the explicit
+// At the CLI level, the message-native path removes the explicit
 // operator `key-wrap` step. The CLI test asserts the end-to-end behavior:
 // without manual wrapping, bob derives F from the proactive wrap and then
 // opens X.
@@ -1032,7 +1032,7 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
          (was {mt_after_expiry}, now {mt_after_chop}):\n{post_chop}"
     );
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,9 +1098,9 @@ fn message_lines_from_text(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn content_event_count(db: &str, workspace_id: &str) -> String {
+fn content_message_count(db: &str, workspace_id: &str) -> String {
     let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
-    line_value(&out, "content_events")
+    line_value(&out, "content_messages")
 }
 
 fn key_access_value(db: &str, workspace_id: &str, removal_frontier_id: &str) -> String {
@@ -1148,7 +1148,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "eventually",
         "content-count",
         workspace_id,
-        "content_events",
+        "content_messages",
         "eq",
         expected,
         "--timeout-ms",

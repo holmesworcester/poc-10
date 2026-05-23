@@ -459,9 +459,9 @@ fn cli_chop_revokes_frontier_rejects_old_wraps_and_allows_fresh_messages() {
         "fresh authoring should not disturb the current local message listing:\n{fresh_messages}"
     );
 
-    let _: u64 = line_value(&chop, "purged_event_bytes")
+    let _: u64 = line_value(&chop, "purged_secret_bytes")
         .parse()
-        .expect("parse purged_event_bytes");
+        .expect("parse purged_secret_bytes");
     let _: u64 = line_value(&chop, "subsumed_message_tombstones_gcd")
         .parse()
         .expect("parse subsumed_message_tombstones_gcd");
@@ -786,7 +786,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "eventually",
         "content-count",
         workspace_id,
-        "content_events",
+        "content_messages",
         "eq",
         expected,
         "--timeout-ms",

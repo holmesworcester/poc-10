@@ -23,9 +23,9 @@ pub struct OpenedMessage {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentCount {
-    pub content_events: usize,
-    pub content_payload_bytes: u64,
-    pub max_timestamp: u64,
+    pub content_messages: usize,
+    pub message_payload_bytes: u64,
+    pub max_created_at_ms: u64,
 }
 
 pub fn opened_messages(store: &Store, workspace_id: FactId) -> Result<Vec<OpenedMessage>, String> {
@@ -65,11 +65,11 @@ pub fn count_for_workspace(store: &Store, workspace_id: FactId) -> Result<Conten
              WHERE workspace_id = ?1 AND deleted = 0",
             params![workspace_id],
             |row| {
-                let content_events = row.get::<_, i64>(0)? as usize;
+                let content_messages = row.get::<_, i64>(0)? as usize;
                 Ok(ContentCount {
-                    content_events,
-                    content_payload_bytes: content_events as u64 * CIPHERTEXT_BYTES as u64,
-                    max_timestamp: row.get::<_, i64>(1)? as u64,
+                    content_messages,
+                    message_payload_bytes: content_messages as u64 * CIPHERTEXT_BYTES as u64,
+                    max_created_at_ms: row.get::<_, i64>(1)? as u64,
                 })
             },
         )

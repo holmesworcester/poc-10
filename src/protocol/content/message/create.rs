@@ -42,7 +42,6 @@ pub struct SendReceipt {
 pub struct GenerateReceipt {
     pub workspace_id: WorkspaceId,
     pub generated_facts: usize,
-    pub event_size_bytes: usize,
     pub message_text_bytes: usize,
     pub first_timestamp: u64,
     pub last_timestamp: u64,
@@ -69,20 +68,20 @@ pub fn generate_messages(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
     count: usize,
-    event_size_bytes: usize,
+    requested_message_text_bytes: usize,
 ) -> Result<CommandOutput<GenerateReceipt>, String> {
     if count == 0 {
         return Err("generate count must be positive".to_string());
     }
-    if event_size_bytes == 0 {
-        return Err("generate event size must be positive".to_string());
+    if requested_message_text_bytes == 0 {
+        return Err("generate message text size must be positive".to_string());
     }
 
     let first_timestamp = ctx.next_timestamp();
     let last_timestamp = first_timestamp
         .checked_add((count - 1) as u64)
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
-    let message_text_bytes = event_size_bytes.min(MAX_TEXT_BYTES);
+    let message_text_bytes = requested_message_text_bytes.min(MAX_TEXT_BYTES);
 
     let mut facts = Vec::with_capacity(count);
     let mut fact_ids = Vec::with_capacity(count);
@@ -100,7 +99,6 @@ pub fn generate_messages(
     Ok(CommandOutput::new(GenerateReceipt {
         workspace_id,
         generated_facts: count,
-        event_size_bytes,
         message_text_bytes,
         first_timestamp,
         last_timestamp,

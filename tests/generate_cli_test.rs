@@ -16,7 +16,6 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
     let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "7", "128"]));
     assert!(generated.contains("generated_facts: 7"), "{generated}");
     assert!(generated.contains("applied_facts: 7"), "{generated}");
-    assert!(generated.contains("event_size_bytes: 128"), "{generated}");
     assert!(generated.contains("message_text_bytes: 108"), "{generated}");
     assert!(generated.contains("first_timestamp: 1"), "{generated}");
     assert!(generated.contains("last_timestamp: 7"), "{generated}");
@@ -25,8 +24,8 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
     assert_eq!(line_value(&messages, "messages"), "7");
 
     let content = assert_success(topo(&["--db", &db, "content-count", &workspace_id]));
-    assert_eq!(line_value(&content, "content_events"), "7");
-    assert_eq!(line_value(&content, "content_payload_bytes"), "896");
+    assert_eq!(line_value(&content, "content_messages"), "7");
+    assert_eq!(line_value(&content, "message_payload_bytes"), "896");
 
     let status = assert_success(topo(&["--db", &db, "count"]));
     assert_eq!(
@@ -60,7 +59,7 @@ fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_facts() {
 
     let advanced = assert_success(topo(&["--db", &db, "clock", "advance", "100"]));
     assert_eq!(line_value(&advanced, "logical_time"), "5100");
-    assert_eq!(line_value(&advanced, "max_event_timestamp"), "5002");
+    assert_eq!(line_value(&advanced, "max_observed_timestamp"), "5002");
     assert_eq!(line_value(&advanced, "next_timestamp"), "5100");
 
     let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "1", "32"]));
@@ -87,7 +86,7 @@ fn assert_eventually_cli_reports_true_when_condition_is_met() {
         "eventually",
         "content-count",
         &workspace_id,
-        "content_events",
+        "content_messages",
         ">=",
         "2",
         "--timeout-ms",
@@ -101,7 +100,7 @@ fn assert_eventually_cli_reports_true_when_condition_is_met() {
         line_value(&out, "command"),
         format!("content-count {workspace_id}")
     );
-    assert_eq!(line_value(&out, "field"), "content_events");
+    assert_eq!(line_value(&out, "field"), "content_messages");
     assert_eq!(line_value(&out, "observed"), "2");
 }
 
@@ -118,7 +117,7 @@ fn assert_eventually_cli_times_out_when_condition_is_not_met() {
         "eventually",
         "content-count",
         &workspace_id,
-        "content_events",
+        "content_messages",
         ">=",
         "1",
         "--timeout-ms",
