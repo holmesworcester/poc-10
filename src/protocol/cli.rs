@@ -298,7 +298,6 @@ pub(crate) fn key_derive(
         format!("scanned_key_wraps: {scanned_key_wraps}"),
         format!("derived_key_secrets: {}", after.saturating_sub(before)),
         "failed_key_wraps: 0".to_string(),
-        "admitted_events: 0".to_string(),
     ]))
 }
 
@@ -666,9 +665,7 @@ fn next_cli_timestamp(runtime: &Runtime) -> Result<u64, String> {
 }
 
 fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
-    let mut max_timestamp = content::event::queries::max_timestamp(store)?;
-    max_timestamp = max_timestamp.max(content::message::queries::max_created_at_ms(store)?);
-    Ok(max_timestamp)
+    content::message::queries::max_created_at_ms(store)
 }
 
 struct SystemClock;

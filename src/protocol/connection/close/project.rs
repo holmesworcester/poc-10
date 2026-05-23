@@ -1,6 +1,6 @@
 //! Connection-close projector.
 //!
-//! Close projection validates that a local close event names a materialized
+//! Close projection validates that a local close fact names a materialized
 //! connection response. It then publishes close context keyed by the connection
 //! id and by both ephemeral-secret fact ids carried by that response.
 //!

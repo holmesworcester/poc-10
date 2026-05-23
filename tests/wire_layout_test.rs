@@ -99,14 +99,14 @@ fn wrong_lengths_are_rejected_for_fixed_layout_decode_and_encode() {
 
 #[test]
 fn tags_are_fixed_bytes_with_golden_layout() {
-    const EVENT_TAG: Tag<4> = fixed_tag(b"EVT1");
+    const FACT_TAG: Tag<4> = fixed_tag(b"FCT1");
 
     assert_eq!(Tag::<4>::LEN, 4);
 
     let mut out = [0; Tag::<4>::LEN];
-    EVENT_TAG.encode(&mut out).unwrap();
-    assert_eq!(&out, b"EVT1");
-    assert_eq!(Tag::<4>::decode(&out).unwrap(), EVENT_TAG);
+    FACT_TAG.encode(&mut out).unwrap();
+    assert_eq!(&out, b"FCT1");
+    assert_eq!(Tag::<4>::decode(&out).unwrap(), FACT_TAG);
 
     assert_eq!(
         Tag::<4>::decode(b"EVT").unwrap_err(),

@@ -1,15 +1,15 @@
-//! Black-box CLI tests for the deterministic per-event leaf-coord design.
+//! Black-box CLI tests for the deterministic per-message leaf-coord design.
 //!
 //! Setup goes through the real `topo` binary: workspace creation, key
 //! frontier, message authoring, deletion. The tests intentionally use only
 //! public CLI processes; the CLI boundary is the invariant under test.
 //!
 //! Tested invariants:
-//!   * The public key listing exposes stable per-event leaf coordinates for
+//!   * The public key listing exposes stable per-message leaf coordinates for
 //!     authored messages.
 //!   * Multiple messages in the same `unix_minute` share one minute_node
 //!     above their per-message leaves.
-//!   * Manual delete purges only the deleted leaf event canonical bytes;
+//!   * Manual delete purges only the deleted message's leaf bytes;
 //!     the minute_node and sibling leaves stay.
 //!   * A workspace's `cover_summary` is a deterministic function of the
 //!     retained-set on that workspace, so replaying the same delete set in
@@ -86,7 +86,7 @@ fn cli_minute_node_is_shared_across_messages_in_same_minute() {
 
     let keys = keys_value(&db, &workspace_id);
     // Under the binary-tree FS, fresh encryption with no deletes
-    // materializes only the leaf row per event — every interior time-tree
+    // materializes only the leaf row per message. Every interior time-tree
     // and trie node stays implicit and is derivable on demand from the
     // workspace root. Three messages in the same minute therefore land as
     // three leaves and zero internal rows.
@@ -204,7 +204,7 @@ fn cli_delete_wipes_minute_node_along_descend_path() {
 }
 
 #[test]
-fn cli_delete_purges_only_the_leaf_event() {
+fn cli_delete_purges_only_the_message_leaf() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Purge", "alice", "alice-laptop");
@@ -287,7 +287,7 @@ fn cli_retained_cover_summary_is_deterministic_within_one_workspace() {
 
 #[test]
 fn cli_send_file_authors_its_own_leaf_distinct_from_message_leaf() {
-    // Each file event now authors its own per-event leaf under the
+    // Each file fact authors its own per-file leaf under the
     // per-minute coarse cover. After `send-file`, the workspace must have:
     //   * one minute_node,
     //   * one leaf for the message,
@@ -490,13 +490,13 @@ fn small_pause() {
 //      minute_node in the trie.
 //   3. Both daemons run, sync converges, key wraps complete.
 //   4. Alice sends `M_A`. Bob sends `M_B`. Each daemon's periodic sync
-//      delivers the other peer's leaf event so both stores hold both
+//      delivers the other peer's message fact so both stores hold both
 //      leaves in the same minute_node.
 //   5. Alice runs `delete-message` against `M_A`. Her retire walk
 //      materializes the minute_node and the trie internals between the
 //      siblings, then exact-deletes `M_A`'s leaf row and purges its
 //      canonical bytes. Cascade purge runs.
-//   6. Sync propagates the deletion event to Bob. Bob's admission also
+//   6. Sync propagates the deletion fact to Bob. Bob's admission also
 //      retires `M_A`'s leaf locally.
 //   7. Both peers list messages.
 //

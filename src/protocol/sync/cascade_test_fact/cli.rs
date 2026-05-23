@@ -6,8 +6,8 @@
 //! argument shape and receipt text; dependency generation and replay mechanics
 //! live in `commands`.
 
-pub const GENERATE_DEPS_USAGE: &str = "generate-deps COUNT DEPS_PER_FACT";
-pub const REPLAY_DEPS_REVERSE_USAGE: &str = "replay-deps-reverse";
+pub const GENERATE_DEPS_USAGE: &str = "test-generate-deps COUNT DEPS_PER_FACT";
+pub const REPLAY_DEPS_REVERSE_USAGE: &str = "test-replay-deps-reverse";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerateDepsArgs {

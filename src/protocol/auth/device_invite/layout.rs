@@ -124,12 +124,12 @@ mod tests {
 
     #[test]
     fn zero_user_invite_roundtrips_as_none() {
-        let event = DeviceInviteFact {
+        let fact = DeviceInviteFact {
             user_invite_fact_id: None,
             ..fact()
         };
-        let encoded = encode_fact(&event).expect("encode");
-        assert_eq!(decode_fact(&encoded).expect("decode"), event);
+        let encoded = encode_fact(&fact).expect("encode");
+        assert_eq!(decode_fact(&encoded).expect("decode"), fact);
     }
 
     #[test]

@@ -49,7 +49,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     wait_for_content_count(&alice, &workspace_id, "0");
 
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
 
     // Stop the daemon and confirm the on-disk state still resists recovery.
@@ -62,7 +62,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     );
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
     // Remaining gap: no non-dev CLI recovery attempt targets a specific
     // message id or minute coordinate. The old assertion used `key-node` and
     // `cover_summary`, which are internal tree probes, to prove the retired
@@ -73,7 +73,7 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     assert_success(topo(&["--db", &alice, "clock", "set", "6120001"]));
     thread::sleep(Duration::from_millis(300));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
     drop(alice_daemon_again);
 }
@@ -160,7 +160,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
 
     // Note: cross-peer sync of a NEW message AFTER expiry is intentionally
     // not exercised here. Empirically, when alice authors a fresh-minute
-    // message after both peers have purged a prior minute's events, sync
+    // message after both peers have purged a prior minute's facts, sync
     // does not redeliver the new message to bob within the test's polling
     // window. That is a sync-vs-purge interaction worth its own
     // investigation — the negentropy snapshot referencing purged ids may
@@ -170,10 +170,10 @@ fn cli_disappearing_messages_two_peer_convergence() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: later admin-signed `content::disappearing_messages_setting` events
+// Test 3: later admin-signed `content::disappearing_messages_setting` facts
 // supersede earlier ones; messages stamped under an earlier setting
 // retain their stamped TTL. `workspace::commands::create` emits the
-// workspace's initial setting alongside the workspace event, so the
+// workspace's initial setting alongside the workspace fact, so the
 // "first" setting and any later admin `disappearing-set` form a chain
 // of settings — there is no separate "workspace TTL fallback" anymore.
 //
@@ -192,13 +192,13 @@ fn cli_disappearing_messages_setting_supersedes_workspace_ttl_without_rewriting_
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Pin the clock and author the first message at minute 100. This is
-    // stamped under the workspace event's TTL of 1, so its
+    // stamped under the workspace fact's TTL of 1, so its
     // expires_at_minute is 101.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "early"]));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
 
-    // Admin authors a setting event raising TTL to 5. After the setting
+    // Admin authors a setting fact raising TTL to 5. After the setting
     // is admitted, subsequent messages are stamped with TTL=5; the
     // previously-authored "early" message's stamped expiry is unchanged.
     assert_success(topo(&[
@@ -300,7 +300,7 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
         !post_view.contains("secret") && !post_view.contains("🌶️ alice"),
         "view must not show the expired message or cascaded reaction:\n{post_view}"
     );
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
 // note at the end of `cli_disappearing_messages_two_peer_convergence`):
 // cross-peer sync of a NEW post-purge message. Empirically the
 // negentropy exchange does not redeliver Y to bob within the polling
-// window after both peers have purged a prior minute's events; that's
+// window after both peers have purged a prior minute's facts; that's
 // a sync-vs-purge interaction that's worth its own investigation and
 // is orthogonal to the local post-purge authoring claim.
 // ---------------------------------------------------------------------------
@@ -546,7 +546,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
 //
 // Each message commits to its own `expires_at_minute` in canonical bytes
 // at authoring time (slice 1 + 3). The admin-signed
-// `content::disappearing_messages_setting` event tightens the TTL used for
+// `content::disappearing_messages_setting` fact tightens the TTL used for
 // SUBSEQUENT authoring (slice 2) without retroactively rewriting earlier
 // messages. The deletion floor is intentionally NOT advanced here — the
 // CLI's `disappearing-set` always sets `expires_at_or_before_minute = 0`,
@@ -718,7 +718,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 //
 // Practical note: per the task and `bdaa60f`, the user-visible wedge
 // message is "no retained ancestor covers the target leaf", surfaced by
-// `derive_event_leaf` on the authoring path. The admit path's exact
+// leaf derivation on the authoring path. The admit path's exact
 // rejection wording is a secondary signal. The assertion below marks the
 // missing deterministic public admit/drop query needed to test redelivery
 // itself without coupling the test to key-healing side effects.
@@ -791,25 +791,25 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
     // unchanged after we restart alice's daemon and let sync attempt
     // to deliver X.
     let bob_messages_before = message_lines(&bob, &workspace_id).len();
-    let bob_content_before = content_event_count(&bob, &workspace_id);
+    let bob_content_before = content_message_count(&bob, &workspace_id);
     let bob_disappearing_before =
         assert_success(topo(&["--db", &bob, "disappearing-status", &workspace_id]));
     // `live_messages` = opened + sealed; the sealed projection is the only
     // place X could land on bob without a full decryption path.
     let bob_live_messages_before = line_value(&bob_disappearing_before, "live_messages");
-    // Bob must not already have the canonical bytes of X — i.e. EVENTS
+    // Bob must not already have the canonical bytes of X: the message listing
     // must not contain `message_fact_id` before the redelivery attempt.
     // If bob's messages output already contains the id, the test setup
     // failed to isolate the wedge.
     let bob_messages_listing_before = messages_text(&bob, &workspace_id);
-    let bob_already_had_event_bytes = bob_messages_listing_before.contains(&message_fact_id);
+    let bob_already_had_message_bytes = bob_messages_listing_before.contains(&message_fact_id);
     // The test isolates the late-delivery path: bob must NOT have admitted
     // X before alice's daemon was killed. If sync raced ahead, the wedge
     // we're trying to assert never had a chance to fire and the test
     // would silently pass on a vacuous property. Since Alice's daemon was
     // stopped before X was authored, this should only fail if another route
     // delivered X unexpectedly.
-    let setup_race_bob_already_saw_x = bob_messages_before > 0 || bob_already_had_event_bytes;
+    let setup_race_bob_already_saw_x = bob_messages_before > 0 || bob_already_had_message_bytes;
     assert!(
         !setup_race_bob_already_saw_x,
         "setup failure: bob saw X before the late-delivery phase, so the \
@@ -823,14 +823,14 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
         "bob must have no visible messages before redelivery"
     );
     assert_eq!(
-        content_event_count(&bob, &workspace_id),
+        content_message_count(&bob, &workspace_id),
         bob_content_before,
         "bob must have no content before redelivery"
     );
     assert_eq!(bob_live_messages_before, "0");
-    // Remaining gap: there is no `events get <id>` or filtered
-    // `sync-status --event <id>` command that reports admit/drop state without
-    // healing or projecting the event. Reconnecting Alice here is not a stable
+    // Remaining gap: there is no fact-id filtered command that reports
+    // admit/drop state without healing or projecting the message. Reconnecting
+    // Alice here is not a stable
     // black-box rejection proof because public key-healing behavior can also
     // run during the reconnect and make the old message visible.
 }
@@ -838,7 +838,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
 // ---------------------------------------------------------------------------
 // Test 8b (recipient-key-triggered proactive wrap): when a member publishes a
 // recipient key and a frontier exists, the frontier owner proactively
-// materializes the deterministic wrap. If a content event races ahead of the
+// materializes the deterministic wrap. If a message fact races ahead of the
 // key material, sync keeps comparing and the message becomes visible once the
 // wrap arrives and F is derived.
 //
@@ -850,11 +850,11 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
 // The gate-specific behavior (drop-at-admit when no cover) is verified by
 // the unit-level `admit_drops_message_with_no_covering_ancestor` and
 // `admit_recovers_after_frontier_root_is_seeded` tests in
-// `message/schema.rs`. Those tests assert the EVENTS row is absent and
+// `message/schema.rs`. Those tests assert the message row is absent and
 // no tombstone is written on the drop, and that the same bytes admit
 // after F appears.
 //
-// At the CLI level, the new event-native path removes the explicit
+// At the CLI level, the message-native path removes the explicit
 // operator `key-wrap` step. The CLI test asserts the end-to-end behavior:
 // without manual wrapping, bob derives F from the proactive wrap and then
 // opens X.
@@ -928,7 +928,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     // Sync naturally redelivers: alice's negentropy "have" set includes X,
     // bob's "have" set still excludes it, so alice resends X on the next
     // compare. With F now present on bob, admit_check_received returns
-    // Admit, the bytes enter EVENTS, the projector decrypts using F,
+    // Admit, the bytes enter the fact store, the projector decrypts using F,
     // and X appears in bob's messages listing.
     wait_for_message_text(&bob, &workspace_id, "alice: early-x");
 
@@ -937,7 +937,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     let bob_post_listing = messages_text(&bob, &workspace_id);
     assert!(
         bob_post_listing.contains(&message_fact_id),
-        "EVENTS on bob must contain X's id after F arrives and sync \
+        "bob's message listing must contain X's id after F arrives and sync \
          redelivers:\n{bob_post_listing}"
     );
 }
@@ -1032,7 +1032,7 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
          (was {mt_after_expiry}, now {mt_after_chop}):\n{post_chop}"
     );
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_event_count(&alice, &workspace_id), "0");
+    assert_eq!(content_message_count(&alice, &workspace_id), "0");
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,9 +1098,9 @@ fn message_lines_from_text(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn content_event_count(db: &str, workspace_id: &str) -> String {
+fn content_message_count(db: &str, workspace_id: &str) -> String {
     let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
-    line_value(&out, "content_events")
+    line_value(&out, "content_messages")
 }
 
 fn key_access_value(db: &str, workspace_id: &str, removal_frontier_id: &str) -> String {
@@ -1148,7 +1148,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "eventually",
         "content-count",
         workspace_id,
-        "content_events",
+        "content_messages",
         "eq",
         expected,
         "--timeout-ms",
@@ -1275,7 +1275,7 @@ fn key_wrap_with_retry(
 ///
 /// The caller must already have a running `topo start` daemon on `host` bound
 /// to `port` and a running daemon on `joiner` (any port). The host's daemon
-/// serves the bootstrap; the joiner's daemon admits the user/endpoint events
+/// serves the bootstrap; the joiner's daemon admits the user/endpoint facts
 /// and connects back. After this returns, both peers' projections include the
 /// new membership and sync continues over the daemons' network routes.
 fn join_workspace(

@@ -1,6 +1,6 @@
 //! Content-file fact shape for the poc-10 target tree.
 //!
-//! A file descriptor is a workspace-scoped, message-attached metadata event
+//! A file descriptor is a workspace-scoped, message-attached metadata fact
 //! naming a file's encrypted blob. The public envelope carries the workspace,
 //! parent message, author, file id, blob byte count, slice budget, and the
 //! BLAKE3 root hash of the encrypted blob (carried in plaintext per the design

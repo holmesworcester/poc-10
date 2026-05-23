@@ -17,7 +17,7 @@
 //! workflows. A user-facing command may query before or after a runtime drain
 //! only when the operation explicitly knows the prior state is present.
 //!
-//! Anything richer (workers, the event registry, a `Protocol`, a
+//! Anything richer (workers, the fact registry, a `Protocol`, a
 //! `DaemonWorkerContext`) is deliberately absent. This module is a core
 //! boundary type, not a protocol command implementation.
 //!
@@ -95,7 +95,7 @@ impl<F: Fn() -> u64> CommandClock for FnClock<F> {
 /// The read-only context for user-facing command workflows.
 ///
 /// `CommandContext` deliberately holds references only. It does not own a
-/// `Protocol`, a `DaemonWorkerContext`, an `EventRegistry`, or any worker
+/// `Protocol`, a `DaemonWorkerContext`, a fact registry, or any worker
 /// channel. The four accessor methods are the entire surface a command may
 /// use.
 pub struct CommandContext<'a> {
@@ -191,7 +191,7 @@ impl<T> CommandOutput<T> {
 // boundary.
 //
 // 1. `CommandContext` has the four read-only methods described above and no
-//    method that returns a worker handle, an event registry, or a
+//    method that returns a worker handle, a fact registry, or a
 //    `DaemonWorkerContext`.
 // 2. The size of `CommandContext` is the size of three thin references, which
 //    rules out a hidden owned worker pool, channel, or registry field.

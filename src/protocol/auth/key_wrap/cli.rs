@@ -288,7 +288,7 @@ pub fn chop_now_output(receipt: &commands::ChopNowReceipt) -> CliOutput {
             "right_side_siblings_materialized: {}",
             receipt.right_side_siblings_materialized
         ),
-        format!("purged_event_bytes: {}", receipt.purged_event_bytes),
+        format!("purged_secret_bytes: {}", receipt.purged_secret_bytes),
         format!(
             "subsumed_message_tombstones_gcd: {}",
             receipt.subsumed_message_tombstones_gcd

@@ -356,7 +356,7 @@ fn cli_sync_status_reports_changed_root_after_expiry() {
     );
     assert!(
         pre_count >= 3,
-        "indexed events must include at least the 3 authored messages: {pre_count}"
+        "indexed facts must include at least the 3 authored messages: {pre_count}"
     );
 
     // Spawn the daemon to advance the messages through expiry, then stop it
@@ -416,7 +416,7 @@ fn cli_chop_now_reports_non_zero_tombstones_for_non_zero_floor() {
     let _: u64 = line_value(&chop, "right_side_siblings_materialized")
         .parse()
         .expect("parse siblings");
-    let _: u64 = line_value(&chop, "purged_event_bytes")
+    let _: u64 = line_value(&chop, "purged_secret_bytes")
         .parse()
         .expect("parse purged bytes");
     let _: u64 = line_value(&chop, "subsumed_message_tombstones_gcd")
@@ -491,7 +491,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         let output = topo(&["--db", db, "content-count", workspace_id]);
         if output.status.success() {
             let out = stdout(&output);
-            if line_value(&out, "content_events") == expected {
+            if line_value(&out, "content_messages") == expected {
                 return;
             }
             last = out;

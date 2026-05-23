@@ -26,7 +26,7 @@ fn run_cascade_replay_perf(count: usize, large: bool) {
     );
     let count_arg = count.to_string();
 
-    let staged = assert_success(topo(&["--db", &db, "generate-deps", &count_arg, "10"]));
+    let staged = assert_success(topo(&["--db", &db, "test-generate-deps", &count_arg, "10"]));
     assert_eq!(line_value(&staged, "staged_facts"), count_arg);
     assert_eq!(line_value(&staged, "deps_per_fact"), "10");
     assert_eq!(
@@ -41,7 +41,7 @@ fn run_cascade_replay_perf(count: usize, large: bool) {
     );
 
     let started = Instant::now();
-    let replayed = assert_success(topo(&["--db", &db, "replay-deps-reverse"]));
+    let replayed = assert_success(topo(&["--db", &db, "test-replay-deps-reverse"]));
     let elapsed = started.elapsed();
 
     assert_eq!(line_value(&replayed, "replayed_facts"), count_arg);

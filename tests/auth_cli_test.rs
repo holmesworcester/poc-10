@@ -16,6 +16,19 @@ use std::time::Duration;
 use cli_harness::*;
 
 #[test]
+fn cli_key_derive_reports_key_wrap_summary_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "derive-output.db");
+
+    let out = assert_success(topo(&["--db", &db, "key-derive"]));
+
+    assert_eq!(line_value(&out, "scanned_key_wraps"), "0");
+    assert_eq!(line_value(&out, "derived_key_secrets"), "0");
+    assert_eq!(line_value(&out, "failed_key_wraps"), "0");
+    assert_eq!(out.lines().count(), 3, "{out}");
+}
+
+#[test]
 fn cli_key_wrap_derives_access_for_proactive_recipients() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -272,7 +285,7 @@ fn cli_history_node_tombstone_rejects_derivation_from_retired_path() {
         stderr(&from_retired_root)
     );
     assert!(
-        stderr(&from_retired_root).contains("history node source event is missing"),
+        stderr(&from_retired_root).contains("history node source fact is missing"),
         "{}",
         stderr(&from_retired_root)
     );
@@ -465,9 +478,9 @@ fn cli_chop_revokes_frontier_rejects_old_wraps_and_allows_fresh_messages() {
         "fresh authoring should not disturb the current local message listing:\n{fresh_messages}"
     );
 
-    let _: u64 = line_value(&chop, "purged_event_bytes")
+    let _: u64 = line_value(&chop, "purged_secret_bytes")
         .parse()
-        .expect("parse purged_event_bytes");
+        .expect("parse purged_secret_bytes");
     let _: u64 = line_value(&chop, "subsumed_message_tombstones_gcd")
         .parse()
         .expect("parse subsumed_message_tombstones_gcd");
@@ -790,7 +803,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "eventually",
         "content-count",
         workspace_id,
-        "content_events",
+        "content_messages",
         "eq",
         expected,
         "--timeout-ms",

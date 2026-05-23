@@ -3,7 +3,7 @@
 //! Ephemeral secrets are local handshake capabilities. Projection turns live
 //! local secret facts into durable local rows plus exact context offers that
 //! request/response projectors can match by secret fact id. When a connection
-//! close event names the secret, the same owner deletes its row and purges its
+//! close fact names the secret, the same owner deletes its row and purges its
 //! own fact bytes.
 //!
 //! POLICY. A connection_ephemeral_secret is admitted iff:

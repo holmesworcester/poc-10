@@ -626,7 +626,7 @@ fn signed_key_wrap(
     }
     let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
     if recipient.workspace_id != wrap.workspace_id {
-        return Err("key wrap recipient key workspace does not match event".to_string());
+        return Err("key wrap recipient key workspace does not match wrap".to_string());
     }
     let frontier_fact = frontier_fact.expect("checked");
     if frontier_fact.id != wrap.frontier_id {
@@ -634,7 +634,7 @@ fn signed_key_wrap(
     }
     let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
     if frontier.workspace_id != wrap.workspace_id {
-        return Err("key wrap removal frontier workspace does not match event".to_string());
+        return Err("key wrap removal frontier workspace does not match wrap".to_string());
     }
     if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not own removal frontier".to_string());
@@ -674,10 +674,10 @@ fn signed_key_wrap(
             &local_recipient_fact.bytes,
         )?;
         if local.workspace_id != wrap.workspace_id {
-            return Err("key wrap local recipient workspace does not match event".to_string());
+            return Err("key wrap local recipient workspace does not match wrap".to_string());
         }
         if local.recipient_key_id != wrap.recipient_key_id {
-            return Err("key wrap local recipient key id does not match event".to_string());
+            return Err("key wrap local recipient key id does not match wrap".to_string());
         }
         if local.recipient_key != recipient.recipient_key {
             return Err("key wrap local recipient public key does not match recipient".to_string());

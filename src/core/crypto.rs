@@ -268,7 +268,7 @@ pub fn bao_outboard(plaintext: &[u8]) -> Result<(Hash, Vec<u8>), String> {
 /// Extract a self-contained BAO slice proof for `[slice_start, slice_start + slice_len)`.
 ///
 /// The returned bytes contain both the verified plaintext and the tree nodes
-/// needed to verify it against `root_hash`. They are what slice events should
+/// needed to verify it against `root_hash`. They are what file-slice facts should
 /// carry on the wire.
 pub fn bao_extract_slice(
     plaintext: &[u8],

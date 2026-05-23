@@ -1,6 +1,6 @@
 //! Connection close fact family.
 //!
-//! A close fact is the local event that retires a materialized connection. It
+//! A close fact is the local fact that retires a materialized connection. It
 //! names a connection-response fact id, waits for exact local connection
 //! context, then publishes close context for that connection and for the
 //! initiator/responder ephemeral-secret fact ids referenced by the response.

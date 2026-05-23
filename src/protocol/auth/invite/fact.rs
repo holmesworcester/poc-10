@@ -5,7 +5,7 @@
 //! a projected fact rather than hidden CLI state. The fact is local-only.
 //!
 //! `workspace_id` and `invite_fact_id` are jointly optional: a freshly minted
-//! invite (creator side) does not yet know which shared `invite_server` event
+//! invite (creator side) does not yet know which shared `invite_server` fact
 //! id it will be paired with, while an accepted invite (acceptor side) scopes
 //! the secret to one workspace/invite pair.
 

@@ -402,8 +402,8 @@ fn black_box_generated_content_sync_catches_up_after_daemon_reconnect() {
     let bob = temp_db(&tmp, "bob-sync-reconnect.db");
     let alice_port = free_port();
     let bob_port = free_port();
-    let event_count = 24;
-    let event_size = 96;
+    let message_count = 24;
+    let message_text_bytes = 96;
     let timeout_ms = 20_000;
 
     let workspace = create_workspace(&alice, "sync-reconnect", "alice", "alice-laptop");
@@ -420,10 +420,10 @@ fn black_box_generated_content_sync_catches_up_after_daemon_reconnect() {
     drop(alice_daemon);
     drop(bob_daemon);
 
-    let generated = generate(&alice, &workspace, event_count, event_size);
+    let generated = generate(&alice, &workspace, message_count, message_text_bytes);
     assert_eq!(
         line_value(&generated, "generated_facts"),
-        event_count.to_string()
+        message_count.to_string()
     );
     assert_content_count(&bob, &workspace, 0);
 
@@ -432,8 +432,8 @@ fn black_box_generated_content_sync_catches_up_after_daemon_reconnect() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
 
-    let projected = poll_for_content_count_at_least(&bob, &workspace, event_count, timeout_ms);
-    assert_eq!(projected, event_count);
+    let projected = poll_for_content_count_at_least(&bob, &workspace, message_count, timeout_ms);
+    assert_eq!(projected, message_count);
 }
 
 #[test]
@@ -460,8 +460,8 @@ fn cli_three_long_running_daemons_converge_messages_among_late_joiner() {
 
     // Late joiner: carol accepts a fresh invite from alice's daemon and starts
     // her own daemon BEFORE bob/alice exchange any encrypted content. The
-    // periodic outbound sync still has to fan out alice's identity events to
-    // both bob and carol, and sync their own join/identity events back to
+    // periodic outbound sync still has to fan out alice's identity facts to
+    // both bob and carol, and sync their own join/identity facts back to
     // alice and to each other.
     let invite_for_carol = workspace_invite_for_addr(&alice, &workspace, alice_port);
     let _carol_daemon = spawn_daemon(&carol, carol_port);
@@ -553,7 +553,7 @@ fn accept_with_identity_retry(db: &str, invite: &str, username: &str, device_nam
         }
         last = stderr(&output);
         // Bootstrap can retry on transient TCP failures or when alice's
-        // daemon has not yet committed the new user_invite to its events
+        // daemon has not yet committed the new user_invite fact
         // table for the just-created invite link.
         if !last.contains("open tcp stream") && !last.contains("user invite was not received") {
             break;
@@ -911,7 +911,7 @@ fn generate(db: &str, workspace: &str, count: usize, size: usize) -> String {
 fn assert_content_count(db: &str, workspace: &str, expected: usize) {
     let out = assert_success(topo(&["--db", db, "content-count", workspace]));
     assert_eq!(
-        line_value(&out, "content_events"),
+        line_value(&out, "content_messages"),
         expected.to_string(),
         "content-count output:\n{out}"
     );
@@ -932,7 +932,7 @@ fn poll_for_content_count_at_least(
         "eventually",
         "content-count",
         workspace,
-        "content_events",
+        "content_messages",
         "gte",
         &expected,
         "--timeout-ms",
@@ -942,7 +942,7 @@ fn poll_for_content_count_at_least(
     ]));
     line_value(&out, "observed")
         .parse()
-        .expect("observed content_events usize")
+        .expect("observed content_messages usize")
 }
 
 fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
@@ -954,7 +954,7 @@ fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
         "eventually",
         "content-count",
         workspace,
-        "content_events",
+        "content_messages",
         "eq",
         &expected,
         "--timeout-ms",

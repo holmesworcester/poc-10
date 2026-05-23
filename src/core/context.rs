@@ -435,9 +435,9 @@ mod tests {
 
     #[test]
     fn role_rejects_broad_free_text() {
-        assert!(Role::new("exact_event").is_ok());
-        assert!(Role::new("ExactEvent").is_err());
-        assert!(Role::new("exact-event").is_err());
+        assert!(Role::new("exact_fact").is_ok());
+        assert!(Role::new("ExactFact").is_err());
+        assert!(Role::new("exact-fact").is_err());
     }
 
     #[test]

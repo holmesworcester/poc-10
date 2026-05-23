@@ -148,7 +148,7 @@ fn project_endpoint_signed(
         return Err("invite_server admin context payload id mismatch".to_string());
     }
     let admin = decode_admin_payload(admin_fact)
-        .map_err(|_| "invite_server authority must be an admin event".to_string())?;
+        .map_err(|_| "invite_server authority must be an admin fact".to_string())?;
     if admin.workspace_id != invite.workspace_id {
         return Err("invite_server admin authority belongs to a different workspace".to_string());
     }

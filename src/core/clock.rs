@@ -1,9 +1,9 @@
 //! Store-local logical clock for deterministic CLI scenarios.
 //!
-//! This is not a protocol event and it is not synced. It is local operator/test
-//! metadata used as a lower bound when CLI commands choose the next event
-//! timestamp. Existing event timestamps still win, so setting the clock
-//! backwards cannot make new shared events collide with old ones.
+//! This is not protocol data and it is not synced. It is local operator/test
+//! metadata used as a lower bound when CLI commands choose the next authored
+//! timestamp. Existing authored timestamps still win, so setting the clock
+//! backwards cannot make new shared facts collide with old ones.
 //!
 //! Change this file when the local CLI clock policy changes. Do not use it as
 //! a shared protocol clock: facts and projected rows must carry their own
@@ -70,12 +70,12 @@ pub fn clear_logical_time(store: &Store) -> Result<(), String> {
 
 /// Compute the next timestamp a command should use.
 ///
-/// The result is at least one greater than the observed event maximum and at
+/// The result is at least one greater than the observed authored maximum and at
 /// least the local logical clock. This makes the clock a lower bound rather
-/// than a source of truth that can override already-observed events.
+/// than a source of truth that can override already-observed authored facts.
 pub fn next_timestamp(store: &Store, observed_max_timestamp: u64) -> Result<u64, String> {
-    let from_events = observed_max_timestamp.saturating_add(1);
-    Ok(from_events.max(logical_time(store)?.unwrap_or(0)))
+    let from_observed = observed_max_timestamp.saturating_add(1);
+    Ok(from_observed.max(logical_time(store)?.unwrap_or(0)))
 }
 
 /// Run the generic `clock` CLI command against a store.
@@ -119,7 +119,7 @@ fn apply_cli_args(
         .unwrap_or_else(|| "unset".to_string());
     Ok(CliOutput::lines(vec![
         format!("logical_time: {logical_time}"),
-        format!("max_event_timestamp: {observed_max_timestamp}"),
+        format!("max_observed_timestamp: {observed_max_timestamp}"),
         format!("next_timestamp: {next_timestamp}"),
     ]))
 }

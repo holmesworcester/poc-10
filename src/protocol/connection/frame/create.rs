@@ -326,14 +326,6 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 },
             );
         }
-        content::event::TYPE_CONTENT_EVENT => {
-            return admit_with_codec::<content::event::Codec>(bytes, |decoded| {
-                Ok(Admission::workspace(
-                    decoded.payload.workspace_id,
-                    decoded.payload.timestamp,
-                ))
-            });
-        }
         content::reaction::TYPE_CONTENT_REACTION => {
             return admit_with_codec::<content::reaction::Codec>(bytes, |decoded| {
                 Ok(Admission::workspace(

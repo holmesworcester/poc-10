@@ -1,4 +1,4 @@
-//! Black-box CLI tests for content events.
+//! Black-box CLI tests for content messages.
 //!
 //! Setup deliberately goes through the real `topo` binary: workspace creation,
 //! daemon-served invite acceptance, connection learning, sync, and content
@@ -423,11 +423,11 @@ fn cli_received_deletion_hides_message_after_processes_exit() {
     }
 
     // The sync processes are dropped here. A fresh CLI read should still show
-    // that the deleted message and its content-event bytes are absent.
+    // that the deleted message bytes are absent.
     let bob_listing = assert_success(topo(&["--db", &bob, "messages", &workspace_id]));
     assert_eq!(line_value(&bob_listing, "messages"), "0");
     assert!(!bob_listing.contains(sentinel), "{bob_listing}");
-    assert_eq!(content_event_count(&bob, &workspace_id), "0");
+    assert_eq!(content_message_count(&bob, &workspace_id), "0");
     // Remaining gap: there is no CLI-visible deletion-fact audit separate
     // from the persisted absence in `messages` and `content-count`.
 }
@@ -656,14 +656,14 @@ fn cli_save_file_rejects_incomplete_download() {
 
 #[test]
 fn cli_out_of_order_slice_arrival_eventually_completes() {
-    // Slice events depend on the file descriptor event id, but slice events
-    // among themselves have no inter-slice dependency: sync may deliver them
+    // File slices depend on the file descriptor id, but slices among
+    // themselves have no inter-slice dependency: sync may deliver them
     // in any order. This test sends a multi-slice file and asserts that
     // regardless of arrival order the assembled bytes round-trip exactly.
     //
     // The `list_for_file` query in the file_slice schema sorts slices by
-    // `slice_number` before assembly, so the order in which slice events
-    // were admitted does not affect the final saved bytes.
+    // `slice_number` before assembly, so admission order does not affect the
+    // final saved bytes.
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
@@ -886,7 +886,7 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
     assert_eq!(files_total(&after_files), "0");
     let after_messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert_eq!(line_value(&after_messages, "messages"), "0");
-    assert_eq!(content_event_count(&db, &workspace_id), "0");
+    assert_eq!(content_message_count(&db, &workspace_id), "0");
 
     let out_path = tmp.path().join("deleted.bin");
     let output = topo(&[
@@ -903,8 +903,8 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
         stdout(&output),
         stderr(&output)
     );
-    // The public purge signal is `content-count`: the deleted content-message
-    // event, file descriptor, and file-slice content rows are gone, while
+    // The public purge signal is `content-count`: the deleted content-message,
+    // file descriptor, and file-slice content rows are gone, while
     // `messages`/`files` and `save-file` cover the read-model behavior.
 }
 
@@ -967,7 +967,7 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
         stderr(&output)
     );
     // The public purge signal is `content-count`: bob has no remaining
-    // content-event rows for the synced deleted message/file bytes.
+    // message/file content rows for the synced deleted bytes.
 }
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
@@ -1231,9 +1231,9 @@ fn wait_for_messages_count(db: &str, workspace_id: &str, expected: &str) {
     wait_for_count(db, "messages", workspace_id, "messages", expected);
 }
 
-fn content_event_count(db: &str, workspace_id: &str) -> String {
+fn content_message_count(db: &str, workspace_id: &str) -> String {
     let out = assert_success(topo(&["--db", db, "content-count", workspace_id]));
-    line_value(&out, "content_events")
+    line_value(&out, "content_messages")
 }
 
 fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
@@ -1244,7 +1244,7 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "eventually",
         "content-count",
         workspace_id,
-        "content_events",
+        "content_messages",
         "eq",
         expected,
         "--timeout-ms",

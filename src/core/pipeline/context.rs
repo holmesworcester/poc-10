@@ -19,7 +19,7 @@
 //! The stored shape is one `context_edges` row per standing need or offer. The
 //! `owner` column is always the fact whose projection emitted the row. For
 //! offers, that same owner is also the payload fact loaded into matched
-//! projection context. Needs and offers are standing state, not event history:
+//! projection context. Needs and offers are standing state, not fact history:
 //! when a fact projects again, its new output replaces the old rows it owned.
 //!
 //! The invariant is replacement by owner. Projection output is the complete

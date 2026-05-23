@@ -1,6 +1,6 @@
 //! Device-invite fact shape for the poc-10 target tree.
 //!
-//! A device-invite fact is the shared authority a later endpoint-shared event
+//! A device-invite fact is the shared authority a later endpoint-shared fact
 //! uses to bind one endpoint into one workspace under one user authority. The
 //! invite public key is an Ed25519 verifying key; the matching private key
 //! travels as out-of-band invite material and is not projected as shared
