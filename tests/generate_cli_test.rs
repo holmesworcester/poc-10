@@ -7,23 +7,40 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "generate.db");
     let workspace_id = create_workspace(&db);
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let before_status = assert_success(topo(&["--db", &db, "count"]));
+    let before_facts = line_value(&before_status, "facts")
+        .parse::<usize>()
+        .expect("facts count before generate");
 
     let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "7", "128"]));
     assert!(generated.contains("generated_facts: 7"), "{generated}");
     assert!(generated.contains("applied_facts: 7"), "{generated}");
     assert!(generated.contains("event_size_bytes: 128"), "{generated}");
+    assert!(generated.contains("message_text_bytes: 108"), "{generated}");
     assert!(generated.contains("first_timestamp: 1"), "{generated}");
     assert!(generated.contains("last_timestamp: 7"), "{generated}");
+
+    let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
+    assert_eq!(line_value(&messages, "messages"), "7");
 
     let content = assert_success(topo(&["--db", &db, "content-count", &workspace_id]));
     assert_eq!(line_value(&content, "content_events"), "7");
     assert_eq!(line_value(&content, "content_payload_bytes"), "896");
 
     let status = assert_success(topo(&["--db", &db, "count"]));
-    // create-workspace emits the bootstrap graph plus the local endpoint fact,
-    // and `generate` adds 7 content events on top.
-    assert_eq!(line_value(&status, "facts"), "16");
-    assert_eq!(line_value(&status, "applied_facts"), "16");
+    assert_eq!(
+        line_value(&status, "facts")
+            .parse::<usize>()
+            .expect("facts count after generate"),
+        before_facts + 7
+    );
+    assert_eq!(
+        line_value(&status, "applied_facts")
+            .parse::<usize>()
+            .expect("applied facts count after generate"),
+        before_facts + 7
+    );
 }
 
 #[test]
@@ -31,6 +48,7 @@ fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "clocked-generate.db");
     let workspace_id = create_workspace(&db);
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
     let set = assert_success(topo(&["--db", &db, "clock", "set", "5000"]));
     assert_eq!(line_value(&set, "logical_time"), "5000");
@@ -59,6 +77,7 @@ fn assert_eventually_cli_reports_true_when_condition_is_met() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "assert-eventually.db");
     let workspace_id = create_workspace(&db);
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
     assert_success(topo(&["--db", &db, "generate", &workspace_id, "2", "64"]));
     let out = assert_success(topo(&[

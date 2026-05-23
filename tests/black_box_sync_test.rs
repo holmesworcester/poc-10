@@ -40,6 +40,8 @@ fn two_endpoints_sync_multiple_mutual_workspaces() {
     bob_daemon.assert_running();
     poll_for_workspace_member(&bob, &workspace_a, "bob-a", 10_000);
     poll_for_workspace_member(&bob, &workspace_b, "bob-b", 10_000);
+    create_local_content_key(&alice, &workspace_a);
+    create_local_content_key(&alice, &workspace_b);
 
     generate(&alice, &workspace_a, 3, 128);
     generate(&alice, &workspace_b, 4, 129);
@@ -64,10 +66,12 @@ fn two_player_sync_does_not_leak_alice_private_workspace_to_bob() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
     poll_for_workspace_member(&bob, &shared, "bob-a", 10_000);
+    create_local_content_key(&alice, &shared);
 
     generate(&alice, &shared, 2, 128);
 
     wait_for_content_count(&bob, &shared, 2);
+    create_local_content_key(&alice, &alice_private);
     generate(&alice, &alice_private, 5, 128);
     thread::sleep(Duration::from_millis(1200));
     assert_content_count(&bob, &alice_private, 0);
@@ -109,6 +113,8 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
     carol_daemon.assert_running();
     poll_for_workspace_member(&bob, &workspace_a, "bob-a", 10_000);
     poll_for_workspace_member(&carol, &workspace_b, "carol-b", 10_000);
+    create_local_content_key(&bob, &workspace_a);
+    create_local_content_key(&carol, &workspace_b);
 
     generate(&bob, &workspace_a, 3, 128);
     generate(&carol, &workspace_b, 4, 128);
@@ -142,6 +148,7 @@ fn daemons_sync_cli_generated_content_without_manual_sync() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
     poll_for_workspace_member(&bob, &workspace, "bob-daemon", 10_000);
+    create_local_content_key(&alice, &workspace);
 
     generate(&alice, &workspace, 3, 128);
 
@@ -409,6 +416,7 @@ fn black_box_generated_content_sync_catches_up_after_daemon_reconnect() {
     alice_daemon.assert_running();
     bob_daemon.assert_running();
     poll_for_workspace_member(&bob, &workspace, "bob", 10_000);
+    create_local_content_key(&alice, &workspace);
     drop(alice_daemon);
     drop(bob_daemon);
 
@@ -585,6 +593,11 @@ fn poll_for_workspace_member(db: &str, workspace_id: &str, username: &str, timeo
     panic!(
         "user {username} did not converge into {db}; last users output:\n{last}\ncount output:\n{count_output}"
     );
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let frontier = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    line_value(&frontier, "removal_frontier_id")
 }
 
 fn poll_for_wrap_eligibility(

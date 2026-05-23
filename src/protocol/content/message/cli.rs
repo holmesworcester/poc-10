@@ -22,12 +22,14 @@ use crate::protocol::content::{file, file_slice, message, message_deletion, reac
 use super::queries;
 
 pub const SEND_USAGE: &str = "send WORKSPACE_ID_HEX TEXT";
+pub const GENERATE_USAGE: &str = "generate WORKSPACE_ID_HEX COUNT EVENT_SIZE_BYTES";
 pub const REACT_USAGE: &str = "react WORKSPACE_ID_HEX MESSAGE_SELECTOR EMOJI";
 pub const SEND_FILE_USAGE: &str = "send-file WORKSPACE_ID_HEX TEXT --file PATH [--mime MIME]";
 pub const FILES_USAGE: &str = "files WORKSPACE_ID_HEX [LIMIT]";
 pub const SAVE_FILE_USAGE: &str = "save-file WORKSPACE_ID_HEX FILE_SELECTOR OUT_PATH";
 pub const DELETE_MESSAGE_USAGE: &str = "delete-message WORKSPACE_ID_HEX MESSAGE_SELECTOR";
 pub const MESSAGES_USAGE: &str = "messages WORKSPACE_ID_HEX";
+pub const CONTENT_COUNT_USAGE: &str = "content-count WORKSPACE_ID_HEX";
 pub const VIEW_USAGE: &str = "view [WORKSPACE_ID_HEX]";
 
 const FILE_SLICE_BYTES: usize = 256 * 1024;
@@ -79,6 +81,32 @@ pub fn send_output(receipt: &message::create::SendReceipt, text: &str) -> CliOut
         format!("message_id: {}", encode_hex_32(&receipt.message_fact_id)),
         format!("created_at_ms: {}", receipt.created_at_ms),
         format!("text: {text}"),
+    ])
+}
+
+pub fn generate(
+    ctx: &CommandContext<'_>,
+    args: CliArgs<'_>,
+) -> Result<CommandOutput<message::create::GenerateReceipt>, String> {
+    args.require_len(3, GENERATE_USAGE)?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
+    let count = args.parse_positive_usize(1, GENERATE_USAGE)?;
+    let event_size_bytes = args.parse_positive_usize(2, GENERATE_USAGE)?;
+    message::create::generate_messages(ctx, workspace_id, count, event_size_bytes)
+}
+
+pub fn generated_output(
+    receipt: &message::create::GenerateReceipt,
+    applied_facts: usize,
+) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
+        format!("generated_facts: {}", receipt.generated_facts),
+        format!("applied_facts: {applied_facts}"),
+        format!("event_size_bytes: {}", receipt.event_size_bytes),
+        format!("message_text_bytes: {}", receipt.message_text_bytes),
+        format!("first_timestamp: {}", receipt.first_timestamp),
+        format!("last_timestamp: {}", receipt.last_timestamp),
     ])
 }
 
@@ -307,6 +335,25 @@ pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput
         }
     }
     Ok(CliOutput::lines(lines))
+}
+
+pub fn content_count(
+    ctx: &CommandContext<'_>,
+    args: CliArgs<'_>,
+) -> Result<queries::ContentCount, String> {
+    args.require_len(1, CONTENT_COUNT_USAGE)?;
+    let workspace_id = decode_id(args.get(0).expect("length checked"))?;
+    queries::count_for_workspace(ctx.store(), workspace_id)
+}
+
+pub fn content_count_output(count: queries::ContentCount) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("content_events: {}", count.content_events),
+        format!("content_facts: {}", count.content_events),
+        format!("content_messages: {}", count.content_events),
+        format!("content_payload_bytes: {}", count.content_payload_bytes),
+        format!("max_event_timestamp: {}", count.max_timestamp),
+    ])
 }
 
 pub fn files(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {

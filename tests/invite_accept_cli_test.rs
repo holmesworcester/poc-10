@@ -546,6 +546,12 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_events() {
 
     let victim_created = create_workspace(&victim, "Victim", "victim", "victim-laptop");
     let victim_workspace_id = line_value(&victim_created, "workspace_id");
+    assert_success(topo(&[
+        "--db",
+        &victim,
+        "key-frontier",
+        &victim_workspace_id,
+    ]));
     let generated = assert_success(topo(&[
         "--db",
         &victim,

@@ -38,11 +38,83 @@ pub struct SendReceipt {
     pub created_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerateReceipt {
+    pub workspace_id: WorkspaceId,
+    pub generated_facts: usize,
+    pub event_size_bytes: usize,
+    pub message_text_bytes: usize,
+    pub first_timestamp: u64,
+    pub last_timestamp: u64,
+    pub fact_ids: Vec<FactId>,
+}
+
 pub fn send_message(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
     text: &str,
 ) -> Result<CommandOutput<SendReceipt>, String> {
+    let created_at_ms = ctx.next_timestamp();
+    let fact = build_message_fact(ctx, workspace_id, text, created_at_ms)?;
+
+    Ok(CommandOutput::new(SendReceipt {
+        workspace_id,
+        message_fact_id: fact.id,
+        created_at_ms,
+    })
+    .with_facts(vec![fact]))
+}
+
+pub fn generate_messages(
+    ctx: &CommandContext<'_>,
+    workspace_id: WorkspaceId,
+    count: usize,
+    event_size_bytes: usize,
+) -> Result<CommandOutput<GenerateReceipt>, String> {
+    if count == 0 {
+        return Err("generate count must be positive".to_string());
+    }
+    if event_size_bytes == 0 {
+        return Err("generate event size must be positive".to_string());
+    }
+
+    let first_timestamp = ctx.next_timestamp();
+    let last_timestamp = first_timestamp
+        .checked_add((count - 1) as u64)
+        .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
+    let message_text_bytes = event_size_bytes.min(MAX_TEXT_BYTES);
+
+    let mut facts = Vec::with_capacity(count);
+    let mut fact_ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let timestamp = first_timestamp
+            .checked_add(index as u64)
+            .ok_or_else(|| "generate timestamp overflows u64".to_string())?;
+        let text =
+            deterministic_generated_text(&workspace_id, timestamp, index, message_text_bytes);
+        let fact = build_message_fact(ctx, workspace_id, &text, timestamp)?;
+        fact_ids.push(fact.id);
+        facts.push(fact);
+    }
+
+    Ok(CommandOutput::new(GenerateReceipt {
+        workspace_id,
+        generated_facts: count,
+        event_size_bytes,
+        message_text_bytes,
+        first_timestamp,
+        last_timestamp,
+        fact_ids,
+    })
+    .with_facts(facts))
+}
+
+fn build_message_fact(
+    ctx: &CommandContext<'_>,
+    workspace_id: WorkspaceId,
+    text: &str,
+    created_at_ms: u64,
+) -> Result<Fact, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err("send_message text must not be blank".to_string());
@@ -62,7 +134,6 @@ pub fn send_message(
         return Err("encryption capability is not bound to this workspace".to_string());
     }
 
-    let created_at_ms = ctx.next_timestamp();
     let minute = created_at_ms / UNIX_MINUTE_MS;
     let active_setting =
         disappearing_messages_setting::queries::active_for_workspace(ctx.store(), workspace_id)?;
@@ -126,12 +197,33 @@ pub fn send_message(
         envelope_bytes,
     );
 
-    Ok(CommandOutput::new(SendReceipt {
-        workspace_id,
-        message_fact_id: fact.id,
-        created_at_ms,
-    })
-    .with_facts(vec![fact]))
+    Ok(fact)
+}
+
+fn deterministic_generated_text(
+    workspace_id: &FactId,
+    timestamp: u64,
+    index: usize,
+    size: usize,
+) -> String {
+    let mut out = Vec::with_capacity(size);
+    let mut block = 0u64;
+    while out.len() < size {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"topo:poc10:generated-message-text:v1");
+        hasher.update(workspace_id);
+        hasher.update(&timestamp.to_be_bytes());
+        hasher.update(&(index as u64).to_be_bytes());
+        hasher.update(&block.to_be_bytes());
+        for byte in hasher.finalize().as_bytes() {
+            out.push(b'a' + (byte % 26));
+            if out.len() == size {
+                break;
+            }
+        }
+        block = block.saturating_add(1);
+    }
+    String::from_utf8(out).expect("generated text is ascii")
 }
 
 fn local_author_user_id(

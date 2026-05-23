@@ -124,13 +124,17 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
         verify_envelope(envelope.as_ref(), "message")?;
 
-        let metadata_output = base_output.offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "content_message_meta",
-            scope.clone(),
-            fact.id,
-            fact.id,
-        ));
+        let metadata_output = base_output
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "content_message_meta",
+                scope.clone(),
+                fact.id,
+                fact.id,
+            ))
+            .row_mutation(RowMutation::InsertValues(content_message_row(
+                fact.id, &message,
+            )));
         if let Some(now_minute) = expiry_minute_reached(context, &message) {
             return Ok(expired_output(fact.id, &message, now_minute));
         }
@@ -159,9 +163,6 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
                 fact.id,
                 fact.id,
             ))
-            .row_mutation(RowMutation::InsertValues(content_message_row(
-                fact.id, &message,
-            )))
             .row_mutation(RowMutation::InsertValues(opened_message_row(
                 OpenedMessageRow {
                     workspace_id: message.workspace_id,
