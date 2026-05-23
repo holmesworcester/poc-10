@@ -131,7 +131,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                 );
             }
             // 3. Materialize local request.
-            return materialized_output(fact.id, &request);
+            return materialized_output(fact.id, &request, true);
         }
 
         // 2b. Received bootstrap path.
@@ -235,6 +235,7 @@ fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String
 fn materialized_output(
     request_id: [u8; 32],
     request: &ConnectionRequestFact,
+    emit_bootstrap_send: bool,
 ) -> Result<ProjectionOutput, String> {
     let mut output = ProjectionOutput::new()
         .offer(crate::core::context::ContextOffer::range(
@@ -247,10 +248,16 @@ fn materialized_output(
         .row_mutation(RowMutation::PutRow(connection_request_row(
             request_id, request,
         )?));
-    if let Some(addr) = request.to_listen_addr {
-        output = output.local_intent(send_bootstrap_connection_request_intent(
-            SendBootstrapConnectionRequest { request_id, addr },
-        )?);
+    if emit_bootstrap_send {
+        if let Some(addr) = request.to_listen_addr {
+            output = output.local_intent(send_bootstrap_connection_request_intent(
+                SendBootstrapConnectionRequest {
+                    request_id,
+                    initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
+                    addr,
+                },
+            )?);
+        }
     }
     Ok(output)
 }
@@ -261,7 +268,7 @@ fn received_materialized_output(
     receive_id: [u8; 32],
 ) -> Result<ProjectionOutput, String> {
     Ok(
-        materialized_output(request_id, request)?.intent(create_connection_response_intent(
+        materialized_output(request_id, request, false)?.intent(create_connection_response_intent(
             CreateConnectionResponse {
                 request_id,
                 invite_secret_id: request.invite_secret_fact_id,
@@ -342,6 +349,7 @@ mod projector_tests {
     };
     use topo::protocol::connection::request::create::encode_optional_addr;
     use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
+    use topo::protocol::connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST;
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
         let invite = InviteSecretFact::new([55; 32]);
@@ -383,7 +391,7 @@ mod projector_tests {
             initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
             initiator_ephemeral_public_key: ephemeral.ephemeral_public_key,
             from_listen_addr: Some("127.0.0.1:41001".parse().expect("listen addr")),
-            to_listen_addr: None,
+            to_listen_addr: Some("127.0.0.1:41002".parse().expect("remote addr")),
         };
         request.invite_signature = crypto::ed25519_sign(
             &invite.bootstrap_secret,
@@ -565,6 +573,11 @@ mod projector_tests {
             .expect("project request");
 
         assert!(output.effects.intents.is_empty());
+        assert_eq!(output.effects.local_intents.len(), 1);
+        assert_eq!(
+            output.effects.local_intents[0].kind.as_str(),
+            SEND_BOOTSTRAP_CONNECTION_REQUEST
+        );
         assert_eq!(output.effects.row_mutations.len(), 1);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
@@ -585,6 +598,37 @@ mod projector_tests {
     }
 
     #[test]
+    fn local_request_with_target_route_schedules_bootstrap_send() {
+        let (mut request, _, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
+        let invite = invite_layout::decode_fact(invite_fact.body()).expect("decode invite");
+        request.to_listen_addr = Some("127.0.0.1:41002".parse().expect("target addr"));
+        request.invite_signature = crypto::ed25519_sign(
+            &invite.bootstrap_secret,
+            &invite_signing_transcript(&request).expect("transcript"),
+        );
+        let request_fact = Fact::new(
+            FactScope::Local,
+            12,
+            layout::encode_fact(&request).expect("encode request"),
+        );
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            ephemeral_match(request_fact.id, ephemeral_fact),
+        ]);
+
+        let output = project::ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert!(output.effects.intents.is_empty());
+        assert_eq!(output.effects.local_intents.len(), 1);
+        assert_eq!(
+            output.effects.local_intents[0].kind.as_str(),
+            SEND_BOOTSTRAP_CONNECTION_REQUEST
+        );
+    }
+
+    #[test]
     fn received_request_materializes_after_invite_and_receipt_context_match() {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
         let context = ProjectionContext::from_matches(vec![
@@ -598,6 +642,7 @@ mod projector_tests {
             .expect("project received request");
 
         assert_eq!(output.effects.intents.len(), 1);
+        assert!(output.effects.local_intents.is_empty());
         assert_eq!(output.effects.row_mutations.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let response_intent = output

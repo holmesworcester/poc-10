@@ -5,9 +5,12 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+use topo::core::schema::CORE_SCHEMA_SOURCE;
+use topo::core::store::Store;
 use topo::core::wire::FixedBytes;
 use topo::protocol::auth;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
+use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::invite::layout as invite_layout;
 use topo::protocol::auth::key_wrap::create as auth_create;
@@ -16,6 +19,7 @@ use topo::protocol::auth::key_wrap::fact::{
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
+use topo::protocol::connection::bootstrap;
 use topo::protocol::connection::frame::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
 use topo::protocol::connection::frame::frame::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
@@ -32,6 +36,7 @@ use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::sync::compare::layout as sync_compare_layout;
 
@@ -223,11 +228,17 @@ fn receive_handler_emits_durable_bootstrap_request_and_receipt_only() {
         &topo::protocol::connection::request::create::invite_signing_transcript(&request)
             .expect("request transcript"),
     );
-    let frame = connection_request_layout::encode_fact(&request).expect("request");
-    let expected_request = Fact::new(FactScope::Global, RECEIVED_AT, frame.clone());
+    let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
+    let frame =
+        bootstrap::seal_connection_request(&request_bytes, &[59; 32]).expect("seal request");
+    let expected_request = Fact::new(FactScope::Global, RECEIVED_AT, request_bytes.clone());
+    let store = store_with_local_endpoint(&endpoint);
 
     let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .handle(
+            &receive_intent(frame.clone()),
+            &HandlerContext::new().with_store(&store),
+        )
         .expect("receive request");
 
     assert!(output.ephemeral_facts.is_empty());
@@ -255,6 +266,113 @@ fn receive_handler_emits_durable_bootstrap_request_and_receipt_only() {
     assert_eq!(receipt.local_endpoint_id, request.to_endpoint);
     assert_eq!(receipt.sender_endpoint_id, request.from_endpoint);
     assert_eq!(receipt.request_id, Some(expected_request.id));
+    assert_eq!(receipt.frame_hash, crypto::hash(&frame));
+}
+
+#[test]
+fn raw_bootstrap_request_bytes_are_discarded_at_the_network_boundary() {
+    let endpoint = local_endpoint();
+    let request = ConnectionRequestFact {
+        from_endpoint: crypto::x25519_public_key(&[55; 32]),
+        to_endpoint: endpoint.endpoint,
+        nonce: [56; 32],
+        invite_fact_id: [57; 32],
+        bootstrap_hash: [58; 32],
+        invite_signature: [59; crypto::ED25519_SIGNATURE_BYTES],
+        invite_secret_fact_id: [60; 32],
+        initiator_ephemeral_secret_fact_id: [61; 32],
+        initiator_ephemeral_public_key: crypto::x25519_public_key(&[62; 32]),
+        from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
+        to_listen_addr: None,
+    };
+    let frame = connection_request_layout::encode_fact(&request).expect("request");
+    let store = store_with_local_endpoint(&endpoint);
+
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(
+            &receive_intent(frame),
+            &HandlerContext::new().with_store(&store),
+        )
+        .expect("raw request is consumed");
+
+    assert!(output.facts.is_empty());
+    assert!(output.ephemeral_facts.is_empty());
+}
+
+#[test]
+fn raw_bootstrap_response_bytes_are_discarded_at_the_network_boundary() {
+    let endpoint = local_endpoint();
+    let response = ConnectionResponseFact {
+        from_endpoint: crypto::x25519_public_key(&[63; 32]),
+        to_endpoint: endpoint.endpoint,
+        request_id: [64; 32],
+        invite_secret_fact_id: [65; 32],
+        initiator_ephemeral_secret_fact_id: [66; 32],
+        responder_ephemeral_secret_fact_id: [67; 32],
+        responder_ephemeral_public_key: crypto::x25519_public_key(&[68; 32]),
+        handshake_hash: [69; 32],
+        connection_secret: [70; 32],
+    };
+    let frame = connection_response_layout::encode_fact(&response).expect("response");
+    let store = store_with_local_endpoint(&endpoint);
+
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(
+            &receive_intent(frame),
+            &HandlerContext::new().with_store(&store),
+        )
+        .expect("raw response is consumed");
+
+    assert!(output.facts.is_empty());
+    assert!(output.ephemeral_facts.is_empty());
+}
+
+#[test]
+fn receive_handler_decrypts_sealed_response_and_records_wire_hash() {
+    let endpoint = local_endpoint();
+    let responder_ephemeral_private = [72; 32];
+    let response = ConnectionResponseFact {
+        from_endpoint: crypto::x25519_public_key(&[71; 32]),
+        to_endpoint: endpoint.endpoint,
+        request_id: [73; 32],
+        invite_secret_fact_id: [74; 32],
+        initiator_ephemeral_secret_fact_id: [75; 32],
+        responder_ephemeral_secret_fact_id: [76; 32],
+        responder_ephemeral_public_key: crypto::x25519_public_key(&responder_ephemeral_private),
+        handshake_hash: [77; 32],
+        connection_secret: [78; 32],
+    };
+    let response_bytes = connection_response_layout::encode_fact(&response).expect("response");
+    let frame = bootstrap::seal_connection_response(&response_bytes, &responder_ephemeral_private)
+        .expect("seal response");
+    let expected_response = Fact::new(FactScope::Local, RECEIVED_AT, response_bytes);
+    let store = store_with_local_endpoint(&endpoint);
+
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(
+            &receive_intent(frame.clone()),
+            &HandlerContext::new().with_store(&store),
+        )
+        .expect("receive response");
+
+    assert!(output.ephemeral_facts.is_empty());
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.facts.contains(&expected_response));
+    let receipt_fact = output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied()
+                == Some(connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT)
+        })
+        .expect("receipt fact");
+    let receipt =
+        connection::fact_receipt::layout::decode_fact(receipt_fact.body()).expect("decode receipt");
+    assert_eq!(receipt.received_fact_id, expected_response.id);
+    assert_eq!(receipt.local_endpoint_id, response.to_endpoint);
+    assert_eq!(receipt.sender_endpoint_id, response.from_endpoint);
+    assert_eq!(receipt.connection_id, Some(expected_response.id));
+    assert_eq!(receipt.request_id, Some(response.request_id));
     assert_eq!(receipt.frame_hash, crypto::hash(&frame));
 }
 
@@ -409,4 +527,13 @@ fn local_endpoint() -> EndpointFact {
         signing_public_key: crypto::ed25519_public_key(&signing_secret),
         signing_secret,
     }
+}
+
+fn store_with_local_endpoint(endpoint: &EndpointFact) -> Store {
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("store");
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(endpoint))
+        .expect("seed local endpoint");
+    store
 }

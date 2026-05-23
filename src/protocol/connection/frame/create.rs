@@ -13,7 +13,6 @@
 //! owning typed codecs. Keep cryptographic frame mechanics here; keep socket IO
 //! in core/network handlers and semantic child validation in each child family.
 
-use crate::core::crypto;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::FactCodec;
@@ -71,6 +70,8 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
         connection::close::layout::TYPE_CONNECTION_CLOSE
+            | connection::bootstrap::TYPE_SEALED_CONNECTION_REQUEST
+            | connection::bootstrap::TYPE_SEALED_CONNECTION_RESPONSE
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::request::layout::TYPE_CONNECTION_REQUEST
             | connection::response::layout::TYPE_CONNECTION_RESPONSE
@@ -134,15 +135,7 @@ pub struct ReceivedNetworkFrame<'a> {
 pub fn received_network_frame_effect(
     input: ReceivedNetworkFrame<'_>,
 ) -> Result<PipelineEffects, String> {
-    match input.frame.first().copied() {
-        Some(connection::request::layout::TYPE_CONNECTION_REQUEST) => {
-            received_connection_request_effect(input)
-        }
-        Some(connection::response::layout::TYPE_CONNECTION_RESPONSE) => {
-            received_connection_response_effect(input)
-        }
-        _ => received_connection_frame_effect(input),
-    }
+    received_connection_frame_effect(input)
 }
 
 #[derive(Debug, Clone)]
@@ -153,52 +146,59 @@ pub struct OpenReceivedFrame<'a> {
     pub received_at_local_ms: u64,
 }
 
-fn received_connection_request_effect(
-    input: ReceivedNetworkFrame<'_>,
+pub fn received_connection_request_fact_effect(
+    request_bytes: &[u8],
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+    frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(request) = typed_payload_from_bytes::<connection::request::Codec>(input.frame) else {
+    let Ok(request) = typed_payload_from_bytes::<connection::request::Codec>(request_bytes) else {
         return Ok(PipelineEffects::new());
     };
     let request_fact = Fact::new(
         FactScope::Global,
-        input.received_at_local_ms,
-        input.frame.to_vec(),
+        received_at_local_ms,
+        request_bytes.to_vec(),
     );
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: request_fact.id,
-        origin_addr: input.origin_addr,
+        origin_addr,
         local_endpoint_id: request.to_endpoint,
         sender_endpoint_id: request.from_endpoint,
         receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST,
         connection_id: None,
         request_id: Some(request_fact.id),
-        frame_hash: crypto::hash(input.frame),
-        received_at_local_ms: input.received_at_local_ms,
+        frame_hash,
+        received_at_local_ms,
     })?;
     Ok(PipelineEffects::new().fact(request_fact).fact(receipt))
 }
 
-fn received_connection_response_effect(
-    input: ReceivedNetworkFrame<'_>,
+pub fn received_connection_response_fact_effect(
+    response_bytes: &[u8],
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+    frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(response) = typed_payload_from_bytes::<connection::response::Codec>(input.frame) else {
+    let Ok(response) = typed_payload_from_bytes::<connection::response::Codec>(response_bytes)
+    else {
         return Ok(PipelineEffects::new());
     };
     let response_fact = Fact::new(
         FactScope::Local,
-        input.received_at_local_ms,
-        input.frame.to_vec(),
+        received_at_local_ms,
+        response_bytes.to_vec(),
     );
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: response_fact.id,
-        origin_addr: input.origin_addr,
+        origin_addr,
         local_endpoint_id: response.to_endpoint,
         sender_endpoint_id: response.from_endpoint,
         receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_RESPONSE,
         connection_id: Some(response_fact.id),
         request_id: Some(response.request_id),
-        frame_hash: crypto::hash(input.frame),
-        received_at_local_ms: input.received_at_local_ms,
+        frame_hash,
+        received_at_local_ms,
     })?;
     Ok(PipelineEffects::new().fact(response_fact).fact(receipt))
 }
@@ -587,7 +587,7 @@ fn require_connection_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::{ed25519_public_key, ed25519_sign};
+    use crate::core::crypto::{self, ed25519_public_key, ed25519_sign};
     use crate::protocol::auth::invite::fact::InviteSecretFact;
     use crate::protocol::auth::signed_fact::fact::SignedFactEnvelope;
     use crate::protocol::auth::user::fact::UserFact;
@@ -684,17 +684,19 @@ mod tests {
         );
         let frame = connection::request::layout::encode_fact(&request).expect("request");
 
-        let first = received_network_frame_effect(ReceivedNetworkFrame {
-            frame: &frame,
-            origin_addr: b"127.0.0.1:41002",
-            received_at_local_ms: 100,
-        })
+        let first = received_connection_request_fact_effect(
+            &frame,
+            b"127.0.0.1:41002",
+            100,
+            crypto::hash(&frame),
+        )
         .expect("first delivery");
-        let second = received_network_frame_effect(ReceivedNetworkFrame {
-            frame: &frame,
-            origin_addr: b"127.0.0.1:41002",
-            received_at_local_ms: 200,
-        })
+        let second = received_connection_request_fact_effect(
+            &frame,
+            b"127.0.0.1:41002",
+            200,
+            crypto::hash(&frame),
+        )
         .expect("duplicate delivery");
 
         assert_eq!(first.facts.len(), 2);
