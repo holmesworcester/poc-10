@@ -189,6 +189,21 @@ available. `--with-deps` sends the owner leaves plus projector-supplied
 mode exists to prove the test is not accidentally passing because a full-range
 sync happened.
 
+`sync-range` is still ordinary established-connection transit. The CLI should
+resolve the peer or connection, enqueue the same `send_facts_on_connection`
+range intent used by background sync, and let the daemon-owned connection and
+network handlers perform framing and socket egress. It should not build frames
+or write to the network directly from the command path.
+
+The current poc-10 implementation stores owner leaves and `context_have` rows
+as projector-supplied `add_to_negentropy` contributions. Range sends walk those
+rows for dependency closure and never rediscover dependencies by parsing fact
+bytes in the sync handler. Raw needs remain excluded from the persisted rows.
+That exclusion is a security boundary, not just a space optimization: a
+projector may emit needs before the related signature or authority context has
+validated, so only validated offers/context may become advertised negentropy
+state.
+
 ## Purge And Retraction
 
 Removal must use the same ownership boundary. When a target projector observes

@@ -28,8 +28,10 @@ impl crate::core::projectors::FactCodec for Codec {
 }
 
 pub use rows::{
-    connection_id_for_peer_or_connection, connection_ids_for_shareable_fact, record_shareable_fact,
+    connection_id_for_peer_or_connection, connection_ids_for_shareable_fact,
+    negentropy_context_have_for_leaf, record_negentropy_contribution, record_shareable_fact,
     shareable_fact_for_connection, shareable_fact_row, shareable_fact_rows,
     shareable_facts_for_connection, shareable_facts_for_connection_range, sync_status,
-    ShareableFactRow, SHAREABLE_FACT_ROWS,
+    NegentropyContextHaveRow, NegentropyLeafRow, ShareableFactRow, NEGENTROPY_CONTEXT_HAVE_ROWS,
+    NEGENTROPY_LEAF_ROWS, SHAREABLE_FACT_ROWS,
 };

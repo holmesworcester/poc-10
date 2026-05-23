@@ -289,6 +289,8 @@ CREATE TABLE IF NOT EXISTS sync_compare_rows (row_key BLOB PRIMARY KEY NOT NULL,
 CREATE TABLE IF NOT EXISTS sync_have_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_need_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
 CREATE TABLE IF NOT EXISTS message_deletion_rows (
     workspace_id BLOB NOT NULL,
@@ -337,6 +339,8 @@ CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIM
         sync::have_id::rows::SYNC_HAVE_ID_ROWS,
         sync::need_id::rows::SYNC_NEED_ID_ROWS,
         sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
+        sync::shared_fact::rows::NEGENTROPY_LEAF_ROWS,
+        sync::shared_fact::rows::NEGENTROPY_CONTEXT_HAVE_ROWS,
         content::disappearing_messages_setting::rows::DISAPPEARING_MESSAGES_SETTING_ROWS,
     ],
 };
@@ -673,6 +677,11 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "share_fact_with_workspace",
         sync::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
         sync::share_fact_with_workspace::ShareFactWithWorkspaceHandler
+    ),
+    handler_route!(
+        "add_to_negentropy",
+        sync::add_to_negentropy::ADD_TO_NEGENTROPY,
+        sync::add_to_negentropy::AddToNegentropyHandler
     ),
     handler_route!(
         "seed_connection_sync",

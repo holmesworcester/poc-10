@@ -90,6 +90,9 @@ pub(crate) fn dispatch_queued_intent(
     let mut status = WorkStatus::idle();
     let context = load_handler_context(store, handler, &queued.intent)?;
     let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
+        if status.retried && queued.table == LOCAL_INTENTS {
+            rotate_local_retry_to_tail(store, &queued.intent)?;
+        }
         return Ok(status);
     };
     validate_pipeline_effects(&output, allowed_tables)?;
@@ -211,6 +214,18 @@ fn commit_handler_output(
             Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))
+}
+
+fn rotate_local_retry_to_tail(store: &Store, intent: &Intent) -> Result<bool, String> {
+    store
+        .write_transaction(|tx| {
+            if delete_intent_in_tx(tx, LOCAL_INTENTS, intent.kind.as_str(), &intent.key)? == 0 {
+                return Ok(false);
+            }
+            record_intent_in_table_in_tx(tx, LOCAL_INTENTS, intent)?;
+            Ok(true)
+        })
+        .map_err(|err| format!("rotate local retry intent: {err}"))
 }
 
 pub(crate) struct QueuedIntent {

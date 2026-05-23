@@ -32,6 +32,7 @@ use crate::core::schema::{
     CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
 };
 use crate::core::store::{SchemaSource, Store, TableName};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub use crate::core::pipeline::WorkStatus;
@@ -137,17 +138,33 @@ impl HandlerSet {
     ) -> Result<WorkStatus, String> {
         let mut total = WorkStatus::idle();
         let kinds = self.intent_kinds();
+        let mut retried_local = BTreeSet::<(String, Vec<u8>)>::new();
         for _ in 0..limit {
             let Some(queued) = pipeline::next_queued_intent(store, &kinds)? else {
                 break;
             };
             let kind = queued.intent.kind.as_str();
+            let local_retry_key = if queued.table == LOCAL_INTENTS {
+                Some((kind.to_owned(), queued.intent.key.clone()))
+            } else {
+                None
+            };
+            if local_retry_key
+                .as_ref()
+                .is_some_and(|key| retried_local.contains(key))
+            {
+                break;
+            }
             let handler = self
                 .handler_for_kind(kind)
                 .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
             let status = pipeline::dispatch_queued_intent(handler, store, allowed_tables, queued)?;
             total.merge(status);
             if status.retried {
+                if let Some(key) = local_retry_key {
+                    retried_local.insert(key);
+                    continue;
+                }
                 break;
             }
         }

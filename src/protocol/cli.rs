@@ -656,13 +656,13 @@ pub(crate) fn sync_range(
         parsed.peer_or_connection_id,
     )?
     .ok_or_else(|| "sync-range could not find an authorized connection".to_string())?;
-    let sent =
-        crate::protocol::connection::send_facts_on_connection::send_shareable_range_on_connection_now(
-            ctx.runtime().store(),
+    ctx.runtime_mut().submit_intent(
+        crate::protocol::connection::send_facts_on_connection::send_shareable_range_on_connection_intent(
             connection_id,
             parsed.start_ms,
             parsed.end_ms,
             parsed.include_deps,
+        ),
     )?;
     Ok(sync::shared_fact::cli::sync_range_output(
         sync::shared_fact::cli::SyncRangeDispatched {
@@ -671,7 +671,7 @@ pub(crate) fn sync_range(
             start_ms: parsed.start_ms,
             end_ms: parsed.end_ms,
             include_deps: parsed.include_deps,
-            sent,
+            queued: true,
         },
     ))
 }

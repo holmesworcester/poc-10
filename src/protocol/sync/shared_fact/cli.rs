@@ -30,7 +30,7 @@ pub struct SyncRangeDispatched {
     pub start_ms: u64,
     pub end_ms: u64,
     pub include_deps: bool,
-    pub sent: bool,
+    pub queued: bool,
 }
 
 pub fn require_sync_status_args(args: CliArgs<'_>) -> Result<(), String> {
@@ -128,6 +128,6 @@ pub fn sync_range_output(output: SyncRangeDispatched) -> CliOutput {
                 "without"
             }
         ),
-        format!("sent: {}", if output.sent { "yes" } else { "no" }),
+        format!("queued: {}", if output.queued { "yes" } else { "no" }),
     ])
 }

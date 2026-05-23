@@ -4,21 +4,17 @@
 //! how those fact bytes are packaged. It loads the named connection and payload
 //! facts, verifies local endpoint ownership and sendability, batches facts into
 //! fixed connection-frame budgets, seals each batch, and emits local
-//! `send_network_frame` intents. The explicit `sync-range` CLI uses the same
-//! batching and sealing logic but sends its named range immediately so unrelated
-//! queued retries cannot delay an operator-requested bounded sync.
+//! `send_network_frame` intents.
 //!
 //! This is not socket IO and it is not sync visibility policy. Sync owns the
 //! shareable index and requested ids, `connection::frame` owns byte-level
 //! sendability and sealing, and `send_network_frame` owns the final opaque
 //! socket write.
 
-use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
-use crate::core::store::Store;
 use crate::core::{effects::PipelineEffects, facts::Fact};
 use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
@@ -113,30 +109,6 @@ pub fn send_shareable_range_on_connection_intent(
         ),
         payload.finish(),
     )
-}
-
-pub fn send_shareable_range_on_connection_now(
-    store: &Store,
-    connection_id: HandlerId,
-    start_timestamp_ms: u64,
-    end_timestamp_ms: u64,
-    include_deps: bool,
-) -> Result<bool, String> {
-    let Some(connection_fact) = persisted_fact(store, &connection_id)? else {
-        return Ok(false);
-    };
-    let connection = response::layout::decode_fact(connection_fact.body())?;
-    if connection_fact.id != connection_id {
-        return Err("send_facts_on_connection connection fact id mismatch".into());
-    }
-    let facts = shared_fact::shareable_facts_for_connection_range(
-        store,
-        connection_id,
-        start_timestamp_ms,
-        end_timestamp_ms,
-        include_deps,
-    )?;
-    send_fact_batches_now(store, connection_id, &connection, facts)
 }
 
 pub fn decode_send_facts_on_connection(intent: &Intent) -> Result<SendFactsOnConnection, String> {
@@ -374,47 +346,4 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
         batches.push(batch);
     }
     Ok(batches)
-}
-
-fn send_fact_batches_now(
-    store: &Store,
-    connection_id: HandlerId,
-    connection: &response::fact::ConnectionResponseFact,
-    facts: Vec<Fact>,
-) -> Result<bool, String> {
-    let batches = fact_batches(facts)?;
-    let local_endpoint = endpoint::create::local_endpoint(store)?
-        .ok_or_else(|| "send_facts_on_connection requires local endpoint state".to_string())?;
-    let (sender_endpoint, receiver_endpoint) =
-        if local_endpoint.endpoint == connection.from_endpoint {
-            (connection.from_endpoint, connection.to_endpoint)
-        } else if local_endpoint.endpoint == connection.to_endpoint {
-            (connection.to_endpoint, connection.from_endpoint)
-        } else {
-            return Err("send_facts_on_connection local endpoint is not part of connection".into());
-        };
-
-    let mut sent = false;
-    for batch in batches {
-        let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
-        let mut bundle = ConnectionFrameFactBundle::new();
-        for fact in &batch {
-            bundle.push(create::require_sendable_fact(fact)?.to_vec());
-        }
-        sent |= send_network_frame::send_network_frame_now(
-            store,
-            SendNetworkFrame {
-                routing_key: connection_id,
-                frame: frame::seal_connection_send_frame(
-                    connection_id,
-                    sender_endpoint,
-                    receiver_endpoint,
-                    connection.connection_secret,
-                    &fact_ids,
-                    bundle,
-                )?,
-            },
-        )?;
-    }
-    Ok(sent)
 }

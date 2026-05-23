@@ -15,7 +15,9 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth;
 use crate::protocol::content::message;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_optional_needs, share_fact_with_negentropy,
+};
 
 use super::fact::DisappearingMessagesSettingFact;
 use super::rows::setting_row;
@@ -111,26 +113,31 @@ impl TypedProjector<super::Codec> for DisappearingMessagesSettingProjector {
         if let Some(previous) = previous_fact {
             validate_previous(previous, &setting)?;
         }
+        let context_have = context_have_from_optional_needs(
+            projection_context,
+            [Some(&authority_need), previous_need.as_ref()],
+        );
 
         // 3. Materialize.
         let row = setting_row(fact.id, &setting)?;
-        Ok(waiting
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "sync_exact_fact",
-                FactScope::Global,
-                fact.id,
-                fact.id,
-            ))
-            .offer(message::retention_floor_offer(
-                fact.id,
-                setting.workspace_id,
-            ))
-            .row_mutation(RowMutation::PutRow(row))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                setting.workspace_id,
-                fact,
-            )))
+        Ok(share_fact_with_negentropy(
+            waiting
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "sync_exact_fact",
+                    FactScope::Global,
+                    fact.id,
+                    fact.id,
+                ))
+                .offer(message::retention_floor_offer(
+                    fact.id,
+                    setting.workspace_id,
+                ))
+                .row_mutation(RowMutation::PutRow(row)),
+            setting.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }
 
@@ -244,7 +251,7 @@ mod projector_tests {
                 )]),
             )
             .expect("project setting");
-        assert_eq!(projected.effects.intents.len(), 1);
+        assert_eq!(projected.effects.intents.len(), 2);
         assert_eq!(projected.effects.row_mutations.len(), 1);
         assert!(projected
             .offers

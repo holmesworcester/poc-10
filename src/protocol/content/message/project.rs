@@ -25,7 +25,9 @@ use crate::protocol::auth::user;
 use crate::protocol::content::{
     disappearing_messages_setting, message_deletion, purge::project as content_purge,
 };
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::rows::{
     content_message_row, message_tombstone_row, message_tombstone_row_at_minute,
@@ -114,28 +116,61 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
                 author_need.clone(),
                 secret_need.clone(),
             ],
+            Vec::new(),
         );
         let Some(signer_payload) = context.payload_for(&signer_need) else {
             return Ok(base_output);
         };
         validate_message_signer_context(signer_payload, &signer_need, &message, envelope.as_ref())?;
+        let signer_context_have = context_have_from_needs(context, [&signer_need]);
         let Some(author) = context_payload(context, &author_need, "message author")? else {
-            return Ok(base_output);
+            return Ok(base_wait_output(
+                fact,
+                &message,
+                [
+                    signer_need.clone(),
+                    deletion_need.clone(),
+                    retention_floor_need.clone(),
+                    author_need.clone(),
+                    secret_need.clone(),
+                ],
+                signer_context_have,
+            ));
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
         verify_envelope(envelope.as_ref(), "message")?;
+        let context_have = context_have_from_needs(
+            context,
+            [
+                &signer_need,
+                &deletion_need,
+                &retention_floor_need,
+                &author_need,
+            ],
+        );
 
-        let metadata_output = base_output
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "content_message_meta",
-                scope.clone(),
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::InsertValues(content_message_row(
-                fact.id, &message,
-            )));
+        let metadata_output = base_wait_output(
+            fact,
+            &message,
+            [
+                signer_need,
+                deletion_need.clone(),
+                retention_floor_need.clone(),
+                author_need,
+                secret_need.clone(),
+            ],
+            context_have,
+        )
+        .offer(crate::core::context::ContextOffer::range(
+            fact.id,
+            "content_message_meta",
+            scope.clone(),
+            fact.id,
+            fact.id,
+        ))
+        .row_mutation(RowMutation::InsertValues(content_message_row(
+            fact.id, &message,
+        )));
         if expiry_minute_reached(context, &message).is_some() {
             return Ok(expired_output(fact.id, &message));
         }
@@ -187,17 +222,19 @@ fn base_wait_output(
     fact: &Fact,
     message: &super::fact::ContentMessageFact,
     needs: impl IntoIterator<Item = ContextNeed>,
+    context_have: Vec<FactId>,
 ) -> ProjectionOutput {
-    with_retention_wakes(
-        needs
-            .into_iter()
-            .fold(ProjectionOutput::new(), |output, need| output.need(need))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                message.workspace_id,
-                fact,
-            )),
-        fact.id,
-        message,
+    share_fact_with_negentropy(
+        with_retention_wakes(
+            needs
+                .into_iter()
+                .fold(ProjectionOutput::new(), |output, need| output.need(need)),
+            fact.id,
+            message,
+        ),
+        message.workspace_id,
+        fact,
+        context_have,
     )
 }
 
@@ -742,7 +779,7 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == "content_message"));
-        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.intents.len(), 2);
         assert_eq!(output.effects.row_mutations.len(), 2);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
@@ -789,7 +826,7 @@ mod projector_tests {
 
         assert_eq!(output.offers.len(), 0);
         assert_eq!(output.needs.len(), 5);
-        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.intents.len(), 2);
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
         assert!(output
@@ -829,7 +866,7 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 5);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
-        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.intents.len(), 2);
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content metadata row");
         assert_eq!(
             row.values[0],

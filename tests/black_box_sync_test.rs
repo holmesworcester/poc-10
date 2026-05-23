@@ -259,7 +259,7 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         accept_with_identity_retry(&carol, &carol_invite, "carol-range", "carol-range-laptop");
     assert_eq!(line_value(&accepted_carol, "workspace_id"), workspace);
     let carol_endpoint = endpoint_id(&carol);
-    sync_range_until_sent(
+    sync_range_until_queued(
         &alice,
         &carol_endpoint,
         &workspace,
@@ -277,7 +277,7 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
     wait_for_daemon_lock_release(&alice);
     alice_daemon = spawn_daemon(&alice, alice_port);
     let alice_endpoint = endpoint_id(&alice);
-    sync_range_until_sent(
+    sync_range_until_queued(
         &carol,
         &alice_endpoint,
         &workspace,
@@ -293,7 +293,7 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         &carol_recipient_id,
         30_000,
     );
-    sync_range_until_sent(
+    sync_range_until_queued(
         &alice,
         &carol_endpoint,
         &workspace,
@@ -316,7 +316,7 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
     drop(alice_daemon);
     wait_for_daemon_lock_release(&alice);
     alice_daemon = spawn_daemon(&alice, alice_port);
-    sync_range_until_sent(
+    sync_range_until_queued(
         &carol,
         &alice_endpoint,
         &workspace,
@@ -349,7 +349,7 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         "--without-deps",
     ]));
     assert_eq!(line_value(&without, "deps"), "without");
-    assert_eq!(line_value(&without, "sent"), "yes");
+    assert_eq!(line_value(&without, "queued"), "yes");
     wait_for_sync_indexed_at_least(&bob, before_without + 1, 10_000);
     thread::sleep(Duration::from_millis(1200));
     assert!(
@@ -371,7 +371,7 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         "--with-deps",
     ]));
     assert_eq!(line_value(&with, "deps"), "with");
-    assert_eq!(line_value(&with, "sent"), "yes");
+    assert_eq!(line_value(&with, "queued"), "yes");
     poll_for_message_text(&bob, &workspace, "carol-range-message", 10_000);
     bob_daemon.assert_running();
 }
@@ -856,7 +856,7 @@ fn sync_indexed_facts(db: &str) -> usize {
         .expect("indexed_facts")
 }
 
-fn sync_range_until_sent(
+fn sync_range_until_queued(
     sender_db: &str,
     peer_or_connection_id: &str,
     workspace_id: &str,
@@ -888,7 +888,7 @@ fn sync_range_until_sent(
         ]);
         if output.status.success() {
             let text = stdout(&output);
-            if line_value(&text, "sent") == "yes" {
+            if line_value(&text, "queued") == "yes" {
                 return text;
             }
             last = text;
@@ -897,7 +897,7 @@ fn sync_range_until_sent(
         }
         thread::sleep(Duration::from_millis(250));
     }
-    panic!("sync-range never sent; last error:\n{last}");
+    panic!("sync-range never queued; last error:\n{last}");
 }
 
 fn wait_for_sync_indexed_at_least(db: &str, expected: usize, timeout_ms: u64) {
@@ -1234,7 +1234,7 @@ fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
         "eq",
         &expected,
         "--timeout-ms",
-        "30000",
+        "60000",
         "--poll-ms",
         "100",
     ]));

@@ -8,12 +8,15 @@
 //!   3. MATERIALIZE. Publish an exact-fact offer for range-request dependency
 //!      matching.
 
-use crate::core::facts::Fact;
+use crate::core::context::ContextNeed;
+use crate::core::facts::{Fact, FactId};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use std::collections::BTreeSet;
 
 use crate::protocol::sync::encrypted_root::project::require_fact_scope;
+use crate::protocol::sync::{add_to_negentropy, share_fact_with_workspace};
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;
@@ -55,4 +58,45 @@ impl TypedProjector<super::Codec> for SyncSharedFactProjector {
             )),
         )
     }
+}
+
+pub fn share_fact_with_negentropy(
+    output: ProjectionOutput,
+    workspace_id: FactId,
+    fact: &Fact,
+    context_have: Vec<FactId>,
+) -> ProjectionOutput {
+    output
+        .intent(
+            share_fact_with_workspace::share_fact_with_workspace_intent_for_fact(
+                workspace_id,
+                fact,
+            ),
+        )
+        .intent(add_to_negentropy::add_to_negentropy_intent_for_fact(
+            workspace_id,
+            fact.id,
+            fact.timestamp,
+            context_have,
+        ))
+}
+
+pub fn context_have_from_needs<'a>(
+    context: &ProjectionContext,
+    needs: impl IntoIterator<Item = &'a ContextNeed>,
+) -> Vec<FactId> {
+    let mut ids = BTreeSet::new();
+    for need in needs {
+        for (_offer, payload) in context.matched_payloads_for(need) {
+            ids.insert(payload.id);
+        }
+    }
+    ids.into_iter().collect()
+}
+
+pub fn context_have_from_optional_needs<'a>(
+    context: &ProjectionContext,
+    needs: impl IntoIterator<Item = Option<&'a ContextNeed>>,
+) -> Vec<FactId> {
+    context_have_from_needs(context, needs.into_iter().flatten())
 }

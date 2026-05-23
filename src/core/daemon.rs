@@ -306,9 +306,7 @@ fn parse_start_options(args: CliArgs<'_>) -> Result<StartOptions, String> {
 }
 
 fn sleep_after_tick(options: &StartOptions, status: WorkStatus) -> Option<Duration> {
-    status
-        .is_idle()
-        .then(|| Duration::from_millis(options.quiet_ms))
+    (!status.progressed).then(|| Duration::from_millis(options.quiet_ms))
 }
 
 fn parse_positive_u64(value: Option<&str>) -> Result<u64, String> {
@@ -617,6 +615,16 @@ mod tests {
         assert_eq!(sleep_after_tick(&options, active), None);
         assert_eq!(
             sleep_after_tick(&options, WorkStatus::idle()),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
+            sleep_after_tick(
+                &options,
+                WorkStatus {
+                    progressed: false,
+                    retried: true,
+                },
+            ),
             Some(Duration::from_millis(200))
         );
     }

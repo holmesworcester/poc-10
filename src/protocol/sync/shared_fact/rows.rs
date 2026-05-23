@@ -12,16 +12,33 @@
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::{Store, TableName, TableRow};
-use crate::protocol::{auth, connection, content};
+use crate::protocol::{auth, connection, sync::add_to_negentropy};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const SHAREABLE_FACT_ROWS: TableName = TableName::new("sync_shareable_fact_rows");
+pub const NEGENTROPY_LEAF_ROWS: TableName = TableName::new("sync_negentropy_leaf_rows");
+pub const NEGENTROPY_CONTEXT_HAVE_ROWS: TableName =
+    TableName::new("sync_negentropy_context_have_rows");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareableFactRow {
     pub workspace_id: FactId,
     pub fact_id: FactId,
     pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegentropyLeafRow {
+    pub workspace_id: FactId,
+    pub owner_fact_id: FactId,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegentropyContextHaveRow {
+    pub workspace_id: FactId,
+    pub owner_fact_id: FactId,
+    pub context_fact_id: FactId,
 }
 
 pub fn shareable_fact_row(row: ShareableFactRow) -> TableRow {
@@ -53,6 +70,78 @@ fn shareable_fact_key(workspace_id: FactId, fact_id: FactId) -> Vec<u8> {
     let mut key = Vec::with_capacity(64);
     key.extend_from_slice(&workspace_id);
     key.extend_from_slice(&fact_id);
+    key
+}
+
+fn negentropy_leaf_row(row: NegentropyLeafRow) -> TableRow {
+    let mut value = Vec::with_capacity(9);
+    value.push(1);
+    value.extend_from_slice(&row.timestamp_ms.to_be_bytes());
+    TableRow {
+        table: NEGENTROPY_LEAF_ROWS,
+        key: negentropy_leaf_key(row.workspace_id, row.owner_fact_id),
+        value,
+    }
+}
+
+fn decode_negentropy_leaf_row(key: &[u8], value: &[u8]) -> Result<NegentropyLeafRow, String> {
+    if key.len() != 64 {
+        return Err("negentropy leaf key must be workspace id plus owner fact id".to_string());
+    }
+    if value.len() != 9 || value[0] != 1 {
+        return Err("invalid negentropy leaf row value".to_string());
+    }
+    Ok(NegentropyLeafRow {
+        workspace_id: key[..32].try_into().unwrap(),
+        owner_fact_id: key[32..64].try_into().unwrap(),
+        timestamp_ms: u64::from_be_bytes(value[1..9].try_into().unwrap()),
+    })
+}
+
+fn negentropy_leaf_key(workspace_id: FactId, owner_fact_id: FactId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(64);
+    key.extend_from_slice(&workspace_id);
+    key.extend_from_slice(&owner_fact_id);
+    key
+}
+
+fn negentropy_context_have_row(row: NegentropyContextHaveRow) -> TableRow {
+    TableRow {
+        table: NEGENTROPY_CONTEXT_HAVE_ROWS,
+        key: negentropy_context_have_key(row.workspace_id, row.owner_fact_id, row.context_fact_id),
+        value: vec![1],
+    }
+}
+
+fn decode_negentropy_context_have_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<NegentropyContextHaveRow, String> {
+    if key.len() != 96 {
+        return Err(
+            "negentropy context-have key must be workspace id plus owner and context fact ids"
+                .to_string(),
+        );
+    }
+    if value != [1] {
+        return Err("invalid negentropy context-have row value".to_string());
+    }
+    Ok(NegentropyContextHaveRow {
+        workspace_id: key[..32].try_into().unwrap(),
+        owner_fact_id: key[32..64].try_into().unwrap(),
+        context_fact_id: key[64..96].try_into().unwrap(),
+    })
+}
+
+fn negentropy_context_have_key(
+    workspace_id: FactId,
+    owner_fact_id: FactId,
+    context_fact_id: FactId,
+) -> Vec<u8> {
+    let mut key = Vec::with_capacity(96);
+    key.extend_from_slice(&workspace_id);
+    key.extend_from_slice(&owner_fact_id);
+    key.extend_from_slice(&context_fact_id);
     key
 }
 
@@ -96,6 +185,50 @@ pub fn record_shareable_fact(
         .map_err(|err| format!("record shareable fact row: {err}"))
 }
 
+pub fn record_negentropy_contribution(
+    store: &Store,
+    input: &add_to_negentropy::AddToNegentropy,
+    owner: &Fact,
+) -> Result<(), String> {
+    if owner.id != input.owner_fact_id {
+        return Err("add_to_negentropy owner fact id mismatch".to_string());
+    }
+    if owner.timestamp != input.timestamp_ms {
+        return Err("add_to_negentropy timestamp does not match owner fact".to_string());
+    }
+    match &owner.scope {
+        FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => {
+            if id != &input.workspace_id {
+                return Err("add_to_negentropy owner scope does not match workspace".to_string());
+            }
+        }
+        FactScope::Global => {}
+        _ => {
+            return Err(
+                "add_to_negentropy requires a workspace-scoped or global owner fact".to_string(),
+            );
+        }
+    }
+
+    let mut rows = Vec::with_capacity(1 + input.context_have.len());
+    rows.push(negentropy_leaf_row(NegentropyLeafRow {
+        workspace_id: input.workspace_id,
+        owner_fact_id: input.owner_fact_id,
+        timestamp_ms: input.timestamp_ms,
+    }));
+    rows.extend(input.context_have.iter().map(|context_fact_id| {
+        negentropy_context_have_row(NegentropyContextHaveRow {
+            workspace_id: input.workspace_id,
+            owner_fact_id: input.owner_fact_id,
+            context_fact_id: *context_fact_id,
+        })
+    }));
+    store
+        .insert_table_rows(rows)
+        .map(|_| ())
+        .map_err(|err| format!("record negentropy contribution rows: {err}"))
+}
+
 pub fn sync_status(store: &Store) -> Result<SyncStatus, String> {
     let mut facts = Vec::new();
     for row in shareable_fact_rows(store)? {
@@ -124,6 +257,26 @@ pub fn shareable_facts_for_connection(
     store: &Store,
     connection_id: FactId,
 ) -> Result<Vec<Fact>, String> {
+    let entries = shareable_fact_entries_for_connection(store, connection_id)?;
+    let mut by_id = BTreeMap::<FactId, Fact>::new();
+    for entry in entries {
+        by_id.entry(entry.fact.id).or_insert(entry.fact);
+    }
+    let mut facts = by_id.into_values().collect::<Vec<_>>();
+    facts.sort_by_key(|fact| (fact.timestamp, fact.id));
+    Ok(facts)
+}
+
+#[derive(Debug, Clone)]
+struct ShareableFactEntry {
+    workspace_id: FactId,
+    fact: Fact,
+}
+
+fn shareable_fact_entries_for_connection(
+    store: &Store,
+    connection_id: FactId,
+) -> Result<Vec<ShareableFactEntry>, String> {
     let Some(connection) = connection_response_row(store, connection_id)? else {
         return Ok(Vec::new());
     };
@@ -148,9 +301,12 @@ pub fn shareable_facts_for_connection(
         let Some(fact) = fact_for_shareable_row(store, &row)? else {
             continue;
         };
-        facts.push(fact);
+        facts.push(ShareableFactEntry {
+            workspace_id: row.workspace_id,
+            fact,
+        });
     }
-    facts.sort_by_key(|fact| (fact.timestamp, fact.id));
+    facts.sort_by_key(|entry| (entry.fact.timestamp, entry.fact.id, entry.workspace_id));
     Ok(facts)
 }
 
@@ -161,20 +317,30 @@ pub fn shareable_facts_for_connection_range(
     end_timestamp_ms: u64,
     include_deps: bool,
 ) -> Result<Vec<Fact>, String> {
-    let available = shareable_facts_for_connection(store, connection_id)?;
+    let available = shareable_fact_entries_for_connection(store, connection_id)?;
     if !include_deps {
-        return Ok(available
-            .into_iter()
-            .filter(|fact| {
-                start_timestamp_ms <= fact.timestamp && fact.timestamp <= end_timestamp_ms
-            })
-            .collect());
+        let mut by_id = BTreeMap::<FactId, Fact>::new();
+        for entry in available {
+            if start_timestamp_ms <= entry.fact.timestamp
+                && entry.fact.timestamp <= end_timestamp_ms
+            {
+                by_id.entry(entry.fact.id).or_insert(entry.fact);
+            }
+        }
+        let mut facts = by_id.into_values().collect::<Vec<_>>();
+        facts.sort_by_key(|fact| (fact.timestamp, fact.id));
+        return Ok(facts);
     }
 
-    let by_id = available
-        .into_iter()
-        .map(|fact| (fact.id, fact))
-        .collect::<BTreeMap<_, _>>();
+    let mut by_id = BTreeMap::<FactId, Fact>::new();
+    let mut workspaces_by_id = BTreeMap::<FactId, BTreeSet<FactId>>::new();
+    for entry in available {
+        workspaces_by_id
+            .entry(entry.fact.id)
+            .or_default()
+            .insert(entry.workspace_id);
+        by_id.entry(entry.fact.id).or_insert(entry.fact);
+    }
     let mut selected = BTreeSet::<FactId>::new();
     let mut pending = VecDeque::<FactId>::new();
     for fact in by_id.values() {
@@ -185,10 +351,16 @@ pub fn shareable_facts_for_connection_range(
     }
 
     while let Some(fact_id) = pending.pop_front() {
-        let Some(fact) = by_id.get(&fact_id) else {
+        let Some(workspace_ids) = workspaces_by_id.get(&fact_id) else {
             continue;
         };
-        for dep_id in shareable_dependency_fact_ids(store, fact)? {
+        for dep_id in workspace_ids
+            .iter()
+            .map(|workspace_id| negentropy_context_have_for_leaf(store, *workspace_id, fact_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+        {
             if by_id.contains_key(&dep_id) && selected.insert(dep_id) {
                 pending.push_back(dep_id);
             }
@@ -385,6 +557,44 @@ pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, Strin
         .collect()
 }
 
+pub fn negentropy_leaf_rows(store: &Store) -> Result<Vec<NegentropyLeafRow>, String> {
+    store
+        .table_rows(NEGENTROPY_LEAF_ROWS)
+        .map_err(|err| format!("load negentropy leaf rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_negentropy_leaf_row(&key, &value))
+        .collect()
+}
+
+pub fn negentropy_context_have_rows(
+    store: &Store,
+) -> Result<Vec<NegentropyContextHaveRow>, String> {
+    store
+        .table_rows(NEGENTROPY_CONTEXT_HAVE_ROWS)
+        .map_err(|err| format!("load negentropy context-have rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))
+        .collect()
+}
+
+pub fn negentropy_context_have_for_leaf(
+    store: &Store,
+    workspace_id: FactId,
+    owner_fact_id: FactId,
+) -> Result<Vec<FactId>, String> {
+    let prefix = negentropy_leaf_key(workspace_id, owner_fact_id);
+    let mut context_ids = store
+        .table_rows_with_key_prefix(NEGENTROPY_CONTEXT_HAVE_ROWS, &prefix, usize::MAX)
+        .map_err(|err| format!("load negentropy context-have rows for leaf: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))
+        .map(|row| row.map(|row| row.context_fact_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    context_ids.sort();
+    context_ids.dedup();
+    Ok(context_ids)
+}
+
 fn fact_for_shareable_row(store: &Store, row: &ShareableFactRow) -> Result<Option<Fact>, String> {
     let Some(fact) = persisted_fact(store, &row.fact_id)? else {
         return Ok(None);
@@ -401,74 +611,6 @@ fn fact_for_shareable_row(store: &Store, row: &ShareableFactRow) -> Result<Optio
         }
         _ => Err("shareable fact row does not match a global or workspace-scoped fact".to_string()),
     }
-}
-
-fn shareable_dependency_fact_ids(store: &Store, fact: &Fact) -> Result<Vec<FactId>, String> {
-    let mut deps = Vec::new();
-    if let Ok(message) = content::message::project::decode_raw_or_signed_fact(
-        fact,
-        content::message::layout::TYPE_CONTENT_MESSAGE,
-        "content message",
-        content::message::decode_fact_payload,
-    ) {
-        deps.push(message.payload.author_user_id);
-        deps.push(message.payload.frontier_id);
-        if message.payload.disappearing_setting_id != [0; 32] {
-            deps.push(message.payload.disappearing_setting_id);
-        }
-        if let Some(endpoint_shared_id) = endpoint_shared_fact_id_for_endpoint(
-            store,
-            message.payload.workspace_id,
-            message.payload.signer_id,
-        )? {
-            deps.push(endpoint_shared_id);
-        }
-        deps.sort();
-        deps.dedup();
-        return Ok(deps);
-    }
-
-    let Some(envelope) = auth::signed_fact::decode_envelope(fact.body()).ok() else {
-        return Ok(deps);
-    };
-    match envelope.inner_type {
-        auth::endpoint_shared::TYPE_ENDPOINT_SHARED => {
-            let shared = auth::endpoint_shared::decode_fact_payload(&envelope.payload)?;
-            deps.push(shared.workspace_id);
-            deps.push(shared.user_authority_fact_id);
-            deps.push(envelope.signer_id);
-        }
-        auth::device_invite::TYPE_DEVICE_INVITE => {
-            let invite = auth::device_invite::decode_fact_payload(&envelope.payload)?;
-            deps.push(invite.workspace_id);
-            deps.push(invite.user_authority_fact_id);
-            if let Some(user_invite_fact_id) = invite.user_invite_fact_id {
-                deps.push(user_invite_fact_id);
-            } else {
-                deps.push(envelope.signer_id);
-            }
-        }
-        auth::user::TYPE_USER => {
-            let user = auth::user::decode_fact_payload(&envelope.payload)?;
-            deps.push(user.workspace_id);
-            deps.push(envelope.signer_id);
-        }
-        _ => {}
-    }
-    deps.sort();
-    deps.dedup();
-    Ok(deps)
-}
-
-fn endpoint_shared_fact_id_for_endpoint(
-    store: &Store,
-    workspace_id: FactId,
-    endpoint_id: FactId,
-) -> Result<Option<FactId>, String> {
-    Ok(endpoint_shared_rows(store)?
-        .into_iter()
-        .find(|row| row.workspace_id == workspace_id && row.endpoint_id == endpoint_id)
-        .map(|row| row.endpoint_shared_id))
 }
 
 fn remote_endpoint_for_connection(

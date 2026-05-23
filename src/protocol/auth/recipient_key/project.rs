@@ -15,7 +15,9 @@ use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     proactive_wrap_source_need, require_fact_scope,
 };
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 
@@ -72,7 +74,8 @@ fn recipient_key(
         fact.id,
         fact.id,
     );
-    let is_superseded = projection_context.payload_for(&superseded_need).is_some();
+    let mut context_have = context_have_from_needs(projection_context, [&superseded_need]);
+    let is_superseded = !context_have.is_empty();
     let mut output = ProjectionOutput::new().need(superseded_need);
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
@@ -88,6 +91,7 @@ fn recipient_key(
             return Ok(output);
         };
         validate_previous_recipient_key(previous_fact, &recipient)?;
+        context_have.push(previous_fact.id);
         output = output.offer(ContextOffer::range(
             fact.id,
             "recipient_superseded",
@@ -98,18 +102,18 @@ fn recipient_key(
     }
 
     // 3. Materialize: publish recipient context and proactive key-wrap work.
-    output = output
-        .offer(ContextOffer::range(
+    output = share_fact_with_negentropy(
+        output.offer(ContextOffer::range(
             fact.id,
             "recipient_key",
             scope.clone(),
             fact.id,
             fact.id,
-        ))
-        .intent(share_fact_with_workspace_intent_for_fact(
-            recipient.workspace_id,
-            fact,
-        ));
+        )),
+        recipient.workspace_id,
+        fact,
+        context_have,
+    );
 
     if is_superseded {
         return Ok(output);
