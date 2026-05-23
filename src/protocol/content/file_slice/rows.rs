@@ -15,6 +15,7 @@ use super::fact::{ContentFileSliceFact, WorkspaceId};
 
 pub const FILE_SLICE_ROWS: TableName = read_models::FILE_SLICE_ROWS;
 pub(crate) const FILE_SLICE_KEY_COLUMNS: &[&str] = read_models::FILE_SLICES.key_columns;
+#[cfg(test)]
 const FILE_SLICE_COLUMNS: &[&str] = read_models::FILE_SLICES.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

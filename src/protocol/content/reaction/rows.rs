@@ -17,6 +17,7 @@ use super::fact::{AuthorId, WorkspaceId, REACTION_CIPHERTEXT_BYTES, REACTION_NON
 
 pub const REACTION_ROWS: TableName = read_models::REACTION_ROWS;
 pub(crate) const REACTION_KEY_COLUMNS: &[&str] = read_models::CONTENT_REACTIONS.key_columns;
+#[cfg(test)]
 const REACTION_COLUMNS: &[&str] = read_models::CONTENT_REACTIONS.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,7 +12,6 @@ use crate::protocol::registry::read_models;
 use super::fact::{ContentEventFact, WorkspaceId};
 
 pub const CONTENT_EVENT_ROWS: TableName = read_models::CONTENT_EVENT_ROWS;
-const CONTENT_EVENT_COLUMNS: &[&str] = read_models::CONTENT_EVENTS.columns;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentEventRow {

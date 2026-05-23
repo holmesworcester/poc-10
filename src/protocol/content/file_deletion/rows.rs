@@ -15,6 +15,7 @@ use crate::protocol::registry::read_models;
 use super::fact::{AuthorId, WorkspaceId};
 
 pub const FILE_DELETION_ROWS: TableName = read_models::FILE_DELETION_ROWS;
+#[cfg(test)]
 const FILE_DELETION_COLUMNS: &[&str] = read_models::FILE_DELETIONS.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

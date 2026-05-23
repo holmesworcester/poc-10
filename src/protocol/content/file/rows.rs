@@ -16,6 +16,7 @@ use super::fact::{AuthorId, ContentFileFact, RootHash, WorkspaceId};
 
 pub const FILE_ROWS: TableName = read_models::FILE_ROWS;
 pub(crate) const FILE_KEY_COLUMNS: &[&str] = read_models::CONTENT_FILES.key_columns;
+#[cfg(test)]
 const FILE_COLUMNS: &[&str] = read_models::CONTENT_FILES.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

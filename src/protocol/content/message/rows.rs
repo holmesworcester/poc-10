@@ -20,8 +20,11 @@ pub const OPENED_MESSAGE_ROWS: TableName = read_models::OPENED_MESSAGE_ROWS;
 pub const MESSAGE_TOMBSTONE_ROWS: TableName = read_models::MESSAGE_TOMBSTONE_ROWS;
 
 pub(crate) const MESSAGE_KEY_COLUMNS: &[&str] = read_models::CONTENT_MESSAGES.key_columns;
+#[cfg(test)]
 const CONTENT_MESSAGE_COLUMNS: &[&str] = read_models::CONTENT_MESSAGES.columns;
+#[cfg(test)]
 const OPENED_MESSAGE_COLUMNS: &[&str] = read_models::OPENED_MESSAGES.columns;
+#[cfg(test)]
 const MESSAGE_TOMBSTONE_COLUMNS: &[&str] = read_models::MESSAGE_TOMBSTONES.columns;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
