@@ -1,9 +1,10 @@
-//! Fixed-width wire layouts for poc-10 transport::transit frames.
+//! Fixed-width wire layouts for poc-10 encrypted connection frames.
 //!
-//! Transit publishes exactly two outer frame shapes — `TransitSmallV1` and
-//! `TransitLargeV1` — that share a fixed public header and differ only in the
-//! size of their encrypted payload slot. The outer wire length reveals only
-//! the size class; per-batch sizing is hidden inside the ciphertext.
+//! Connection frames have exactly two outer shapes: `ConnectionFrameSmallV1`
+//! and `ConnectionFrameLargeV1`. They share a fixed public header and differ
+//! only in encrypted payload-slot capacity. The receive handler stores the
+//! observed shape as one of two ephemeral fact tags; the encrypted frame bytes
+//! remain opaque until projection has local connection context.
 
 use crate::core::crypto::{
     self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,
@@ -13,47 +14,50 @@ use crate::core::wire::{
     self, fixed_tag, Ciphertext, FixedBytes, FixedLayout, Id32, Nonce24, Tag, WireError,
 };
 
-use super::fact::TransitInputFact;
-use crate::protocol::transport::transit_received::create::normalize_origin_addr_bytes;
+use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
 
-/// Ephemeral projection-input tag for one received transit frame.
-pub const TYPE_TRANSIT_INPUT: u8 = 168;
+/// Ephemeral projection-input tag for one received small connection frame.
+pub const TYPE_CONNECTION_FRAME_SMALL: u8 = 168;
 
-/// Public tag prefix shared by both transport::transit frame variants.
-pub const TRANSIT_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
+/// Ephemeral projection-input tag for one received large connection frame.
+pub const TYPE_CONNECTION_FRAME_LARGE: u8 = 169;
 
-/// Current transport::transit frame version.
-pub const TRANSIT_FRAME_VERSION: u8 = 1;
+/// Public tag prefix shared by both transport::connection_frame frame variants.
+pub const CONNECTION_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
 
-/// Size class byte for [`TransitSmallV1`].
-pub const TRANSIT_FRAME_SIZE_CLASS_SMALL: u8 = 0;
+/// Current transport::connection_frame frame version.
+pub const CONNECTION_FRAME_VERSION: u8 = 1;
 
-/// Size class byte for [`TransitLargeV1`].
-pub const TRANSIT_FRAME_SIZE_CLASS_LARGE: u8 = 1;
+/// Size class byte for [`ConnectionFrameSmallV1`].
+pub const CONNECTION_FRAME_SIZE_CLASS_SMALL: u8 = 0;
 
-/// Plaintext capacity of a small transport::transit frame (4 KiB).
+/// Size class byte for [`ConnectionFrameLargeV1`].
+pub const CONNECTION_FRAME_SIZE_CLASS_LARGE: u8 = 1;
+
+/// Plaintext capacity of a small transport::connection_frame frame (4 KiB).
 ///
 /// Small frames carry control traffic and single events; the batcher chooses
 /// this class when the packed inner bytes fit in the small budget.
-pub const TRANSIT_SMALL_PLAINTEXT_BYTES: usize = 4 * 1024;
+pub const CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES: usize = 4 * 1024;
 
-/// Plaintext capacity of a large transport::transit frame (1 MiB).
+/// Plaintext capacity of a large transport::connection_frame frame (1 MiB).
 ///
 /// Large frames carry batched events. The batcher chooses this class for any
 /// batch that exceeds the small plaintext budget. The architecture doc does
 /// not pin exact numbers; these are the poc-10 defaults and may evolve.
-pub const TRANSIT_LARGE_PLAINTEXT_BYTES: usize = 1024 * 1024;
+pub const CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES: usize = 1024 * 1024;
 
 /// Ciphertext slot capacity for small frames (plaintext + AEAD tag).
-pub const TRANSIT_SMALL_CIPHERTEXT_BYTES: usize =
-    TRANSIT_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+pub const CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES: usize =
+    CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 
 /// Ciphertext slot capacity for large frames (plaintext + AEAD tag).
-pub const TRANSIT_LARGE_CIPHERTEXT_BYTES: usize =
-    TRANSIT_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+pub const CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES: usize =
+    CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 
 /// Fixed public header size (tag + version + size class + 3 ids + nonce).
-pub const TRANSIT_HEADER_BYTES: usize = Tag::<4>::LEN
+pub const CONNECTION_FRAME_HEADER_BYTES: usize = Tag::<4>::LEN
     + wire::U8_BYTES
     + wire::U8_BYTES
     + Id32::LEN
@@ -61,13 +65,13 @@ pub const TRANSIT_HEADER_BYTES: usize = Tag::<4>::LEN
     + Id32::LEN
     + Nonce24::LEN;
 
-/// Outer wire length for a [`TransitSmallV1`] frame.
-pub const TRANSIT_SMALL_WIRE_BYTES: usize =
-    TRANSIT_HEADER_BYTES + Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::LEN;
+/// Outer wire length for a [`ConnectionFrameSmallV1`] frame.
+pub const CONNECTION_FRAME_SMALL_WIRE_BYTES: usize =
+    CONNECTION_FRAME_HEADER_BYTES + Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::LEN;
 
-/// Outer wire length for a [`TransitLargeV1`] frame.
-pub const TRANSIT_LARGE_WIRE_BYTES: usize =
-    TRANSIT_HEADER_BYTES + Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::LEN;
+/// Outer wire length for a [`ConnectionFrameLargeV1`] frame.
+pub const CONNECTION_FRAME_LARGE_WIRE_BYTES: usize =
+    CONNECTION_FRAME_HEADER_BYTES + Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::LEN;
 
 const VERSION_OFFSET: usize = Tag::<4>::LEN;
 const SIZE_CLASS_OFFSET: usize = VERSION_OFFSET + wire::U8_BYTES;
@@ -77,60 +81,114 @@ const CONNECTION_OFFSET: usize = RECEIVER_OFFSET + Id32::LEN;
 const NONCE_OFFSET: usize = CONNECTION_OFFSET + Id32::LEN;
 const CIPHERTEXT_OFFSET: usize = NONCE_OFFSET + Nonce24::LEN;
 
-/// Encode one transient projectable input for the transit projector.
-pub fn encode_fact(fact: &TransitInputFact) -> Result<Vec<u8>, String> {
-    let origin_addr = normalize_origin_addr_bytes(&fact.origin_addr)?;
-    let mut out = wire::Writer::with_capacity(1 + 4 + origin_addr.len() + 8 + 4 + fact.frame.len());
-    out.u8(TYPE_TRANSIT_INPUT);
-    out.bytes_u32be(&origin_addr).map_err(wire_err)?;
-    out.u64be(fact.received_at_local_ms);
-    out.bytes_u32be(&fact.frame).map_err(wire_err)?;
-    Ok(out.finish())
+pub fn encode_small_fact(fact: &ConnectionFrameSmallFact) -> Result<Vec<u8>, String> {
+    encode_received_frame_fact(
+        TYPE_CONNECTION_FRAME_SMALL,
+        CONNECTION_FRAME_SIZE_CLASS_SMALL,
+        &fact.origin_addr,
+        fact.received_at_local_ms,
+        &fact.frame,
+    )
 }
 
-/// Decode one transient projectable input for the transit projector.
-pub fn decode_fact(bytes: &[u8]) -> Result<TransitInputFact, String> {
-    let mut reader = wire::Reader::new(bytes);
-    reader.expect_u8(TYPE_TRANSIT_INPUT).map_err(wire_err)?;
-    let origin_addr = normalize_origin_addr_bytes(reader.bytes_u32be().map_err(wire_err)?)?;
-    let received_at_local_ms = reader.u64be().map_err(wire_err)?;
-    let frame = reader.bytes_u32be().map_err(wire_err)?.to_vec();
-    reader.finish().map_err(wire_err)?;
-    Ok(TransitInputFact {
+pub fn decode_small_fact(bytes: &[u8]) -> Result<ConnectionFrameSmallFact, String> {
+    let (origin_addr, received_at_local_ms, frame) =
+        decode_received_frame_fact(bytes, TYPE_CONNECTION_FRAME_SMALL)?;
+    require_frame_size_class(&frame, CONNECTION_FRAME_SIZE_CLASS_SMALL)?;
+    Ok(ConnectionFrameSmallFact {
         origin_addr,
         received_at_local_ms,
         frame,
     })
 }
 
-/// Fixed-width small transport::transit frame.
+pub fn encode_large_fact(fact: &ConnectionFrameLargeFact) -> Result<Vec<u8>, String> {
+    encode_received_frame_fact(
+        TYPE_CONNECTION_FRAME_LARGE,
+        CONNECTION_FRAME_SIZE_CLASS_LARGE,
+        &fact.origin_addr,
+        fact.received_at_local_ms,
+        &fact.frame,
+    )
+}
+
+pub fn decode_large_fact(bytes: &[u8]) -> Result<ConnectionFrameLargeFact, String> {
+    let (origin_addr, received_at_local_ms, frame) =
+        decode_received_frame_fact(bytes, TYPE_CONNECTION_FRAME_LARGE)?;
+    require_frame_size_class(&frame, CONNECTION_FRAME_SIZE_CLASS_LARGE)?;
+    Ok(ConnectionFrameLargeFact {
+        origin_addr,
+        received_at_local_ms,
+        frame,
+    })
+}
+
+fn encode_received_frame_fact(
+    tag: u8,
+    expected_size_class: u8,
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+    frame: &[u8],
+) -> Result<Vec<u8>, String> {
+    require_frame_size_class(frame, expected_size_class)?;
+    let origin_addr = normalize_origin_addr_bytes(origin_addr)?;
+    let mut out = wire::Writer::with_capacity(1 + 4 + origin_addr.len() + 8 + 4 + frame.len());
+    out.u8(tag);
+    out.bytes_u32be(&origin_addr).map_err(wire_err)?;
+    out.u64be(received_at_local_ms);
+    out.bytes_u32be(frame).map_err(wire_err)?;
+    Ok(out.finish())
+}
+
+fn decode_received_frame_fact(bytes: &[u8], tag: u8) -> Result<(Vec<u8>, u64, Vec<u8>), String> {
+    let mut reader = wire::Reader::new(bytes);
+    reader.expect_u8(tag).map_err(wire_err)?;
+    let origin_addr = normalize_origin_addr_bytes(reader.bytes_u32be().map_err(wire_err)?)?;
+    let received_at_local_ms = reader.u64be().map_err(wire_err)?;
+    let frame = reader.bytes_u32be().map_err(wire_err)?.to_vec();
+    reader.finish().map_err(wire_err)?;
+    Ok((origin_addr, received_at_local_ms, frame))
+}
+
+fn require_frame_size_class(frame: &[u8], expected_size_class: u8) -> Result<(), String> {
+    let parts = decode_frame_parts(frame).map_err(wire_err)?;
+    if parts.header.size_class != expected_size_class {
+        return Err(format!(
+            "connection frame fact size class mismatch: expected {} got {}",
+            expected_size_class, parts.header.size_class
+        ));
+    }
+    Ok(())
+}
+
+/// Fixed-width small transport::connection_frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransitSmallV1 {
+pub struct ConnectionFrameSmallV1 {
     pub sender_endpoint_id: Id32,
     pub receiver_endpoint_id: Id32,
     pub connection_id: Id32,
     pub nonce: Nonce24,
-    pub ciphertext: Ciphertext<TRANSIT_SMALL_CIPHERTEXT_BYTES>,
+    pub ciphertext: Ciphertext<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>,
 }
 
-/// Fixed-width large transport::transit frame.
+/// Fixed-width large transport::connection_frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransitLargeV1 {
+pub struct ConnectionFrameLargeV1 {
     pub sender_endpoint_id: Id32,
     pub receiver_endpoint_id: Id32,
     pub connection_id: Id32,
     pub nonce: Nonce24,
-    pub ciphertext: Ciphertext<TRANSIT_LARGE_CIPHERTEXT_BYTES>,
+    pub ciphertext: Ciphertext<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>,
 }
 
-impl FixedLayout for TransitSmallV1 {
-    const LEN: usize = TRANSIT_SMALL_WIRE_BYTES;
+impl FixedLayout for ConnectionFrameSmallV1 {
+    const LEN: usize = CONNECTION_FRAME_SMALL_WIRE_BYTES;
 
     fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
         encode_header(
             out,
             Self::LEN,
-            TRANSIT_FRAME_SIZE_CLASS_SMALL,
+            CONNECTION_FRAME_SIZE_CLASS_SMALL,
             &self.sender_endpoint_id,
             &self.receiver_endpoint_id,
             &self.connection_id,
@@ -141,9 +199,10 @@ impl FixedLayout for TransitSmallV1 {
 
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         let (sender, receiver, connection, nonce) =
-            decode_header(bytes, Self::LEN, TRANSIT_FRAME_SIZE_CLASS_SMALL)?;
-        let ciphertext =
-            Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::decode(&bytes[CIPHERTEXT_OFFSET..])?;
+            decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_SMALL)?;
+        let ciphertext = Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::decode(
+            &bytes[CIPHERTEXT_OFFSET..],
+        )?;
         Ok(Self {
             sender_endpoint_id: sender,
             receiver_endpoint_id: receiver,
@@ -154,14 +213,14 @@ impl FixedLayout for TransitSmallV1 {
     }
 }
 
-impl FixedLayout for TransitLargeV1 {
-    const LEN: usize = TRANSIT_LARGE_WIRE_BYTES;
+impl FixedLayout for ConnectionFrameLargeV1 {
+    const LEN: usize = CONNECTION_FRAME_LARGE_WIRE_BYTES;
 
     fn encode(&self, out: &mut [u8]) -> Result<(), WireError> {
         encode_header(
             out,
             Self::LEN,
-            TRANSIT_FRAME_SIZE_CLASS_LARGE,
+            CONNECTION_FRAME_SIZE_CLASS_LARGE,
             &self.sender_endpoint_id,
             &self.receiver_endpoint_id,
             &self.connection_id,
@@ -172,9 +231,10 @@ impl FixedLayout for TransitLargeV1 {
 
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         let (sender, receiver, connection, nonce) =
-            decode_header(bytes, Self::LEN, TRANSIT_FRAME_SIZE_CLASS_LARGE)?;
-        let ciphertext =
-            Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::decode(&bytes[CIPHERTEXT_OFFSET..])?;
+            decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_LARGE)?;
+        let ciphertext = Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::decode(
+            &bytes[CIPHERTEXT_OFFSET..],
+        )?;
         Ok(Self {
             sender_endpoint_id: sender,
             receiver_endpoint_id: receiver,
@@ -187,7 +247,7 @@ impl FixedLayout for TransitLargeV1 {
 
 /// Public header view recovered without decrypting the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransitFrameHeader {
+pub struct ConnectionFrameHeader {
     pub size_class: u8,
     pub sender_endpoint_id: Id32,
     pub receiver_endpoint_id: Id32,
@@ -195,32 +255,32 @@ pub struct TransitFrameHeader {
     pub nonce: Nonce24,
 }
 
-/// Borrowed transport::transit frame payload recovered without materializing a large
+/// Borrowed transport::connection_frame frame payload recovered without materializing a large
 /// fixed-slot value on the stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransitFrameParts<'a> {
-    pub header: TransitFrameHeader,
+pub struct ConnectionFrameParts<'a> {
+    pub header: ConnectionFrameHeader,
     pub ciphertext: &'a [u8],
 }
 
-/// Inspect just the public header of a transport::transit frame.
+/// Inspect just the public header of a transport::connection_frame frame.
 ///
 /// Returns the size class byte and addressing fields. The caller decides which
-/// of [`TransitSmallV1::decode`] or [`TransitLargeV1::decode`] to run based on
+/// of [`ConnectionFrameSmallV1::decode`] or [`ConnectionFrameLargeV1::decode`] to run based on
 /// `size_class` and the outer length.
-pub fn peek_frame_header(bytes: &[u8]) -> Result<TransitFrameHeader, WireError> {
-    if bytes.len() < TRANSIT_HEADER_BYTES {
+pub fn peek_frame_header(bytes: &[u8]) -> Result<ConnectionFrameHeader, WireError> {
+    if bytes.len() < CONNECTION_FRAME_HEADER_BYTES {
         return Err(WireError::WrongLength {
-            expected: TRANSIT_HEADER_BYTES,
+            expected: CONNECTION_FRAME_HEADER_BYTES,
             actual: bytes.len(),
         });
     }
     let tag = Tag::<4>::decode(&bytes[..VERSION_OFFSET])?;
-    if tag != TRANSIT_FRAME_TAG {
+    if tag != CONNECTION_FRAME_TAG {
         return Err(WireError::NonZeroPadding { index: 0 });
     }
     let version = wire::take_u8(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?;
-    if version != TRANSIT_FRAME_VERSION {
+    if version != CONNECTION_FRAME_VERSION {
         return Err(WireError::InvalidBool { actual: version });
     }
     let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
@@ -228,7 +288,7 @@ pub fn peek_frame_header(bytes: &[u8]) -> Result<TransitFrameHeader, WireError> 
     let receiver_endpoint_id = Id32::decode(&bytes[RECEIVER_OFFSET..CONNECTION_OFFSET])?;
     let connection_id = Id32::decode(&bytes[CONNECTION_OFFSET..NONCE_OFFSET])?;
     let nonce = Nonce24::decode(&bytes[NONCE_OFFSET..CIPHERTEXT_OFFSET])?;
-    Ok(TransitFrameHeader {
+    Ok(ConnectionFrameHeader {
         size_class,
         sender_endpoint_id,
         receiver_endpoint_id,
@@ -239,7 +299,7 @@ pub fn peek_frame_header(bytes: &[u8]) -> Result<TransitFrameHeader, WireError> 
 
 /// Decode the public header and borrowed ciphertext slot for either size
 /// class without copying the full padded payload.
-pub fn decode_frame_parts(bytes: &[u8]) -> Result<TransitFrameParts<'_>, WireError> {
+pub fn decode_frame_parts(bytes: &[u8]) -> Result<ConnectionFrameParts<'_>, WireError> {
     let header = peek_frame_header(bytes)?;
     let (expected_len, capacity) = frame_shape(header.size_class)?;
     if bytes.len() != expected_len {
@@ -264,13 +324,13 @@ pub fn decode_frame_parts(bytes: &[u8]) -> Result<TransitFrameParts<'_>, WireErr
             index: CIPHERTEXT_OFFSET + 4 + ciphertext_len + offset,
         });
     }
-    Ok(TransitFrameParts {
+    Ok(ConnectionFrameParts {
         header,
         ciphertext: &slot[4..4 + ciphertext_len],
     })
 }
 
-/// Encode a transport::transit frame for either size class from already-encrypted bytes.
+/// Encode a transport::connection_frame frame for either size class from already-encrypted bytes.
 pub fn encode_frame_bytes(
     size_class: u8,
     sender_endpoint_id: Id32,
@@ -320,9 +380,9 @@ fn encode_header(
             actual: out.len(),
         });
     }
-    TRANSIT_FRAME_TAG.encode(&mut out[..VERSION_OFFSET])?;
+    CONNECTION_FRAME_TAG.encode(&mut out[..VERSION_OFFSET])?;
     wire::put_u8(
-        TRANSIT_FRAME_VERSION,
+        CONNECTION_FRAME_VERSION,
         &mut out[VERSION_OFFSET..SIZE_CLASS_OFFSET],
     )?;
     wire::put_u8(size_class, &mut out[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
@@ -345,11 +405,11 @@ fn decode_header(
         });
     }
     let tag = Tag::<4>::decode(&bytes[..VERSION_OFFSET])?;
-    if tag != TRANSIT_FRAME_TAG {
+    if tag != CONNECTION_FRAME_TAG {
         return Err(WireError::NonZeroPadding { index: 0 });
     }
     let version = wire::take_u8(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?;
-    if version != TRANSIT_FRAME_VERSION {
+    if version != CONNECTION_FRAME_VERSION {
         return Err(WireError::InvalidBool { actual: version });
     }
     let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
@@ -365,43 +425,47 @@ fn decode_header(
 
 fn frame_shape(size_class: u8) -> Result<(usize, usize), WireError> {
     match size_class {
-        TRANSIT_FRAME_SIZE_CLASS_SMALL => {
-            Ok((TRANSIT_SMALL_WIRE_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES))
-        }
-        TRANSIT_FRAME_SIZE_CLASS_LARGE => {
-            Ok((TRANSIT_LARGE_WIRE_BYTES, TRANSIT_LARGE_CIPHERTEXT_BYTES))
-        }
+        CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok((
+            CONNECTION_FRAME_SMALL_WIRE_BYTES,
+            CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
+        )),
+        CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok((
+            CONNECTION_FRAME_LARGE_WIRE_BYTES,
+            CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES,
+        )),
         other => Err(WireError::InvalidBool { actual: other }),
     }
 }
 
 /// Sanity-check assertion that the constants above stay consistent.
 const _: () = {
-    assert!(TRANSIT_HEADER_BYTES == 4 + 1 + 1 + 32 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES);
-    assert!(TRANSIT_SMALL_WIRE_BYTES < TRANSIT_LARGE_WIRE_BYTES);
+    assert!(
+        CONNECTION_FRAME_HEADER_BYTES == 4 + 1 + 1 + 32 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES
+    );
+    assert!(CONNECTION_FRAME_SMALL_WIRE_BYTES < CONNECTION_FRAME_LARGE_WIRE_BYTES);
 };
 
 // ---------------------------------------------------------------------------
 // Connection-frame sealing and inner bundle helpers.
 // ---------------------------------------------------------------------------
 
-const FRAME_PURPOSE: &[u8] = b"topo transport::transit frame v1";
+const FRAME_PURPOSE: &[u8] = b"topo transport::connection_frame frame v1";
 const INNER_BUNDLE_TAG: &[u8; 4] = b"TIB1";
 const INNER_BUNDLE_VERSION: u8 = 1;
 const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 4;
 const INNER_FACT_LEN_BYTES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TransitFactBundle {
-    facts: Vec<TransitFactBytes>,
+pub struct ConnectionFrameFactBundle {
+    facts: Vec<ConnectionFrameFactBytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TransitFactBytes {
+struct ConnectionFrameFactBytes {
     bytes: Vec<u8>,
 }
 
-impl TransitFactBundle {
+impl ConnectionFrameFactBundle {
     pub fn new() -> Self {
         Self::default()
     }
@@ -415,7 +479,7 @@ impl TransitFactBundle {
     }
 
     pub fn push(&mut self, bytes: Vec<u8>) {
-        self.facts.push(TransitFactBytes { bytes });
+        self.facts.push(ConnectionFrameFactBytes { bytes });
     }
 
     pub fn len(&self) -> usize {
@@ -431,22 +495,22 @@ impl TransitFactBundle {
     }
 }
 
-impl IntoIterator for TransitFactBundle {
+impl IntoIterator for ConnectionFrameFactBundle {
     type Item = Vec<u8>;
-    type IntoIter = TransitFactBundleIntoIter;
+    type IntoIter = ConnectionFrameFactBundleIntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        TransitFactBundleIntoIter {
+        ConnectionFrameFactBundleIntoIter {
             inner: self.facts.into_iter(),
         }
     }
 }
 
-pub struct TransitFactBundleIntoIter {
-    inner: std::vec::IntoIter<TransitFactBytes>,
+pub struct ConnectionFrameFactBundleIntoIter {
+    inner: std::vec::IntoIter<ConnectionFrameFactBytes>,
 }
 
-impl Iterator for TransitFactBundleIntoIter {
+impl Iterator for ConnectionFrameFactBundleIntoIter {
     type Item = Vec<u8>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -461,7 +525,7 @@ pub struct SealConnectionFrame {
     pub receiver_endpoint_id: FactId,
     pub connection_secret: crypto::XChaCha20Poly1305Key,
     pub nonce: XChaCha20Poly1305Nonce,
-    pub facts: TransitFactBundle,
+    pub facts: ConnectionFrameFactBundle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,12 +534,12 @@ pub struct OpenedConnectionFrame {
     pub sender_endpoint_id: FactId,
     pub receiver_endpoint_id: FactId,
     pub frame_hash: [u8; 32],
-    pub facts: TransitFactBundle,
+    pub facts: ConnectionFrameFactBundle,
 }
 
 pub fn connection_send_nonce(connection_id: FactId, fact_ids: &[FactId]) -> XChaCha20Poly1305Nonce {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"topo:transport::transit-connection-send-nonce:v1:");
+    hash.update(b"topo:transport::connection_frame-connection-send-nonce:v1:");
     hash.update(&connection_id);
     hash.update(&(fact_ids.len() as u32).to_be_bytes());
     for fact_id in fact_ids {
@@ -529,7 +593,7 @@ pub fn seal_connection_send_frame(
     receiver_endpoint_id: FactId,
     connection_secret: crypto::XChaCha20Poly1305Key,
     fact_ids: &[FactId],
-    facts: TransitFactBundle,
+    facts: ConnectionFrameFactBundle,
 ) -> Result<Vec<u8>, String> {
     seal_connection_frame(SealConnectionFrame {
         connection_id,
@@ -549,7 +613,7 @@ pub fn open_connection_frame(
     let expected_ciphertext_len = ciphertext_len_for_size_class(parts.header.size_class)?;
     if parts.ciphertext.len() != expected_ciphertext_len {
         return Err(format!(
-            "transport::transit frame ciphertext must fill fixed slot: expected {} got {}",
+            "transport::connection_frame frame ciphertext must fill fixed slot: expected {} got {}",
             expected_ciphertext_len,
             parts.ciphertext.len()
         ));
@@ -570,7 +634,7 @@ pub fn open_connection_frame(
     let expected_plaintext_len = plaintext_len_for_size_class(parts.header.size_class)?;
     if plaintext.len() != expected_plaintext_len {
         return Err(format!(
-            "transport::transit frame plaintext must fill fixed slot: expected {} got {}",
+            "transport::connection_frame frame plaintext must fill fixed slot: expected {} got {}",
             expected_plaintext_len,
             plaintext.len()
         ));
@@ -585,34 +649,34 @@ pub fn open_connection_frame(
 }
 
 fn frame_size_class_for_plaintext(len: usize) -> Result<u8, String> {
-    if len <= TRANSIT_SMALL_PLAINTEXT_BYTES {
-        Ok(TRANSIT_FRAME_SIZE_CLASS_SMALL)
-    } else if len <= TRANSIT_LARGE_PLAINTEXT_BYTES {
-        Ok(TRANSIT_FRAME_SIZE_CLASS_LARGE)
+    if len <= CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES {
+        Ok(CONNECTION_FRAME_SIZE_CLASS_SMALL)
+    } else if len <= CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
+        Ok(CONNECTION_FRAME_SIZE_CLASS_LARGE)
     } else {
         Err(format!(
-            "transport::transit inner payload too large: max {} got {len}",
-            TRANSIT_LARGE_PLAINTEXT_BYTES
+            "transport::connection_frame inner payload too large: max {} got {len}",
+            CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES
         ))
     }
 }
 
 fn plaintext_len_for_size_class(size_class: u8) -> Result<usize, String> {
     match size_class {
-        TRANSIT_FRAME_SIZE_CLASS_SMALL => Ok(TRANSIT_SMALL_PLAINTEXT_BYTES),
-        TRANSIT_FRAME_SIZE_CLASS_LARGE => Ok(TRANSIT_LARGE_PLAINTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok(CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES),
         other => Err(format!(
-            "unknown transport::transit frame size class {other}"
+            "unknown transport::connection_frame frame size class {other}"
         )),
     }
 }
 
 fn ciphertext_len_for_size_class(size_class: u8) -> Result<usize, String> {
     match size_class {
-        TRANSIT_FRAME_SIZE_CLASS_SMALL => Ok(TRANSIT_SMALL_CIPHERTEXT_BYTES),
-        TRANSIT_FRAME_SIZE_CLASS_LARGE => Ok(TRANSIT_LARGE_CIPHERTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_SMALL => Ok(CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES),
+        CONNECTION_FRAME_SIZE_CLASS_LARGE => Ok(CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES),
         other => Err(format!(
-            "unknown transport::transit frame size class {other}"
+            "unknown transport::connection_frame frame size class {other}"
         )),
     }
 }
@@ -634,28 +698,36 @@ fn frame_associated_data(
     out
 }
 
-fn inner_bundle_packed_len(facts: &TransitFactBundle) -> Result<usize, String> {
+fn inner_bundle_packed_len(facts: &ConnectionFrameFactBundle) -> Result<usize, String> {
     if facts.is_empty() {
-        return Err("transport::transit inner bundle must contain at least one fact".to_string());
+        return Err(
+            "transport::connection_frame inner bundle must contain at least one fact".to_string(),
+        );
     }
     let mut len = INNER_BUNDLE_HEADER_BYTES;
     for fact in facts.iter() {
         let fact_len = fact.len();
-        u32::try_from(fact_len)
-            .map_err(|_| format!("transport::transit inner length too large: {fact_len}"))?;
+        u32::try_from(fact_len).map_err(|_| {
+            format!("transport::connection_frame inner length too large: {fact_len}")
+        })?;
         len = len
             .checked_add(INNER_FACT_LEN_BYTES)
             .and_then(|len| len.checked_add(fact_len))
-            .ok_or_else(|| "transport::transit inner bundle length overflow".to_string())?;
+            .ok_or_else(|| {
+                "transport::connection_frame inner bundle length overflow".to_string()
+            })?;
     }
     Ok(len)
 }
 
-fn encode_inner_bundle(facts: &TransitFactBundle, plaintext_len: usize) -> Result<Vec<u8>, String> {
+fn encode_inner_bundle(
+    facts: &ConnectionFrameFactBundle,
+    plaintext_len: usize,
+) -> Result<Vec<u8>, String> {
     let packed_len = inner_bundle_packed_len(facts)?;
     if packed_len > plaintext_len {
         return Err(format!(
-            "transport::transit inner payload too large: max {} got {packed_len}",
+            "transport::connection_frame inner payload too large: max {} got {packed_len}",
             plaintext_len
         ));
     }
@@ -672,22 +744,24 @@ fn encode_inner_bundle(facts: &TransitFactBundle, plaintext_len: usize) -> Resul
     Ok(out)
 }
 
-fn decode_inner_bundle(bytes: &[u8]) -> Result<TransitFactBundle, String> {
+fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != INNER_BUNDLE_TAG {
-        return Err("expected transport::transit inner bundle".to_string());
+        return Err("expected transport::connection_frame inner bundle".to_string());
     }
     let version = reader.u8()?;
     if version != INNER_BUNDLE_VERSION {
         return Err(format!(
-            "unsupported transport::transit inner bundle version {version}"
+            "unsupported transport::connection_frame inner bundle version {version}"
         ));
     }
     let count = reader.u32()? as usize;
     if count == 0 {
-        return Err("transport::transit inner bundle must contain at least one fact".to_string());
+        return Err(
+            "transport::connection_frame inner bundle must contain at least one fact".to_string(),
+        );
     }
-    let mut facts = TransitFactBundle::new();
+    let mut facts = ConnectionFrameFactBundle::new();
     for _ in 0..count {
         facts.push(reader.bytes()?.to_vec());
     }
@@ -697,16 +771,16 @@ fn decode_inner_bundle(bytes: &[u8]) -> Result<TransitFactBundle, String> {
 
 fn put_u32(out: &mut [u8], offset: &mut usize, value: usize) -> Result<(), String> {
     let value = u32::try_from(value)
-        .map_err(|_| format!("transport::transit inner length too large: {value}"))?;
+        .map_err(|_| format!("transport::connection_frame inner length too large: {value}"))?;
     put(out, offset, &value.to_be_bytes())
 }
 
 fn put(out: &mut [u8], offset: &mut usize, bytes: &[u8]) -> Result<(), String> {
     let end = offset
         .checked_add(bytes.len())
-        .ok_or_else(|| "transport::transit inner bundle length overflow".to_string())?;
+        .ok_or_else(|| "transport::connection_frame inner bundle length overflow".to_string())?;
     if end > out.len() {
-        return Err("transport::transit inner bundle exceeds fixed slot".to_string());
+        return Err("transport::connection_frame inner bundle exceeds fixed slot".to_string());
     }
     out[*offset..end].copy_from_slice(bytes);
     *offset = end;
@@ -741,12 +815,11 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or_else(|| "transport::transit inner bundle length overflow".to_string())?;
+        let end = self.offset.checked_add(len).ok_or_else(|| {
+            "transport::connection_frame inner bundle length overflow".to_string()
+        })?;
         if end > self.bytes.len() {
-            return Err("truncated transport::transit inner bundle".to_string());
+            return Err("truncated transport::connection_frame inner bundle".to_string());
         }
         let bytes = &self.bytes[self.offset..end];
         self.offset = end;
@@ -757,7 +830,7 @@ impl<'a> Reader<'a> {
         if self.bytes[self.offset..].iter().all(|byte| *byte == 0) {
             Ok(())
         } else {
-            Err("transport::transit inner bundle has nonzero padding".to_string())
+            Err("transport::connection_frame inner bundle has nonzero padding".to_string())
         }
     }
 }

@@ -7,8 +7,8 @@
 //! network-frame sends.
 //!
 //! Keep connection framing here. Sync visibility is resolved by `shared_fact`,
-//! sendability checks live in the transit fact family, and the lower network
-//! intent only carries already-sealed frames.
+//! sendability checks live in the connection-frame family, and the lower
+//! network intent only carries already-sealed frames.
 
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
@@ -21,10 +21,10 @@ use crate::protocol::{
     connection::response,
     identity::endpoint,
     sync::shared_fact,
-    transport::transit::{
+    transport::connection_frame::{
         create,
-        frame::{self, TransitFactBundle},
-        layout::TRANSIT_LARGE_PLAINTEXT_BYTES,
+        frame::{self, ConnectionFrameFactBundle},
+        layout::CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES,
     },
 };
 
@@ -236,7 +236,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         let mut output = PipelineEffects::new();
         for batch in batches {
             let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
-            let mut bundle = TransitFactBundle::new();
+            let mut bundle = ConnectionFrameFactBundle::new();
             for fact in &batch {
                 bundle.push(create::require_sendable_fact(fact)?.to_vec());
             }
@@ -295,10 +295,10 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
     let mut packed_len = INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
         let item_len = INNER_FACT_LEN_BYTES + create::require_sendable_fact(&fact)?.len();
-        if INNER_BUNDLE_HEADER_BYTES + item_len > TRANSIT_LARGE_PLAINTEXT_BYTES {
+        if INNER_BUNDLE_HEADER_BYTES + item_len > CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
             return Err("send_facts_on_connection fact exceeds transport frame capacity".into());
         }
-        if !batch.is_empty() && packed_len + item_len > TRANSIT_LARGE_PLAINTEXT_BYTES {
+        if !batch.is_empty() && packed_len + item_len > CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
             batches.push(std::mem::take(&mut batch));
             packed_len = INNER_BUNDLE_HEADER_BYTES;
         }

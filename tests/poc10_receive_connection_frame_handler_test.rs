@@ -1,4 +1,4 @@
-//! Receive-transport::transit handler and projector wiring tests.
+//! Receive-network handler and connection-frame projector wiring tests.
 
 use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
@@ -6,6 +6,7 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::FixedBytes;
+use topo::protocol::connection;
 use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
@@ -17,24 +18,24 @@ use topo::protocol::encryption::key_wrap::fact::{
 use topo::protocol::encryption::key_wrap::layout as encryption_layout;
 use topo::protocol::identity;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
-use topo::protocol::identity::endpoint::layout as endpoint_layout;
 use topo::protocol::identity::invite::fact::InviteSecretFact;
 use topo::protocol::identity::invite::layout as invite_layout;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::sync::compare::layout as sync_compare_layout;
-use topo::protocol::transport;
-use topo::protocol::transport::receive_transit_frame::{
-    receive_transit_frame_intent, ReceiveTransitFrame, ReceiveTransitFrameHandler,
-    RECEIVE_TRANSIT_FRAME,
+use topo::protocol::transport::connection_frame::fact::{
+    ConnectionFrameLargeFact, ConnectionFrameSmallFact,
 };
-use topo::protocol::transport::transit::fact::TransitInputFact;
-use topo::protocol::transport::transit::frame::{
-    self as transit_frame, SealConnectionFrame, TransitFactBundle,
+use topo::protocol::transport::connection_frame::frame::{
+    self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
-use topo::protocol::transport::transit::layout::{
-    self as transit_layout, TRANSIT_FRAME_SIZE_CLASS_LARGE,
+use topo::protocol::transport::connection_frame::layout::{
+    self as frame_layout, CONNECTION_FRAME_SIZE_CLASS_LARGE,
 };
-use topo::protocol::transport::transit::project::TransitProjector;
+use topo::protocol::transport::connection_frame::project::ConnectionFrameProjector;
+use topo::protocol::transport::receive_network_frame::{
+    receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
+    RECEIVE_NETWORK_FRAME,
+};
 
 const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;
@@ -44,7 +45,7 @@ fn receive_intent(frame: Vec<u8>) -> topo::core::intents::Intent {
 }
 
 fn receive_intent_from_origin(frame: Vec<u8>, origin: &[u8]) -> topo::core::intents::Intent {
-    receive_transit_frame_intent(ReceiveTransitFrame {
+    receive_network_frame_intent(ReceiveNetworkFrame {
         frame,
         origin_addr: origin.to_vec(),
         received_at_local_ms: RECEIVED_AT,
@@ -52,8 +53,8 @@ fn receive_intent_from_origin(frame: Vec<u8>, origin: &[u8]) -> topo::core::inte
     .expect("receive intent")
 }
 
-fn transit_input_fact(frame: Vec<u8>) -> Fact {
-    let input = TransitInputFact {
+fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
+    let input = ConnectionFrameSmallFact {
         frame,
         origin_addr: ORIGIN.to_vec(),
         received_at_local_ms: RECEIVED_AT,
@@ -61,17 +62,30 @@ fn transit_input_fact(frame: Vec<u8>) -> Fact {
     Fact::new(
         FactScope::Local,
         RECEIVED_AT,
-        transit_layout::encode_fact(&input).expect("transit input"),
+        frame_layout::encode_small_fact(&input).expect("small connection frame"),
     )
 }
 
-fn project_transit_input(
+fn connection_frame_large_fact(frame: Vec<u8>) -> Fact {
+    let input = ConnectionFrameLargeFact {
+        frame,
+        origin_addr: ORIGIN.to_vec(),
+        received_at_local_ms: RECEIVED_AT,
+    };
+    Fact::new(
+        FactScope::Local,
+        RECEIVED_AT,
+        frame_layout::encode_large_fact(&input).expect("large connection frame"),
+    )
+}
+
+fn project_connection_frame_fact(
     fact: &Fact,
     context: ProjectionContext,
 ) -> topo::core::projectors::ProjectionOutput {
-    TransitProjector::new()
+    ConnectionFrameProjector::new()
         .project(fact, &context)
-        .expect("project transit input")
+        .expect("project connection frame")
 }
 
 fn exact_match(
@@ -153,39 +167,39 @@ fn signed_key_wrap_bytes() -> Vec<u8> {
 fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
     let (connection_fact, connection) = connection_fact();
     let signed_wrap = signed_key_wrap_bytes();
-    let frame = transit_frame::seal_connection_frame(SealConnectionFrame {
+    let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
         connection_id: connection_fact.id,
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
         nonce: [19; 24],
-        facts: TransitFactBundle::from_bytes([signed_wrap.clone()]),
+        facts: ConnectionFrameFactBundle::from_bytes([signed_wrap.clone()]),
     })
-    .expect("seal transport::transit frame");
+    .expect("seal transport::connection_frame frame");
     (frame, connection_fact, connection, signed_wrap)
 }
 
 #[test]
-fn receive_handler_emits_ephemeral_transit_input() {
+fn receive_handler_emits_ephemeral_connection_frame_small() {
     let (frame, _, _, _) = encrypted_small_frame();
     let intent = receive_intent(frame.clone());
-    assert_eq!(intent.kind.as_str(), RECEIVE_TRANSIT_FRAME);
+    assert_eq!(intent.kind.as_str(), RECEIVE_NETWORK_FRAME);
 
-    let output = ReceiveTransitFrameHandler::new()
+    let output = ReceiveNetworkFrameHandler::new()
         .handle(&intent, &HandlerContext::new())
-        .expect("receive intent becomes transient input");
+        .expect("receive intent becomes connection frame input");
 
     assert!(output.facts.is_empty());
     assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = transit_layout::decode_fact(output.ephemeral_facts[0].body())
-        .expect("decode transit input");
+    let input = frame_layout::decode_small_fact(output.ephemeral_facts[0].body())
+        .expect("decode small connection frame");
     assert_eq!(input.frame, frame);
     assert_eq!(input.origin_addr, ORIGIN);
     assert_eq!(input.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
-fn bootstrap_request_projection_emits_request_and_provenance_only() {
+fn receive_handler_emits_durable_bootstrap_request_and_receipt_only() {
     let invite = InviteSecretFact::new([33; 32]);
     let invite_fact = Fact::new(
         FactScope::Local,
@@ -193,11 +207,6 @@ fn bootstrap_request_projection_emits_request_and_provenance_only() {
         invite_layout::encode_fact(&invite).expect("invite"),
     );
     let endpoint = local_endpoint();
-    let endpoint_fact = Fact::new(
-        FactScope::Local,
-        11,
-        endpoint_layout::encode_fact(&endpoint).expect("endpoint"),
-    );
     let mut request = ConnectionRequestFact {
         from_endpoint: crypto::x25519_public_key(&[55; 32]),
         to_endpoint: endpoint.endpoint,
@@ -218,60 +227,43 @@ fn bootstrap_request_projection_emits_request_and_provenance_only() {
     );
     let frame = connection_request_layout::encode_fact(&request).expect("request");
     let expected_request = Fact::new(FactScope::Global, RECEIVED_AT, frame.clone());
-    let input_fact = transit_input_fact(frame.clone());
-    let context = ProjectionContext::from_matches(vec![
-        exact_match(
-            input_fact.id,
-            "connection_invite_secret",
-            invite_fact.id,
-            invite_fact,
-        ),
-        exact_match(
-            input_fact.id,
-            "identity_local_endpoint",
-            endpoint.endpoint,
-            endpoint_fact,
-        ),
-    ]);
 
-    let output = project_transit_input(&input_fact, context);
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .expect("receive request");
 
-    assert_eq!(output.effects.facts.len(), 2);
-    assert!(output
-        .effects
-        .facts
-        .iter()
-        .any(|fact| *fact == expected_request));
-    assert!(output.effects.intents.is_empty());
-    assert!(output.effects.facts.iter().all(|fact| {
+    assert!(output.ephemeral_facts.is_empty());
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.facts.iter().any(|fact| *fact == expected_request));
+    assert!(output.intents.is_empty());
+    assert!(output.facts.iter().all(|fact| {
         !matches!(
             fact.body().first().copied(),
             Some(connection_response_layout::TYPE_CONNECTION_RESPONSE)
                 | Some(topo::protocol::connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
         )
     }));
-    let provenance_fact = output
-        .effects
+    let receipt_fact = output
         .facts
         .iter()
         .find(|fact| {
             fact.body().first().copied()
-                == Some(transport::transit_received::layout::TYPE_TRANSIT_RECEIVED)
+                == Some(connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT)
         })
-        .expect("provenance fact");
-    let provenance = transport::transit_received::layout::decode_fact(provenance_fact.body())
-        .expect("decode provenance");
-    assert_eq!(provenance.received_fact_id, expected_request.id);
-    assert_eq!(provenance.local_endpoint_id, request.to_endpoint);
-    assert_eq!(provenance.sender_endpoint_id, request.from_endpoint);
-    assert_eq!(provenance.request_id, Some(expected_request.id));
-    assert_eq!(provenance.frame_hash, crypto::hash(&frame));
+        .expect("receipt fact");
+    let receipt =
+        connection::fact_receipt::layout::decode_fact(receipt_fact.body()).expect("decode receipt");
+    assert_eq!(receipt.received_fact_id, expected_request.id);
+    assert_eq!(receipt.local_endpoint_id, request.to_endpoint);
+    assert_eq!(receipt.sender_endpoint_id, request.from_endpoint);
+    assert_eq!(receipt.request_id, Some(expected_request.id));
+    assert_eq!(receipt.frame_hash, crypto::hash(&frame));
 }
 
 #[test]
-fn well_formed_frame_opens_signed_key_wrap_and_records_receive_provenance() {
+fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
     let (frame, connection_fact, connection, signed_wrap) = encrypted_small_frame();
-    let input_fact = transit_input_fact(frame.clone());
+    let input_fact = connection_frame_small_fact(frame.clone());
     let context = ProjectionContext::from_matches(vec![exact_match(
         input_fact.id,
         "connection_response",
@@ -279,7 +271,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_receive_provenance() {
         connection_fact.clone(),
     )]);
 
-    let output = project_transit_input(&input_fact, context);
+    let output = project_connection_frame_fact(&input_fact, context);
 
     assert_eq!(output.effects.facts.len(), 2);
     let admitted_wrap =
@@ -292,22 +284,22 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_receive_provenance() {
             .any(|fact| *fact == admitted_wrap),
         "opened frame should emit the admitted signed key-wrap fact"
     );
-    let provenance_fact = output
+    let receipt_fact = output
         .effects
         .facts
         .iter()
         .find(|fact| fact.scope == FactScope::Local && fact.id != admitted_wrap.id)
-        .expect("local provenance fact");
-    let provenance = transport::transit_received::layout::decode_fact(&provenance_fact.bytes)
-        .expect("decode provenance");
-    assert_eq!(provenance.received_fact_id, admitted_wrap.id);
-    assert_eq!(provenance.origin_addr, ORIGIN);
-    assert_eq!(provenance.local_endpoint_id, connection.to_endpoint);
-    assert_eq!(provenance.sender_endpoint_id, connection.from_endpoint);
-    assert_eq!(provenance.connection_id, Some(connection_fact.id));
-    assert_eq!(provenance.request_id, Some(connection.request_id));
-    assert_eq!(provenance.frame_hash, crypto::hash(&frame));
-    assert_eq!(provenance.received_at_local_ms, RECEIVED_AT);
+        .expect("local receipt fact");
+    let receipt =
+        connection::fact_receipt::layout::decode_fact(&receipt_fact.bytes).expect("decode receipt");
+    assert_eq!(receipt.received_fact_id, admitted_wrap.id);
+    assert_eq!(receipt.origin_addr, ORIGIN);
+    assert_eq!(receipt.local_endpoint_id, connection.to_endpoint);
+    assert_eq!(receipt.sender_endpoint_id, connection.from_endpoint);
+    assert_eq!(receipt.connection_id, Some(connection_fact.id));
+    assert_eq!(receipt.request_id, Some(connection.request_id));
+    assert_eq!(receipt.frame_hash, crypto::hash(&frame));
+    assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
@@ -315,17 +307,17 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
     let (frame, _, _, _) = encrypted_small_frame();
     let intent = receive_intent_from_origin(frame, b"127.0.0.1_41001");
 
-    let output = ReceiveTransitFrameHandler::new()
+    let output = ReceiveNetworkFrameHandler::new()
         .handle(&intent, &HandlerContext::new())
-        .expect("receive transport::transit stages input");
+        .expect("receive transport::connection_frame stages input");
 
-    let input = transit_layout::decode_fact(output.ephemeral_facts[0].body())
-        .expect("decode transit input");
+    let input = frame_layout::decode_small_fact(output.ephemeral_facts[0].body())
+        .expect("decode small connection frame");
     assert_eq!(input.origin_addr, ORIGIN);
 }
 
 #[test]
-fn well_formed_frame_admits_sync_compare_and_records_receive_provenance() {
+fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
     let (connection_fact, connection) = connection_fact();
     let compare_bytes = sync_compare_layout::encode_fact(&SyncCompareFact {
         connection_id: connection_fact.id,
@@ -337,16 +329,16 @@ fn well_formed_frame_admits_sync_compare_and_records_receive_provenance() {
         response_requested: true,
     })
     .expect("sync compare");
-    let frame = transit_frame::seal_connection_frame(SealConnectionFrame {
+    let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
         connection_id: connection_fact.id,
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
         nonce: [29; 24],
-        facts: TransitFactBundle::from_bytes([compare_bytes.clone()]),
+        facts: ConnectionFrameFactBundle::from_bytes([compare_bytes.clone()]),
     })
-    .expect("seal transport::transit frame");
-    let input_fact = transit_input_fact(frame);
+    .expect("seal transport::connection_frame frame");
+    let input_fact = connection_frame_small_fact(frame);
     let context = ProjectionContext::from_matches(vec![exact_match(
         input_fact.id,
         "connection_response",
@@ -354,27 +346,27 @@ fn well_formed_frame_admits_sync_compare_and_records_receive_provenance() {
         connection_fact,
     )]);
 
-    let output = project_transit_input(&input_fact, context);
+    let output = project_connection_frame_fact(&input_fact, context);
 
     assert_eq!(output.effects.facts.len(), 2);
     let admitted = Fact::new(FactScope::Global, 0, compare_bytes);
     assert!(output.effects.facts.iter().any(|fact| *fact == admitted));
-    let provenance_fact = output
+    let receipt_fact = output
         .effects
         .facts
         .iter()
         .find(|fact| fact.scope == FactScope::Local)
-        .expect("local provenance fact");
-    let provenance = transport::transit_received::layout::decode_fact(&provenance_fact.bytes)
-        .expect("decode provenance");
-    assert_eq!(provenance.received_fact_id, admitted.id);
+        .expect("local receipt fact");
+    let receipt =
+        connection::fact_receipt::layout::decode_fact(&receipt_fact.bytes).expect("decode receipt");
+    assert_eq!(receipt.received_fact_id, admitted.id);
 }
 
 #[test]
 fn well_formed_large_frame_can_park_before_materializing_large_slot() {
     let (connection_fact, connection) = connection_fact();
-    let frame = transit_layout::encode_frame_bytes(
-        TRANSIT_FRAME_SIZE_CLASS_LARGE,
+    let frame = frame_layout::encode_frame_bytes(
+        CONNECTION_FRAME_SIZE_CLASS_LARGE,
         FixedBytes(connection.from_endpoint),
         FixedBytes(connection.to_endpoint),
         FixedBytes(connection_fact.id),
@@ -382,9 +374,9 @@ fn well_formed_large_frame_can_park_before_materializing_large_slot() {
         b"not-opened-without-context",
     )
     .expect("large frame");
-    let input_fact = transit_input_fact(frame);
+    let input_fact = connection_frame_large_fact(frame);
 
-    let output = project_transit_input(&input_fact, ProjectionContext::default());
+    let output = project_connection_frame_fact(&input_fact, ProjectionContext::default());
 
     assert_eq!(output.needs.len(), 1);
     assert_eq!(output.needs[0].role, "connection_response");
@@ -392,29 +384,26 @@ fn well_formed_large_frame_can_park_before_materializing_large_slot() {
 }
 
 #[test]
-fn malformed_frame_header_is_discarded_by_projection() {
-    let input_fact = transit_input_fact(vec![0u8; 32]);
+fn malformed_frame_header_is_discarded_by_receive_handler() {
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(&receive_intent(vec![0u8; 32]), &HandlerContext::new())
+        .expect("malformed frame is consumed");
 
-    let output = TransitProjector::new()
-        .project(&input_fact, &ProjectionContext::default())
-        .expect("malformed transit input is consumed");
-
-    assert!(output.needs.is_empty());
-    assert!(output.effects.facts.is_empty());
+    assert!(output.facts.is_empty());
+    assert!(output.ephemeral_facts.is_empty());
 }
 
 #[test]
-fn truncated_small_frame_after_valid_header_is_discarded_by_projection() {
+fn truncated_small_frame_after_valid_header_is_discarded_by_receive_handler() {
     let (mut bytes, _, _, _) = encrypted_small_frame();
     bytes.truncate(bytes.len() - 1);
-    let input_fact = transit_input_fact(bytes);
 
-    let output = TransitProjector::new()
-        .project(&input_fact, &ProjectionContext::default())
-        .expect("truncated transit input is consumed");
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(&receive_intent(bytes), &HandlerContext::new())
+        .expect("truncated frame is consumed");
 
-    assert!(output.needs.is_empty());
-    assert!(output.effects.facts.is_empty());
+    assert!(output.facts.is_empty());
+    assert!(output.ephemeral_facts.is_empty());
 }
 
 fn local_endpoint() -> EndpointFact {

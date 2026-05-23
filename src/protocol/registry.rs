@@ -536,7 +536,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_facts_on_connection",
     "send_network_frame",
-    "receive_transit_frame",
+    "receive_network_frame",
 ];
 
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
@@ -649,8 +649,9 @@ projector_routes! {
     project_sync_compare => sync::compare::layout::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector;
     project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector;
     project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector;
-    project_transit_input => transport::transit::layout::TYPE_TRANSIT_INPUT, transport::transit::project::TransitProjector;
-    project_transit_received => transport::transit_received::layout::TYPE_TRANSIT_RECEIVED, transport::transit_received::project::TransitReceivedProjector;
+    project_connection_frame_small => transport::connection_frame::layout::TYPE_CONNECTION_FRAME_SMALL, transport::connection_frame::project::ConnectionFrameProjector;
+    project_connection_frame_large => transport::connection_frame::layout::TYPE_CONNECTION_FRAME_LARGE, transport::connection_frame::project::ConnectionFrameProjector;
+    project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
     project_user_invite => identity::user_invite::layout::TYPE_USER_INVITE, identity::user_invite::project::UserInviteProjector;
     project_user => identity::user::layout::TYPE_USER, identity::user::project::UserProjector;
 }
@@ -756,9 +757,9 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         transport::send_network_frame::SendNetworkFrameHandler
     ),
     handler_route!(
-        "receive_transit_frame",
-        transport::receive_transit_frame::RECEIVE_TRANSIT_FRAME,
-        transport::receive_transit_frame::ReceiveTransitFrameHandler
+        "receive_network_frame",
+        transport::receive_network_frame::RECEIVE_NETWORK_FRAME,
+        transport::receive_network_frame::ReceiveNetworkFrameHandler
     ),
 ];
 

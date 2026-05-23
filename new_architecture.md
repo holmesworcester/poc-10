@@ -62,7 +62,7 @@ The architecture holds when:
   read-model row codecs.
 - Wire layouts are declarative and fixed length. There are no variable payload
   slots.
-- Transit frames use the same fixed-layout wire machinery and support only the
+- Connection frames use the same fixed-layout wire machinery and support only the
   two configured frame sizes.
 - Boundary tests fail if dumping-ground files, ad hoc SQL, ad hoc codecs,
   broad projector reads, direct handler calls, or direct network/store side
@@ -84,8 +84,8 @@ The architecture holds when:
   handlers; they are exercised by poc-10 tests and route production `match`
   behavior through the target runtime. Each scope manifest
   `src/protocol/<scope>.rs` declares its fact families and intent handlers.
-- Receive transit can open fixed transit frames that carry signed key-wrap
-  facts, admit the opened fact, and record local receive provenance.
+- Connection-frame receive can open fixed connection frames that carry signed key-wrap
+  facts, admit the opened fact, and record local fact receipt.
   Send-side flow emits send-on-connection and network-send intents and writes a
   bounded TCP frame when route context is present.
 - Purge can remove exact retained facts through handler output;
@@ -99,7 +99,7 @@ The architecture holds when:
 Implemented slices:
 
 - Core fact/context/intent/projector contracts.
-- Context needs/offers for exact fact ids, secret coverage, receive provenance,
+- Context needs/offers for exact fact ids, secret coverage, fact receipt,
   deletion/update wakeups, and recipient-key supersession.
 - Row mutations as the projector- and handler-owned path for bounded read-model
   writes and deletes.
@@ -110,8 +110,8 @@ Implemented slices:
 - Handler dispatch that accepts only declared fact inputs and returns facts,
   purges, and follow-up intents.
 - Target tests for signed facts, encrypted content messages, key wraps, key request
-  healing, recipient-key supersession cleanup, signed key-wrap transit receive,
-  transit frame layout, sync context, receive provenance, flat handler
+  healing, recipient-key supersession cleanup, signed key-wrap connection-frame
+  receive, connection frame layout, sync context, fact receipt, flat handler
   contracts, black-box invite/accept/link flows, basic content send/messages,
   encryption CLI flows, and daemon lifecycle.
 - `CommandContext` for user-facing target commands that may read projected state
@@ -211,9 +211,9 @@ src/
 
     transport.rs
     transport/
-      transit/
-      transit_received/
-      receive_transit_frame.rs
+      connection_frame/
+      fact_receipt/
+      receive_network_frame.rs
       send_facts_on_connection.rs
       send_network_frame.rs
 
@@ -297,7 +297,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     name: "match",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
-        inbound_network_intent: Some(receive_transit_frame_intent),
+        inbound_network_intent: Some(receive_network_frame_intent),
         time_wakes: MATCH_DAEMON_TIME_WAKES,
     },
     commands: MATCH_COMMANDS,
@@ -383,8 +383,8 @@ rows.rs
   read-model row shapes
 
 frame.rs / receive.rs
-  transit-specific fixed-frame helpers and receive classification (transit
-  modules only)
+  connection-frame-specific fixed-frame helpers and receive classification
+  (connection-frame modules only)
 ```
 
 Context range encoders are not a separate file. Simple fact-id and composite-id
@@ -395,7 +395,7 @@ of the family that validates its candidates.
 ### Command Chaining
 
 Commands are not the automatic/reactive mechanism. If behavior is triggered by
-new facts, missing context, transit receive, sync, or purge, it belongs in
+new facts, missing context, connection receive, sync, or purge, it belongs in
 projectors plus intent handlers and receives inputs through
 `ProjectionContext`/`HandlerContext`.
 
@@ -612,9 +612,9 @@ Secret coverage key range
   Offer(role="secret_coverage", range=[workspace/frontier/minute-prefix-low,
                                         workspace/frontier/minute-prefix-high])
 
-Receive provenance key
-  Need(role="transit_received", range=[received_fact_id, received_fact_id])
-  Offer(role="transit_received", range=[received_fact_id, received_fact_id])
+Connection fact receipt key
+  Need(role="connection_fact_receipt", range=[received_fact_id, received_fact_id])
+  Offer(role="connection_fact_receipt", range=[received_fact_id, received_fact_id])
 
 Deletion/update key
   Need(role="content_deleted", range=[target_id + author_id, same])
@@ -745,7 +745,7 @@ role, and authorization.
 When implementing or reviewing a projector:
 
 ```text
-1. Record every required dependency, update trigger, receive/provenance check,
+1. Record every required dependency, update trigger, fact-receipt check,
    queued side effect, and row write.
 2. For each requirement, inspect supplied ProjectionContext first. If matched
    context is absent, emit a stable target ContextNeed unless the fact is
@@ -758,7 +758,7 @@ When implementing or reviewing a projector:
 5. If required context is missing, return stable needs and no materialized rows
    or intents for that branch.
 6. Emit bounded row writes/deletes as row mutations in projector output.
-7. Convert async, retryable, IO, purge, transit, sync, and key-healing work to
+7. Convert async, retryable, IO, purge, connection receive, sync, and key-healing work to
    explicit typed deferred intents owned by handlers.
 8. Keep helper functions small and local to the fact family. They live inside
    the standard role file that owns their responsibility, not in a separate
@@ -999,15 +999,15 @@ This removes handwritten per-module `rows.rs` files in the end state. Projectors
 still make the semantic decision to write a row; generated codecs only build the
 bounded bytes for `PutRow` and `DeleteRow` intents.
 
-## Transit
+## Connection Receive
 
-### Transit Frame Style
+### Connection Frame Style
 
-Transit uses the same fixed-layout system as facts. The outer frame layouts are:
+Connection frames use the same fixed-layout system as facts. The outer frame layouts are:
 
 ```text
-TransitSmallV1
-TransitLargeV1
+ConnectionFrameSmallV1
+ConnectionFrameLargeV1
 ```
 
 Each frame has a fixed public header and a fixed encrypted payload slot:
@@ -1031,36 +1031,35 @@ Outbound after connection:
 ```text
 SendOnConnection(connection_id, fact_id)
   -> load route, connection state, and fact bytes
-  -> package one small or large transit frame
+  -> package one small or large connection frame
   -> emit NetworkSend(addr, frame)
 ```
 
 Inbound:
 
 ```text
-ReceiveTransit(frame)
+ReceiveNetworkFrame(frame)
   -> authenticate sender, recipient, connection, and scope
   -> recover inner bytes
   -> classify explicit fact types
   -> emit inner shared facts
-  -> emit local TransitReceived facts
+  -> emit local ConnectionFactReceipt facts
 ```
 
-Connection transit may carry connection responses, connection-scoped sync
-facts, or shared workspace facts. It must reject facts outside the connection's
-authorized scopes.
+Connection frames may carry connection-scoped sync facts or shared workspace
+facts. They must reject facts outside the connection's authorized scopes.
 
-## Receive Facts
+## Fact Receipts
 
-Receive metadata is represented as local facts about received facts:
+Connection receive metadata is represented as local facts about received facts:
 
 ```text
-TransitReceivedFact {
+ConnectionFactReceipt {
     received_fact_id,
     origin_addr,
     local_endpoint_id,
     sender_endpoint_id,
-    transit_kind,
+    receive_path,
     connection_id,
     request_id,
     frame_hash,
@@ -1068,28 +1067,32 @@ TransitReceivedFact {
 }
 ```
 
-The receive fact offers context:
+The fact receipt offers context:
 
 ```text
 Offer(
-    owner = transit_received_fact_id,
-    role = "transit_received",
+    owner = fact_receipt_fact_id,
+    role = "connection_fact_receipt",
     key = received_fact_id,
 )
 ```
 
 The receive intent carries opaque frame bytes, observed origin address, and
-local receive time. The handler uses those only to open the frame and build
-local provenance facts. Shared fact identity is derived from canonical inner
-bytes.
+local receive time. For connection requests and responses, the handler can
+create the semantic fact and fact receipt immediately. For encrypted connection
+frames, the handler creates an ephemeral connection-frame fact that carries
+origin/time/frame bytes; the connection-frame projector later opens it and
+emits durable child facts plus receipts. Shared fact identity is derived from
+canonical inner bytes.
 
-Transport-bound facts may explicitly need receive provenance. Ordinary shared
-facts should validate through signatures, dependencies, context, and
+Connection receive-bound facts may explicitly need a fact receipt. Ordinary
+shared facts should validate through signatures, dependencies, context, and
 projectors.
 
 The first concrete shared-fact admission point should be signed key-wrap
-receive. Transit unwrap recovers signed key-wrap bytes; admission parses only
-enough to assign fact scope and timestamp. Authority remains projector work.
+receive. Connection-frame projection recovers signed key-wrap bytes; admission
+parses only enough to assign fact scope and timestamp. Authority remains
+projector work.
 
 ## Connection And Sync
 
@@ -1108,15 +1111,15 @@ Connection flow:
 ```text
 connection request fact
   -> SendBootstrapRequest
-  -> ReceiveTransit on peer
+  -> ReceiveNetworkFrame on peer
   -> request projector validates invite/endpoint context
   -> ConnectionResponse
   -> SendHandshakeResponse
-  -> ReceiveTransit on initiator
+  -> ReceiveNetworkFrame on initiator
   -> response projector materializes connection state
 ```
 
-Sync decides which ids should move. Transit decides how bytes move.
+Sync decides which ids should move. Connection transport decides how bytes move.
 
 ```text
 StartSync
@@ -1316,7 +1319,7 @@ projectors validate protocol meaning
 row mutations commit exact state
 deferred intents drive bounded handlers
 handlers produce more facts and intents
-transit moves bytes
+connection frames move bytes
 sync decides ids
 connection proves peer relationships
 receive facts record local observations

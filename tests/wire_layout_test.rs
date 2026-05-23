@@ -6,9 +6,9 @@ use topo::core::wire::{
     take_u32be, take_u64be, take_u8, Ciphertext, FixedBytes, FixedLayout, FixedSlot, Id32, Nonce24,
     Tag, WireError, U16_BYTES, U32_BYTES, U64_BYTES, U8_BYTES,
 };
-use topo::protocol::transport::transit::layout::{
-    TRANSIT_LARGE_CIPHERTEXT_BYTES, TRANSIT_LARGE_PLAINTEXT_BYTES, TRANSIT_SMALL_CIPHERTEXT_BYTES,
-    TRANSIT_SMALL_PLAINTEXT_BYTES,
+use topo::protocol::transport::connection_frame::layout::{
+    CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES, CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES,
+    CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
 };
 
 #[test]
@@ -155,35 +155,35 @@ fn fixed_slots_lock_length_prefix_padding_and_rejection() {
 }
 
 #[test]
-fn transit_ciphertext_slot_layout_includes_aead_tag_capacity() {
-    assert_eq!(TRANSIT_SMALL_PLAINTEXT_BYTES, 4 * 1024);
+fn connection_frame_ciphertext_slot_layout_includes_aead_tag_capacity() {
+    assert_eq!(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, 4 * 1024);
     assert_eq!(
-        TRANSIT_SMALL_CIPHERTEXT_BYTES,
-        TRANSIT_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
+        CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
+        CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
     );
     assert_eq!(
-        Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::DATA_LEN,
-        TRANSIT_SMALL_CIPHERTEXT_BYTES
+        Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::DATA_LEN,
+        CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES
     );
     assert_eq!(
-        Ciphertext::<TRANSIT_SMALL_CIPHERTEXT_BYTES>::LEN,
-        U32_BYTES + TRANSIT_SMALL_CIPHERTEXT_BYTES
+        Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::LEN,
+        U32_BYTES + CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES
     );
 
-    assert_eq!(TRANSIT_LARGE_PLAINTEXT_BYTES, 1024 * 1024);
+    assert_eq!(CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES, 1024 * 1024);
     assert_eq!(
-        TRANSIT_LARGE_CIPHERTEXT_BYTES,
-        TRANSIT_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
+        CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES,
+        CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES
     );
     assert_eq!(
-        Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::DATA_LEN,
-        TRANSIT_LARGE_CIPHERTEXT_BYTES
+        Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::DATA_LEN,
+        CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES
     );
     assert_eq!(
-        Ciphertext::<TRANSIT_LARGE_CIPHERTEXT_BYTES>::LEN,
-        U32_BYTES + TRANSIT_LARGE_CIPHERTEXT_BYTES
+        Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::LEN,
+        U32_BYTES + CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES
     );
-    assert!(TRANSIT_LARGE_CIPHERTEXT_BYTES <= u32::MAX as usize);
+    assert!(CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES <= u32::MAX as usize);
 }
 
 fn assert_fixed_bytes_golden<const N: usize>(bytes: &[u8; N]) {

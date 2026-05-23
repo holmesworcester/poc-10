@@ -258,7 +258,7 @@ Predicates:
 ```text
 valid_invite_secret_offer(offer, invite_secret)
 valid_ephemeral_secret_offer(offer, ephemeral_secret)
-valid_transit_received_offer(offer, receive_fact)
+valid_connection_fact_receipt_offer(offer, receipt_fact)
 valid_connection_request_offer(offer, request_fact, graph)
 valid_connection_row(row, response_fact, graph)
 ```
@@ -269,14 +269,14 @@ Proof chain:
 connection_ephemeral_secret projector
   -> local secret offer implies public key matches private key
 
-transit_received projector
-  -> receive offer implies local provenance for received_fact_id
+connection_fact_receipt projector
+  -> receipt offer implies local fact receipt for received_fact_id
 
 connection_request projector
   -> invite context is present
   -> invite signature transcript verifies
   -> local branch has matching local ephemeral secret
-  -> received branch has matching bootstrap receive provenance
+  -> received branch has matching connection-request fact receipt
   -> emitted connection_request offer is valid
 
 connection_response projector
@@ -285,7 +285,7 @@ connection_response projector
   -> endpoint direction reverses request
   -> public handshake hash matches transcript
   -> local branch has responder ephemeral secret
-  -> received branch has handshake receive provenance and initiator secret
+  -> received branch has connection-response fact receipt and initiator secret
   -> emitted connection row is valid
 ```
 
@@ -309,7 +309,7 @@ The runner should verify only proof-enabled modules first:
 ```text
 core context/matcher lemmas
 connection_ephemeral_secret proof
-transit_received proof
+connection_fact_receipt proof
 connection_request proof
 connection_response proof
 identity_admin proof
@@ -345,7 +345,7 @@ Use this template when assigning proof work to a worktree:
 1. Add the Verus runner and a tiny core proof target for exact selector matching.
 2. Prove projection context plumbing for exact matches and payload refs.
 3. Prove local connection ephemeral-secret offer validity.
-4. Prove transit receive provenance offer validity.
+4. Prove connection fact receipt offer validity.
 5. Fix the invite-secret role mismatch for connection proof composition.
 6. Prove connection request offer validity.
 7. Prove connection response row validity.

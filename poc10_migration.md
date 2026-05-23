@@ -52,7 +52,7 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 | projection row writes | row mutations from projectors |
 | content purge | purge intents and purge handlers |
 | key unwrap/materialization | encryption projectors plus key handlers |
-| transit in/out | receive/transit/network handlers |
+| connection-frame in/out | receive/connection-frame/network handlers |
 | sync worker/index | sync facts plus durable sync handlers |
 | command admission helper | `core::command_context` + generic core runtime |
 
@@ -60,7 +60,7 @@ The executable TODO list lives in `tests/poc10_cutover_todo_test.rs`.
 
 1. Port the remaining product commands and daemon lifecycle to generic core
    runtime/app methods plus module-local `cli.rs`/`commands.rs`/`queries.rs`.
-2. Replace transit send packaging and `network_send` stubs with real fixed-frame
+2. Replace connection-frame send packaging and `network_send` stubs with real fixed-frame
    handler behavior.
 3. Complete durable sync state and dep-aware range closure for out-of-range
    dependencies and keys.

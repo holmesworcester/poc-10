@@ -5,7 +5,8 @@
 //!      non-empty, and the endpoints differ.
 //!   2. CONTEXT. Both branches require invite-secret context. Local requests
 //!      require initiator ephemeral-secret context; received requests require
-//!      transit receive provenance addressed to this endpoint.
+//!      local-endpoint context plus connection fact receipt addressed to
+//!      that endpoint.
 //!   3. MATERIALIZE. Valid requests write the request row and offer request
 //!      context; received bootstrap requests also emit deferred response work.
 
@@ -20,11 +21,11 @@ use crate::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse,
 };
 use crate::protocol::connection::ephemeral_secret;
+use crate::protocol::connection::fact_receipt;
 use crate::protocol::connection::send_bootstrap_request::{
     send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
 };
-use crate::protocol::identity::invite;
-use crate::protocol::transport::transit_received;
+use crate::protocol::identity::{endpoint, invite};
 
 use super::create::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
@@ -123,33 +124,53 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
         }
 
         // 2b. Received bootstrap path.
+        let endpoint_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "identity_local_endpoint",
+            crate::core::facts::FactScope::Local,
+            request.to_endpoint,
+            request.to_endpoint,
+        );
         let receive_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "transport_transit_received",
+            "connection_fact_receipt",
             crate::core::facts::FactScope::Local,
             fact.id,
             fact.id,
         );
+        let Some(endpoint_context) = projection_context.payload_for(&endpoint_need) else {
+            return Ok(waiting_output([invite_need, endpoint_need, receive_need]));
+        };
+        if endpoint_context.scope != FactScope::Local {
+            return Err("connection request endpoint context must be local".to_string());
+        }
+        let local_endpoint =
+            endpoint::decode_fact_payload(endpoint_context.body()).map_err(|_| {
+                "connection request endpoint context is not a local endpoint".to_string()
+            })?;
+        if local_endpoint.endpoint != request.to_endpoint {
+            return Err("connection request endpoint context does not match request".to_string());
+        }
         let Some(receive) = projection_context
             .matched_payloads_for(&receive_need)
             .map(|(_, fact)| fact)
             .min_by_key(|fact| fact.id)
         else {
-            return Ok(waiting_output([invite_need, receive_need]));
+            return Ok(waiting_output([invite_need, endpoint_need, receive_need]));
         };
         if receive.scope != FactScope::Local {
             return Err("connection request receive context must be local".to_string());
         }
-        let received = transit_received::decode_fact_payload(receive.body()).map_err(|_| {
-            "connection request receive context is not transport::transit provenance".to_string()
+        let received = fact_receipt::decode_fact_payload(receive.body()).map_err(|_| {
+            "connection request receive context is not connection fact receipt".to_string()
         })?;
         if received.received_fact_id != fact.id {
             return Err("connection request receive context targets another fact".to_string());
         }
-        if received.transit_kind
-            != crate::protocol::transport::transit_received::fact::TRANSIT_KIND_BOOTSTRAP
+        if received.receive_path
+            != crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST
         {
-            return Err("connection request requires bootstrap receive provenance".to_string());
+            return Err("connection request requires connection request receipt".to_string());
         }
         if received.local_endpoint_id != request.to_endpoint {
             return Err("connection request addressed to a different endpoint".to_string());
@@ -159,9 +180,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
         }
         if let Some(request_id) = received.request_id {
             if request_id != fact.id {
-                return Err(
-                    "connection request receive provenance names another request".to_string(),
-                );
+                return Err("connection request fact receipt names another request".to_string());
             }
         }
         if request.from_listen_addr.is_none() {
@@ -304,13 +323,14 @@ mod projector_tests {
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
-    use topo::protocol::connection::request::create::encode_optional_addr;
-    use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
-    use topo::protocol::identity::invite::{fact::InviteSecretFact, layout as invite_layout};
-    use topo::protocol::transport::transit_received::{
-        fact::{TransitReceivedFact, TRANSIT_KIND_BOOTSTRAP},
+    use topo::protocol::connection::fact_receipt::{
+        fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST},
         layout as received_layout,
     };
+    use topo::protocol::connection::request::create::encode_optional_addr;
+    use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
+    use topo::protocol::identity::endpoint::{fact::EndpointFact, layout as endpoint_layout};
+    use topo::protocol::identity::invite::{fact::InviteSecretFact, layout as invite_layout};
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
         let invite = InviteSecretFact::new([55; 32]);
@@ -343,7 +363,7 @@ mod projector_tests {
         let (ephemeral, ephemeral_fact) = ephemeral_fact([1; 32]);
         let mut request = ConnectionRequestFact {
             from_endpoint: [1; 32],
-            to_endpoint: [2; 32],
+            to_endpoint: crypto::x25519_public_key(&[2; 32]),
             nonce: [3; 32],
             invite_fact_id: [4; 32],
             bootstrap_hash: invite.bootstrap_hash,
@@ -414,12 +434,12 @@ mod projector_tests {
         request_id: [u8; 32],
         received_at_local_ms: u64,
     ) -> MatchedContext {
-        let received = TransitReceivedFact {
+        let received = ConnectionFactReceipt {
             received_fact_id: request_id,
             origin_addr: b"127.0.0.1:41001".to_vec(),
             local_endpoint_id: request.to_endpoint,
             sender_endpoint_id: request.from_endpoint,
-            transit_kind: TRANSIT_KIND_BOOTSTRAP,
+            receive_path: RECEIVE_PATH_CONNECTION_REQUEST,
             connection_id: None,
             request_id: Some(request_id),
             frame_hash: [9; 32],
@@ -428,11 +448,11 @@ mod projector_tests {
         let fact = Fact::new(
             FactScope::Local,
             13,
-            received_layout::encode_fact(&received).expect("encode provenance"),
+            received_layout::encode_fact(&received).expect("encode receipt"),
         );
         let need = crate::core::context::ContextNeed::range(
             owner,
-            "transport_transit_received",
+            "connection_fact_receipt",
             crate::core::facts::FactScope::Local,
             request_id,
             request_id,
@@ -441,10 +461,42 @@ mod projector_tests {
             need,
             offer: crate::core::context::ContextOffer::range(
                 fact.id,
-                "transport_transit_received",
+                "connection_fact_receipt",
                 crate::core::facts::FactScope::Local,
                 request_id,
                 request_id,
+            ),
+            payload: fact,
+        }
+    }
+
+    fn endpoint_match(owner: [u8; 32], endpoint_id: [u8; 32]) -> MatchedContext {
+        let endpoint = EndpointFact {
+            endpoint: endpoint_id,
+            secret: [2; 32],
+            signing_public_key: crypto::ed25519_public_key(&[22; 32]),
+            signing_secret: [22; 32],
+        };
+        let fact = Fact::new(
+            FactScope::Local,
+            14,
+            endpoint_layout::encode_fact(&endpoint).expect("encode endpoint"),
+        );
+        let need = crate::core::context::ContextNeed::range(
+            owner,
+            "identity_local_endpoint",
+            crate::core::facts::FactScope::Local,
+            endpoint_id,
+            endpoint_id,
+        );
+        MatchedContext {
+            need,
+            offer: crate::core::context::ContextOffer::range(
+                fact.id,
+                "identity_local_endpoint",
+                crate::core::facts::FactScope::Local,
+                endpoint_id,
+                endpoint_id,
             ),
             payload: fact,
         }
@@ -469,21 +521,23 @@ mod projector_tests {
     }
 
     #[test]
-    fn received_request_missing_provenance_waits_without_row() {
-        let (_, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
-        let context =
-            ProjectionContext::from_matches(vec![invite_match(request_fact.id, invite_fact)]);
+    fn received_request_missing_receipt_waits_without_row() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
+        ]);
 
         let output = project::ConnectionRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project waits");
 
         assert!(output.effects.intents.is_empty());
-        assert_eq!(output.needs.len(), 2);
+        assert_eq!(output.needs.len(), 3);
         assert!(output
             .needs
             .iter()
-            .any(|need| need.role == "transport_transit_received"));
+            .any(|need| need.role == "connection_fact_receipt"));
     }
 
     #[test]
@@ -520,10 +574,11 @@ mod projector_tests {
     }
 
     #[test]
-    fn received_request_materializes_after_invite_and_provenance_context_match() {
+    fn received_request_materializes_after_invite_and_receipt_context_match() {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
             receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
         ]);
 
@@ -547,10 +602,11 @@ mod projector_tests {
     }
 
     #[test]
-    fn received_request_duplicate_provenance_emits_one_response_intent() {
+    fn received_request_duplicate_receipt_emits_one_response_intent() {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
             receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
             receive_match(request_fact.id, &request, request_fact.id, 1_700_000_250),
         ]);
@@ -568,7 +624,7 @@ mod projector_tests {
         assert_eq!(
             response_intents.len(),
             1,
-            "duplicate receive provenance for one request must collapse to one response intent"
+            "duplicate fact receipt for one request must collapse to one response intent"
         );
     }
 

@@ -59,7 +59,7 @@ has been removed; new behavior belongs in `src/core` or `src/protocol`.
   `payload_for_checked`, or `matched_payloads_for`. Direct
   `matched_context()` scans are exceptional compatibility code and must be
   explicitly justified by a guardrail allowlist.
-- Deletion, supersession, receive provenance, key availability, and dependency
+- Deletion, supersession, connection fact receipts, key availability, and dependency
   availability are context offers or facts, not labels or side channels.
 
 ## Intents And Handlers
@@ -88,14 +88,14 @@ has been removed; new behavior belongs in `src/core` or `src/protocol`.
 - Decoders reject wrong tags, wrong lengths, trailing bytes, non-canonical
   padding, and invalid enum values.
 - Store code is a generic row substrate. It must not learn protocol table
-  meaning, sync ranges, transit routes, or context semantics.
+  meaning, sync ranges, connection routes, or context semantics.
 
-## Sync And Transit
+## Sync And Connection Frames
 
-- Transit frames are opaque fixed-size envelopes until opened by a transit
-  handler with exact connection context.
-- Receive provenance is a local fact plus context offer about the recovered
-  shared fact. It is not a projector argument side channel.
+- Connection frames are opaque fixed-size envelopes until opened by the
+  connection-frame projector with exact connection context.
+- A connection fact receipt is a local fact plus context offer about the
+  recovered shared fact. It is not a projector argument side channel.
 - Sync is event-layer protocol work. Missing keys are represented by facts,
   needs, offers, and request/response facts, not trusted server-side sync
   shortcuts.

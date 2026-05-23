@@ -4,8 +4,8 @@
 //! is connection-scoped so duplicate requests from different peers do not
 //! collapse into one route-level response.
 //!
-//! Transit wrapping (delivering the request on a connection and answering
-//! it by queuing the requested fact) is owned by transport::transit handlers; this
+//! Connection-frame wrapping (delivering the request on a connection and answering
+//! it by queuing the requested fact) is owned by transport::connection_frame handlers; this
 //! module owns only the fact shape and projection row.
 
 use crate::core::facts::FactId;

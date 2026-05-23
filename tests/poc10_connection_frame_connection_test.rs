@@ -12,6 +12,7 @@ use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
+use topo::protocol::transport::connection_frame::frame as connection_frame;
 use topo::protocol::transport::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
@@ -19,7 +20,6 @@ use topo::protocol::transport::send_facts_on_connection::{
 use topo::protocol::transport::send_network_frame::{
     decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
-use topo::protocol::transport::transit::frame as transit_frame;
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
     let local_endpoint = local_endpoint();
@@ -142,8 +142,9 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
     assert_eq!(output.local_intents.len(), 1);
     let send = decode_send_network_frame(&output.local_intents[0]).unwrap();
     assert_eq!(send.routing_key, connection_fact.id);
-    let opened = transit_frame::open_connection_frame(&send.frame, &connection.connection_secret)
-        .expect("open packaged transport frame");
+    let opened =
+        connection_frame::open_connection_frame(&send.frame, &connection.connection_secret)
+            .expect("open packaged transport frame");
     assert_eq!(
         opened.facts.into_iter().collect::<Vec<_>>(),
         vec![fact.bytes]

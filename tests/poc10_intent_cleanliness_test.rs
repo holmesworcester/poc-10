@@ -150,7 +150,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "transport",
             &[
-                "receive_transit_frame",
+                "receive_network_frame",
                 "send_facts_on_connection",
                 "send_network_frame",
             ],
@@ -1325,7 +1325,7 @@ fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
 }
 
 #[test]
-fn connection_intents_treat_transit_frames_as_opaque() {
+fn connection_intents_treat_connection_frames_as_opaque() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let connection_handlers = intent_handler_files(root)
         .into_iter()
@@ -1365,7 +1365,7 @@ fn connection_intents_treat_transit_frames_as_opaque() {
 
     assert!(
         offenders.is_empty(),
-        "connection intents must treat transport::transit frames as opaque transport bytes:\n{}",
+        "connection intents must treat transport::connection_frame frames as opaque transport bytes:\n{}",
         offenders.join("\n")
     );
 }

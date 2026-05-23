@@ -1,40 +1,40 @@
-//! Fixed-width layout for local transit receive provenance facts.
+//! Fixed-width layout for local connection fact receipts.
 //!
-//! Received-transit facts are local audit records: they say which fact or frame
-//! arrived, from which origin address, under which connection or request, and
-//! when the local node observed it. The layout canonicalizes origin addresses
-//! so repeated receives compare by stable bytes. It should not validate the
-//! received payload itself.
+//! Fact receipts are local audit records: they say which semantic fact arrived,
+//! from which origin address, on which connection receive path, under which
+//! connection or request, and when the local node observed it. The layout
+//! canonicalizes origin addresses so repeated receives compare by stable bytes.
+//! It should not validate the received payload itself.
 
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::create::normalize_origin_addr_bytes;
 use super::fact::{
-    TransitReceivedFact, ORIGIN_ADDR_BYTES, TRANSIT_KIND_BOOTSTRAP, TRANSIT_KIND_CONNECTION,
-    TRANSIT_KIND_CONNECTION_HANDSHAKE,
+    ConnectionFactReceipt, ORIGIN_ADDR_BYTES, RECEIVE_PATH_CONNECTION_FRAME,
+    RECEIVE_PATH_CONNECTION_REQUEST, RECEIVE_PATH_CONNECTION_RESPONSE,
 };
 
-pub const TYPE_TRANSIT_RECEIVED: u8 = 164;
+pub const TYPE_CONNECTION_FACT_RECEIPT: u8 = 164;
 
-pub const TRANSIT_RECEIVED_BYTES: usize =
+pub const CONNECTION_FACT_RECEIPT_BYTES: usize =
     1 + 32 + 4 + ORIGIN_ADDR_BYTES + 32 + 32 + 1 + 1 + 32 + 1 + 32 + 32 + 8;
 
 const RECEIVED_FACT_OFFSET: usize = 1;
 const ORIGIN_OFFSET: usize = RECEIVED_FACT_OFFSET + 32;
 const LOCAL_ENDPOINT_OFFSET: usize = ORIGIN_OFFSET + FixedSlot::<ORIGIN_ADDR_BYTES>::LEN;
 const SENDER_ENDPOINT_OFFSET: usize = LOCAL_ENDPOINT_OFFSET + 32;
-const TRANSIT_KIND_OFFSET: usize = SENDER_ENDPOINT_OFFSET + 32;
-const HAS_CONNECTION_OFFSET: usize = TRANSIT_KIND_OFFSET + 1;
+const RECEIVE_PATH_OFFSET: usize = SENDER_ENDPOINT_OFFSET + 32;
+const HAS_CONNECTION_OFFSET: usize = RECEIVE_PATH_OFFSET + 1;
 const CONNECTION_ID_OFFSET: usize = HAS_CONNECTION_OFFSET + 1;
 const HAS_REQUEST_OFFSET: usize = CONNECTION_ID_OFFSET + 32;
 const REQUEST_ID_OFFSET: usize = HAS_REQUEST_OFFSET + 1;
 const FRAME_HASH_OFFSET: usize = REQUEST_ID_OFFSET + 32;
 const RECEIVED_AT_OFFSET: usize = FRAME_HASH_OFFSET + 32;
 
-pub fn encode_fact(fact: &TransitReceivedFact) -> Result<Vec<u8>, String> {
-    let mut out = vec![0; TRANSIT_RECEIVED_BYTES];
-    wire::put_u8(TYPE_TRANSIT_RECEIVED, &mut out[0..1]).map_err(wire_err)?;
+pub fn encode_fact(fact: &ConnectionFactReceipt) -> Result<Vec<u8>, String> {
+    let mut out = vec![0; CONNECTION_FACT_RECEIPT_BYTES];
+    wire::put_u8(TYPE_CONNECTION_FACT_RECEIPT, &mut out[0..1]).map_err(wire_err)?;
     out[RECEIVED_FACT_OFFSET..ORIGIN_OFFSET].copy_from_slice(&fact.received_fact_id);
     let origin_addr = normalize_origin_addr_bytes(&fact.origin_addr)?;
     FixedSlot::<ORIGIN_ADDR_BYTES>::new(&origin_addr)
@@ -42,11 +42,11 @@ pub fn encode_fact(fact: &TransitReceivedFact) -> Result<Vec<u8>, String> {
         .encode(&mut out[ORIGIN_OFFSET..LOCAL_ENDPOINT_OFFSET])
         .map_err(wire_err)?;
     out[LOCAL_ENDPOINT_OFFSET..SENDER_ENDPOINT_OFFSET].copy_from_slice(&fact.local_endpoint_id);
-    out[SENDER_ENDPOINT_OFFSET..TRANSIT_KIND_OFFSET].copy_from_slice(&fact.sender_endpoint_id);
-    validate_transit_kind(fact.transit_kind)?;
+    out[SENDER_ENDPOINT_OFFSET..RECEIVE_PATH_OFFSET].copy_from_slice(&fact.sender_endpoint_id);
+    validate_receive_path(fact.receive_path)?;
     wire::put_u8(
-        fact.transit_kind,
-        &mut out[TRANSIT_KIND_OFFSET..HAS_CONNECTION_OFFSET],
+        fact.receive_path,
+        &mut out[RECEIVE_PATH_OFFSET..HAS_CONNECTION_OFFSET],
     )
     .map_err(wire_err)?;
     wire::put_bool8(
@@ -68,17 +68,17 @@ pub fn encode_fact(fact: &TransitReceivedFact) -> Result<Vec<u8>, String> {
     out[FRAME_HASH_OFFSET..RECEIVED_AT_OFFSET].copy_from_slice(&fact.frame_hash);
     wire::put_u64be(
         fact.received_at_local_ms,
-        &mut out[RECEIVED_AT_OFFSET..TRANSIT_RECEIVED_BYTES],
+        &mut out[RECEIVED_AT_OFFSET..CONNECTION_FACT_RECEIPT_BYTES],
     )
     .map_err(wire_err)?;
     Ok(out)
 }
 
-pub fn decode_fact(bytes: &[u8]) -> Result<TransitReceivedFact, String> {
-    wire::expect_len(bytes, TRANSIT_RECEIVED_BYTES).map_err(wire_err)?;
+pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionFactReceipt, String> {
+    wire::expect_len(bytes, CONNECTION_FACT_RECEIPT_BYTES).map_err(wire_err)?;
     let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
-    if tag != TYPE_TRANSIT_RECEIVED {
-        return Err("expected transport::transit received fact".to_string());
+    if tag != TYPE_CONNECTION_FACT_RECEIPT {
+        return Err("expected connection fact receipt".to_string());
     }
     let origin_addr =
         FixedSlot::<ORIGIN_ADDR_BYTES>::decode(&bytes[ORIGIN_OFFSET..LOCAL_ENDPOINT_OFFSET])
@@ -87,11 +87,11 @@ pub fn decode_fact(bytes: &[u8]) -> Result<TransitReceivedFact, String> {
             .to_vec();
     let canonical_origin_addr = normalize_origin_addr_bytes(&origin_addr)?;
     if canonical_origin_addr != origin_addr {
-        return Err("transport::transit received origin addr is not canonical".to_string());
+        return Err("connection fact receipt origin addr is not canonical".to_string());
     }
-    let transit_kind =
-        wire::take_u8(&bytes[TRANSIT_KIND_OFFSET..HAS_CONNECTION_OFFSET]).map_err(wire_err)?;
-    validate_transit_kind(transit_kind)?;
+    let receive_path =
+        wire::take_u8(&bytes[RECEIVE_PATH_OFFSET..HAS_CONNECTION_OFFSET]).map_err(wire_err)?;
+    validate_receive_path(receive_path)?;
     let has_connection =
         wire::take_bool8(&bytes[HAS_CONNECTION_OFFSET..CONNECTION_ID_OFFSET]).map_err(wire_err)?;
     let connection_id = has_connection.then(|| {
@@ -106,7 +106,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<TransitReceivedFact, String> {
             .try_into()
             .unwrap()
     });
-    Ok(TransitReceivedFact {
+    Ok(ConnectionFactReceipt {
         received_fact_id: bytes[RECEIVED_FACT_OFFSET..ORIGIN_OFFSET]
             .try_into()
             .unwrap(),
@@ -114,26 +114,28 @@ pub fn decode_fact(bytes: &[u8]) -> Result<TransitReceivedFact, String> {
         local_endpoint_id: bytes[LOCAL_ENDPOINT_OFFSET..SENDER_ENDPOINT_OFFSET]
             .try_into()
             .unwrap(),
-        sender_endpoint_id: bytes[SENDER_ENDPOINT_OFFSET..TRANSIT_KIND_OFFSET]
+        sender_endpoint_id: bytes[SENDER_ENDPOINT_OFFSET..RECEIVE_PATH_OFFSET]
             .try_into()
             .unwrap(),
-        transit_kind,
+        receive_path,
         connection_id,
         request_id,
         frame_hash: bytes[FRAME_HASH_OFFSET..RECEIVED_AT_OFFSET]
             .try_into()
             .unwrap(),
-        received_at_local_ms: wire::take_u64be(&bytes[RECEIVED_AT_OFFSET..TRANSIT_RECEIVED_BYTES])
-            .map_err(wire_err)?,
+        received_at_local_ms: wire::take_u64be(
+            &bytes[RECEIVED_AT_OFFSET..CONNECTION_FACT_RECEIPT_BYTES],
+        )
+        .map_err(wire_err)?,
     })
 }
 
-fn validate_transit_kind(kind: u8) -> Result<(), String> {
-    match kind {
-        TRANSIT_KIND_BOOTSTRAP | TRANSIT_KIND_CONNECTION | TRANSIT_KIND_CONNECTION_HANDSHAKE => {
-            Ok(())
-        }
-        other => Err(format!("unknown transport::transit receive kind {other}")),
+fn validate_receive_path(path: u8) -> Result<(), String> {
+    match path {
+        RECEIVE_PATH_CONNECTION_REQUEST
+        | RECEIVE_PATH_CONNECTION_FRAME
+        | RECEIVE_PATH_CONNECTION_RESPONSE => Ok(()),
+        other => Err(format!("unknown connection receive path {other}")),
     }
 }
 
@@ -145,13 +147,13 @@ fn wire_err(err: wire::WireError) -> String {
 mod tests {
     use super::*;
 
-    fn fact() -> TransitReceivedFact {
-        TransitReceivedFact {
+    fn fact() -> ConnectionFactReceipt {
+        ConnectionFactReceipt {
             received_fact_id: [1; 32],
             origin_addr: b"127.0.0.1:41001".to_vec(),
             local_endpoint_id: [2; 32],
             sender_endpoint_id: [3; 32],
-            transit_kind: TRANSIT_KIND_CONNECTION_HANDSHAKE,
+            receive_path: RECEIVE_PATH_CONNECTION_RESPONSE,
             connection_id: Some([4; 32]),
             request_id: Some([6; 32]),
             frame_hash: [5; 32],
@@ -160,14 +162,14 @@ mod tests {
     }
 
     #[test]
-    fn transit_received_roundtrips_fixed_width() {
+    fn fact_receipt_roundtrips_fixed_width() {
         let encoded = encode_fact(&fact()).expect("encode");
-        assert_eq!(encoded.len(), TRANSIT_RECEIVED_BYTES);
+        assert_eq!(encoded.len(), CONNECTION_FACT_RECEIPT_BYTES);
         assert_eq!(decode_fact(&encoded).expect("decode"), fact());
     }
 
     #[test]
-    fn transit_received_encode_normalizes_friendly_origin_addr() {
+    fn fact_receipt_encode_normalizes_friendly_origin_addr() {
         let mut fact = fact();
         fact.origin_addr = b"127.0.0.1_41001".to_vec();
         let encoded = encode_fact(&fact).expect("encode");
@@ -177,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn transit_received_decode_rejects_noncanonical_origin_addr() {
+    fn fact_receipt_decode_rejects_noncanonical_origin_addr() {
         let mut encoded = encode_fact(&fact()).expect("encode");
         let friendly = b"127.0.0.1_41001";
         encoded[ORIGIN_OFFSET..ORIGIN_OFFSET + 4]
@@ -189,9 +191,9 @@ mod tests {
     }
 
     #[test]
-    fn transit_received_roundtrips_without_connection() {
-        let fact = TransitReceivedFact {
-            transit_kind: TRANSIT_KIND_BOOTSTRAP,
+    fn fact_receipt_roundtrips_without_connection() {
+        let fact = ConnectionFactReceipt {
+            receive_path: RECEIVE_PATH_CONNECTION_REQUEST,
             connection_id: None,
             request_id: None,
             ..fact()
@@ -203,7 +205,7 @@ mod tests {
     #[test]
     fn rejects_wrong_tag_or_length() {
         let mut encoded = encode_fact(&fact()).expect("encode");
-        encoded[0] = TYPE_TRANSIT_RECEIVED.wrapping_add(1);
+        encoded[0] = TYPE_CONNECTION_FACT_RECEIPT.wrapping_add(1);
         assert!(decode_fact(&encoded).is_err());
 
         let mut short = encode_fact(&fact()).expect("encode");
@@ -212,9 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_transit_kind() {
-        let fact = TransitReceivedFact {
-            transit_kind: 99,
+    fn rejects_unknown_receive_path() {
+        let fact = ConnectionFactReceipt {
+            receive_path: 99,
             ..fact()
         };
         assert!(encode_fact(&fact).is_err());
@@ -222,7 +224,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_origin_addr() {
-        let fact = TransitReceivedFact {
+        let fact = ConnectionFactReceipt {
             origin_addr: b"not-a-socket-addr".to_vec(),
             ..fact()
         };

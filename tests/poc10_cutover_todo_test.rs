@@ -138,7 +138,7 @@ const INTENT_HANDLER_FILES: [&str; 17] = [
     "src/protocol/sync/send_needed_fact_id.rs",
     "src/protocol/sync/send_requested_fact.rs",
     "src/protocol/sync/share_fact_with_workspace.rs",
-    "src/protocol/transport/receive_transit_frame.rs",
+    "src/protocol/transport/receive_network_frame.rs",
     "src/protocol/transport/send_facts_on_connection.rs",
     "src/protocol/transport/send_network_frame.rs",
 ];
@@ -265,7 +265,7 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
         "WorkerRun",
         "canonical.in",
         "sync.in",
-        "transport::transit.out",
+        "transport::connection_frame.out",
         "content.purge_instructions",
         "encryption.pending_key_requests",
         "encryption.pending_key_unwraps",
@@ -274,7 +274,7 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
         "connection.pending_connection_attempts",
         "connection.pending_connection_responses",
         "canonical_in",
-        "transit_out",
+        "connection_frame_out",
         "purge_instructions",
         "pending_key_requests",
         "pending_key_unwraps",
@@ -389,7 +389,7 @@ fn cutover_legacy_island_is_deleted() {
         .collect::<Vec<_>>();
     assert!(
         remaining.is_empty(),
-        "delete the legacy compatibility island as one cut after target runtime, CLI, daemon, sync, transport::transit, purge, and tests are cut over:\n{}",
+        "delete the legacy compatibility island as one cut after target runtime, CLI, daemon, sync, transport::connection_frame, purge, and tests are cut over:\n{}",
         remaining.join("\n")
     );
 }
@@ -418,13 +418,13 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 }
 
 #[test]
-fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
+fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let root = root();
     let paths = vec![
         root.join("src/protocol/transport/send_facts_on_connection.rs"),
         root.join("src/protocol/transport/send_network_frame.rs"),
-        root.join("src/protocol/transport/transit/create.rs"),
-        root.join("src/protocol/transport/transit/layout.rs"),
+        root.join("src/protocol/transport/connection_frame/create.rs"),
+        root.join("src/protocol/transport/connection_frame/layout.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -439,7 +439,7 @@ fn cutover_transit_send_has_no_not_yet_wired_or_variable_payload_slots() {
     );
     assert!(
         offenders.is_empty(),
-        "transport::transit send still has placeholder packaging or variable payload slots:\n{}",
+        "transport::connection_frame send still has placeholder packaging or variable payload slots:\n{}",
         offenders.join("\n")
     );
 }
@@ -809,7 +809,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
     paths.extend(intent_handler_files(&root));
-    paths.push(root.join("src/protocol/transport/transit/create.rs"));
+    paths.push(root.join("src/protocol/transport/connection_frame/create.rs"));
 
     let offenders = matching_code_lines(
         &root,
@@ -1071,7 +1071,7 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
     let network_io_files = [
         "src/protocol/connection/send_bootstrap_request.rs",
         "src/protocol/transport/send_network_frame.rs",
-        "src/protocol/transport/receive_transit_frame.rs",
+        "src/protocol/transport/receive_network_frame.rs",
     ];
 
     let mut offenders = Vec::new();

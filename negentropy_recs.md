@@ -61,7 +61,7 @@ Sync handlers are bounded intent handlers:
   precise follow-up facts/intents.
 - `sync_index_update`: update durable sync summary/checkpoint state, or keep the
   intent queued until the target durable index exists.
-- transit send handlers package sync facts as ordinary facts; sync does not own
+- connection-frame send handlers package sync facts as ordinary facts; sync does not own
   sockets.
 
 There is no sync worker. Sync behavior is modeled as facts, context, and

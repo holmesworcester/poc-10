@@ -23,7 +23,7 @@ Looking across the 30-plus modules in `src/protocol/facts/`:
 The boilerplate share is mechanical. The repo already has the right primitives
 (`src/core/wire.rs` — `FixedLayout`, `Id32`, `U64be`, `Nonce24`, `FixedSlot<N>`,
 `Ciphertext<N>`) and a schema DSL parser (`src/core/schema_dsl.rs`). The newer
-modules (`transit`, `signed_fact`, parts of `encryption`) already use the
+modules (`connection_frame`, `signed_fact`, parts of `encryption`) already use the
 `FixedLayout` trait; the older ones (`content_message`, `content_file`,
 `connection_response`) still hand-write byte-offset arithmetic that describes
 the same thing the schema would.
@@ -147,7 +147,7 @@ Open `Vec<u8>` / `String` payloads in `fact.rs`:
 | `identity_endpoint_shared/fact.rs:51` | `device_name: String` | `FixedSlot<N>` (mirror workspace name) |
 | `identity_user/fact.rs:16` | `username: String` | `FixedSlot<N>` |
 | `signed_fact/fact.rs:23` | `payload: Vec<u8>` | Either pick a max envelope size and use `FixedSlot<N>`, or carve out as the documented bounded-opaque exception |
-| `transit_received/fact.rs:21` | `origin_addr: Vec<u8>` | `FixedSlot<N>` |
+| `fact_receipt/fact.rs:23` | `origin_addr: Vec<u8>` | `FixedSlot<N>` |
 
 The `signed_fact` payload is the interesting case: it wraps an inner fact and
 its size is the sum of inner-fact wire layouts. Two options: declare a global

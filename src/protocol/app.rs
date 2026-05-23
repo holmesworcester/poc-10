@@ -27,7 +27,7 @@ use crate::protocol::registry::{
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
 use crate::protocol::transport as transport_intents;
-use crate::protocol::{content, transport};
+use crate::protocol::{connection, content};
 
 pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
@@ -41,7 +41,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     name: "match",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
-        inbound_network_intent: Some(receive_transit_frame_intent),
+        inbound_network_intent: Some(receive_network_frame_intent),
         time_wakes: MATCH_DAEMON_TIME_WAKES,
     },
     commands: MATCH_COMMANDS,
@@ -53,11 +53,11 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
     end_inclusive: current_message_expiration_minute,
 }];
 
-fn receive_transit_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {
-    transport_intents::receive_transit_frame::receive_transit_frame_intent(
-        transport_intents::receive_transit_frame::ReceiveTransitFrame {
+fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {
+    transport_intents::receive_network_frame::receive_network_frame_intent(
+        transport_intents::receive_network_frame::ReceiveNetworkFrame {
             frame: input.frame,
-            origin_addr: transport::transit_received::create::canonical_origin_addr_bytes(
+            origin_addr: connection::fact_receipt::create::canonical_origin_addr_bytes(
                 input.origin_addr,
             ),
             received_at_local_ms: input.received_at_local_ms,

@@ -160,7 +160,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "transport",
             &[
-                "receive_transit_frame.rs",
+                "receive_network_frame.rs",
                 "send_facts_on_connection.rs",
                 "send_network_frame.rs",
             ],
@@ -231,7 +231,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "### Projector Style",
         "### Intent Handler Style",
         "### Wire And Codec Style",
-        "### Transit Frame Style",
+        "### Connection Frame Style",
         "### Simplicity Guardrails",
     ];
 
@@ -437,7 +437,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "context_updates",
         "canonical.in",
         "sync.in",
-        "transport::transit.out",
+        "transport::connection_frame.out",
         "content.purge_instructions",
         "encryption.pending_key_requests",
         "encryption.pending_key_unwraps",
@@ -446,7 +446,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "connection.pending_connection_attempts",
         "connection.pending_connection_responses",
         "canonical_in",
-        "transit_out",
+        "connection_frame_out",
         "purge_instructions",
         "pending_key_requests",
         "pending_key_unwraps",
@@ -556,7 +556,7 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
     let forbidden = [
         "canonical.in",
         "sync.in",
-        "transport::transit.out",
+        "transport::connection_frame.out",
         "content.purge_instructions",
         "encryption.pending_key_requests",
         "encryption.pending_key_unwraps",
@@ -565,7 +565,7 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "connection.pending_connection_attempts",
         "connection.pending_connection_responses",
         "canonical_in",
-        "transit_out",
+        "connection_frame_out",
         "purge_instructions",
         "pending_key_requests",
         "pending_key_unwraps",
@@ -762,7 +762,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
-    let receive = source_text(&root.join("src/protocol/transport/transit/create.rs"));
+    let receive = source_text(&root.join("src/protocol/transport/connection_frame/create.rs"));
 
     for required in [
         "content::message",

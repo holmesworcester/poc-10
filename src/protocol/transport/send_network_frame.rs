@@ -1,19 +1,19 @@
 //! Outbound network-send handler.
 //!
 //! Owns the local-queue intent that asks the runtime to push an already-packaged
-//! transport::transit frame onto a connection's TCP socket. The handler resolves the
+//! connection frame onto a connection's TCP socket. The handler resolves the
 //! connection route from the fact context, hands the opaque frame to core's
 //! network boundary, and attempts one bounded TCP write. If route
 //! context or the socket is unavailable, the handler keeps the ephemeral
 //! intent visible in the current process so the next sync/daemon pass can
 //! try again without making network delivery durable protocol state. There is
 //! intentionally no protocol-level peer ACK here: TCP handles stream delivery
-//! for a single write, and duplicated transit frames are harmless because fact
+//! for a single write, and duplicated connection frames are harmless because fact
 //! admission is idempotent.
 
 //! Send-network-frame intent layout.
 //!
-//! The intent carries a routing key (connection id) and the opaque transport::transit
+//! The intent carries a routing key (connection id) and the opaque connection
 //! frame bytes that the runtime should push onto that connection's socket.
 //! Payload bytes remain opaque to this handler.
 
@@ -24,7 +24,7 @@ use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 /// Stable intent kind for outbound network frame sends.
 pub const SEND_NETWORK_FRAME: &str = "send_network_frame";
 
-/// Maximum frame size accepted by the handler. Mirrors the largest transport::transit
+/// Maximum frame size accepted by the handler. Mirrors the largest transport::connection_frame
 /// frame size class with a small headroom; oversized frames are rejected
 /// before any route lookup or socket work is attempted.
 pub const MAX_FRAME_BYTES: usize = 1 << 21; // 2 MiB
@@ -38,7 +38,7 @@ pub type RoutingKey = [u8; 32];
 pub struct SendNetworkFrame {
     /// Routing key for the destination socket / connection.
     pub routing_key: RoutingKey,
-    /// Opaque outbound frame bytes. Already packaged by the transport::transit layer.
+    /// Opaque outbound frame bytes. Already packaged by the transport::connection_frame layer.
     pub frame: Vec<u8>,
 }
 

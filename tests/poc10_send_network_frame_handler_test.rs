@@ -43,7 +43,7 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
     let (connection_fact, request_fact) = routed_connection(addr, local_endpoint.endpoint);
     let input = SendNetworkFrame {
         routing_key: connection_fact.id,
-        frame: b"opaque-transport::transit-frame-bytes".to_vec(),
+        frame: b"opaque-transport::connection_frame-frame-bytes".to_vec(),
     };
     let intent = send_network_frame_intent(input);
     assert_eq!(intent.kind.as_str(), SEND_NETWORK_FRAME);
@@ -60,7 +60,7 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
     assert!(output.intents.is_empty());
     assert_eq!(
         reader.join().expect("reader"),
-        b"opaque-transport::transit-frame-bytes"
+        b"opaque-transport::connection_frame-frame-bytes"
     );
 }
 
@@ -91,7 +91,7 @@ fn unreachable_peer_requests_retry_without_consuming_intent() {
     let (connection_fact, request_fact) = routed_connection(addr, local_endpoint.endpoint);
     let intent = send_network_frame_intent(SendNetworkFrame {
         routing_key: connection_fact.id,
-        frame: b"opaque-transport::transit-frame-bytes".to_vec(),
+        frame: b"opaque-transport::connection_frame-frame-bytes".to_vec(),
     });
 
     let err = SendNetworkFrameHandler::new()
@@ -115,7 +115,7 @@ fn missing_route_requests_retry_without_consuming_intent() {
     let (connection_fact, request_fact) = connection_without_return_route(local_endpoint.endpoint);
     let intent = send_network_frame_intent(SendNetworkFrame {
         routing_key: connection_fact.id,
-        frame: b"opaque-transport::transit-frame-bytes".to_vec(),
+        frame: b"opaque-transport::connection_frame-frame-bytes".to_vec(),
     });
 
     let err = SendNetworkFrameHandler::new()

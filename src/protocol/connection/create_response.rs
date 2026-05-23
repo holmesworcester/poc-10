@@ -1,7 +1,7 @@
 //! Create-connection-response intent handler and payload.
 //!
 //! Drives the responder side of the connection handshake: given a validated
-//! inbound connection request fact, invite secret, receive provenance, and the
+//! inbound connection request fact, invite secret, fact receipt, and the
 //! local endpoint capability, create fresh responder ephemeral material and
 //! produce the canonical connection response fact using the native key schedule:
 //! `DH(eph_r, eph_i)`, `DH(static_r, eph_i)`, invite bootstrap secret, and
@@ -16,8 +16,8 @@
 //! 1. `request_id` — fact id of the inbound connection request fact.
 //! 2. `invite_secret_id` — fact id of the local `invite_secret` fact whose
 //!    `bootstrap_hash` matches the request.
-//! 3. `receive_id` — fact id of the `transport::transit_received`
-//!    provenance fact proving the request was observed locally.
+//! 3. `receive_id` — fact id of the `connection::fact_receipt`
+//!    fact receipt proving the request was observed locally.
 //!
 //! This module intentionally does not pull in the core wire vocabulary:
 //! the layout is a simple concatenation of fixed-width 32-byte ids.
@@ -83,7 +83,7 @@ fn encode_payload(input: &CreateConnectionResponse) -> Vec<u8> {
 
 fn idempotence_key(input: &CreateConnectionResponse) -> Vec<u8> {
     // The request fact id is the bootstrap-response unit of work. Duplicate
-    // deliveries may produce different provenance fact ids, but only one
+    // deliveries may produce different receipt fact ids, but only one
     // response should be created for a request.
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"topo:create-connection-response-intent:v1:");
@@ -154,7 +154,7 @@ mod tests {
 //
 // The handler decodes its intent, loads the three dependency facts (the
 // inbound connection request, the local invite secret it matches, and the
-// receive-provenance fact), reloads the local endpoint capability from the
+// fact-receipt fact), reloads the local endpoint capability from the
 // store, and runs the cross-checks that depend on those decoded shapes. It then
 // delegates the handshake key schedule plus response-fact construction to
 // `facts::connection::response::create`. The cleanliness guardrail keeps fact
@@ -170,6 +170,7 @@ use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
+use crate::protocol::connection::fact_receipt;
 use crate::protocol::connection::request::create as request_create;
 use crate::protocol::connection::request::layout as request_layout;
 use crate::protocol::connection::response::create::{
@@ -177,7 +178,6 @@ use crate::protocol::connection::response::create::{
 };
 use crate::protocol::identity::endpoint::create as local_endpoint;
 use crate::protocol::identity::invite::layout as invite_layout;
-use crate::protocol::transport::transit_received;
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateConnectionResponseHandler;
@@ -206,12 +206,11 @@ impl IntentHandler for CreateConnectionResponseHandler {
 
         let request = request_layout::decode_fact(request_fact.body())?;
         let invite = invite_layout::decode_fact(&invite_fact.bytes)?;
-        let received =
-            transit_received::decode_fact_payload(receive_fact.body()).map_err(|_| {
-                HandlerError::fatal(
-                "create_connection_response receive context is not transport::transit provenance",
+        let received = fact_receipt::decode_fact_payload(receive_fact.body()).map_err(|_| {
+            HandlerError::fatal(
+                "create_connection_response receive context is not connection fact receipt",
             )
-            })?;
+        })?;
 
         if request.invite_secret_fact_id != input.invite_secret_id {
             return Err(
@@ -225,7 +224,7 @@ impl IntentHandler for CreateConnectionResponseHandler {
             return Err("create_connection_response receive context must be local".into());
         }
         request_create::validate_invite_signature(&request, &invite)?;
-        validate_receive_provenance(input.request_id, &request, &received)?;
+        validate_fact_receipt(input.request_id, &request, &received)?;
         let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {
             HandlerError::fatal("create_connection_response requires local endpoint state")
         })?;
@@ -276,18 +275,18 @@ impl IntentHandler for CreateConnectionResponseHandler {
     }
 }
 
-fn validate_receive_provenance(
+fn validate_fact_receipt(
     request_id: [u8; 32],
     request: &crate::protocol::connection::request::fact::ConnectionRequestFact,
-    received: &crate::protocol::transport::transit_received::fact::TransitReceivedFact,
+    received: &crate::protocol::connection::fact_receipt::fact::ConnectionFactReceipt,
 ) -> Result<(), String> {
     if received.received_fact_id != request_id {
         return Err("create_connection_response receive context targets another fact".into());
     }
-    if received.transit_kind
-        != crate::protocol::transport::transit_received::fact::TRANSIT_KIND_BOOTSTRAP
+    if received.receive_path
+        != crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST
     {
-        return Err("create_connection_response requires bootstrap receive provenance".into());
+        return Err("create_connection_response requires connection request receipt".into());
     }
     if received.local_endpoint_id != request.to_endpoint {
         return Err("create_connection_response request endpoint does not match receive".into());
@@ -296,7 +295,7 @@ fn validate_receive_provenance(
         return Err("create_connection_response sender does not match receive".into());
     }
     if received.request_id != Some(request_id) {
-        return Err("create_connection_response receive provenance names another request".into());
+        return Err("create_connection_response fact receipt names another request".into());
     }
     Ok(())
 }

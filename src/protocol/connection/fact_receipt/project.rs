@@ -1,11 +1,11 @@
-//! Poc-10 transport::transit receive provenance projector.
+//! Connection fact-receipt projector.
 //!
-//! POLICY. A transit_received fact is admitted iff:
-//!   1. STRUCTURAL. The fact is local-only and its provenance payload decodes.
+//! POLICY. A connection_fact_receipt is admitted iff:
+//!   1. STRUCTURAL. The fact is local-only and its receipt payload decodes.
 //!   2. CONTEXT. No authority context is loaded here; higher-level projectors
-//!      validate that provenance against their target fact.
-//!   3. MATERIALIZE. Publish a local transit_received offer for the received
-//!      fact so the owning projector can continue.
+//!      validate the receipt against their target fact.
+//!   3. MATERIALIZE. Publish a local connection_fact_receipt offer for the
+//!      received fact so the owning projector can continue.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
@@ -13,15 +13,15 @@ use crate::core::projectors::{
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct TransitReceivedProjector;
+pub struct ConnectionFactReceiptProjector;
 
-impl TransitReceivedProjector {
+impl ConnectionFactReceiptProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for TransitReceivedProjector {
+impl Projector for ConnectionFactReceiptProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -31,22 +31,22 @@ impl Projector for TransitReceivedProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for TransitReceivedProjector {
+impl TypedProjector<super::Codec> for ConnectionFactReceiptProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        received: super::fact::TransitReceivedFact,
+        received: super::fact::ConnectionFactReceipt,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
-            return Err("transport::transit received fact must have FactScope::Local".to_string());
+            return Err("connection fact receipt must have FactScope::Local".to_string());
         }
         // 3. Materialize.
         Ok(
             ProjectionOutput::new().offer(crate::core::context::ContextOffer::range(
                 fact.id,
-                "transport_transit_received",
+                "connection_fact_receipt",
                 crate::core::facts::FactScope::Local,
                 received.received_fact_id,
                 received.received_fact_id,

@@ -39,7 +39,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
     assert!(MATCH_RUNTIME
         .handlers
         .iter()
-        .any(|handler| handler.name == "receive_transit_frame"));
+        .any(|handler| handler.name == "receive_network_frame"));
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
     for required in [
         "send_bootstrap_connection_request",
         "send_network_frame",
-        "receive_transit_frame",
+        "receive_network_frame",
     ] {
         assert!(
             names.contains(required),
@@ -137,7 +137,7 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
     for excluded in [
         "send_facts_on_connection",
         "send_network_frame",
-        "receive_transit_frame",
+        "receive_network_frame",
     ] {
         assert!(
             MATCH_RUNTIME.command_excluded_handlers.contains(&excluded),

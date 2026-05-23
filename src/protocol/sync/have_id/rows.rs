@@ -1,6 +1,6 @@
 //! Sync have-id projection rows.
 //!
-//! Rows are keyed by `connection_id || fact_id` so transport::transit handlers can scan
+//! Rows are keyed by `connection_id || fact_id` so transport::connection_frame handlers can scan
 //! all advertisements queued for a connection. The value stores the
 //! timestamp and the advertised fact id; the fact id in the key keeps
 //! distinct advertisements distinct even when the same fact id is

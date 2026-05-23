@@ -1,8 +1,12 @@
-//! Transit envelope construction and admission helpers.
+//! Connection-frame construction, receive classification, and admission helpers.
 //!
-//! Transit send handlers ask this module whether fact bytes may leave the local
-//! store, and receive handlers use it to turn opened frame bytes into admitted
-//! facts plus local provenance. Frame byte layout and sealing live in `layout`;
+//! Send handlers ask this module whether fact bytes may leave the local store
+//! and use it to seal encrypted established-connection frames. The receive
+//! handler uses the same module for one mechanical classification step:
+//! bootstrap request/response bytes become their durable semantic facts, while
+//! encrypted established-connection bytes become ephemeral small or large
+//! connection-frame facts. Cryptographic opening and child-fact admission stay
+//! here because they depend on the frame layout and receive receipt shape;
 //! socket IO belongs in core network handlers.
 
 use crate::core::crypto;
@@ -11,10 +15,10 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::FactCodec;
 use crate::protocol::{connection, content, encryption, identity, sync, transport};
 
-use super::fact::TransitInputFact;
-use super::frame::{self, SealConnectionFrame, TransitFactBundle};
+use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 
-/// Return the bytes that may be packaged into a transport::transit frame.
+/// Return the bytes that may be packaged into a transport::connection_frame frame.
 ///
 /// Local facts and private/local fact tags are never transport payloads. A
 /// signed envelope is parsed here as a defensive check that the envelope is
@@ -23,19 +27,20 @@ use super::frame::{self, SealConnectionFrame, TransitFactBundle};
 pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
     if fact.scope == FactScope::Local {
         return Err(format!(
-            "transport::transit send refused local fact {:?}",
+            "transport::connection_frame send refused local fact {:?}",
             fact.id
         ));
     }
 
-    let tag = fact
-        .bytes
-        .first()
-        .copied()
-        .ok_or_else(|| format!("transport::transit send refused empty fact {:?}", fact.id))?;
+    let tag = fact.bytes.first().copied().ok_or_else(|| {
+        format!(
+            "transport::connection_frame send refused empty fact {:?}",
+            fact.id
+        )
+    })?;
     if is_private_local_fact_tag(tag) {
         return Err(format!(
-            "transport::transit send refused private/local fact tag {tag} for {:?}",
+            "transport::connection_frame send refused private/local fact tag {tag} for {:?}",
             fact.id
         ));
     }
@@ -44,13 +49,13 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
         let envelope =
             identity::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
                 format!(
-                    "transport::transit send refused invalid signed fact {:?}: {err}",
+                    "transport::connection_frame send refused invalid signed fact {:?}: {err}",
                     fact.id
                 )
             })?;
         if is_private_local_fact_tag(envelope.inner_type) {
             return Err(format!(
-                "transport::transit send refused private/local signed payload tag {} for {:?}",
+                "transport::connection_frame send refused private/local signed payload tag {} for {:?}",
                 envelope.inner_type, fact.id
             ));
         }
@@ -71,8 +76,9 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | encryption::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
             | encryption::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | encryption::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
-            | transport::transit::layout::TYPE_TRANSIT_INPUT
-            | transport::transit_received::layout::TYPE_TRANSIT_RECEIVED
+            | transport::connection_frame::layout::TYPE_CONNECTION_FRAME_SMALL
+            | transport::connection_frame::layout::TYPE_CONNECTION_FRAME_LARGE
+            | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
     )
 }
 
@@ -92,7 +98,7 @@ pub fn seal_connection_send_frame(
     }
     let connection = connection::response::layout::decode_fact(connection_fact.body())?;
 
-    let mut bundle = TransitFactBundle::new();
+    let mut bundle = ConnectionFrameFactBundle::new();
     for (expected_id, fact) in fact_ids.iter().zip(facts.iter().copied()) {
         if fact.id != *expected_id {
             return Err("send_facts_on_connection loaded fact id mismatch".to_string());
@@ -110,19 +116,30 @@ pub fn seal_connection_send_frame(
     })
 }
 
-pub fn received_input_effect(input: TransitInputFact) -> Result<PipelineEffects, String> {
-    let timestamp = input.received_at_local_ms;
-    let fact = Fact::new(
-        FactScope::Local,
-        timestamp,
-        super::layout::encode_fact(&input)?,
-    );
-    Ok(PipelineEffects::new().ephemeral_fact(fact))
-}
-
 // ---------------------------------------------------------------------------
 // Receive-side admission.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReceivedNetworkFrame<'a> {
+    pub frame: &'a [u8],
+    pub origin_addr: &'a [u8],
+    pub received_at_local_ms: u64,
+}
+
+pub fn received_network_frame_effect(
+    input: ReceivedNetworkFrame<'_>,
+) -> Result<PipelineEffects, String> {
+    match input.frame.first().copied() {
+        Some(connection::request::layout::TYPE_CONNECTION_REQUEST) => {
+            received_connection_request_effect(input)
+        }
+        Some(connection::response::layout::TYPE_CONNECTION_RESPONSE) => {
+            received_connection_response_effect(input)
+        }
+        _ => received_connection_frame_effect(input),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenReceivedFrame<'a> {
@@ -132,103 +149,89 @@ pub struct OpenReceivedFrame<'a> {
     pub received_at_local_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum BootstrapFrameKind {
-    ConnectionRequest(connection::request::fact::ConnectionRequestFact),
-    ConnectionResponse(connection::response::fact::ConnectionResponseFact),
-    ConnectionFrame,
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenBootstrapRequest<'a> {
-    pub frame: &'a [u8],
-    pub invite_fact: &'a Fact,
-    pub local_endpoint: &'a identity::endpoint::fact::EndpointFact,
-    pub origin_addr: &'a [u8],
-    pub received_at_local_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenedBootstrapRequest {
-    pub facts: Vec<Fact>,
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenBootstrapResponse<'a> {
-    pub frame: &'a [u8],
-    pub origin_addr: &'a [u8],
-    pub received_at_local_ms: u64,
-}
-
-pub fn bootstrap_frame_kind(frame: &[u8]) -> Result<BootstrapFrameKind, String> {
-    match frame.first().copied() {
-        Some(connection::request::layout::TYPE_CONNECTION_REQUEST) => {
-            typed_payload_from_bytes::<connection::request::Codec>(frame)
-                .map(BootstrapFrameKind::ConnectionRequest)
-        }
-        Some(connection::response::layout::TYPE_CONNECTION_RESPONSE) => {
-            typed_payload_from_bytes::<connection::response::Codec>(frame)
-                .map(BootstrapFrameKind::ConnectionResponse)
-        }
-        _ => Ok(BootstrapFrameKind::ConnectionFrame),
-    }
-}
-
-pub fn open_bootstrap_request(
-    input: OpenBootstrapRequest<'_>,
-) -> Result<OpenedBootstrapRequest, String> {
-    let request = typed_payload_from_bytes::<connection::request::Codec>(input.frame)?;
+fn received_connection_request_effect(
+    input: ReceivedNetworkFrame<'_>,
+) -> Result<PipelineEffects, String> {
+    let Ok(request) = typed_payload_from_bytes::<connection::request::Codec>(input.frame) else {
+        return Ok(PipelineEffects::new());
+    };
     let request_fact = Fact::new(
         FactScope::Global,
         input.received_at_local_ms,
         input.frame.to_vec(),
     );
-    let invite = identity::invite::Codec::decode_fact(input.invite_fact)?;
-    connection::request::create::validate_invite_signature(&request, &invite)?;
-
-    if input.local_endpoint.endpoint != request.to_endpoint {
-        return Err("bootstrap request addressed to a different endpoint".to_string());
-    }
-    if request.from_listen_addr.is_none() {
-        return Err("bootstrap request did not advertise a return listener".to_string());
-    }
-
-    let provenance = received_provenance_fact_for_kind(
+    let receipt = connection_fact_receipt_for_path(
         request_fact.id,
         input.origin_addr,
         request.to_endpoint,
         request.from_endpoint,
-        transport::transit_received::fact::TRANSIT_KIND_BOOTSTRAP,
+        connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST,
         None,
         Some(request_fact.id),
         crypto::hash(input.frame),
         input.received_at_local_ms,
     )?;
-
-    Ok(OpenedBootstrapRequest {
-        facts: vec![request_fact, provenance],
-    })
+    Ok(PipelineEffects::new().fact(request_fact).fact(receipt))
 }
 
-pub fn open_bootstrap_response(input: OpenBootstrapResponse<'_>) -> Result<Vec<Fact>, String> {
-    let response = typed_payload_from_bytes::<connection::response::Codec>(input.frame)?;
+fn received_connection_response_effect(
+    input: ReceivedNetworkFrame<'_>,
+) -> Result<PipelineEffects, String> {
+    let Ok(response) = typed_payload_from_bytes::<connection::response::Codec>(input.frame) else {
+        return Ok(PipelineEffects::new());
+    };
     let response_fact = Fact::new(
         FactScope::Local,
         input.received_at_local_ms,
         input.frame.to_vec(),
     );
-    let provenance = received_provenance_fact_for_kind(
+    let receipt = connection_fact_receipt_for_path(
         response_fact.id,
         input.origin_addr,
         response.to_endpoint,
         response.from_endpoint,
-        transport::transit_received::fact::TRANSIT_KIND_CONNECTION_HANDSHAKE,
+        connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_RESPONSE,
         Some(response_fact.id),
         Some(response.request_id),
         crypto::hash(input.frame),
         input.received_at_local_ms,
     )?;
-    Ok(vec![response_fact, provenance])
+    Ok(PipelineEffects::new().fact(response_fact).fact(receipt))
+}
+
+fn received_connection_frame_effect(
+    input: ReceivedNetworkFrame<'_>,
+) -> Result<PipelineEffects, String> {
+    let Ok(parts) = super::layout::decode_frame_parts(input.frame) else {
+        return Ok(PipelineEffects::new());
+    };
+    match parts.header.size_class {
+        super::layout::CONNECTION_FRAME_SIZE_CLASS_SMALL => {
+            let fact = ConnectionFrameSmallFact {
+                origin_addr: input.origin_addr.to_vec(),
+                received_at_local_ms: input.received_at_local_ms,
+                frame: input.frame.to_vec(),
+            };
+            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
+                FactScope::Local,
+                input.received_at_local_ms,
+                super::layout::encode_small_fact(&fact)?,
+            )))
+        }
+        super::layout::CONNECTION_FRAME_SIZE_CLASS_LARGE => {
+            let fact = ConnectionFrameLargeFact {
+                origin_addr: input.origin_addr.to_vec(),
+                received_at_local_ms: input.received_at_local_ms,
+                frame: input.frame.to_vec(),
+            };
+            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
+                FactScope::Local,
+                input.received_at_local_ms,
+                super::layout::encode_large_fact(&fact)?,
+            )))
+        }
+        _ => Ok(PipelineEffects::new()),
+    }
 }
 
 pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, String> {
@@ -236,7 +239,8 @@ pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, St
     let opened = frame::open_connection_frame(input.frame, &connection.connection_secret)?;
     if input.connection_fact.id != opened.connection_id {
         return Err(
-            "transport::transit frame connection id does not match connection fact".to_string(),
+            "transport::connection_frame frame connection id does not match connection fact"
+                .to_string(),
         );
     }
     require_connection_endpoints(
@@ -248,7 +252,7 @@ pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, St
     let mut facts = Vec::with_capacity(opened.facts.len() * 2);
     for bytes in opened.facts {
         let received = admit_received_fact_bytes(bytes)?;
-        let provenance = received_provenance_fact(
+        let receipt = connection_frame_fact_receipt(
             received.id,
             input.origin_addr,
             opened.receiver_endpoint_id,
@@ -259,7 +263,7 @@ pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, St
             input.received_at_local_ms,
         )?;
         facts.push(received);
-        facts.push(provenance);
+        facts.push(receipt);
     }
     Ok(facts)
 }
@@ -268,7 +272,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
     let tag = bytes
         .first()
         .copied()
-        .ok_or_else(|| "received transport::transit fact bytes are empty".to_string())?;
+        .ok_or_else(|| "received transport::connection_frame fact bytes are empty".to_string())?;
     match tag {
         identity::workspace::TYPE_WORKSPACE => {
             return admit_with_codec::<identity::workspace::Codec>(bytes, |workspace| {
@@ -406,7 +410,8 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         }
         encryption::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             return Err(
-                "received transport::transit payload is local history-node secret".to_string(),
+                "received transport::connection_frame payload is local history-node secret"
+                    .to_string(),
             );
         }
         sync::compare::TYPE_SYNC_COMPARE => {
@@ -421,7 +426,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         identity::signed_fact::TYPE_SIGNED_FACT => {}
         _ => {
             return Err(format!(
-                "unsupported received transport::transit fact type {tag}"
+                "unsupported received transport::connection_frame fact type {tag}"
             ))
         }
     }
@@ -529,7 +534,7 @@ fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             })
         }
         other => Err(format!(
-            "unsupported signed transport::transit payload type {other}"
+            "unsupported signed transport::connection_frame payload type {other}"
         )),
     }
 }
@@ -549,7 +554,7 @@ fn workspace_scope(workspace_id: FactId) -> FactScope {
     crate::protocol::identity::workspace::scope(workspace_id)
 }
 
-fn received_provenance_fact(
+fn connection_frame_fact_receipt(
     received_fact_id: FactId,
     origin_addr: &[u8],
     local_endpoint_id: FactId,
@@ -559,12 +564,12 @@ fn received_provenance_fact(
     frame_hash: [u8; 32],
     received_at_local_ms: u64,
 ) -> Result<Fact, String> {
-    received_provenance_fact_for_kind(
+    connection_fact_receipt_for_path(
         received_fact_id,
         origin_addr,
         local_endpoint_id,
         sender_endpoint_id,
-        transport::transit_received::fact::TRANSIT_KIND_CONNECTION,
+        connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
         Some(connection_id),
         Some(request_id),
         frame_hash,
@@ -572,23 +577,23 @@ fn received_provenance_fact(
     )
 }
 
-fn received_provenance_fact_for_kind(
+fn connection_fact_receipt_for_path(
     received_fact_id: FactId,
     origin_addr: &[u8],
     local_endpoint_id: FactId,
     sender_endpoint_id: FactId,
-    transit_kind: u8,
+    receive_path: u8,
     connection_id: Option<FactId>,
     request_id: Option<FactId>,
     frame_hash: [u8; 32],
     received_at_local_ms: u64,
 ) -> Result<Fact, String> {
-    let fact = transport::transit_received::fact::TransitReceivedFact {
+    let fact = connection::fact_receipt::fact::ConnectionFactReceipt {
         received_fact_id,
         origin_addr: origin_addr.to_vec(),
         local_endpoint_id,
         sender_endpoint_id,
-        transit_kind,
+        receive_path,
         connection_id,
         request_id,
         frame_hash,
@@ -597,7 +602,7 @@ fn received_provenance_fact_for_kind(
     Ok(Fact::new(
         FactScope::Local,
         received_at_local_ms,
-        transport::transit_received::layout::encode_fact(&fact)?,
+        connection::fact_receipt::layout::encode_fact(&fact)?,
     ))
 }
 
@@ -613,7 +618,7 @@ fn require_connection_endpoints(
     if forward || reverse {
         Ok(())
     } else {
-        Err("transport::transit frame endpoints do not match connection fact".to_string())
+        Err("transport::connection_frame frame endpoints do not match connection fact".to_string())
     }
 }
 
@@ -621,7 +626,6 @@ fn require_connection_endpoints(
 mod tests {
     use super::*;
     use crate::core::crypto::{ed25519_public_key, ed25519_sign};
-    use crate::protocol::identity::endpoint::fact::EndpointFact;
     use crate::protocol::identity::invite::fact::InviteSecretFact;
     use crate::protocol::identity::signed_fact::fact::SignedFactEnvelope;
     use crate::protocol::identity::user::fact::UserFact;
@@ -692,29 +696,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_bootstrap_request_delivery_emits_only_request_and_provenance() {
+    fn duplicate_bootstrap_request_delivery_emits_only_request_and_receipt() {
         let invite = InviteSecretFact::new([33; 32]);
-        let invite_fact = Fact::new(
-            FactScope::Local,
-            10,
-            identity::invite::layout::encode_fact(&invite).expect("invite"),
-        );
-        let endpoint_secret = [44; 32];
-        let signing_secret = [45; 32];
-        let endpoint = EndpointFact {
-            endpoint: crypto::x25519_public_key(&endpoint_secret),
-            secret: endpoint_secret,
-            signing_public_key: ed25519_public_key(&signing_secret),
-            signing_secret,
-        };
         let mut request = connection::request::fact::ConnectionRequestFact {
             from_endpoint: crypto::x25519_public_key(&[55; 32]),
-            to_endpoint: endpoint.endpoint,
+            to_endpoint: crypto::x25519_public_key(&[44; 32]),
             nonce: [56; 32],
             invite_fact_id: [57; 32],
             bootstrap_hash: invite.bootstrap_hash,
             invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-            invite_secret_fact_id: invite_fact.id,
+            invite_secret_fact_id: [50; 32],
             initiator_ephemeral_secret_fact_id: [58; 32],
             initiator_ephemeral_public_key: crypto::x25519_public_key(&[59; 32]),
             from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
@@ -727,18 +718,14 @@ mod tests {
         );
         let frame = connection::request::layout::encode_fact(&request).expect("request");
 
-        let first = open_bootstrap_request(OpenBootstrapRequest {
+        let first = received_network_frame_effect(ReceivedNetworkFrame {
             frame: &frame,
-            invite_fact: &invite_fact,
-            local_endpoint: &endpoint,
             origin_addr: b"127.0.0.1:41002",
             received_at_local_ms: 100,
         })
         .expect("first delivery");
-        let second = open_bootstrap_request(OpenBootstrapRequest {
+        let second = received_network_frame_effect(ReceivedNetworkFrame {
             frame: &frame,
-            invite_fact: &invite_fact,
-            local_endpoint: &endpoint,
             origin_addr: b"127.0.0.1:41002",
             received_at_local_ms: 200,
         })
@@ -746,8 +733,8 @@ mod tests {
 
         assert_eq!(first.facts.len(), 2);
         assert_eq!(second.facts.len(), 2);
-        let stable_first = non_provenance_fact_ids(&first.facts);
-        let stable_second = non_provenance_fact_ids(&second.facts);
+        let stable_first = non_receipt_fact_ids(&first.facts);
+        let stable_second = non_receipt_fact_ids(&second.facts);
         assert_eq!(stable_first, stable_second);
         assert_eq!(stable_first.len(), 1);
         assert!(first.facts.iter().all(|fact| {
@@ -759,12 +746,12 @@ mod tests {
         }));
     }
 
-    fn non_provenance_fact_ids(facts: &[Fact]) -> Vec<FactId> {
+    fn non_receipt_fact_ids(facts: &[Fact]) -> Vec<FactId> {
         let mut ids = facts
             .iter()
             .filter(|fact| {
                 fact.body().first().copied()
-                    != Some(transport::transit_received::layout::TYPE_TRANSIT_RECEIVED)
+                    != Some(connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT)
             })
             .map(|fact| fact.id)
             .collect::<Vec<_>>();

@@ -2,8 +2,8 @@
 //!
 //! Connection facts turn invite or endpoint context into an encrypted transport
 //! relationship. A local endpoint emits an ephemeral secret and request; a peer
-//! projects that request after matching invite/provenance context; responses
-//! complete the handshake and seed sync.
+//! projects that request after matching invite and fact-receipt context;
+//! responses complete the handshake and seed sync.
 //!
 //! The handshake is deliberately fact-driven. Projectors wait through context
 //! needs instead of calling directly into identity, transport, or sync code.
@@ -15,6 +15,7 @@
 //! modules when established connections send or receive frame bytes.
 
 pub mod ephemeral_secret;
+pub mod fact_receipt;
 pub mod request;
 pub mod response;
 

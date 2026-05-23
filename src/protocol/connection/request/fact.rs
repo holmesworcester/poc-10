@@ -3,7 +3,7 @@
 //! The request names both endpoints, carries a transcript-bound invite
 //! signature, and pins the dependency edges that bootstrap authorisation will
 //! validate. The optional listen address is the requester's advertised
-//! steady-state listener, used by transport::transit handlers as a route hint after the
+//! steady-state listener, used by transport::connection_frame handlers as a route hint after the
 //! bootstrap stream closes.
 //!
 //! This fact is the canonical body of a connection request. Signed-envelope

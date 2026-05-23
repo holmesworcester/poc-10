@@ -2,7 +2,7 @@
 //!
 //! Shared-fact projection records which facts may be sent on which connection.
 //! Sync handlers use these rows to seed compares, advertise new facts, and build
-//! outbound transit frames. The index is connection-scoped sharing policy; it
+//! outbound connection frames. The index is connection-scoped sharing policy; it
 //! does not change the validity of the underlying facts.
 
 pub mod cli;

@@ -11,12 +11,12 @@ use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
+use topo::protocol::transport::connection_frame::frame as connection_frame;
 use topo::protocol::transport::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::transport::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use topo::protocol::transport::send_network_frame;
-use topo::protocol::transport::transit::frame as transit_frame;
 
 fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
     let connection = ConnectionResponseFact {
@@ -63,7 +63,7 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
             &intent,
             &HandlerContext::with_facts([connection_fact.clone(), fact.clone()]).with_store(&store),
         )
-        .expect("transport::transit packaging succeeds");
+        .expect("transport::connection_frame packaging succeeds");
 
     assert!(output.facts.is_empty());
     assert!(output.intents.is_empty());
@@ -71,8 +71,9 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     let send = send_network_frame::decode_send_network_frame(&output.local_intents[0])
         .expect("network send");
     assert_eq!(send.routing_key, connection_fact.id);
-    let opened = transit_frame::open_connection_frame(&send.frame, &connection.connection_secret)
-        .expect("open fixed transport::transit frame");
+    let opened =
+        connection_frame::open_connection_frame(&send.frame, &connection.connection_secret)
+            .expect("open fixed transport::connection_frame frame");
     assert_eq!(opened.connection_id, connection_fact.id);
     assert_eq!(opened.sender_endpoint_id, connection.from_endpoint);
     assert_eq!(opened.receiver_endpoint_id, connection.to_endpoint);

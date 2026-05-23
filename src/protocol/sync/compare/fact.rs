@@ -6,9 +6,9 @@
 //! range, the sender's summary, and a flag indicating whether the peer
 //! should respond with its own compare or with leaf-level have-id facts.
 //!
-//! Transit wrapping is a separate concern: the projector here only owns the
+//! Connection-frame wrapping is a separate concern: the projector here only owns the
 //! durable row layout. Routing this fact onto a connection happens in a
-//! transport::transit handler.
+//! transport::connection_frame handler.
 
 use crate::core::facts::FactId;
 

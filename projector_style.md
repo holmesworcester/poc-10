@@ -104,7 +104,7 @@ Use:
 - `payload_for_checked(&need, label)` when the module wants the shared
   offer/payload consistency check.
 - `matched_payloads_for(&need)` only for intentional multi-match roles, such as
-  transit receive provenance or range roots.
+  connection fact receipts or range roots.
 
 Do not call `matched_context()` from protocol projectors. Do not scan
 `context.offers()` to infer whether a declared need is satisfied. A matched

@@ -1,7 +1,7 @@
 //! Behavioural tests for the target `connection::response` handler.
 //!
 //! The request projector schedules this handler only after exact invite and
-//! receive-provenance context exists. The handler rechecks that context,
+//! fact-receipt context exists. The handler rechecks that context,
 //! creates local responder ephemeral material, emits the response fact, and
 //! sends the response bytes back to the request's bootstrap return address.
 
@@ -19,6 +19,10 @@ use topo::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
 use topo::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
+use topo::protocol::connection::fact_receipt::fact::{
+    ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST,
+};
+use topo::protocol::connection::fact_receipt::layout as received_layout;
 use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as request_layout;
 use topo::protocol::connection::response::layout as response_layout;
@@ -27,10 +31,6 @@ use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::identity::invite::fact::InviteSecretFact;
 use topo::protocol::identity::invite::layout as invite_layout;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
-use topo::protocol::transport::transit_received::fact::{
-    TransitReceivedFact, TRANSIT_KIND_BOOTSTRAP,
-};
-use topo::protocol::transport::transit_received::layout as received_layout;
 
 #[test]
 fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
@@ -197,12 +197,12 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     );
 
     let received_at = 1_700_000_333;
-    let received = TransitReceivedFact {
+    let received = ConnectionFactReceipt {
         received_fact_id: request_fact.id,
         origin_addr: b"127.0.0.1:41001".to_vec(),
         local_endpoint_id: request.to_endpoint,
         sender_endpoint_id: request.from_endpoint,
-        transit_kind: TRANSIT_KIND_BOOTSTRAP,
+        receive_path: RECEIVE_PATH_CONNECTION_REQUEST,
         connection_id: None,
         request_id: Some(request_fact.id),
         frame_hash: crypto::hash(&request_fact.bytes),

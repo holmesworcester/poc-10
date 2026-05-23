@@ -25,7 +25,7 @@ Reviewer instructions:
 3. Compare target behavior with the corresponding poc-8 projector, command,
    worker, or CLI test.
 4. Fail on hidden dumping grounds, unbounded handlers, fake response paths,
-   placeholder crypto/transit/sync behavior, missing need/offer relationships,
+   placeholder crypto/connection-frame/sync behavior, missing need/offer relationships,
    or missing authorization checks.
 5. Report findings as file paths plus required fixes. Prefer concrete failing
    tests over prose.
@@ -163,27 +163,27 @@ Reviewer instructions:
 - [ ] Purging of recipient material is event-triggered by deletion/retirement
   facts, not by time-based background GC.
 
-## Transit And Connections
+## Connection Frames And Connections
 
 - [ ] Connection request/response projectors wait for invite, ephemeral secret,
   and receive-metadata context as required by poc-8.
-- [ ] Transit-received metadata is modeled as a local fact/about-context offer
-  so state can track where transit events came from.
-- [x] Transit unwrap admits signed key-wrap and sync compare/have/need facts:
-  inbound network frame -> receive_transit intent -> authenticated open -> fact
-  admission plus transit_received provenance fact.
-- [ ] Transit wrap is real: send-on-connection intent -> fixed-size transit
+- [ ] Connection fact receipts are modeled as local fact/about-context offers
+  so state can track where received facts came from.
+- [x] Connection-frame projection admits signed key-wrap and sync compare/have/need facts:
+  inbound network frame -> receive_network_frame intent -> authenticated open -> fact
+  admission plus connection_fact_receipt fact.
+- [ ] Connection-frame wrap is real: send-on-connection intent -> fixed-size connection
   frame -> network_send intent -> durable send acknowledgement.
 - [ ] Connection handlers are bounded and idempotent; they do not define fact
   wire formats, crypto-shaped fake facts, or protocol projection state.
-- [ ] Network handlers treat transit frames as opaque bytes.
+- [ ] Network handlers treat connection frames as opaque bytes.
 
 ## Sync And Dep-Aware Range Closure
 
 - [x] Sync compare projection writes the row and emits a response intent when
   `response_requested=true`.
 - [ ] Sync response handler computes compare/have facts from current fact
-  context and sends them over transit; the remaining cutover is to replace the
+  context and sends them over connection frames; the remaining cutover is to replace the
   in-memory fact scan with bounded durable range/index state.
 - [ ] Sync have/need projectors emit real follow-up intents/offers as needed,
   not only rows if poc-8 responded transitively.
@@ -301,14 +301,14 @@ Reviewer instructions:
   purge/sync-status CLI surfaces remain explicit ignored cutover blockers.
   Current `view_cli_test` status: 4/5 pass; remaining failure is missing
   `react`/file CLI parity, not view selection/rendering for messages.
-- [ ] Sync compare response now emits response facts and a transit send intent
+- [ ] Sync compare response now emits response facts and a connection-frame send intent
   from current facts, but real bounded durable range-index response state is not
   complete yet.
 - [ ] `network_send` now resolves connection-request listen routes and attempts
   bounded TCP delivery through core network queues. Remaining gaps: durable send
   acknowledgement/cursors, bidirectional route hints, and nonfatal daemon retry
   policy for offline peers.
-- [ ] Transit send still needs schema-generated fixed-layout intent/frame
+- [ ] Connection-frame send still needs schema-generated fixed-layout intent/frame
   codecs for the two supported size classes; current handler tests prove
   bounded TCP send, not the final wire-layout source of truth.
 - [ ] General shared signed-fact admission is not complete. Signed key-wrap
