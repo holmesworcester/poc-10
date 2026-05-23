@@ -14,7 +14,7 @@ use crate::core::{
     },
     store::Store,
 };
-use crate::protocol::transport::send_facts_on_connection::{
+use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, send_shareable_bucket_on_connection_intent,
     SendFactsOnConnection,
 };

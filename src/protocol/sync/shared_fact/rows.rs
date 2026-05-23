@@ -6,7 +6,7 @@
 //! named fact still exists in the core store.
 //!
 //! Keep sync visibility here. Fact admission belongs to projectors, and
-//! transport framing belongs to `send_facts_on_connection`; callers use this
+//! connection framing belongs to `send_facts_on_connection`; callers use this
 //! file to ask what a peer is allowed to learn.
 
 use crate::core::fact_store::persisted_fact;

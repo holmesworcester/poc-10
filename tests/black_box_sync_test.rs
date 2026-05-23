@@ -206,7 +206,7 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
 #[test]
 fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
     // This is the poc-10 replacement for the basic simulated download proof:
-    // drive only the product CLI plus daemon transport, then assert the peer
+    // drive only the product CLI plus daemon networking, then assert the peer
     // can save the exact multi-slice bytes without any manual sync command.
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-file.db");

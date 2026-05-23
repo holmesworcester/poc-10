@@ -21,10 +21,10 @@
 //! keeps socket readiness, backpressure, and partial writes out of protocol
 //! handlers while also keeping protocol admission out of the network loop.
 //!
-//! Change this file for frame transport mechanics: listener setup,
+//! Change this file for frame network mechanics: listener setup,
 //! length-prefix framing, queue idempotence, local row cleanup, or bounded IO.
-//! Change `connection::frame` or transport intents when the bytes inside a
-//! frame need new protocol meaning.
+//! Change `connection::frame` or connection network intents when the bytes
+//! inside a frame need new protocol meaning.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};

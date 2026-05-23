@@ -1,7 +1,7 @@
 //! Fixed-layout wire primitives.
 //!
 //! This module owns the small, protocol-neutral byte codecs used by fact,
-//! intent, and transport layouts. It provides exact-length fixed byte arrays,
+//! intent, and connection-frame layouts. It provides exact-length fixed byte arrays,
 //! big-endian integers, one-byte booleans, zero-padded bounded slots, and simple
 //! sequential readers and writers for assembling those pieces.
 //!

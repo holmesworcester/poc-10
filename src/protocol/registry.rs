@@ -29,7 +29,7 @@ use crate::core::projectors::{
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
-use crate::protocol::{connection, content, encryption, identity, sync, transport};
+use crate::protocol::{connection, content, encryption, identity, sync};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -748,18 +748,18 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     ),
     handler_route!(
         "send_facts_on_connection",
-        transport::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
-        transport::send_facts_on_connection::SendFactsOnConnectionHandler
+        connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
+        connection::send_facts_on_connection::SendFactsOnConnectionHandler
     ),
     handler_route!(
         "send_network_frame",
-        transport::send_network_frame::SEND_NETWORK_FRAME,
-        transport::send_network_frame::SendNetworkFrameHandler
+        connection::send_network_frame::SEND_NETWORK_FRAME,
+        connection::send_network_frame::SendNetworkFrameHandler
     ),
     handler_route!(
         "receive_network_frame",
-        transport::receive_network_frame::RECEIVE_NETWORK_FRAME,
-        transport::receive_network_frame::ReceiveNetworkFrameHandler
+        connection::receive_network_frame::RECEIVE_NETWORK_FRAME,
+        connection::receive_network_frame::ReceiveNetworkFrameHandler
     ),
 ];
 

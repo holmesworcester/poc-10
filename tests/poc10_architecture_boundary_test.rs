@@ -112,22 +112,21 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
     matches
 }
 
-const PROTOCOL_SCOPES: [&str; 6] = [
-    "connection",
-    "content",
-    "encryption",
-    "identity",
-    "sync",
-    "transport",
-];
+const PROTOCOL_SCOPES: [&str; 5] = ["connection", "content", "encryption", "identity", "sync"];
 
 /// The verb-named intent handler files that live directly inside each scope
 /// directory. Everything else under a scope directory is fact-module code.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
-    let handlers: [(&str, &[&str]); 6] = [
+    let handlers: [(&str, &[&str]); 5] = [
         (
             "connection",
-            &["create_response.rs", "send_bootstrap_request.rs"],
+            &[
+                "create_response.rs",
+                "receive_network_frame.rs",
+                "send_bootstrap_request.rs",
+                "send_facts_on_connection.rs",
+                "send_network_frame.rs",
+            ],
         ),
         (
             "content",
@@ -155,14 +154,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "send_needed_fact_id.rs",
                 "send_requested_fact.rs",
                 "share_fact_with_workspace.rs",
-            ],
-        ),
-        (
-            "transport",
-            &[
-                "receive_network_frame.rs",
-                "send_facts_on_connection.rs",
-                "send_network_frame.rs",
             ],
         ),
     ];
@@ -790,7 +781,7 @@ fn poc10_concrete_protocol_routes_semantic_messages() {
     assert!(
         !receive.contains("content::sealed_message::TYPE_SEALED_MESSAGE")
             && !receive.contains("admit_sealed_message_fact"),
-        "transport admission must accept semantic content::message facts, not sealed-message wrappers"
+        "connection frame admission must accept semantic content::message facts, not sealed-message wrappers"
     );
 }
 

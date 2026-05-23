@@ -26,7 +26,7 @@ fn invite_daemons_accept_and_connect_two_cli_processes() {
 
     let _host_daemon = spawn_daemon(&host, host_port);
     let _joiner_daemon = spawn_daemon(&joiner, joiner_port);
-    let invite = transport_invite_link(&host, host_port);
+    let invite = network_invite_link(&host, host_port);
     let accepted = accept_with_retry(&joiner, &invite);
     assert!(accepted.contains("connected:"), "{accepted}");
 
@@ -51,7 +51,7 @@ fn invite_daemons_accept_two_separate_cli_processes() {
     let _host_daemon = spawn_daemon(&host, port);
     let _joiner_a_daemon = spawn_daemon(&joiner_a, joiner_a_port);
     let _joiner_b_daemon = spawn_daemon(&joiner_b, joiner_b_port);
-    let invite = transport_invite_link(&host, port);
+    let invite = network_invite_link(&host, port);
 
     let accepted_a = accept_with_retry(&joiner_a, &invite);
     assert!(accepted_a.contains("connected:"), "{accepted_a}");
@@ -694,7 +694,7 @@ fn workspace_invite_link(db: &str, workspace_id: &str, port: u16) -> String {
     invite_link_from_output(&out)
 }
 
-fn transport_invite_link(db: &str, port: u16) -> String {
+fn network_invite_link(db: &str, port: u16) -> String {
     let addr = format!("127.0.0.1:{port}");
     let out = assert_success(topo(&["--db", db, "invite", "--public-addr", &addr]));
     invite_link_from_output(&out)

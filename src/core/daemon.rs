@@ -8,7 +8,7 @@
 //! then drain projection/intent/projection work.
 //!
 //! The daemon is the host for work that should keep happening without a user
-//! command on the stack. It does not decode transport frames or choose protocol
+//! command on the stack. It does not decode connection frames or choose protocol
 //! actions itself. The protocol declaration turns inbound bytes into an
 //! ephemeral intent, declares which time-wake timelines should be admitted, and
 //! supplies the runtime handlers that consume queued work.

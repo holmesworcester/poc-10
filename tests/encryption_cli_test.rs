@@ -1,7 +1,7 @@
 //! Black-box CLI tests for encryption key availability.
 //!
 //! Setup goes through the real `topo` binary: workspace creation, invite
-//! listening, invite acceptance, transport connection learning, sync, key
+//! listening, invite acceptance, connection learning, sync, key
 //! publication, wrap creation, and automatic derivation. The tests intentionally
 //! do not seed protocol rows or inspect private storage layout; the CLI boundary
 //! is the invariant under test.

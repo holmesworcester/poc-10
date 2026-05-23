@@ -12,8 +12,8 @@
 //! `MATCH_RUNTIME` or `MATCH_PROTOCOL` constants here.
 //!
 //! Keep executable protocol policy out of this file. The conversion from a TCP
-//! frame to an intent is a small adapter; the actual transport admission and
-//! frame interpretation live in transport intent and fact modules.
+//! frame to an intent is a small adapter; connection receive admission and
+//! frame interpretation live in connection intent and fact modules.
 
 use crate::core::app::ProtocolDescription;
 use crate::core::clock;
@@ -26,7 +26,6 @@ use crate::protocol::registry::{
     SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
-use crate::protocol::transport as transport_intents;
 use crate::protocol::{connection, content};
 
 pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
@@ -54,8 +53,8 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
 }];
 
 fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {
-    transport_intents::receive_network_frame::receive_network_frame_intent(
-        transport_intents::receive_network_frame::ReceiveNetworkFrame {
+    connection::receive_network_frame::receive_network_frame_intent(
+        connection::receive_network_frame::ReceiveNetworkFrame {
             frame: input.frame,
             origin_addr: connection::fact_receipt::create::canonical_origin_addr_bytes(
                 input.origin_addr,

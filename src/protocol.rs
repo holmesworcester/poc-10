@@ -8,7 +8,7 @@
 //! everything for one protocol concern: its fact families, its deferred intent
 //! handlers, and its CLI adapters. A reader can follow a concern from command
 //! creation, through fact layout and projection, into derived rows, queries,
-//! and the intents that perform delayed work — all in one place.
+//! and the intents that perform delayed work - all in one place.
 //!
 //! Each scope module root is the navigational map for that scope. Fact families
 //! are noun-named submodules (`message`, `key_wrap`); intents are verb-named
@@ -20,9 +20,9 @@
 //! inputs, and handler.
 //!
 //! Scopes are: identity and membership authority, encryption and retention,
-//! content (user-visible workspace data), connection handshake, sync
-//! convergence, and transport delivery. `payload` holds intent payload
-//! machinery shared across scope intent modules.
+//! content (user-visible workspace data), connection protocol, and sync
+//! convergence. `payload` holds intent payload machinery shared across scope
+//! intent modules.
 
 pub mod app;
 pub(crate) mod cli;
@@ -34,4 +34,3 @@ pub mod content;
 pub mod encryption;
 pub mod identity;
 pub mod sync;
-pub mod transport;

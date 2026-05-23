@@ -4,12 +4,12 @@
 //! triggering compare fact are runtime state, not fields of the compare itself.
 //! The handler loads the connection-visible fact set, asks compare planning for
 //! child compares or exact ids, persists any generated compare facts, and queues
-//! transport sends when there is something to send.
+//! connection sends when there is something to send.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::transport::send_facts_on_connection::{
+use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 

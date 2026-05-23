@@ -2,16 +2,16 @@
 //!
 //! Need-id facts name exact payloads a peer says it is missing. This handler
 //! loads the requested fact, checks that the fact is shareable on the
-//! connection, rejects private or unsendable payloads, and queues transport
+//! connection, rejects private or unsendable payloads, and queues connection
 //! work for the fact bytes. Authorization remains in the shareable-fact index.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::sync::need_id;
-use crate::protocol::transport::send_facts_on_connection::{
+use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
+use crate::protocol::sync::need_id;
 
 pub const SEND_REQUESTED_FACT: &str = "send_requested_fact";
 

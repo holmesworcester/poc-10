@@ -45,14 +45,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 #[test]
 fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let scopes = [
-        "connection",
-        "content",
-        "encryption",
-        "identity",
-        "sync",
-        "transport",
-    ];
+    let scopes = ["connection", "content", "encryption", "identity", "sync"];
     let forbidden_fact_module_files = scopes
         .iter()
         .flat_map(|scope| rust_files(&root.join("src/protocol").join(scope)))

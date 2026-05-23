@@ -20,7 +20,7 @@ use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 
 /// Return the bytes that may be packaged into a connection::frame frame.
 ///
-/// Local facts and private/local fact tags are never transport payloads. A
+/// Local facts and private/local fact tags are never connection-frame payloads. A
 /// signed envelope is parsed here as a defensive check that the envelope is
 /// well-formed and does not hide a private local payload type. Signature
 /// verification belongs to the semantic projector once signer context exists.

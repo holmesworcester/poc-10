@@ -1,6 +1,6 @@
 //! Intent handler that packages exact facts into encrypted connection frames.
 //!
-//! Sync decides which fact ids should move; this transport intent decides how
+//! Sync decides which fact ids should move; this connection intent decides how
 //! to move their bytes. It supports explicit fact-id sends and bucketed
 //! shareable-range sends, loads the facts, batches them under the frame size
 //! limit, seals each batch with the connection secret, and queues ephemeral
@@ -15,8 +15,8 @@ use crate::core::intents::{
 };
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::{effects::PipelineEffects, facts::Fact};
+use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
-use crate::protocol::transport::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::{
     connection::frame::{
         create,
@@ -296,7 +296,7 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
     for fact in facts {
         let item_len = INNER_FACT_LEN_BYTES + create::require_sendable_fact(&fact)?.len();
         if INNER_BUNDLE_HEADER_BYTES + item_len > CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
-            return Err("send_facts_on_connection fact exceeds transport frame capacity".into());
+            return Err("send_facts_on_connection fact exceeds connection frame capacity".into());
         }
         if !batch.is_empty() && packed_len + item_len > CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
             batches.push(std::mem::take(&mut batch));

@@ -3,7 +3,7 @@
 //! Invite-server facts advertise a server endpoint that can help bootstrap
 //! connection requests. They are signed, projected through identity authority
 //! context, and exposed as invite-server rows plus context for connection
-//! handshakes. Keep server advertisement policy here, not in transport.
+//! handshakes. Keep server advertisement policy here, not in network send handlers.
 
 pub mod fact;
 pub mod layout;

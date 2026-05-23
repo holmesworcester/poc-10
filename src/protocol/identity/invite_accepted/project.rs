@@ -5,7 +5,7 @@
 //!      non-zero.
 //!   2. CONTEXT. Matched invite_secret context must be local and scoped to the
 //!      same workspace/invite/bootstrap hash.
-//!   3. MATERIALIZE. Write the invite_accepted row; broader transport effects
+//!   3. MATERIALIZE. Write the invite_accepted row; broader network effects
 //!      remain explicit intent-handler work.
 
 use crate::core::facts::{Fact, FactScope};

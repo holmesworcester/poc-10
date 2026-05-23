@@ -917,7 +917,7 @@ fn key_wrap_with_retry(
 /// to `port` and a running daemon on `joiner` (any port). The host's daemon
 /// serves the bootstrap; the joiner's daemon admits the user/endpoint facts
 /// and connects back. After this returns, both peers' projections include the
-/// new membership and sync continues over the daemons' transport routes.
+/// new membership and sync continues over the daemons' network routes.
 fn join_workspace(
     host: &str,
     joiner: &str,

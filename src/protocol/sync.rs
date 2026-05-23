@@ -6,7 +6,7 @@
 //! which facts are shareable on a connection, and cascade facts support test and
 //! dependency replay flows.
 //!
-//! Sync does not decide whether a protocol fact is valid. It transports and
+//! Sync does not decide whether a protocol fact is valid. It sends and
 //! advertises facts whose own modules already define layout, scope, and
 //! projection policy. When sync receives bytes, those bytes are admitted as
 //! ordinary facts and then the normal projection/context/intent machinery

@@ -3,7 +3,7 @@
 //! This handler owns the one pre-connection network effect: sending a validated
 //! `connection::request` fact to the address carried by an invite link. Once the
 //! request/response handshake establishes a connection, ordinary connection
-//! frames and `send_network_frame` take over.
+//! frames and `connection::send_network_frame` take over.
 
 use std::net::SocketAddr;
 

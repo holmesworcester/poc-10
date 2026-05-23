@@ -113,19 +113,15 @@ fn matching_lines_with_comment_mode(
     matches
 }
 
-const SCOPE_NAMES: [&str; 6] = [
-    "connection",
-    "content",
-    "encryption",
-    "identity",
-    "sync",
-    "transport",
-];
+const SCOPE_NAMES: [&str; 5] = ["connection", "content", "encryption", "identity", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
 const INTENT_HANDLER_FILES: [&str; 17] = [
     "src/protocol/connection/create_response.rs",
+    "src/protocol/connection/receive_network_frame.rs",
     "src/protocol/connection/send_bootstrap_request.rs",
+    "src/protocol/connection/send_facts_on_connection.rs",
+    "src/protocol/connection/send_network_frame.rs",
     "src/protocol/content/purge_below_retention_floor.rs",
     "src/protocol/content/purge_deleted_message.rs",
     "src/protocol/content/purge_expired_message.rs",
@@ -138,9 +134,6 @@ const INTENT_HANDLER_FILES: [&str; 17] = [
     "src/protocol/sync/send_needed_fact_id.rs",
     "src/protocol/sync/send_requested_fact.rs",
     "src/protocol/sync/share_fact_with_workspace.rs",
-    "src/protocol/transport/receive_network_frame.rs",
-    "src/protocol/transport/send_facts_on_connection.rs",
-    "src/protocol/transport/send_network_frame.rs",
 ];
 
 /// Absolute paths of every verb-named intent handler file in the new
@@ -152,7 +145,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Absolute paths of the 6 scope directories under src/protocol.
+/// Absolute paths of the scope directories under src/protocol.
 fn scope_dirs(root: &Path) -> Vec<PathBuf> {
     SCOPE_NAMES
         .into_iter()
@@ -421,8 +414,8 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots() {
     let root = root();
     let paths = vec![
-        root.join("src/protocol/transport/send_facts_on_connection.rs"),
-        root.join("src/protocol/transport/send_network_frame.rs"),
+        root.join("src/protocol/connection/send_facts_on_connection.rs"),
+        root.join("src/protocol/connection/send_network_frame.rs"),
         root.join("src/protocol/connection/frame/create.rs"),
         root.join("src/protocol/connection/frame/layout.rs"),
     ];
@@ -960,7 +953,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
     let pipeline = source_text(&root.join("src/core/pipeline.rs"));
     let core_daemon = source_text(&root.join("src/core/daemon.rs"));
     let send_network_frame =
-        source_text(&root.join("src/protocol/transport/send_network_frame.rs"));
+        source_text(&root.join("src/protocol/connection/send_network_frame.rs"));
 
     let mut offenders = Vec::new();
     if pipeline.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
@@ -994,13 +987,13 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
         && send_network_frame.contains("return Ok(PipelineEffects::new())")
     {
         offenders.push(
-            "src/protocol/transport/send_network_frame.rs swallows TCP send failures as an empty successful handler output"
+            "src/protocol/connection/send_network_frame.rs swallows TCP send failures as an empty successful handler output"
                 .to_string(),
         );
     }
     if send_network_frame.contains("fn frame_digest(") {
         offenders.push(
-            "src/protocol/transport/send_network_frame.rs still carries cursor/ack digest scaffolding"
+            "src/protocol/connection/send_network_frame.rs still carries cursor/ack digest scaffolding"
                 .to_string(),
         );
     }
@@ -1037,11 +1030,11 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
             "network declares memory schemas, but Runtime does not load network::SCHEMA_SOURCE",
         );
     }
-    if source_text(&root.join("src/protocol/transport/send_network_frame.rs"))
+    if source_text(&root.join("src/protocol/connection/send_network_frame.rs"))
         .contains("fn frame_digest")
     {
         offenders.push(
-            "send_network_frame frame_digest is unused ACK/cursor scaffolding; duplicate transport frames must stay harmless instead",
+            "send_network_frame frame_digest is unused ACK/cursor scaffolding; duplicate connection frames must stay harmless instead",
         );
     }
     if durable_in_core_schema == memory_in_queue_module {
@@ -1066,12 +1059,12 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
     let core_schema = source_text(&root.join("src/core/schema.rs"));
     let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
     let send_facts_handler =
-        source_text(&root.join("src/protocol/transport/send_facts_on_connection.rs"));
+        source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
     let network_io_files = [
         "src/protocol/connection/send_bootstrap_request.rs",
-        "src/protocol/transport/send_network_frame.rs",
-        "src/protocol/transport/receive_network_frame.rs",
+        "src/protocol/connection/send_network_frame.rs",
+        "src/protocol/connection/receive_network_frame.rs",
     ];
 
     let mut offenders = Vec::new();

@@ -90,14 +90,7 @@ fn strip_line_comments(text: &str) -> String {
 /// each scope directory holds BOTH fact-family modules and verb-named intent
 /// handler files, replacing the old `src/protocol/facts` and
 /// `src/protocol/intents` layer roots.
-const SCOPES: [&str; 6] = [
-    "connection",
-    "content",
-    "encryption",
-    "identity",
-    "sync",
-    "transport",
-];
+const SCOPES: [&str; 5] = ["connection", "content", "encryption", "identity", "sync"];
 
 fn scope_dirs(root: &Path) -> Vec<PathBuf> {
     SCOPES
@@ -119,7 +112,16 @@ fn scope_manifests(root: &Path) -> Vec<PathBuf> {
 /// no intent handlers.
 fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
     const HANDLERS: &[(&str, &[&str])] = &[
-        ("connection", &["create_response", "send_bootstrap_request"]),
+        (
+            "connection",
+            &[
+                "create_response",
+                "receive_network_frame",
+                "send_bootstrap_request",
+                "send_facts_on_connection",
+                "send_network_frame",
+            ],
+        ),
         (
             "content",
             &[
@@ -145,14 +147,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "send_needed_fact_id",
                 "send_requested_fact",
                 "share_fact_with_workspace",
-            ],
-        ),
-        (
-            "transport",
-            &[
-                "receive_network_frame",
-                "send_facts_on_connection",
-                "send_network_frame",
             ],
         ),
     ];
@@ -1343,7 +1337,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
     let mut offenders = Vec::new();
     for path in connection_handlers {
         let text = source_text(&path);
-        let production = production_text_before_unit_tests(&text);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
         for forbidden in [
             "canonical_events",
             "protocol::encryption",
@@ -1365,7 +1359,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
 
     assert!(
         offenders.is_empty(),
-        "connection intents must treat connection::frame frames as opaque transport bytes:\n{}",
+        "connection intents must treat connection::frame frames as opaque network bytes:\n{}",
         offenders.join("\n")
     );
 }

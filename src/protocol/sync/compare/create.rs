@@ -3,9 +3,9 @@
 //! Compare facts are the range-summary handshake that lets peers converge
 //! without immediately sending every fact. This module summarizes local facts,
 //! compares that summary with a peer's range, and either plans narrower child
-//! compares or asks transport to send exact fact ids.
+//! compares or asks connection send handlers to send exact fact ids.
 //!
-//! Keep range-splitting and fingerprint logic here. Transport decides how to
+//! Keep range-splitting and fingerprint logic here. Connection send handlers decide how to
 //! frame facts, and `shared_fact` decides which facts a connection is allowed
 //! to see; this module only plans what a sync response should contain.
 

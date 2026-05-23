@@ -115,7 +115,7 @@ Implemented slices:
   contracts, black-box invite/accept/link flows, basic content send/messages,
   encryption CLI flows, and daemon lifecycle.
 - `CommandContext` for user-facing target commands that may read projected state
-  through module `queries.rs`, but do not drive handlers or transport directly.
+  through module `queries.rs`, but do not drive handlers or network IO directly.
   The type lives in `core::command_context`.
 - `ProtocolDescription` as the executable protocol boundary. A binary selects
   a protocol description; core opens the declared runtime, runs the declared
@@ -129,7 +129,7 @@ Current follow-up work:
 - Keep manual projection/download perf fixtures available, but out of the
   default test suite.
 - Finish the intentionally deferred partial-download-progress CLI behavior.
-- Keep network/perf coverage honest while preserving the simple transport
+- Keep network/perf coverage honest while preserving the simple connection
   contract: TCP stream delivery, memory-local byte queues, and idempotent
   regenerated sends.
 - Keep command-host boundaries visible for accept/listen flows: accepting an
@@ -209,16 +209,13 @@ src/
       purge_expired_message.rs
       purge_message_child.rs
 
-    transport.rs
-    transport/
-      receive_network_frame.rs
-      send_facts_on_connection.rs
-      send_network_frame.rs
-
     connection.rs
     connection/
       frame/
       fact_receipt/
+      receive_network_frame.rs
+      send_facts_on_connection.rs
+      send_network_frame.rs
     encryption.rs   encryption/
     identity.rs     identity/
     sync.rs         sync/
@@ -650,7 +647,7 @@ handler names and accepted intent kinds
 ```
 
 It must not run projection, construct handlers, open stores, branch on fact
-bytes, parse CLI input, or call transport IO. Registry entries should reference
+bytes, parse CLI input, or call network IO. Registry entries should reference
 module constants where possible so renames fail at compile time.
 
 ## Projectors
@@ -1104,7 +1101,7 @@ connection.connection_events
 connection.request_connections
 connection.connections
 connection.invite_workspaces
-connection.transport_targets
+connection.network_targets
 ```
 
 Connection flow:
@@ -1120,7 +1117,7 @@ connection request fact
   -> response projector materializes connection state
 ```
 
-Sync decides which ids should move. Connection transport decides how bytes move.
+Sync decides which ids should move. Connection send handlers decide how bytes move.
 
 ```text
 StartSync
@@ -1329,4 +1326,4 @@ runtime pipelines coordinate mechanics
 
 There is one context mechanism, one projection scheduler, and one intent
 scheduling surface. Everything else is either fact-module projection state,
-command construction, transport IO, or handler checkpoint state.
+command construction, network IO, or handler checkpoint state.

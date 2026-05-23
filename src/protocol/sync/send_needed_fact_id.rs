@@ -2,17 +2,17 @@
 //!
 //! A have-id tells us that a peer has a fact. This handler checks whether the
 //! local store lacks that fact and, if so, creates a need-id fact and queues it
-//! for transport on the same connection. It provides the request side of the
+//! for sending on the same connection. It provides the request side of the
 //! exact-id sync fallback; it does not decide whether the peer may later send
 //! the requested payload.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::sync::{have_id, need_id};
-use crate::protocol::transport::send_facts_on_connection::{
+use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
+use crate::protocol::sync::{have_id, need_id};
 
 pub const SEND_NEEDED_FACT_ID: &str = "send_needed_fact_id";
 
@@ -98,10 +98,10 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
+    use crate::protocol::connection::send_facts_on_connection;
     use crate::protocol::sync::have_id::fact::SyncHaveIdFact;
     use crate::protocol::sync::have_id::layout as sync_have_id_layout;
     use crate::protocol::sync::need_id::layout as sync_need_id_layout;
-    use crate::protocol::transport::send_facts_on_connection;
 
     #[test]
     fn send_needed_fact_id_emits_need_fact_for_missing_fact() {
@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(need.fact_id, [8; 32]);
         assert_eq!(output.intents.len(), 1);
         let send = send_facts_on_connection::decode_send_facts_on_connection(&output.intents[0])
-            .expect("transport send");
+            .expect("connection send");
         assert_eq!(send.connection_id, [4; 32]);
         assert_eq!(send.fact_ids, vec![output.facts[0].id]);
     }

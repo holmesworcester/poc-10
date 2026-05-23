@@ -7,19 +7,19 @@ use topo::core::store::Store;
 use topo::protocol::connection::frame::frame as connection_frame;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::connection::send_facts_on_connection::{
+    decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
+    SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
+};
+use topo::protocol::connection::send_network_frame::{
+    decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
+};
 use topo::protocol::encryption;
 use topo::protocol::identity;
 use topo::protocol::identity::endpoint::fact::EndpointFact;
 use topo::protocol::identity::endpoint::rows as endpoint_rows;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
-use topo::protocol::transport::send_facts_on_connection::{
-    decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
-    SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
-};
-use topo::protocol::transport::send_network_frame::{
-    decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
-};
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
     let local_endpoint = local_endpoint();
@@ -75,7 +75,7 @@ fn send_facts_on_connection_refuses_forged_local_fact_reference() {
 
     let err = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)
-        .expect_err("local facts must never be packaged for transport send");
+        .expect_err("local facts must never be packaged for connection send");
 
     assert!(
         err.contains("local fact"),
@@ -105,7 +105,7 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
 
         let err = SendFactsOnConnectionHandler::new()
             .handle(&intent, &context)
-            .expect_err("private/local fact tags must never be packaged for transport send");
+            .expect_err("private/local fact tags must never be packaged for connection send");
 
         assert!(
             err.contains("private/local fact tag"),
@@ -136,7 +136,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
 
     let output = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)
-        .expect("normal shared fact packages for transport");
+        .expect("normal shared fact packages for connection send");
 
     assert!(output.intents.is_empty());
     assert_eq!(output.local_intents.len(), 1);
@@ -144,7 +144,7 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
     assert_eq!(send.routing_key, connection_fact.id);
     let opened =
         connection_frame::open_connection_frame(&send.frame, &connection.connection_secret)
-            .expect("open packaged transport frame");
+            .expect("open packaged connection frame");
     assert_eq!(
         opened.facts.into_iter().collect::<Vec<_>>(),
         vec![fact.bytes]
@@ -152,16 +152,18 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
 }
 
 #[test]
-fn intent_kind_names_keep_transport_boundaries_clear() {
+fn intent_kind_names_keep_connection_boundaries_clear() {
     for kind in [
         SEND_FACTS_ON_CONNECTION,
-        topo::protocol::transport::send_network_frame::SEND_NETWORK_FRAME,
+        topo::protocol::connection::send_network_frame::SEND_NETWORK_FRAME,
     ] {
         IntentKind::new(kind).expect("intent kind is registry-safe");
     }
 
     assert!(SEND_FACTS_ON_CONNECTION.starts_with("send_"));
-    assert!(topo::protocol::transport::send_network_frame::SEND_NETWORK_FRAME.starts_with("send_"));
+    assert!(
+        topo::protocol::connection::send_network_frame::SEND_NETWORK_FRAME.starts_with("send_")
+    );
 }
 
 #[test]

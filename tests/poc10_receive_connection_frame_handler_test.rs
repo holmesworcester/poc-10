@@ -15,6 +15,10 @@ use topo::protocol::connection::frame::layout::{
     self as frame_layout, CONNECTION_FRAME_SIZE_CLASS_LARGE,
 };
 use topo::protocol::connection::frame::project::ConnectionFrameProjector;
+use topo::protocol::connection::receive_network_frame::{
+    receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
+    RECEIVE_NETWORK_FRAME,
+};
 use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
@@ -30,10 +34,6 @@ use topo::protocol::identity::invite::fact::InviteSecretFact;
 use topo::protocol::identity::invite::layout as invite_layout;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::sync::compare::layout as sync_compare_layout;
-use topo::protocol::transport::receive_network_frame::{
-    receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
-    RECEIVE_NETWORK_FRAME,
-};
 
 const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;

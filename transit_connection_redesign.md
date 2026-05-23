@@ -40,7 +40,7 @@ not point at an owner whose payload disappears on restart.
 
 ## Receive Classification
 
-`transport::receive_network_frame` owns intent payload decoding and origin
+`connection::receive_network_frame` owns intent payload decoding and origin
 normalization. It does not construct facts inline. It delegates the mechanical
 classification to `connection::frame::create`:
 
@@ -100,7 +100,7 @@ Core owns queue lifetime, projection fixed points, transactional child
 projection, durable fact storage, and validation that ephemeral owners do not
 publish durable standing context.
 
-`transport::receive_network_frame` owns network receive intent decoding and
+`connection::receive_network_frame` owns network receive intent decoding and
 delegates fact creation to protocol modules.
 
 `connection::frame` owns encrypted frame fact layout, fixed frame
@@ -124,7 +124,7 @@ Core tests cover ephemeral projection, one-shot durable context use, discard
 without standing needs, rejection of ephemeral offers, immediate child
 projection, child parking as success, and rollback on child projection failure.
 
-Connection and transport tests cover receive-handler classification, durable
-bootstrap request admission, connection-frame opening, origin normalization,
-sync control payload admission, large-frame parking before ciphertext
-materialization, and discard of malformed raw network bytes.
+Connection tests cover receive-handler classification, durable bootstrap
+request admission, connection-frame opening, origin normalization, sync control
+payload admission, large-frame parking before ciphertext materialization, and
+discard of malformed raw network bytes.
