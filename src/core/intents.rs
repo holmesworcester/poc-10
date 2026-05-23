@@ -29,10 +29,43 @@
 
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::select::Value as SqlValue;
 use crate::core::store::{Store, TableName, TableRow};
+use rusqlite::types::Value as SqliteValue;
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// SQLite value carried by typed-table row mutations and internal SQL helpers.
+///
+/// Protocol row builders choose these values from their fact layout and table
+/// schema. Core also uses the same representation for checked pipeline
+/// insert-select parameters. Conversion into SQLite bind parameters is
+/// mechanical; core does not interpret what a column or parameter means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Bytes(Vec<u8>),
+    Text(String),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+}
+
+impl Value {
+    pub(crate) fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
+        match self {
+            Self::Bytes(value) => Ok(SqliteValue::Blob(value.clone())),
+            Self::Text(value) => Ok(SqliteValue::Text(value.clone())),
+            Self::U64(value) => i64::try_from(*value)
+                .map(SqliteValue::Integer)
+                .map_err(|_| {
+                    rusqlite::Error::InvalidParameterName(
+                        "SQL value exceeds SQLite integer range".to_string(),
+                    )
+                }),
+            Self::I64(value) => Ok(SqliteValue::Integer(*value)),
+            Self::Bool(value) => Ok(SqliteValue::Integer(i64::from(*value))),
+        }
+    }
+}
 
 /// Stable queue routing key for an intent handler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -109,7 +142,7 @@ pub struct TableInsert {
     /// Columns supplied by this insert.
     pub columns: &'static [&'static str],
     /// Values corresponding to `columns`.
-    pub values: Vec<SqlValue>,
+    pub values: Vec<Value>,
 }
 
 /// Delete typed-table rows matching all supplied columns.
@@ -120,7 +153,7 @@ pub struct TableDeleteWhere {
     /// Predicate columns.
     pub columns: &'static [&'static str],
     /// Predicate values corresponding to `columns`.
-    pub values: Vec<SqlValue>,
+    pub values: Vec<Value>,
 }
 
 /// Protocol-owned typed table declaration.
@@ -141,7 +174,7 @@ pub struct TypedTableSchema {
 
 impl TypedTableSchema {
     /// Build an insert mutation using this schema's declared column order.
-    pub fn insert(self, values: Vec<SqlValue>) -> TableInsert {
+    pub fn insert(self, values: Vec<Value>) -> TableInsert {
         TableInsert {
             table: self.table,
             columns: self.columns,
@@ -150,7 +183,7 @@ impl TypedTableSchema {
     }
 
     /// Build a delete mutation against this schema's logical key columns.
-    pub fn delete_by_key(self, values: Vec<SqlValue>) -> TableDeleteWhere {
+    pub fn delete_by_key(self, values: Vec<Value>) -> TableDeleteWhere {
         TableDeleteWhere {
             table: self.table,
             columns: self.key_columns,
@@ -162,7 +195,7 @@ impl TypedTableSchema {
     pub fn delete_where(
         self,
         columns: &'static [&'static str],
-        values: Vec<SqlValue>,
+        values: Vec<Value>,
     ) -> TableDeleteWhere {
         TableDeleteWhere {
             table: self.table,
@@ -401,5 +434,42 @@ mod tests {
         );
         assert_eq!(output.intents.len(), 1);
         assert!(output.local_intents.is_empty());
+    }
+
+    #[test]
+    fn typed_table_values_convert_to_sqlite_bind_values() {
+        assert_eq!(
+            Value::Bytes(b"bytes".to_vec()).as_sqlite_value().unwrap(),
+            SqliteValue::Blob(b"bytes".to_vec())
+        );
+        assert_eq!(
+            Value::Text("text".to_string()).as_sqlite_value().unwrap(),
+            SqliteValue::Text("text".to_string())
+        );
+        assert_eq!(
+            Value::U64(42).as_sqlite_value().unwrap(),
+            SqliteValue::Integer(42)
+        );
+        assert_eq!(
+            Value::I64(-7).as_sqlite_value().unwrap(),
+            SqliteValue::Integer(-7)
+        );
+        assert_eq!(
+            Value::Bool(true).as_sqlite_value().unwrap(),
+            SqliteValue::Integer(1)
+        );
+    }
+
+    #[test]
+    fn typed_table_u64_values_must_fit_sqlite_integer_range() {
+        let err = Value::U64(i64::MAX as u64 + 1)
+            .as_sqlite_value()
+            .expect_err("oversized u64 should not bind");
+
+        assert!(
+            err.to_string()
+                .contains("SQL value exceeds SQLite integer range"),
+            "{err}"
+        );
     }
 }

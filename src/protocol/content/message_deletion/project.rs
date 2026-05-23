@@ -256,20 +256,20 @@ mod projector_tests {
         assert_eq!(stored.table, rows::MESSAGE_DELETION_ROWS);
         assert_eq!(
             stored.values[0],
-            topo::core::select::Value::Bytes(deletion.workspace_id.to_vec())
+            topo::core::intents::Value::Bytes(deletion.workspace_id.to_vec())
         );
         assert_eq!(
             stored.values[1],
-            topo::core::select::Value::Bytes(deletion.target_message_id.to_vec())
+            topo::core::intents::Value::Bytes(deletion.target_message_id.to_vec())
         );
         assert_eq!(
             stored.values[2],
-            topo::core::select::Value::Bytes(fact.id.to_vec())
+            topo::core::intents::Value::Bytes(fact.id.to_vec())
         );
-        assert_eq!(stored.values[3], topo::core::select::Value::U64(12_345));
+        assert_eq!(stored.values[3], topo::core::intents::Value::U64(12_345));
         assert_eq!(
             stored.values[4],
-            topo::core::select::Value::Bytes(deletion.author_user_id.to_vec())
+            topo::core::intents::Value::Bytes(deletion.author_user_id.to_vec())
         );
     }
 

@@ -34,11 +34,12 @@ use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use crate::core::projectors::{MatchedContext, ProjectionContext};
 use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
-use crate::core::select;
 use crate::core::store::Store;
 use crate::core::wire::{Reader, WireError};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
+
+use super::insert_select;
 
 const CONTEXT_NEED_DIRECTION: &str = "need";
 const CONTEXT_OFFER_DIRECTION: &str = "offer";
@@ -405,9 +406,9 @@ pub(super) fn wake_context_matches_in_tx(
     Ok(inserted)
 }
 
-fn overlapping_offers_for_need_select(need: &ContextNeed) -> select::Select {
+fn overlapping_offers_for_need_select(need: &ContextNeed) -> insert_select::Select {
     let scope_key = scope_key(&need.scope);
-    select::Select::new(
+    insert_select::Select::new(
         r#"
         SELECT :need_owner AS owner
         WHERE EXISTS (
@@ -422,18 +423,18 @@ fn overlapping_offers_for_need_select(need: &ContextNeed) -> select::Select {
         "#,
         &[CONTEXT_EDGES],
         vec![
-            select::Param::bytes(":need_owner", need.owner),
-            select::Param::text(":role", need.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":need_start", need.start_key.as_bytes()),
-            select::Param::bytes(":need_end", need.end_key.as_bytes()),
+            insert_select::Param::bytes(":need_owner", need.owner),
+            insert_select::Param::text(":role", need.role.as_str()),
+            insert_select::Param::bytes(":scope_key", scope_key),
+            insert_select::Param::bytes(":need_start", need.start_key.as_bytes()),
+            insert_select::Param::bytes(":need_end", need.end_key.as_bytes()),
         ],
     )
 }
 
-fn overlapping_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
+fn overlapping_needs_for_offer_select(offer: &ContextOffer) -> insert_select::Select {
     let scope_key = scope_key(&offer.scope);
-    select::Select::new(
+    insert_select::Select::new(
         r#"
         SELECT n.owner
         FROM context_edges n
@@ -447,19 +448,19 @@ fn overlapping_needs_for_offer_select(offer: &ContextOffer) -> select::Select {
         "#,
         &[CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS],
         vec![
-            select::Param::text(":role", offer.role.as_str()),
-            select::Param::bytes(":scope_key", scope_key),
-            select::Param::bytes(":offer_start", offer.start_key.as_bytes()),
-            select::Param::bytes(":offer_end", offer.end_key.as_bytes()),
+            insert_select::Param::text(":role", offer.role.as_str()),
+            insert_select::Param::bytes(":scope_key", scope_key),
+            insert_select::Param::bytes(":offer_start", offer.start_key.as_bytes()),
+            insert_select::Param::bytes(":offer_end", offer.end_key.as_bytes()),
         ],
     )
 }
 
 fn insert_pending_projection_from_select_in_tx(
     store: &Store,
-    select: &select::Select,
+    select: &insert_select::Select,
     edge_kind: &str,
 ) -> Result<usize, String> {
-    select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
+    insert_select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
         .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
 }

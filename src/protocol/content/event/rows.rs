@@ -5,7 +5,7 @@
 //! stores the timestamp and the original payload byte count.
 
 use crate::core::intents::TableInsert;
-use crate::core::select::Value;
+use crate::core::intents::Value;
 use crate::core::store::TableName;
 use crate::protocol::registry::read_models;
 

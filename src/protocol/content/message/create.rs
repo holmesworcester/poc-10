@@ -11,10 +11,10 @@ use crate::core::command_context::{
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
+use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::pipeline::commit_pipeline_effects_to_store;
 use crate::core::runtime::Runtime;
-use crate::core::select::Value;
 use crate::core::store::{Store, TableName};
 use crate::core::wire;
 use crate::protocol::content::message;
