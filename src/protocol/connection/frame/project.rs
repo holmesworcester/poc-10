@@ -10,9 +10,9 @@
 //!   1. STRUCTURAL. The fact is a local ephemeral small or large connection
 //!      frame whose body encodes the corresponding fixed outer frame shape.
 //!   2. CONTEXT. The public frame header names an exact local
-//!      connection_response fact. Missing context parks the ephemeral input only
-//!      for its first needs check; malformed or undecryptable frames complete
-//!      with no durable output.
+//!      connection_response fact. Missing context parks the ephemeral input
+//!      until the connection context arrives; malformed or undecryptable frames
+//!      complete with no durable output.
 //!   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
 //!      each with a durable `connection::fact_receipt`. The child
 //!      facts project immediately or park on their own durable context in the

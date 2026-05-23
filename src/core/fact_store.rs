@@ -28,7 +28,7 @@
 //! belongs in the protocol fact module and its projector.
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
-use crate::core::schema::EPHEMERAL_PROJECTION_INPUTS;
+use crate::core::schema::{CONTEXT_EDGES, EPHEMERAL_PROJECTION_INPUTS};
 use crate::core::store::Store;
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
@@ -221,8 +221,32 @@ pub(crate) fn ephemeral_pending_fact_ids(
     let mut stmt = store
         .conn()
         .prepare(&format!(
-            "SELECT id FROM {} ORDER BY received_at, id LIMIT ?1",
-            EPHEMERAL_PROJECTION_INPUTS.as_str()
+            r#"
+            SELECT e.id
+            FROM {ephemeral} e
+            WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM {context} n
+                    WHERE n.owner = e.id
+                      AND n.direction = 'need'
+                )
+               OR EXISTS (
+                    SELECT 1
+                    FROM {context} n
+                    JOIN {context} o
+                      ON o.direction = 'offer'
+                     AND o.role = n.role
+                     AND o.scope_key = n.scope_key
+                     AND o.start_key <= n.end_key
+                     AND o.end_key >= n.start_key
+                    WHERE n.owner = e.id
+                      AND n.direction = 'need'
+                )
+            ORDER BY e.received_at, e.id
+            LIMIT ?1
+            "#,
+            ephemeral = EPHEMERAL_PROJECTION_INPUTS.as_str(),
+            context = CONTEXT_EDGES.as_str(),
         ))
         .map_err(|err| format!("load ephemeral projection inputs: {err}"))?;
     let rows = stmt

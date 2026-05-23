@@ -849,10 +849,13 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     reader.read_line(&mut line).expect("read daemon line");
-    assert!(
-        line.starts_with("listening: "),
-        "daemon did not report listening: {line}"
-    );
+    if !line.starts_with("listening: ") {
+        let mut stderr_text = String::new();
+        let mut stderr_reader = BufReader::new(stderr);
+        let _ = stderr_reader.read_to_string(&mut stderr_text);
+        let _ = child.wait();
+        panic!("daemon did not report listening: {line}\nstderr={stderr_text}");
+    }
     let stdout_handle = thread::spawn(move || {
         let mut text = String::new();
         let _ = reader.read_to_string(&mut text);

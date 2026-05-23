@@ -124,8 +124,12 @@ pub fn free_port() -> u16 {
 }
 
 fn next_port_candidate() -> usize {
-    const MIN_PORT: usize = 42000;
-    const MAX_PORT: usize = 61000;
+    // Keep daemon listener ports below Linux's default ephemeral client-port
+    // range (typically 32768-60999). The black-box sync tests open many
+    // loopback client connections in parallel, and allocating listeners from
+    // that same range can race with the kernel's outgoing port selection.
+    const MIN_PORT: usize = 20000;
+    const MAX_PORT: usize = 32767;
     static FALLBACK_NEXT_PORT: OnceLock<AtomicUsize> = OnceLock::new();
 
     let path = std::env::temp_dir().join("poc10-cli-test-port-counter");
