@@ -15,7 +15,7 @@ use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::collections::BTreeSet;
 
-use super::fact::{CascadeFact, MAX_DEPS, PAYLOAD_BYTES};
+use super::fact::{CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
 use super::{layout, rows};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub fn generate_deps(
         dep_edges += dependencies.len();
         let timestamp = u64::try_from(index + 1)
             .map_err(|_| "cascade fact index exceeds timestamp range".to_string())?;
-        let fact = CascadeFact {
+        let fact = CascadeTestFact {
             timestamp,
             dependencies,
             payload: [(index % 251) as u8; PAYLOAD_BYTES],
@@ -104,7 +104,7 @@ pub fn replay_deps_reverse(runtime: &mut Runtime) -> Result<ReplayDepsReceipt, S
 
     Ok(ReplayDepsReceipt {
         replayed_facts: rows.len(),
-        applied_facts: applied_cascade_fact_count(runtime),
+        applied_facts: applied_cascade_test_fact_count(runtime),
     })
 }
 
@@ -150,7 +150,7 @@ fn materialize_replayed_cascade_offers(
     Ok(applied.len())
 }
 
-fn applied_cascade_fact_count(runtime: &Runtime) -> usize {
+fn applied_cascade_test_fact_count(runtime: &Runtime) -> usize {
     let role = "sync_exact_fact";
     runtime
         .facts()
@@ -189,7 +189,7 @@ mod tests {
                 applied_facts: 2,
             }
         );
-        assert_eq!(applied_cascade_fact_count(&runtime), 2);
+        assert_eq!(applied_cascade_test_fact_count(&runtime), 2);
     }
 
     #[test]
@@ -213,6 +213,6 @@ mod tests {
                 applied_facts: 0,
             }
         );
-        assert_eq!(applied_cascade_fact_count(&runtime), 0);
+        assert_eq!(applied_cascade_test_fact_count(&runtime), 0);
     }
 }

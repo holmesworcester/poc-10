@@ -8,18 +8,18 @@
 
 use crate::core::facts::FactId;
 
-use super::fact::{CascadeFact, MAX_DEPS, PAYLOAD_BYTES};
+use super::fact::{CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
 
-pub const TYPE_CASCADE_FACT: u8 = 2;
+pub const TYPE_CASCADE_TEST_FACT: u8 = 2;
 pub const ENCODED_BYTES: usize = 1 + 8 + 1 + (MAX_DEPS * 32) + PAYLOAD_BYTES;
 
-pub fn encode_fact(fact: &CascadeFact) -> Result<Vec<u8>, String> {
+pub fn encode_fact(fact: &CascadeTestFact) -> Result<Vec<u8>, String> {
     if fact.dependencies.len() > MAX_DEPS {
         return Err("cascade fact dependency count exceeds fixed fields".to_string());
     }
 
     let mut out = vec![0; ENCODED_BYTES];
-    out[0] = TYPE_CASCADE_FACT;
+    out[0] = TYPE_CASCADE_TEST_FACT;
     out[1..9].copy_from_slice(&fact.timestamp.to_be_bytes());
     out[9] = fact.dependencies.len() as u8;
     let mut offset = 10;
@@ -32,11 +32,11 @@ pub fn encode_fact(fact: &CascadeFact) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-pub fn decode_fact(bytes: &[u8]) -> Result<CascadeFact, String> {
+pub fn decode_fact(bytes: &[u8]) -> Result<CascadeTestFact, String> {
     if bytes.len() != ENCODED_BYTES {
         return Err("cascade fact length mismatch".to_string());
     }
-    if bytes[0] != TYPE_CASCADE_FACT {
+    if bytes[0] != TYPE_CASCADE_TEST_FACT {
         return Err("unknown cascade fact type".to_string());
     }
 
@@ -58,7 +58,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<CascadeFact, String> {
         offset += 32;
     }
 
-    Ok(CascadeFact {
+    Ok(CascadeTestFact {
         timestamp,
         dependencies,
         payload: bytes[offset..offset + PAYLOAD_BYTES].try_into().unwrap(),
@@ -70,8 +70,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cascade_fact_roundtrips_fixed_width() {
-        let fact = CascadeFact {
+    fn cascade_test_fact_roundtrips_fixed_width() {
+        let fact = CascadeTestFact {
             timestamp: 42,
             dependencies: vec![[1; 32], [2; 32]],
             payload: [7; PAYLOAD_BYTES],

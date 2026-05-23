@@ -603,22 +603,22 @@ pub(crate) fn generate_deps(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let args = sync::cascade_fact::cli::parse_generate_deps_args(args)?;
-    let receipt = sync::cascade_fact::commands::generate_deps(
+    let args = sync::cascade_test_fact::cli::parse_generate_deps_args(args)?;
+    let receipt = sync::cascade_test_fact::commands::generate_deps(
         ctx.runtime().store(),
         args.count,
         args.deps_per_fact,
     )?;
-    Ok(sync::cascade_fact::cli::generate_deps_output(&receipt))
+    Ok(sync::cascade_test_fact::cli::generate_deps_output(&receipt))
 }
 
 pub(crate) fn replay_deps_reverse(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    args.require_len(0, sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE)?;
-    let receipt = sync::cascade_fact::commands::replay_deps_reverse(ctx.runtime_mut())?;
-    Ok(sync::cascade_fact::cli::replay_deps_reverse_output(
+    args.require_len(0, sync::cascade_test_fact::cli::REPLAY_DEPS_REVERSE_USAGE)?;
+    let receipt = sync::cascade_test_fact::commands::replay_deps_reverse(ctx.runtime_mut())?;
+    Ok(sync::cascade_test_fact::cli::replay_deps_reverse_output(
         &receipt,
     ))
 }

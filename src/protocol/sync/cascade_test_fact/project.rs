@@ -1,6 +1,6 @@
 //! Poc-10 sync cascade projector.
 //!
-//! POLICY. A cascade_fact is admitted iff:
+//! POLICY. A cascade_test_fact is admitted iff:
 //!   1. STRUCTURAL. The body decodes and its timestamp matches the outer fact
 //!      timestamp.
 //!   2. CONTEXT. Every declared dependency must be present as an exact-fact
@@ -14,15 +14,15 @@ use crate::core::projectors::{
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct CascadeFactProjector;
+pub struct CascadeTestFactProjector;
 
-impl CascadeFactProjector {
+impl CascadeTestFactProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for CascadeFactProjector {
+impl Projector for CascadeTestFactProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -32,11 +32,11 @@ impl Projector for CascadeFactProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for CascadeFactProjector {
+impl TypedProjector<super::Codec> for CascadeTestFactProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: super::fact::CascadeFact,
+        decoded: super::fact::CascadeTestFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.

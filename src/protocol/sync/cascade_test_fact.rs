@@ -12,16 +12,16 @@ pub mod layout;
 pub mod project;
 pub mod rows;
 
-pub const TYPE_CASCADE_FACT: u8 = layout::TYPE_CASCADE_FACT;
+pub const TYPE_CASCADE_TEST_FACT: u8 = layout::TYPE_CASCADE_TEST_FACT;
 
-pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::CascadeFact, String> {
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::CascadeTestFact, String> {
     layout::decode_fact(bytes)
 }
 
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = fact::CascadeFact;
+    type Payload = fact::CascadeTestFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         decode_fact_payload(fact.body())

@@ -16,7 +16,7 @@
 //! connection-scoped sharing behavior. Change the owning fact family when the
 //! payload being synced needs a new validation rule.
 
-pub mod cascade_fact;
+pub mod cascade_test_fact;
 pub mod compare;
 pub mod encrypted_root;
 pub mod have_id;

@@ -343,7 +343,7 @@ CREATE TABLE IF NOT EXISTS disappearing_messages_setting_rows (row_key BLOB PRIM
         identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
         identity::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
         identity::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
-        sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,
+        sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
         identity::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::request::rows::CONNECTION_REQUEST_ROWS,
@@ -506,12 +506,12 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("generate", content::event::cli::GENERATE_USAGE, generate),
     cli_command!(
         "generate-deps",
-        sync::cascade_fact::cli::GENERATE_DEPS_USAGE,
+        sync::cascade_test_fact::cli::GENERATE_DEPS_USAGE,
         generate_deps
     ),
     cli_command!(
         "replay-deps-reverse",
-        sync::cascade_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
+        sync::cascade_test_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
         replay_deps_reverse
     ),
     cli_command!(
@@ -542,7 +542,7 @@ pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
-    sync::cascade_fact::rows::CASCADE_STAGED_FACT_ROWS,
+    sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,
     connection::response::rows::CONNECTION_RESPONSE_ROWS,
@@ -614,7 +614,7 @@ macro_rules! projector_routes {
 }
 
 projector_routes! {
-    project_cascade_fact => sync::cascade_fact::layout::TYPE_CASCADE_FACT, sync::cascade_fact::project::CascadeFactProjector;
+    project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
     project_connection_request => connection::request::layout::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector;
     project_connection_response => connection::response::layout::TYPE_CONNECTION_RESPONSE, connection::response::project::ConnectionResponseProjector;
