@@ -19,6 +19,7 @@ use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::invite::layout as invite_layout;
+use topo::protocol::connection::bootstrap;
 use topo::protocol::connection::create_response::{
     create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
@@ -98,7 +99,23 @@ fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
     assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
     assert_ne!(response.handshake_hash, [0u8; 32]);
     assert_ne!(response.connection_secret, [0u8; 32]);
-    assert_eq!(reader.join().expect("reader"), response_fact.bytes);
+    let sent = reader.join().expect("reader");
+    assert_eq!(sent[0], bootstrap::TYPE_SEALED_CONNECTION_RESPONSE);
+    assert_ne!(sent, response_fact.bytes);
+    assert!(!sent
+        .windows(response.connection_secret.len())
+        .any(|window| window == response.connection_secret));
+    let initiator_endpoint = EndpointFact {
+        endpoint: scenario.initiator_endpoint,
+        secret: scenario.initiator_secret,
+        signing_public_key: crypto::ed25519_public_key(&[111; 32]),
+        signing_secret: [111; 32],
+    };
+    assert_eq!(
+        bootstrap::open_connection_response(&sent, &initiator_endpoint)
+            .expect("open sealed response"),
+        response_fact.bytes
+    );
 }
 
 #[test]
@@ -136,6 +153,7 @@ struct Scenario {
     intent: topo::core::intents::Intent,
     endpoint: EndpointFact,
     initiator_endpoint: [u8; 32],
+    initiator_secret: [u8; 32],
     responder_endpoint: [u8; 32],
     received_at: u64,
 }
@@ -230,6 +248,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         intent,
         endpoint,
         initiator_endpoint,
+        initiator_secret: initiator_static,
         responder_endpoint,
         received_at,
     }

@@ -7,7 +7,8 @@ should see:
 - `connection_request`: durable global fact
 - `connection_response`: durable local fact
 - `connection_frame_small`: ephemeral local fact
-- `connection_frame_large`: ephemeral local fact
+- `connection_frame_file_slice`: ephemeral local fact
+- `connection_frame_bundle`: ephemeral local fact
 
 There is no generic incoming wrapper fact. Bootstrap request and response bytes
 are already semantic connection protocol messages, so they enter durable fact
@@ -51,8 +52,9 @@ classification to `connection::frame::create`:
    create the durable local response fact, and create durable response receipt
    data.
 3. Otherwise, decode the public connection-frame header. A valid small header
-   emits a local ephemeral `connection_frame_small` fact; a valid large header
-   emits a local ephemeral `connection_frame_large` fact.
+   emits a local ephemeral `connection_frame_small` fact, a valid file-slice
+   header emits `connection_frame_file_slice`, and a valid bundle header emits
+   `connection_frame_bundle`.
 4. Malformed, unsupported, or unclassifiable bytes complete with no effects.
 
 The receive handler is therefore close to the networking layer, but it only uses

@@ -77,15 +77,14 @@ impl TypedProjector<super::Codec> for DeviceInviteProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_envelope::SignedPayload<DeviceInviteFact>,
+        device_invite: DeviceInviteFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("device_invite fact must have global scope".to_string());
         }
-        let envelope = signed.envelope;
-        let device_invite = signed.payload;
+        super::layout::verify_signature(&device_invite)?;
 
         // 2. Authority.
         //
@@ -97,11 +96,10 @@ impl TypedProjector<super::Codec> for DeviceInviteProjector {
             Some(user_invite_fact_id) => project_user_signed(
                 fact,
                 &device_invite,
-                &envelope,
                 user_invite_fact_id,
                 context,
             ),
-            None => project_endpoint_signed(fact, &device_invite, &envelope, context),
+            None => project_endpoint_signed(fact, &device_invite, context),
         }
     }
 }
@@ -156,44 +154,38 @@ through core's typed adapter. The owning fact module supplies a small codec:
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = auth::signed_envelope::SignedPayload<fact::DeviceInviteFact>;
+    type Payload = fact::DeviceInviteFact;
 
     fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
-        auth::signed_envelope::decode_signed_payload(
-            fact,
-            layout::TYPE_DEVICE_INVITE,
-            "device_invite",
-            decode_fact_payload,
-        )
+        decode_fact_payload(fact.body())
     }
 }
 ```
 
 The projector receives that typed payload in `project_typed()`. It should not
-call `layout::decode_fact(fact.body())`, decode a signed envelope from its own
-input fact, or dispatch on raw primary bytes except inside the module codec.
+call `layout::decode_fact(fact.body())` or dispatch on raw primary bytes except
+inside the module codec. If the fact family is signed, the typed payload carries
+natural signer fields and the projector verifies the signature in its structural
+section before authority checks.
 
 Foreign context fact bytes are different. A projector should not import another
 fact module's `layout` or call another module's raw layout codec. It should call
 a module-owned typed helper:
 
 ```rust
-let endpoint = endpoint_shared::decode_fact_payload(&endpoint_envelope.payload)
+let endpoint = endpoint_shared::decode_fact_payload(endpoint_fact.body())
     .map_err(|_| "user_invite signer must be workspace or endpoint_shared".to_string())?;
+endpoint_shared::layout::verify_signature(&endpoint)?;
 ```
 
 That keeps wire formatting centralized inside the owning fact module while
-letting projector policy read as typed facts and named witnesses. The same rule
-applies to signed envelopes: use `auth::signed_envelope::TYPE_SIGNED_ENVELOPE`,
-`auth::signed_envelope::SignedPayload<T>`, and
-`auth::signed_envelope::decode_envelope`, not the signed-envelope layout module.
+letting projector policy read as typed facts and named witnesses.
 
 Family projectors use the same rule with a module-owned enum:
 
 ```rust
 pub enum ProjectionPayload {
     Message(fact::ContentMessageFact),
-    SignedMessage(auth::signed_envelope::SignedPayload<fact::ContentMessageFact>),
     SecretNode(fact::SecretNodeFact),
 }
 ```
@@ -278,7 +270,7 @@ match invite.user_invite_fact_id {
 Bad:
 
 ```rust
-validate_authority(&needs, &invite, &envelope, context)?;
+validate_authority(&needs, &invite, context)?;
 ```
 
 Generic names like `validate_authority` hide the security proof. If the helper

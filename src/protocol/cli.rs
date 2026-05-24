@@ -114,7 +114,7 @@ pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     let output = ctx.with_command_context(|command_context| {
         auth::invite::cli::accept(command_context, args, from_listen_addr)
     })?;
-    let receipt = ctx.runtime_mut().submit_command_output(output)?;
+    let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
 }
 
@@ -126,7 +126,7 @@ pub(crate) fn accept_invite_server(
     let output = ctx.with_command_context(|command_context| {
         auth::invite::cli::accept_invite_server(command_context, args, from_listen_addr)
     })?;
-    let receipt = ctx.runtime_mut().submit_command_output(output)?;
+    let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
 }
 
@@ -138,7 +138,7 @@ pub(crate) fn accept_link(
     let output = ctx.with_command_context(|command_context| {
         auth::invite::cli::accept_link(command_context, args, from_listen_addr)
     })?;
-    let receipt = ctx.runtime_mut().submit_command_output(output)?;
+    let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
 }
 

@@ -1,10 +1,10 @@
 # Auth
 
 This document records the poc-10 auth authority and key-material invariants.
-Auth combines workspace identity, endpoint authority, signed envelopes,
-recipient public keys, removal frontiers, key wraps, and local secret material
-because those facts form one proof boundary: who can act in a workspace and
-what this store is allowed to open or share for that authority.
+Auth combines workspace identity, endpoint authority, naturally signed facts,
+recipient public keys, removal frontiers, deterministic key wraps, and local
+secret material because those facts form one proof boundary: who can act in a
+workspace and what this store is allowed to open or share for that authority.
 
 Content retention and deletion live in `protocol::content`; they interact with
 auth keys by emitting purge context that auth projectors can range-match.
@@ -19,13 +19,13 @@ needs/offers, `WakeLoop`, projectors, and handlers.
   granting, and accepting workspace authority.
 - `endpoint` and `endpoint_shared`: local and shared endpoint identity
   material.
-- `signed_envelope`: shared codec binding signer identity to another payload;
-  projectors for the wrapped fact family own signature and authority checks.
 - `removal_frontier`: shared fact naming a content-key frontier and its owner.
 - `recipient_key`: shared endpoint public key for receiving wraps.
 - `local_recipient_key`: local private material paired with one recipient key.
-- `key_wrap`: shared signed fact wrapping either a frontier root or one retained
-  history-node secret to one recipient key.
+- `key_wrap`: deterministic shared fact wrapping either a frontier root or one
+  retained history-node secret to one recipient key. Its integrity comes from
+  deterministic coordinate validation and AEAD associated data, not a natural
+  signature.
 - `key_request`: shared fact asking an authorized responder for missing key
   material for one frontier.
 - `local_key_secret`: local opened frontier/root secret.

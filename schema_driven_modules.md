@@ -23,10 +23,10 @@ Looking across the protocol fact-family modules in `src/protocol/`:
 The boilerplate share is mechanical. The repo already has the right primitives
 (`src/core/wire.rs` - `FixedLayout`, `Id32`, `U64be`, `Nonce24`, `FixedSlot<N>`,
 `Ciphertext<N>`) and a schema DSL parser (`src/core/schema_dsl.rs`). The newer
-modules (`connection::frame`, `auth::signed_envelope`, and `auth::key_wrap`) use
-the same fixed-layout primitives as the rest of the protocol tree. Schema
-generation should preserve those byte contracts rather than introduce a second
-layout vocabulary.
+modules (`connection::frame`, naturally signed auth/content facts, and
+`auth::key_wrap`) use the same fixed-layout primitives as the rest of the
+protocol tree. Schema generation should preserve those byte contracts rather
+than introduce a second layout vocabulary.
 
 ## What the schema can absorb
 
@@ -75,9 +75,10 @@ struct, encode, wrap in `Fact::new` with the right scope and timestamp.
 Schema-derivable end-to-end.
 
 For crypto modules (`connection_response`, `content_message`, `auth::key_wrap`),
-the tail of every recipe is the same shape: build the fact struct, encode,
-optionally wrap in a signed envelope, return a `Fact` with the right scope.
-The schema absorbs that tail. What it does not absorb is the recipe body.
+the tail of every recipe is the same shape: build the fact struct, populate
+natural signature fields when the family is signed, encode, and return a `Fact`
+with the right scope. The schema absorbs that tail. What it does not absorb is
+the recipe body.
 
 ## What stays hand-written
 
@@ -87,7 +88,7 @@ reviewable. Concretely:
 - `connection_response/create.rs` — X25519 DH (ee, es), HKDF derivation of
   response key and connection secret, transcript hashing.
 - `content/message/create.rs` — deterministic nonce derivation, AEAD encrypt
-  of message fields, plaintext padding, signed-envelope wrapping.
+  of message fields, plaintext padding, and natural content-message signing.
   Its projector exposes authenticated message metadata before decrypt so
   author deletions can purge without keys, while opened message context remains
   gated on successful decryption.
@@ -133,9 +134,9 @@ it needs:
 
 Protocol fact structs use fixed-width fields at the fact boundary:
 `FixedSlot<N>`, `FixedText<N>`, fixed arrays, or bounded structs that encode to
-a fixed layout. The non-semantic signed envelope is an auth helper with a
-bounded payload slot; child fact projectors verify signatures while projecting
-their own payloads.
+a fixed layout. Shareable facts carry natural signer fields directly in their
+family layout. Projectors verify those signatures while projecting their own
+payloads, and deterministic `key_wrap` remains the raw exception.
 
 The schema direction depends on this invariant. Generated fact declarations
 should reject public `Vec<T>` and `String` fields in `fact.rs`, keep opaque

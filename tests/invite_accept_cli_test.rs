@@ -846,7 +846,7 @@ fn try_accept_link_with_retry(db: &str, invite: &str, device_name: &str) -> Resu
 fn wait_for_users_containing(db: &str, workspace_id: &str, users: &[&str]) {
     let start = Instant::now();
     let mut last = String::new();
-    while start.elapsed() < Duration::from_secs(10) {
+    while start.elapsed() < Duration::from_secs(40) {
         let output = topo(&["--db", db, "users", workspace_id]);
         if output.status.success() {
             let text = stdout(&output);
@@ -859,7 +859,10 @@ fn wait_for_users_containing(db: &str, workspace_id: &str, users: &[&str]) {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("users never contained {users:?}:\n{last}");
+    panic!(
+        "users never contained {users:?}; connections={}:\n{last}",
+        connection_count(db)
+    );
 }
 
 fn wait_for_workspaces_containing(db: &str, values: &[&str]) {

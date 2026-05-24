@@ -15,8 +15,7 @@ use crate::core::{
     store::Store,
 };
 use crate::protocol::connection::send_facts_on_connection::{
-    send_facts_on_connection_intent, send_shareable_bucket_on_connection_intent,
-    SendFactsOnConnection,
+    send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use crate::protocol::{connection, sync};
 
@@ -118,10 +117,12 @@ fn append_live_tail_send(
     connection_id: FactId,
     fact: &Fact,
 ) -> HandlerResult {
-    Ok(output.intent(send_shareable_bucket_on_connection_intent(
-        connection_id,
-        fact.timestamp,
-    )))
+    Ok(
+        output.intent(send_facts_on_connection_intent(SendFactsOnConnection {
+            connection_id,
+            fact_ids: vec![fact.id],
+        })),
+    )
 }
 
 #[cfg(test)]
@@ -192,5 +193,23 @@ mod tests {
         assert_eq!(compare.range, sync::compare::fact::TimestampRange::ROOT);
         assert!(compare.response_requested);
         assert_eq!(output.intents.len(), 1);
+    }
+
+    #[test]
+    fn live_tail_send_names_only_the_trigger_fact() {
+        let connection_id = [8; 32];
+        let fact = Fact::new(FactScope::Global, 42, vec![1, 2, 3]);
+
+        let output =
+            append_live_tail_send(PipelineEffects::new(), connection_id, &fact).expect("tail");
+
+        assert_eq!(output.intents.len(), 1);
+        let send =
+            crate::protocol::connection::send_facts_on_connection::decode_send_facts_on_connection(
+                &output.intents[0],
+            )
+            .expect("decode send");
+        assert_eq!(send.connection_id, connection_id);
+        assert_eq!(send.fact_ids, vec![fact.id]);
     }
 }

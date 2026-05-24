@@ -470,6 +470,11 @@ enum ProjectionSource {
 /// - Apply row mutations.
 /// - Record durable intents.
 /// - Record ephemeral intents in the temp local queue.
+///
+/// Ephemeral inputs are allowed to park unresolved needs in standing context
+/// while their input row remains temp-local. Once a future durable offer
+/// satisfies those needs, the ephemeral selector makes the input eligible again
+/// and completion removes both the input and its parked needs.
 fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,
@@ -506,7 +511,10 @@ fn commit_projection_effects_in_tx(
         }
         ProjectionSource::Ephemeral => {
             validate_ephemeral_projection(effects).map_err(sqlite_string_error)?;
-            delete_ephemeral_fact_in_tx(tx, effects.fact_id)?;
+            replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
+            if effects.next_context.needs.is_empty() {
+                delete_ephemeral_fact_in_tx(tx, effects.fact_id)?;
+            }
         }
     }
 
@@ -694,16 +702,13 @@ fn load_pending_fact(
     let Some(fact) = fact else {
         return Ok(None);
     };
-    let previous_context = match source {
-        ProjectionSource::Durable => stored_context_for_owner(store, &fact_id)?,
-        ProjectionSource::Ephemeral => ContextSet::new(),
-    };
+    let previous_context = stored_context_for_owner(store, &fact_id)?;
     let projection_context = match source {
         ProjectionSource::Durable => {
             let time_ranges = pending_time_ranges_for_owner(store, &fact_id)?;
             stored_matching_context(store, &previous_context)?.with_time_ranges(time_ranges)
         }
-        ProjectionSource::Ephemeral => ProjectionContext::default(),
+        ProjectionSource::Ephemeral => stored_matching_context(store, &previous_context)?,
     };
     Ok(Some(PendingFact {
         source,
@@ -1159,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_input_missing_context_is_discarded_without_standing_need() {
+    fn ephemeral_input_missing_context_parks_until_context_arrives() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1187,11 +1192,66 @@ mod tests {
         assert!(
             crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
                 .expect("load ephemeral")
+                .is_some()
+        );
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert_eq!(context.needs.len(), 1);
+        assert!(context.offers.is_empty());
+
+        let idle = drain_pending_projection(
+            &EphemeralIntentAfterContext {
+                role: role.clone(),
+                key: key.clone(),
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect("drain parked projection without context");
+        assert_eq!(idle.projected, 0);
+
+        let offered = Fact::new(FactScope::Local, 2, b"available".to_vec());
+        submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: parent.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let replayed =
+            drain_pending_projection(&EphemeralIntentAfterContext { role, key }, &store, &[], 10)
+                .expect("drain parked projection with context");
+        assert_eq!(replayed.projected, 1);
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
                 .is_none()
         );
         let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
         assert!(context.needs.is_empty());
-        assert!(context.offers.is_empty());
+
+        let payload: Vec<u8> = store
+            .conn()
+            .query_row(
+                "SELECT payload FROM intents
+                 WHERE kind = 'ephemeral_ready'
+                   AND idempotence_key = ?1",
+                rusqlite::params![parent.id.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("ephemeral ready intent");
+        assert_eq!(payload, offered.id.to_vec());
     }
 
     #[test]

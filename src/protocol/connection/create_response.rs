@@ -4,8 +4,9 @@
 //! request projection. The request projector emits this intent with the
 //! request, invite-secret, and receive-receipt fact ids; the handler loads
 //! exactly those facts, creates fresh responder ephemeral material, builds the
-//! canonical `connection::response` fact, and emits follow-up work through the
-//! normal pipeline.
+//! canonical local `connection::response` fact, sends a sealed bootstrap
+//! response wrapper over TCP, and emits follow-up work through the normal
+//! pipeline.
 //!
 //! The payload is three fixed 32-byte ids in order: request id, invite-secret
 //! id, and fact-receipt id. This file owns intent identity, idempotence,
@@ -153,6 +154,7 @@ use crate::core::intents::{
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::auth::endpoint::create as local_endpoint;
 use crate::protocol::auth::invite::layout as invite_layout;
+use crate::protocol::connection::bootstrap;
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
@@ -244,11 +246,15 @@ impl IntentHandler for CreateConnectionResponseHandler {
             HandlerError::fatal("create_connection_response response route is missing")
         })?;
         let target = NetworkTarget::new(return_addr);
+        let sealed_response = bootstrap::seal_connection_response(
+            &built.fact.bytes,
+            &responder_ephemeral_private_key,
+        )?;
         network::send(
             context.store()?,
             target,
             OutboundFrame {
-                bytes: built.fact.bytes.clone(),
+                bytes: sealed_response,
             },
         )
         .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
