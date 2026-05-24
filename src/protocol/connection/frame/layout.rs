@@ -2,8 +2,9 @@
 //!
 //! Connection frames have two outer shapes, `ConnectionFrameSmallV1` and
 //! `ConnectionFrameLargeV1`. Both share a public header containing tag,
-//! version, size class, endpoint ids, connection id, and nonce; only the
-//! encrypted payload slot capacity differs. Received-frame fact encoding also
+//! version, size class, connection id, and nonce; only the encrypted payload
+//! slot capacity differs. Sender/receiver endpoint ids are carried inside the
+//! encrypted inner bundle. Received-frame fact encoding also
 //! stores normalized origin metadata around the raw frame bytes for ephemeral
 //! projection.
 //!
@@ -62,14 +63,9 @@ pub const CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES: usize =
 pub const CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES: usize =
     CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 
-/// Fixed public header size (tag + version + size class + 3 ids + nonce).
-pub const CONNECTION_FRAME_HEADER_BYTES: usize = Tag::<4>::LEN
-    + wire::U8_BYTES
-    + wire::U8_BYTES
-    + Id32::LEN
-    + Id32::LEN
-    + Id32::LEN
-    + Nonce24::LEN;
+/// Fixed public header size (tag + version + size class + connection id + nonce).
+pub const CONNECTION_FRAME_HEADER_BYTES: usize =
+    Tag::<4>::LEN + wire::U8_BYTES + wire::U8_BYTES + Id32::LEN + Nonce24::LEN;
 
 /// Outer wire length for a [`ConnectionFrameSmallV1`] frame.
 pub const CONNECTION_FRAME_SMALL_WIRE_BYTES: usize =
@@ -81,9 +77,7 @@ pub const CONNECTION_FRAME_LARGE_WIRE_BYTES: usize =
 
 const VERSION_OFFSET: usize = Tag::<4>::LEN;
 const SIZE_CLASS_OFFSET: usize = VERSION_OFFSET + wire::U8_BYTES;
-const SENDER_OFFSET: usize = SIZE_CLASS_OFFSET + wire::U8_BYTES;
-const RECEIVER_OFFSET: usize = SENDER_OFFSET + Id32::LEN;
-const CONNECTION_OFFSET: usize = RECEIVER_OFFSET + Id32::LEN;
+const CONNECTION_OFFSET: usize = SIZE_CLASS_OFFSET + wire::U8_BYTES;
 const NONCE_OFFSET: usize = CONNECTION_OFFSET + Id32::LEN;
 const CIPHERTEXT_OFFSET: usize = NONCE_OFFSET + Nonce24::LEN;
 
@@ -170,8 +164,6 @@ fn require_frame_size_class(frame: &[u8], expected_size_class: u8) -> Result<(),
 /// Fixed-width small connection::frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameSmallV1 {
-    pub sender_endpoint_id: Id32,
-    pub receiver_endpoint_id: Id32,
     pub connection_id: Id32,
     pub nonce: Nonce24,
     pub ciphertext: Ciphertext<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>,
@@ -180,8 +172,6 @@ pub struct ConnectionFrameSmallV1 {
 /// Fixed-width large connection::frame frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameLargeV1 {
-    pub sender_endpoint_id: Id32,
-    pub receiver_endpoint_id: Id32,
     pub connection_id: Id32,
     pub nonce: Nonce24,
     pub ciphertext: Ciphertext<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>,
@@ -195,8 +185,6 @@ impl FixedLayout for ConnectionFrameSmallV1 {
             out,
             Self::LEN,
             CONNECTION_FRAME_SIZE_CLASS_SMALL,
-            &self.sender_endpoint_id,
-            &self.receiver_endpoint_id,
             &self.connection_id,
             &self.nonce,
         )?;
@@ -204,14 +192,12 @@ impl FixedLayout for ConnectionFrameSmallV1 {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let (sender, receiver, connection, nonce) =
+        let (connection, nonce) =
             decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_SMALL)?;
         let ciphertext = Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::decode(
             &bytes[CIPHERTEXT_OFFSET..],
         )?;
         Ok(Self {
-            sender_endpoint_id: sender,
-            receiver_endpoint_id: receiver,
             connection_id: connection,
             nonce,
             ciphertext,
@@ -227,8 +213,6 @@ impl FixedLayout for ConnectionFrameLargeV1 {
             out,
             Self::LEN,
             CONNECTION_FRAME_SIZE_CLASS_LARGE,
-            &self.sender_endpoint_id,
-            &self.receiver_endpoint_id,
             &self.connection_id,
             &self.nonce,
         )?;
@@ -236,14 +220,12 @@ impl FixedLayout for ConnectionFrameLargeV1 {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let (sender, receiver, connection, nonce) =
+        let (connection, nonce) =
             decode_header(bytes, Self::LEN, CONNECTION_FRAME_SIZE_CLASS_LARGE)?;
         let ciphertext = Ciphertext::<CONNECTION_FRAME_LARGE_CIPHERTEXT_BYTES>::decode(
             &bytes[CIPHERTEXT_OFFSET..],
         )?;
         Ok(Self {
-            sender_endpoint_id: sender,
-            receiver_endpoint_id: receiver,
             connection_id: connection,
             nonce,
             ciphertext,
@@ -255,8 +237,6 @@ impl FixedLayout for ConnectionFrameLargeV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameHeader {
     pub size_class: u8,
-    pub sender_endpoint_id: Id32,
-    pub receiver_endpoint_id: Id32,
     pub connection_id: Id32,
     pub nonce: Nonce24,
 }
@@ -289,15 +269,11 @@ pub fn peek_frame_header(bytes: &[u8]) -> Result<ConnectionFrameHeader, WireErro
     if version != CONNECTION_FRAME_VERSION {
         return Err(WireError::InvalidBool { actual: version });
     }
-    let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
-    let sender_endpoint_id = Id32::decode(&bytes[SENDER_OFFSET..RECEIVER_OFFSET])?;
-    let receiver_endpoint_id = Id32::decode(&bytes[RECEIVER_OFFSET..CONNECTION_OFFSET])?;
+    let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..CONNECTION_OFFSET])?;
     let connection_id = Id32::decode(&bytes[CONNECTION_OFFSET..NONCE_OFFSET])?;
     let nonce = Nonce24::decode(&bytes[NONCE_OFFSET..CIPHERTEXT_OFFSET])?;
     Ok(ConnectionFrameHeader {
         size_class,
-        sender_endpoint_id,
-        receiver_endpoint_id,
         connection_id,
         nonce,
     })
@@ -339,8 +315,6 @@ pub fn decode_frame_parts(bytes: &[u8]) -> Result<ConnectionFrameParts<'_>, Wire
 /// Encode a connection::frame frame for either size class from already-encrypted bytes.
 pub fn encode_frame_bytes(
     size_class: u8,
-    sender_endpoint_id: Id32,
-    receiver_endpoint_id: Id32,
     connection_id: Id32,
     nonce: Nonce24,
     ciphertext: &[u8],
@@ -353,15 +327,7 @@ pub fn encode_frame_bytes(
         });
     }
     let mut out = vec![0; wire_len];
-    encode_header(
-        &mut out,
-        wire_len,
-        size_class,
-        &sender_endpoint_id,
-        &receiver_endpoint_id,
-        &connection_id,
-        &nonce,
-    )?;
+    encode_header(&mut out, wire_len, size_class, &connection_id, &nonce)?;
     wire::put_u32be(
         ciphertext.len() as u32,
         &mut out[CIPHERTEXT_OFFSET..CIPHERTEXT_OFFSET + 4],
@@ -375,8 +341,6 @@ fn encode_header(
     out: &mut [u8],
     expected_len: usize,
     size_class: u8,
-    sender: &Id32,
-    receiver: &Id32,
     connection: &Id32,
     nonce: &Nonce24,
 ) -> Result<(), WireError> {
@@ -391,9 +355,7 @@ fn encode_header(
         CONNECTION_FRAME_VERSION,
         &mut out[VERSION_OFFSET..SIZE_CLASS_OFFSET],
     )?;
-    wire::put_u8(size_class, &mut out[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
-    sender.encode(&mut out[SENDER_OFFSET..RECEIVER_OFFSET])?;
-    receiver.encode(&mut out[RECEIVER_OFFSET..CONNECTION_OFFSET])?;
+    wire::put_u8(size_class, &mut out[SIZE_CLASS_OFFSET..CONNECTION_OFFSET])?;
     connection.encode(&mut out[CONNECTION_OFFSET..NONCE_OFFSET])?;
     nonce.encode(&mut out[NONCE_OFFSET..CIPHERTEXT_OFFSET])?;
     Ok(())
@@ -403,7 +365,7 @@ fn decode_header(
     bytes: &[u8],
     expected_len: usize,
     expected_size_class: u8,
-) -> Result<(Id32, Id32, Id32, Nonce24), WireError> {
+) -> Result<(Id32, Nonce24), WireError> {
     if bytes.len() != expected_len {
         return Err(WireError::WrongLength {
             expected: expected_len,
@@ -418,15 +380,13 @@ fn decode_header(
     if version != CONNECTION_FRAME_VERSION {
         return Err(WireError::InvalidBool { actual: version });
     }
-    let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..SENDER_OFFSET])?;
+    let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..CONNECTION_OFFSET])?;
     if size_class != expected_size_class {
         return Err(WireError::InvalidBool { actual: size_class });
     }
-    let sender = Id32::decode(&bytes[SENDER_OFFSET..RECEIVER_OFFSET])?;
-    let receiver = Id32::decode(&bytes[RECEIVER_OFFSET..CONNECTION_OFFSET])?;
     let connection = Id32::decode(&bytes[CONNECTION_OFFSET..NONCE_OFFSET])?;
     let nonce = Nonce24::decode(&bytes[NONCE_OFFSET..CIPHERTEXT_OFFSET])?;
-    Ok((sender, receiver, connection, nonce))
+    Ok((connection, nonce))
 }
 
 fn frame_shape(size_class: u8) -> Result<(usize, usize), WireError> {
@@ -445,9 +405,7 @@ fn frame_shape(size_class: u8) -> Result<(usize, usize), WireError> {
 
 /// Sanity-check assertion that the constants above stay consistent.
 const _: () = {
-    assert!(
-        CONNECTION_FRAME_HEADER_BYTES == 4 + 1 + 1 + 32 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES
-    );
+    assert!(CONNECTION_FRAME_HEADER_BYTES == 4 + 1 + 1 + 32 + XCHACHA20_POLY1305_NONCE_BYTES);
     assert!(CONNECTION_FRAME_SMALL_WIRE_BYTES < CONNECTION_FRAME_LARGE_WIRE_BYTES);
 };
 
@@ -458,7 +416,7 @@ const _: () = {
 const FRAME_PURPOSE: &[u8] = b"topo connection::frame frame v1";
 const INNER_BUNDLE_TAG: &[u8; 4] = b"TIB1";
 const INNER_BUNDLE_VERSION: u8 = 1;
-const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 4;
+const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 32 + 32 + 4;
 const INNER_FACT_LEN_BYTES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -543,10 +501,17 @@ pub struct OpenedConnectionFrame {
     pub facts: ConnectionFrameFactBundle,
 }
 
-pub fn connection_send_nonce(connection_id: FactId, fact_ids: &[FactId]) -> XChaCha20Poly1305Nonce {
+pub fn connection_send_nonce(
+    connection_id: FactId,
+    sender_endpoint_id: FactId,
+    receiver_endpoint_id: FactId,
+    fact_ids: &[FactId],
+) -> XChaCha20Poly1305Nonce {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:connection::frame-connection-send-nonce:v1:");
     hash.update(&connection_id);
+    hash.update(&sender_endpoint_id);
+    hash.update(&receiver_endpoint_id);
     hash.update(&(fact_ids.len() as u32).to_be_bytes());
     for fact_id in fact_ids {
         hash.update(fact_id);
@@ -568,14 +533,13 @@ pub fn received_connection_fact_id(frame: &[u8]) -> Result<FactId, String> {
 pub fn seal_connection_frame(input: SealConnectionFrame) -> Result<Vec<u8>, String> {
     let packed_len = inner_bundle_packed_len(&input.facts)?;
     let size_class = frame_size_class_for_plaintext(packed_len)?;
-    let plaintext = encode_inner_bundle(&input.facts, plaintext_len_for_size_class(size_class)?)?;
-    let aad = frame_associated_data(
-        size_class,
+    let plaintext = encode_inner_bundle(
+        &input.facts,
+        plaintext_len_for_size_class(size_class)?,
         input.sender_endpoint_id,
         input.receiver_endpoint_id,
-        input.connection_id,
-        input.nonce,
-    );
+    )?;
+    let aad = frame_associated_data(size_class, input.connection_id, input.nonce);
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &input.connection_secret,
         &aad,
@@ -584,8 +548,6 @@ pub fn seal_connection_frame(input: SealConnectionFrame) -> Result<Vec<u8>, Stri
     )?;
     encode_frame_bytes(
         size_class,
-        FixedBytes(input.sender_endpoint_id),
-        FixedBytes(input.receiver_endpoint_id),
         FixedBytes(input.connection_id),
         FixedBytes(input.nonce),
         &ciphertext,
@@ -606,7 +568,12 @@ pub fn seal_connection_send_frame(
         sender_endpoint_id,
         receiver_endpoint_id,
         connection_secret,
-        nonce: connection_send_nonce(connection_id, fact_ids),
+        nonce: connection_send_nonce(
+            connection_id,
+            sender_endpoint_id,
+            receiver_endpoint_id,
+            fact_ids,
+        ),
         facts,
     })
 }
@@ -626,8 +593,6 @@ pub fn open_connection_frame(
     }
     let aad = frame_associated_data(
         parts.header.size_class,
-        parts.header.sender_endpoint_id.0,
-        parts.header.receiver_endpoint_id.0,
         parts.header.connection_id.0,
         parts.header.nonce.0,
     );
@@ -645,12 +610,13 @@ pub fn open_connection_frame(
             plaintext.len()
         ));
     }
+    let inner = decode_inner_bundle(&plaintext)?;
     Ok(OpenedConnectionFrame {
         connection_id: parts.header.connection_id.0,
-        sender_endpoint_id: parts.header.sender_endpoint_id.0,
-        receiver_endpoint_id: parts.header.receiver_endpoint_id.0,
+        sender_endpoint_id: inner.sender_endpoint_id,
+        receiver_endpoint_id: inner.receiver_endpoint_id,
         frame_hash: crypto::hash(frame),
-        facts: decode_inner_bundle(&plaintext)?,
+        facts: inner.facts,
     })
 }
 
@@ -689,16 +655,12 @@ fn ciphertext_len_for_size_class(size_class: u8) -> Result<usize, String> {
 
 fn frame_associated_data(
     size_class: u8,
-    sender_endpoint_id: FactId,
-    receiver_endpoint_id: FactId,
     connection_id: FactId,
     nonce: XChaCha20Poly1305Nonce,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(FRAME_PURPOSE.len() + 1 + 32 * 3 + 24);
+    let mut out = Vec::with_capacity(FRAME_PURPOSE.len() + 1 + 32 + 24);
     out.extend_from_slice(FRAME_PURPOSE);
     out.push(size_class);
-    out.extend_from_slice(&sender_endpoint_id);
-    out.extend_from_slice(&receiver_endpoint_id);
     out.extend_from_slice(&connection_id);
     out.extend_from_slice(&nonce);
     out
@@ -724,6 +686,8 @@ fn inner_bundle_packed_len(facts: &ConnectionFrameFactBundle) -> Result<usize, S
 fn encode_inner_bundle(
     facts: &ConnectionFrameFactBundle,
     plaintext_len: usize,
+    sender_endpoint_id: FactId,
+    receiver_endpoint_id: FactId,
 ) -> Result<Vec<u8>, String> {
     let packed_len = inner_bundle_packed_len(facts)?;
     if packed_len > plaintext_len {
@@ -737,6 +701,8 @@ fn encode_inner_bundle(
     let mut offset = 0;
     put(&mut out, &mut offset, INNER_BUNDLE_TAG)?;
     put(&mut out, &mut offset, &[INNER_BUNDLE_VERSION])?;
+    put(&mut out, &mut offset, &sender_endpoint_id)?;
+    put(&mut out, &mut offset, &receiver_endpoint_id)?;
     put_u32(&mut out, &mut offset, facts.len())?;
     for fact in facts.iter() {
         put_u32(&mut out, &mut offset, fact.len())?;
@@ -745,7 +711,13 @@ fn encode_inner_bundle(
     Ok(out)
 }
 
-fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String> {
+struct DecodedInnerBundle {
+    sender_endpoint_id: FactId,
+    receiver_endpoint_id: FactId,
+    facts: ConnectionFrameFactBundle,
+}
+
+fn decode_inner_bundle(bytes: &[u8]) -> Result<DecodedInnerBundle, String> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != INNER_BUNDLE_TAG {
         return Err("expected connection::frame inner bundle".to_string());
@@ -756,6 +728,8 @@ fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String
             "unsupported connection::frame inner bundle version {version}"
         ));
     }
+    let sender_endpoint_id = reader.id32()?;
+    let receiver_endpoint_id = reader.id32()?;
     let count = reader.u32()? as usize;
     if count == 0 {
         return Err("connection::frame inner bundle must contain at least one fact".to_string());
@@ -765,7 +739,11 @@ fn decode_inner_bundle(bytes: &[u8]) -> Result<ConnectionFrameFactBundle, String
         facts.push(reader.bytes()?.to_vec());
     }
     reader.finish_zero_padding()?;
-    Ok(facts)
+    Ok(DecodedInnerBundle {
+        sender_endpoint_id,
+        receiver_endpoint_id,
+        facts,
+    })
 }
 
 fn put_u32(out: &mut [u8], offset: &mut usize, value: usize) -> Result<(), String> {
@@ -811,6 +789,10 @@ impl<'a> Reader<'a> {
     fn bytes(&mut self) -> Result<&'a [u8], String> {
         let len = self.u32()? as usize;
         self.take(len)
+    }
+
+    fn id32(&mut self) -> Result<FactId, String> {
+        Ok(self.take(32)?.try_into().unwrap())
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {

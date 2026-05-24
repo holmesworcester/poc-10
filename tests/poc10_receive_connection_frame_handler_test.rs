@@ -476,11 +476,9 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 
 #[test]
 fn well_formed_large_frame_can_park_before_materializing_large_slot() {
-    let (connection_fact, connection) = connection_fact();
+    let (connection_fact, _) = connection_fact();
     let frame = frame_layout::encode_frame_bytes(
         CONNECTION_FRAME_SIZE_CLASS_LARGE,
-        FixedBytes(connection.from_endpoint),
-        FixedBytes(connection.to_endpoint),
         FixedBytes(connection_fact.id),
         FixedBytes([19; 24]),
         b"not-opened-without-context",
