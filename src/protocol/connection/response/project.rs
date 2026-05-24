@@ -14,8 +14,8 @@
 //!      initiator secret; local responses require responder secret. Close
 //!      context removes the response row and purges this response fact.
 //!   3. MATERIALIZE. Valid responses write the connection_response row, publish
-//!      local connection context, and schedule the initial sync seed for the
-//!      materialized connection.
+//!      local connection context, and schedule the initial one-shot sync seed
+//!      for the materialized connection.
 //!
 //! Change this projector for response admission, context waits, connection
 //! context offers, or sync seeding. Response byte compatibility belongs in
@@ -375,15 +375,13 @@ fn materialized_output(
         )?));
     let seed_timeline = super::seed_sync_timeline();
     let seed_at = fact.timestamp.saturating_add(SEED_SYNC_DELAY_MS);
-    if let Some(now_ms) = projection_context.time_reached(&seed_timeline, seed_at) {
+    if projection_context
+        .time_reached(&seed_timeline, seed_at)
+        .is_some()
+    {
         output = output.intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: response_id,
         }));
-        output = output.time_wake(TimeWake {
-            owner: response_id,
-            timeline: seed_timeline,
-            at: now_ms.saturating_add(SEED_SYNC_DELAY_MS),
-        });
     } else {
         output = output.time_wake(TimeWake {
             owner: response_id,
@@ -728,11 +726,7 @@ mod projector_tests {
             output.effects.intents[0].kind.as_str(),
             SEED_CONNECTION_SYNC
         );
-        assert_eq!(output.time_wakes.len(), 1);
-        assert_eq!(
-            output.time_wakes[0].at,
-            scenario.response_fact.timestamp + (super::SEED_SYNC_DELAY_MS * 2)
-        );
+        assert!(output.time_wakes.is_empty());
     }
 
     #[test]

@@ -60,13 +60,18 @@ context_have[]
 context_offer[]
 ```
 
-`context_have` contains sync-eligible context facts that the projector has
+`context_have` contains direct sync-eligible context facts that the projector has
 validated or consumed in this pass. It should include exact input parents,
 matched update/about facts, matched authority facts, key wraps, retained key
 nodes, and other out-of-range witnesses that would help a receiver project the
-owner fact. Local-only secrets must not be listed as sendable facts; projectors
-should represent their shared coverage through the public facts or selectors
-that peers are allowed to learn.
+owner fact. A projector does not need to copy the entire dependency graph into
+each leaf. If fact A lists fact B and fact B's own projector listed fact C, the
+range response derives A's closure by walking the persisted A -> B -> C rows.
+That walk is mechanical graph composition over projector-owned rows; it is not
+permission to parse fact bytes or infer semantic dependencies in sync code.
+Local-only secrets must not be listed as sendable facts; projectors should
+represent their shared coverage through the public facts or selectors that
+peers are allowed to learn.
 
 `context_offer` contains the public offer metadata associated with the included
 context facts. It is useful when the receiver can match the transferred facts
@@ -167,7 +172,12 @@ range, the response can include:
 
 This keeps dep-aware sync bounded. The expensive semantic choice of what counts
 as context was already made by projectors during projection. Sync handlers only
-walk indexed range rows and exact leaf-context rows.
+walk indexed range rows and exact leaf-context rows. For `--with-deps`, that
+walk must be transitive: include each in-range owner, then enqueue its
+projector-supplied `context_have` facts, then enqueue each dependency's own
+`context_have` facts until the authorized shareable graph is exhausted. The
+walk stops at missing, purged, unauthorized, or local-only facts because those
+facts have no sendable shareable row for the connection.
 
 ## Range Sync CLI
 
@@ -196,13 +206,13 @@ network handlers perform framing and socket egress. It should not build frames
 or write to the network directly from the command path.
 
 The current poc-10 implementation stores owner leaves and `context_have` rows
-as projector-supplied `update_negentropy_tree` contributions. Range sends walk those
-rows for dependency closure and never rediscover dependencies by parsing fact
-bytes in the sync handler. Raw needs remain excluded from the persisted rows.
-That exclusion is a security boundary, not just a space optimization: a
-projector may emit needs before the related signature or authority context has
-validated, so only validated offers/context may become advertised negentropy
-state.
+as projector-supplied `update_negentropy_tree` contributions. Range sends walk
+those rows for transitive dependency closure and never rediscover dependencies
+by parsing fact bytes in the sync handler. Raw needs remain excluded from the
+persisted rows. That exclusion is a security boundary, not just a space
+optimization: a projector may emit needs before the related signature or
+authority context has validated, so only validated offers/context may become
+advertised negentropy state.
 
 ## Purge And Retraction
 
@@ -239,6 +249,9 @@ retention policy.
 - Leaf and owner-purge updates are incremental; no required update path rebuilds
   the full negentropy tree.
 - Range summaries include context closure, not only owner fact ids.
+- Context closure is derived transitively from direct projector-supplied
+  `context_have` rows, not by duplicating every ancestor into each leaf and not
+  by fact parsing in sync handlers.
 - Local-only secret material is never exposed as sendable `context_have`.
 - Purge/retraction removes the owner's negentropy contribution through the
   owner projector or its validated purge path.
@@ -267,6 +280,11 @@ Add focused tests with the implementation:
   and appear in `messages` without syncing the full range. The paired
   `--without-deps` case must not make the message viewable, proving the signer
   context came from dep-aware leaf closure rather than an accidental full sync.
+- black-box CLI range-sync tests with at least one multi-hop dependency, such as
+  a retention policy authored by a newly delegated admin: the policy leaf lists
+  the delegated admin grant directly, and the range response must also deliver
+  the admin grant's own workspace/root-admin/user context by transitive
+  `context_have` closure.
 - guardrail tests proving sync compare/response code reads the durable
   negentropy tables instead of scanning all facts or context rows for closure.
 - final worktree step: commit the completed work on that same worktree branch

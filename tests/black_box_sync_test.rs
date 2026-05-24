@@ -211,7 +211,7 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
 }
 
 #[test]
-fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
+fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-range.db");
     let carol = temp_db(&tmp, "carol-range.db");
@@ -230,6 +230,16 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         alice_port,
         "bob-range",
         "bob-range-phone",
+    );
+    let bob_endpoint = endpoint_id(&bob);
+    sync_range_until_queued(
+        &alice,
+        &bob_endpoint,
+        &workspace,
+        "0",
+        "18446744073709551615",
+        true,
+        30_000,
     );
     poll_for_workspace_member(&bob, &workspace, "bob-range", 10_000);
 
@@ -293,6 +303,16 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         &carol_recipient_id,
         30_000,
     );
+    poll_for_workspace_member(&alice, &workspace, "carol-range", 30_000);
+    let carol_user_id = line_value(&accepted_carol, "user_id");
+    let carol_admin = assert_success(topo(&[
+        "--db",
+        &alice,
+        "grant-admin",
+        &workspace,
+        &carol_user_id,
+    ]));
+    assert!(!line_value(&carol_admin, "admin_id").is_empty());
     sync_range_until_queued(
         &alice,
         &carol_endpoint,
@@ -326,15 +346,69 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
         30_000,
     );
     poll_for_message_text(&alice, &workspace, "carol-range-message", 10_000);
+
+    let policy_at = message_at
+        .parse::<u64>()
+        .expect("message timestamp")
+        .saturating_add(1)
+        .to_string();
+    let clock = assert_success(topo(&["--db", &carol, "clock", "set", &policy_at]));
+    assert_eq!(line_value(&clock, "next_timestamp"), policy_at);
+    let policy = assert_success(topo(&[
+        "--db",
+        &carol,
+        "disappearing-set",
+        &workspace,
+        "120",
+    ]));
+    assert_eq!(line_value(&policy, "ttl_minutes"), "120");
+    sync_range_until_queued(
+        &carol,
+        &alice_endpoint,
+        &workspace,
+        &policy_at,
+        &policy_at,
+        true,
+        30_000,
+    );
+    poll_for_disappearing_value(&alice, &workspace, "current_ttl_minutes", "120", 10_000);
     alice_daemon.assert_running();
     carol_daemon.assert_running();
     assert_success(topo(&["--db", &carol, "stop"]));
     drop(carol_daemon);
     wait_for_daemon_lock_release(&carol);
 
-    let bob_endpoint = endpoint_id(&bob);
-    let before_without = sync_indexed_facts(&bob);
     bob_daemon = spawn_daemon_with_sync_ms(&bob, bob_port, 600_000);
+    assert_ne!(
+        disappearing_value(&bob, &workspace, "current_ttl_minutes"),
+        "120"
+    );
+
+    let before_policy_without = fact_count(&bob);
+    let policy_without = assert_success(topo(&[
+        "--db",
+        &alice,
+        "sync-range",
+        &bob_endpoint,
+        "--workspace",
+        &workspace,
+        "--start-ms",
+        &policy_at,
+        "--end-ms",
+        &policy_at,
+        "--without-deps",
+    ]));
+    assert_eq!(line_value(&policy_without, "deps"), "without");
+    assert_eq!(line_value(&policy_without, "queued"), "yes");
+    wait_for_fact_count_at_least(&bob, before_policy_without + 1, 10_000);
+    thread::sleep(Duration::from_millis(1200));
+    assert_ne!(
+        disappearing_value(&bob, &workspace, "current_ttl_minutes"),
+        "120",
+        "without-deps range sync must not materialize Carol's admin-authored policy"
+    );
+
+    let before_without = fact_count(&bob);
     let without = assert_success(topo(&[
         "--db",
         &alice,
@@ -350,12 +424,29 @@ fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
     ]));
     assert_eq!(line_value(&without, "deps"), "without");
     assert_eq!(line_value(&without, "queued"), "yes");
-    wait_for_sync_indexed_at_least(&bob, before_without + 1, 10_000);
+    wait_for_fact_count_at_least(&bob, before_without + 1, 10_000);
     thread::sleep(Duration::from_millis(1200));
     assert!(
         !messages_text(&bob, &workspace).contains("carol-range-message"),
         "without-deps range sync must not make the out-of-range signer message viewable"
     );
+
+    let policy_with = assert_success(topo(&[
+        "--db",
+        &alice,
+        "sync-range",
+        &bob_endpoint,
+        "--workspace",
+        &workspace,
+        "--start-ms",
+        &policy_at,
+        "--end-ms",
+        &policy_at,
+        "--with-deps",
+    ]));
+    assert_eq!(line_value(&policy_with, "deps"), "with");
+    assert_eq!(line_value(&policy_with, "queued"), "yes");
+    poll_for_disappearing_value(&bob, &workspace, "current_ttl_minutes", "120", 10_000);
 
     let with = assert_success(topo(&[
         "--db",
@@ -844,16 +935,44 @@ fn messages_text(db: &str, workspace_id: &str) -> String {
     assert_success(topo(&["--db", db, "messages", workspace_id]))
 }
 
+fn disappearing_value(db: &str, workspace_id: &str, key: &str) -> String {
+    let status = assert_success(topo(&["--db", db, "disappearing-status", workspace_id]));
+    line_value(&status, key)
+}
+
+fn poll_for_disappearing_value(
+    db: &str,
+    workspace_id: &str,
+    key: &str,
+    expected: &str,
+    timeout_ms: u64,
+) {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let out = topo(&["--db", db, "disappearing-status", workspace_id]);
+        if out.status.success() {
+            let text = stdout(&out);
+            if line_value(&text, key) == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&out);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("disappearing-status {key} did not reach {expected} in {db}; last output:\n{last}");
+}
+
 fn endpoint_id(db: &str) -> String {
     let identity = assert_success(topo(&["--db", db, "identity"]));
     line_value(&identity, "endpoint_id")
 }
 
-fn sync_indexed_facts(db: &str) -> usize {
-    let status = assert_success(topo(&["--db", db, "sync-status"]));
-    line_value(&status, "indexed_facts")
-        .parse()
-        .expect("indexed_facts")
+fn fact_count(db: &str) -> usize {
+    let count = assert_success(topo(&["--db", db, "count"]));
+    line_value(&count, "facts").parse().expect("facts")
 }
 
 fn sync_range_until_queued(
@@ -900,16 +1019,14 @@ fn sync_range_until_queued(
     panic!("sync-range never queued; last error:\n{last}");
 }
 
-fn wait_for_sync_indexed_at_least(db: &str, expected: usize, timeout_ms: u64) {
+fn wait_for_fact_count_at_least(db: &str, expected: usize, timeout_ms: u64) {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut last = String::new();
     while std::time::Instant::now() < deadline {
-        let output = topo(&["--db", db, "sync-status"]);
+        let output = topo(&["--db", db, "count"]);
         if output.status.success() {
             let text = stdout(&output);
-            let observed = line_value(&text, "indexed_facts")
-                .parse::<usize>()
-                .expect("indexed_facts");
+            let observed = line_value(&text, "facts").parse::<usize>().expect("facts");
             if observed >= expected {
                 return;
             }
@@ -919,7 +1036,7 @@ fn wait_for_sync_indexed_at_least(db: &str, expected: usize, timeout_ms: u64) {
         }
         thread::sleep(Duration::from_millis(250));
     }
-    panic!("sync indexed_facts did not reach {expected} in {db}:\n{last}");
+    panic!("fact count did not reach {expected} in {db}:\n{last}");
 }
 
 fn poll_for_file_complete(
