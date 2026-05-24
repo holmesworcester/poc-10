@@ -68,6 +68,16 @@ impl MatchCliContext {
         run(&command_context)
     }
 
+    fn with_key_material_context<T>(
+        &self,
+        run: impl FnOnce(&CommandContext<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let clock = SystemClock;
+        let vault = auth::key_wrap::commands::KeyMaterialVault::new(self.runtime.store());
+        let command_context = self.runtime.command_context(&clock, &vault);
+        run(&command_context)
+    }
+
     fn with_content_message_context<T>(
         &self,
         workspace_id: WorkspaceId,
@@ -217,7 +227,7 @@ pub(crate) fn key_recipient(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let output = ctx.with_command_context(|command_context| {
+    let output = ctx.with_key_material_context(|command_context| {
         auth::key_wrap::cli::key_recipient(command_context, args)
     })?;
     let receipt = ctx.submit_and_settle(output)?;
@@ -236,7 +246,7 @@ pub(crate) fn key_recipient_rotation(
     let previous =
         auth::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
             .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
-    let output = ctx.with_command_context(|command_context| {
+    let output = ctx.with_key_material_context(|command_context| {
         auth::key_wrap::cli::key_recipient_rotation(command_context, args, previous)
     })?;
     let receipt = ctx.submit_and_settle(output)?;

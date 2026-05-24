@@ -1,7 +1,8 @@
 //! Connection-frame sealing, classification, and child admission.
 //!
 //! Outbound connection sends call this module to reject private/local payloads
-//! and seal an ordered fact bundle into fixed small or large frame bytes.
+//! and seal an ordered fact bundle into fixed small, file-slice, or bundle
+//! frame bytes.
 //! Inbound receive handling calls the same module to classify raw network bytes
 //! into bootstrap request/response facts or ephemeral frame facts. Frame
 //! projection calls it again to open a frame and turn each inner payload into a
@@ -17,17 +18,19 @@ use crate::core::crypto;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::FactCodec;
+use crate::core::wire::FixedSlot;
 use crate::protocol::{auth, connection, content, sync};
 
-use super::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use super::fact::{
+    ConnectionFrameBundleFact, ConnectionFrameFileSliceFact, ConnectionFrameSmallFact,
+};
 use super::frame::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 
 /// Return the bytes that may be packaged into a connection::frame frame.
 ///
-/// Local facts and private/local fact tags are never connection-frame payloads. A
-/// signed envelope is parsed here as a defensive check that the envelope is
-/// well-formed and does not hide a private local payload type. Signature
-/// verification belongs to the semantic projector once signer context exists.
+/// Local facts and private/local fact tags are never connection-frame payloads.
+/// Semantic fact validation belongs to the child fact projector once signer
+/// context exists.
 pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
     if fact.scope == FactScope::Local {
         return Err(format!(
@@ -48,22 +51,6 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
         ));
     }
 
-    if tag == auth::signed_fact::layout::TYPE_SIGNED_FACT {
-        let envelope =
-            auth::signed_fact::layout::decode_signed_fact(fact.body()).map_err(|err| {
-                format!(
-                    "connection::frame send refused invalid signed fact {:?}: {err}",
-                    fact.id
-                )
-            })?;
-        if is_private_local_fact_tag(envelope.inner_type) {
-            return Err(format!(
-                "connection::frame send refused private/local signed payload tag {} for {:?}",
-                envelope.inner_type, fact.id
-            ));
-        }
-    }
-
     Ok(fact.body())
 }
 
@@ -76,12 +63,13 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::response::layout::TYPE_CONNECTION_RESPONSE
             | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
             | auth::invite::layout::TYPE_INVITE_SECRET
-            | auth::signed_fact::layout::TYPE_LOCAL_SIGNER_SECRET
+            | auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET
             | auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
             | auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
             | auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
             | connection::frame::layout::TYPE_CONNECTION_FRAME_SMALL
-            | connection::frame::layout::TYPE_CONNECTION_FRAME_LARGE
+            | connection::frame::layout::TYPE_CONNECTION_FRAME_FILE_SLICE
+            | connection::frame::layout::TYPE_CONNECTION_FRAME_BUNDLE
             | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
     )
 }
@@ -212,9 +200,9 @@ fn received_connection_frame_effect(
     match parts.header.size_class {
         super::layout::CONNECTION_FRAME_SIZE_CLASS_SMALL => {
             let fact = ConnectionFrameSmallFact {
-                origin_addr: input.origin_addr.to_vec(),
+                origin_addr: origin_addr_slot(input.origin_addr)?,
                 received_at_local_ms: input.received_at_local_ms,
-                frame: input.frame.to_vec(),
+                frame: exact_frame_slot(input.frame)?,
             };
             Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
                 FactScope::Local,
@@ -222,20 +210,47 @@ fn received_connection_frame_effect(
                 super::layout::encode_small_fact(&fact)?,
             )))
         }
-        super::layout::CONNECTION_FRAME_SIZE_CLASS_LARGE => {
-            let fact = ConnectionFrameLargeFact {
-                origin_addr: input.origin_addr.to_vec(),
+        super::layout::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
+            let fact = ConnectionFrameFileSliceFact {
+                origin_addr: origin_addr_slot(input.origin_addr)?,
                 received_at_local_ms: input.received_at_local_ms,
-                frame: input.frame.to_vec(),
+                frame: exact_frame_slot(input.frame)?,
             };
             Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
                 FactScope::Local,
                 input.received_at_local_ms,
-                super::layout::encode_large_fact(&fact)?,
+                super::layout::encode_file_slice_fact(&fact)?,
+            )))
+        }
+        super::layout::CONNECTION_FRAME_SIZE_CLASS_BUNDLE => {
+            let fact = ConnectionFrameBundleFact {
+                origin_addr: origin_addr_slot(input.origin_addr)?,
+                received_at_local_ms: input.received_at_local_ms,
+                frame: exact_frame_slot(input.frame)?,
+            };
+            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
+                FactScope::Local,
+                input.received_at_local_ms,
+                super::layout::encode_bundle_fact(&fact)?,
             )))
         }
         _ => Ok(PipelineEffects::new()),
     }
+}
+
+fn origin_addr_slot(
+    origin_addr: &[u8],
+) -> Result<connection::fact_receipt::fact::OriginAddr, String> {
+    let normalized = connection::fact_receipt::create::normalize_origin_addr_bytes(origin_addr)?;
+    connection::fact_receipt::fact::OriginAddr::new(&normalized)
+        .map_err(|err| format!("connection frame origin addr: {err}"))
+}
+
+fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot<N>, String> {
+    if frame.len() != N {
+        return Err(format!("connection frame must be exactly {N} bytes"));
+    }
+    FixedSlot::new(frame).map_err(|err| format!("connection frame bytes: {err}"))
 }
 
 pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, String> {
@@ -324,10 +339,17 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             });
         }
         content::reaction::TYPE_CONTENT_REACTION => {
-            return Err("received content reaction fact must be signed".to_string());
+            return admit_with_codec::<content::reaction::Codec>(bytes, |reaction| {
+                Ok(Admission::workspace(
+                    reaction.workspace_id,
+                    reaction.created_at_ms,
+                ))
+            });
         }
         content::file::TYPE_CONTENT_FILE => {
-            return Err("received content file fact must be signed".to_string());
+            return admit_with_codec::<content::file::Codec>(bytes, |file| {
+                Ok(Admission::workspace(file.workspace_id, file.created_at_ms))
+            });
         }
         content::file_slice::TYPE_CONTENT_FILE_SLICE => {
             return admit_with_codec::<content::file_slice::Codec>(bytes, |slice| {
@@ -338,13 +360,28 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             });
         }
         content::message::TYPE_CONTENT_MESSAGE => {
-            return Err("received content message fact must be signed".to_string());
+            return admit_with_codec::<content::message::Codec>(bytes, |message| {
+                Ok(Admission::workspace(
+                    message.workspace_id,
+                    message.created_at_ms,
+                ))
+            });
         }
         content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => {
-            return Err("received content message deletion fact must be signed".to_string());
+            return admit_with_codec::<content::message_deletion::Codec>(bytes, |deletion| {
+                Ok(Admission::workspace(
+                    deletion.workspace_id,
+                    deletion.created_at_ms,
+                ))
+            });
         }
         content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
-            return Err("received content file deletion fact must be signed".to_string());
+            return admit_with_codec::<content::file_deletion::Codec>(bytes, |deletion| {
+                Ok(Admission::workspace(
+                    deletion.workspace_id,
+                    deletion.created_at_ms,
+                ))
+            });
         }
         auth::recipient_key::layout::TYPE_RECIPIENT_KEY => {
             return admit_with_codec::<auth::recipient_key::Codec>(bytes, |recipient| {
@@ -384,15 +421,17 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         sync::need_id::TYPE_SYNC_NEED_ID => {
             return admit_with_codec::<sync::need_id::Codec>(bytes, |_| Ok(Admission::global(0)));
         }
-        auth::signed_fact::TYPE_SIGNED_FACT => {}
+        auth::key_wrap::layout::TYPE_KEY_WRAP => {
+            return admit_with_codec::<auth::key_wrap::Codec>(bytes, |wrap| {
+                Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms))
+            });
+        }
         _ => {
             return Err(format!(
                 "unsupported received connection::frame fact type {tag}"
             ))
         }
     }
-
-    admit_signed_fact_bytes(bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -446,93 +485,6 @@ fn admit_with_decoder<T>(
     Ok(Fact::new(admission.scope, admission.timestamp, bytes))
 }
 
-fn admit_signed_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
-    let envelope = auth::signed_fact::layout::decode_signed_fact(&bytes)?;
-    match envelope.inner_type {
-        auth::user_invite::TYPE_USER_INVITE => {
-            admit_with_codec::<auth::user_invite::Codec>(bytes, |signed| {
-                Ok(Admission::global(signed.payload.created_at_ms))
-            })
-        }
-        auth::user::TYPE_USER => admit_with_codec::<auth::user::Codec>(bytes, |signed| {
-            Ok(Admission::global(signed.payload.created_at_ms))
-        }),
-        auth::admin::TYPE_ADMIN => admit_with_codec::<auth::admin::Codec>(bytes, |signed| {
-            Ok(Admission::global(signed.payload.created_at_ms))
-        }),
-        auth::device_invite::TYPE_DEVICE_INVITE => {
-            admit_with_codec::<auth::device_invite::Codec>(bytes, |signed| {
-                Ok(Admission::global(signed.payload.created_at_ms))
-            })
-        }
-        auth::endpoint_shared::TYPE_ENDPOINT_SHARED => {
-            admit_with_codec::<auth::endpoint_shared::Codec>(bytes, |signed| {
-                Ok(Admission::global(signed.payload.created_at_ms))
-            })
-        }
-        auth::invite_server::TYPE_INVITE_SERVER => {
-            admit_with_codec::<auth::invite_server::Codec>(bytes, |signed| {
-                Ok(Admission::global(signed.payload.created_at_ms))
-            })
-        }
-        auth::key_wrap::layout::TYPE_KEY_WRAP => admit_signed_key_wrap_fact(bytes),
-        content::message::TYPE_CONTENT_MESSAGE => {
-            admit_with_codec::<content::message::Codec>(bytes, |signed| {
-                Ok(Admission::workspace(
-                    signed.payload.workspace_id,
-                    signed.payload.created_at_ms,
-                ))
-            })
-        }
-        content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => {
-            admit_with_codec::<content::message_deletion::Codec>(bytes, |signed| {
-                Ok(Admission::workspace(
-                    signed.payload.workspace_id,
-                    signed.payload.created_at_ms,
-                ))
-            })
-        }
-        content::reaction::TYPE_CONTENT_REACTION => {
-            admit_with_codec::<content::reaction::Codec>(bytes, |signed| {
-                Ok(Admission::workspace(
-                    signed.payload.workspace_id,
-                    signed.payload.created_at_ms,
-                ))
-            })
-        }
-        content::file::TYPE_CONTENT_FILE => {
-            admit_with_codec::<content::file::Codec>(bytes, |signed| {
-                Ok(Admission::workspace(
-                    signed.payload.workspace_id,
-                    signed.payload.created_at_ms,
-                ))
-            })
-        }
-        content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
-            admit_with_codec::<content::file_deletion::Codec>(bytes, |signed| {
-                Ok(Admission::workspace(
-                    signed.payload.workspace_id,
-                    signed.payload.created_at_ms,
-                ))
-            })
-        }
-        other => Err(format!(
-            "unsupported signed connection::frame payload type {other}"
-        )),
-    }
-}
-
-fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    admit_with_codec::<auth::key_wrap::Codec>(bytes, |signed| {
-        let envelope = signed.envelope;
-        let wrap = signed.payload;
-        if envelope.signer_id != wrap.signer_endpoint_id {
-            return Err("key wrap signer does not match signed envelope signer".to_string());
-        }
-        Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms))
-    })
-}
-
 fn workspace_scope(workspace_id: FactId) -> FactScope {
     crate::protocol::auth::workspace::scope(workspace_id)
 }
@@ -552,7 +504,8 @@ struct ConnectionFactReceiptInput<'a> {
 fn connection_fact_receipt_for_path(input: ConnectionFactReceiptInput<'_>) -> Result<Fact, String> {
     let fact = connection::fact_receipt::fact::ConnectionFactReceipt {
         received_fact_id: input.received_fact_id,
-        origin_addr: input.origin_addr.to_vec(),
+        origin_addr: connection::fact_receipt::fact::OriginAddr::new(input.origin_addr)
+            .map_err(|err| format!("connection fact receipt origin addr: {err}"))?,
         local_endpoint_id: input.local_endpoint_id,
         sender_endpoint_id: input.sender_endpoint_id,
         receive_path: input.receive_path,
@@ -589,24 +542,29 @@ mod tests {
     use super::*;
     use crate::core::crypto::{ed25519_public_key, ed25519_sign};
     use crate::protocol::auth::invite::fact::InviteSecretFact;
-    use crate::protocol::auth::signed_fact::fact::SignedFactEnvelope;
     use crate::protocol::auth::user::fact::UserFact;
     use crate::protocol::auth::workspace::fact::WorkspaceFact;
 
     #[test]
     fn admitted_message_deletion_uses_payload_created_timestamp() {
-        let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
+        let signing_secret = [9; 32];
+        let mut deletion = content::message_deletion::fact::ContentMessageDeletionFact {
             workspace_id: [9; 32],
             created_at_ms: 12_345,
             target_message_id: [10; 32],
             target_frontier_id: [12; 32],
             target_minute: 1,
             author_user_id: [11; 32],
+            signer_id: [8; 32],
+            signer_public_key: ed25519_public_key(&signing_secret),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        let payload =
+        deletion.signature = ed25519_sign(
+            &signing_secret,
+            &content::message_deletion::layout::signing_bytes(&deletion).expect("signing bytes"),
+        );
+        let bytes =
             content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion");
-        let bytes = auth::signed_fact::create::sign_payload_bytes([8; 32], &[9; 32], payload)
-            .expect("sign deletion");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit deletion");
 
@@ -617,11 +575,17 @@ mod tests {
 
     #[test]
     fn admitted_workspace_uses_payload_created_timestamp() {
-        let workspace = WorkspaceFact {
+        let signing_secret = [7; 32];
+        let mut workspace = WorkspaceFact {
             created_at_ms: 55_555,
-            public_key: [7; 32],
-            name: "workspace".to_string(),
+            public_key: ed25519_public_key(&signing_secret),
+            name: auth::workspace::fact::WorkspaceName::new("workspace").expect("name"),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
+        workspace.signature = ed25519_sign(
+            &signing_secret,
+            &auth::workspace::layout::signing_bytes(&workspace).expect("signing bytes"),
+        );
         let bytes = auth::workspace::layout::encode_fact(&workspace).expect("workspace");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit workspace");
@@ -633,26 +597,21 @@ mod tests {
 
     #[test]
     fn admitted_signed_identity_uses_payload_created_timestamp() {
-        let user = UserFact {
+        let signing_secret = [10; 32];
+        let mut user = UserFact {
             created_at_ms: 66_666,
             workspace_id: [8; 32],
             public_key: [9; 32],
-            username: "alice".to_string(),
-        };
-        let payload = auth::user::layout::encode_fact(&user).expect("user payload");
-        let signing_secret = [10; 32];
-        let mut envelope = SignedFactEnvelope {
+            username: auth::user::fact::Username::new("alice").expect("username"),
             signer_id: [11; 32],
             signer_public_key: ed25519_public_key(&signing_secret),
-            inner_type: auth::user::layout::TYPE_USER,
-            payload,
-            signature: [0; 64],
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        let signing_bytes =
-            auth::signed_fact::layout::signing_bytes(&envelope).expect("signing bytes");
-        envelope.signature = ed25519_sign(&signing_secret, &signing_bytes);
-        let bytes =
-            auth::signed_fact::layout::encode_signed_fact(&envelope).expect("signed identity");
+        user.signature = ed25519_sign(
+            &signing_secret,
+            &auth::user::layout::signing_bytes(&user).expect("signing bytes"),
+        );
+        let bytes = auth::user::layout::encode_fact(&user).expect("user payload");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");
 

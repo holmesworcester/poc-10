@@ -38,6 +38,6 @@ pub fn decode_workspace_row(key: &[u8], value: &[u8]) -> Result<WorkspaceRow, St
         workspace_id: key.try_into().unwrap(),
         created_at_ms: fact.created_at_ms,
         public_key: fact.public_key,
-        name: fact.name,
+        name: fact.name.to_string(),
     })
 }

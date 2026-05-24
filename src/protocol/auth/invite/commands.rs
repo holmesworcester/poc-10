@@ -188,16 +188,20 @@ pub fn create_device_link(
         user_authority_fact_id: user.user_id,
         user_invite_fact_id: None,
         public_key: crypto::ed25519_public_key(&invite_private_key),
+        signer_id: membership.endpoint_shared_id,
+        signer_public_key: local.signing_public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let device_invite_bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
-        membership.endpoint_shared_id,
+    let mut device_invite = device_invite;
+    let (_, signature) = crypto::ed25519_sign_canonical(
         &local.signing_secret,
-        auth::device_invite::layout::encode_fact(&device_invite)?,
-    )?;
+        &auth::device_invite::layout::signing_bytes(&device_invite)?,
+    );
+    device_invite.signature = signature;
     let device_invite_fact = Fact::new(
         FactScope::Global,
         device_invite.created_at_ms,
-        device_invite_bytes,
+        auth::device_invite::layout::encode_fact(&device_invite)?,
     );
     let invite_secret = InviteSecretFact::scoped(
         invite_private_key,
@@ -247,16 +251,20 @@ pub fn create_invite_server(
         public_key: crypto::ed25519_public_key(&invite_private_key),
         workspace_id: input.workspace_id,
         authority_fact_id: authority.admin_id,
+        signer_id: authority.signer_id,
+        signer_public_key: local.signing_public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let invite_server_bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
-        authority.signer_id,
+    let mut invite_server = invite_server;
+    let (_, signature) = crypto::ed25519_sign_canonical(
         &local.signing_secret,
-        auth::invite_server::layout::encode_fact(&invite_server)?,
-    )?;
+        &auth::invite_server::layout::signing_bytes(&invite_server)?,
+    );
+    invite_server.signature = signature;
     let invite_server_fact = Fact::new(
         FactScope::Global,
         invite_server.created_at_ms,
-        invite_server_bytes,
+        auth::invite_server::layout::encode_fact(&invite_server)?,
     );
     let invite_secret = InviteSecretFact::scoped(
         invite_private_key,
@@ -444,13 +452,21 @@ fn workspace_accept_device_invite_fact(
         user_authority_fact_id: user_id,
         user_invite_fact_id: Some(user_invite_fact_id),
         public_key: crypto::ed25519_public_key(&bootstrap_secret),
+        signer_id: user_id,
+        signer_public_key: crypto::ed25519_public_key(&bootstrap_secret),
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
-        user_id,
+    let mut payload = payload;
+    let (_, signature) = crypto::ed25519_sign_canonical(
         &bootstrap_secret,
+        &auth::device_invite::layout::signing_bytes(&payload)?,
+    );
+    payload.signature = signature;
+    Ok(Fact::new(
+        FactScope::Global,
+        created_at_ms,
         auth::device_invite::layout::encode_fact(&payload)?,
-    )?;
-    Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
+    ))
 }
 
 pub fn accept_device_link(
@@ -612,14 +628,23 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
         endpoint_id: input.endpoint_id,
         signing_public_key: input.signing_public_key,
         endpoint_role: input.endpoint_role,
-        device_name: input.device_name.to_string(),
+        device_name: auth::endpoint_shared::fact::EndpointDeviceName::new(input.device_name)
+            .map_err(|err| format!("endpoint device name: {err}"))?,
+        signer_id: input.signer_id,
+        signer_public_key: crypto::ed25519_public_key(&input.signer_private_key),
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let bytes = crate::protocol::auth::signed_fact::create::sign_payload_bytes(
-        input.signer_id,
+    let mut endpoint = endpoint;
+    let (_, signature) = crypto::ed25519_sign_canonical(
         &input.signer_private_key,
+        &auth::endpoint_shared::layout::signing_bytes(&endpoint)?,
+    );
+    endpoint.signature = signature;
+    Ok(Fact::new(
+        FactScope::Global,
+        input.created_at_ms,
         auth::endpoint_shared::layout::encode_fact(&endpoint)?,
-    )?;
-    Ok(Fact::new(FactScope::Global, input.created_at_ms, bytes))
+    ))
 }
 
 pub fn parse(value: &str) -> Result<Invite, String> {

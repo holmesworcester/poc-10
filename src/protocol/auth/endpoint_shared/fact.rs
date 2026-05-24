@@ -3,12 +3,13 @@
 //! Endpoint-shared facts describe peer-visible endpoint identity bindings: an
 //! endpoint id (X25519 public key) and its signing public key are bound to a
 //! workspace and a user authority. Projection receives this payload inside a
-//! signed envelope, validates the signer against device-invite or invite-server
+//! natural signature, validates the signer against device-invite or invite-server
 //! authority, and then publishes signer context for content, admin, connection,
 //! and auth projectors.
 
-use crate::core::crypto::Ed25519PublicKey;
+use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;
+use crate::core::wire::FixedText;
 
 pub const ENDPOINT_DEVICE_NAME_BYTES: usize = 64;
 
@@ -16,6 +17,7 @@ pub type EndpointId = [u8; 32];
 pub type WorkspaceId = FactId;
 pub type UserAuthorityId = FactId;
 pub type EndpointSharedId = FactId;
+pub type EndpointDeviceName = FixedText<ENDPOINT_DEVICE_NAME_BYTES>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointRole {
@@ -48,5 +50,8 @@ pub struct EndpointSharedFact {
     pub endpoint_id: EndpointId,
     pub signing_public_key: Ed25519PublicKey,
     pub endpoint_role: EndpointRole,
-    pub device_name: String,
+    pub device_name: EndpointDeviceName,
+    pub signer_id: FactId,
+    pub signer_public_key: Ed25519PublicKey,
+    pub signature: Ed25519Signature,
 }

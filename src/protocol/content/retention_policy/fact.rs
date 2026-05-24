@@ -9,16 +9,18 @@
 //! predecessor via `supersedes_policy_id` so projection can chain them.
 //!
 //! Current boundaries:
-//! - Signed envelope verification is owned by `auth::signed_fact`.
+//! - Natural signature verification is owned by this fact layout and projector.
 //! - Workspace-admin authority is validated by the projector context.
 //! - Monotonic floor checks are enforced through the supersedes chain in the
 //!   retention policy projector.
 
+use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;
 pub type PolicyId = FactId;
 pub type AuthorUserId = FactId;
+pub type SignerId = FactId;
 
 /// Scope-kind tag carried in the fact so the projector can key the row by
 /// `(workspace_id, scope_kind, scope_id)`. Concrete scope vocabularies are
@@ -46,5 +48,8 @@ pub struct RetentionPolicyFact {
     pub scope_kind: u8,
     pub scope_id: FactId,
     pub author_user_id: AuthorUserId,
+    pub signer_id: SignerId,
+    pub signer_public_key: Ed25519PublicKey,
     pub created_at_ms: u64,
+    pub signature: Ed25519Signature,
 }

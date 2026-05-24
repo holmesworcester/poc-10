@@ -11,6 +11,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
+use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     requested_wrap_source_need, require_fact_scope,
@@ -59,8 +60,16 @@ fn key_request(
     // 1. Structural.
     let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
+    super::layout::verify_signature(&request)?;
 
-    // 2. Context: recipient, frontier, and wrap-source needs.
+    // 2. Context: requester signer, recipient, frontier, and wrap-source needs.
+    let requester_need = ContextNeed::range(
+        fact.id,
+        "content_signer",
+        scope.clone(),
+        request.requester_endpoint_id,
+        request.requester_endpoint_id,
+    );
     let recipient_need = ContextNeed::range(
         fact.id,
         "recipient_key",
@@ -75,19 +84,28 @@ fn key_request(
         request.frontier_id,
         request.frontier_id,
     );
-    let source_need =
-        requested_wrap_source_need(fact.id, scope, request.workspace_id, request.frontier_id);
+    let source_need = requested_wrap_source_need(
+        fact.id,
+        scope.clone(),
+        request.workspace_id,
+        request.frontier_id,
+    );
 
     let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
     let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
     let mut output = ProjectionOutput::new()
+        .need(requester_need.clone())
         .need(recipient_need)
         .need(frontier_need)
-        .need(source_need.clone())
-        .intent(share_fact_with_workspace_intent_for_fact(
-            request.workspace_id,
-            fact,
-        ));
+        .need(source_need.clone());
+    let Some(requester_fact) = projection_context.payload_for(&requester_need) else {
+        return Ok(output);
+    };
+    validate_requester_signer(requester_fact, &request)?;
+    output = output.intent(share_fact_with_workspace_intent_for_fact(
+        request.workspace_id,
+        fact,
+    ));
 
     // 3. Materialize: emit create-key-wrap work for eligible sources.
     if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {
@@ -95,6 +113,7 @@ fn key_request(
             return Err("key request recipient context payload id mismatch".to_string());
         }
         let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
+        recipient_key::layout::verify_signature(&recipient)?;
         if recipient.workspace_id != request.workspace_id {
             return Err("key request recipient workspace mismatch".to_string());
         }
@@ -105,6 +124,7 @@ fn key_request(
             return Err("key request frontier context payload id mismatch".to_string());
         }
         let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
+        removal_frontier::layout::verify_signature(&frontier)?;
         if frontier.workspace_id != request.workspace_id {
             return Err("key request frontier workspace mismatch".to_string());
         }
@@ -127,4 +147,23 @@ fn key_request(
         }
     }
     Ok(output)
+}
+
+fn validate_requester_signer(
+    requester_fact: &Fact,
+    request: &KeyRequestFact,
+) -> Result<(), String> {
+    let signer = endpoint_shared::decode_fact_payload(requester_fact.body())
+        .map_err(|_| "key request requester context must be endpoint_shared".to_string())?;
+    endpoint_shared::layout::verify_signature(&signer)?;
+    if signer.workspace_id != request.workspace_id {
+        return Err("key request requester workspace mismatch".to_string());
+    }
+    if signer.endpoint_id != request.requester_endpoint_id {
+        return Err("key request requester endpoint mismatch".to_string());
+    }
+    if signer.signing_public_key != request.signer_public_key {
+        return Err("key request requester signing key mismatch".to_string());
+    }
+    Ok(())
 }

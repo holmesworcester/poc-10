@@ -11,7 +11,7 @@ code, and isolate the parts that genuinely deserve hand-written Rust.
 
 ## Why
 
-Looking across the 30-plus modules in `src/protocol/facts/`:
+Looking across the protocol fact-family modules in `src/protocol/`:
 
 - `fact.rs` is almost always a typed struct with semantic field names.
 - `layout.rs` is almost always a tag byte plus fixed-offset writes of those
@@ -23,10 +23,10 @@ Looking across the 30-plus modules in `src/protocol/facts/`:
 The boilerplate share is mechanical. The repo already has the right primitives
 (`src/core/wire.rs` - `FixedLayout`, `Id32`, `U64be`, `Nonce24`, `FixedSlot<N>`,
 `Ciphertext<N>`) and a schema DSL parser (`src/core/schema_dsl.rs`). The newer
-modules (`connection::frame`, `signed_fact`, and `auth::key_wrap`) already use the
-`FixedLayout` trait; the older ones (`content_message`, `content_file`,
-`connection_response`) still hand-write byte-offset arithmetic that describes
-the same thing the schema would.
+modules (`connection::frame`, `auth::signed_envelope`, and `auth::key_wrap`) use
+the same fixed-layout primitives as the rest of the protocol tree. Schema
+generation should preserve those byte contracts rather than introduce a second
+layout vocabulary.
 
 ## What the schema can absorb
 
@@ -69,8 +69,8 @@ fixed-length already or open deviations that should be fixed:
 ### `create.rs` — the boilerplate tail
 
 For protocol modules with no crypto (`auth_workspace`,
-`content_file_deletion`, `content_message_deletion`, `signed_fact`,
-`removal_frontier`, several others), `create.rs` is: validate ids, build
+`content_file_deletion`, `content_message_deletion`, `removal_frontier`, several others),
+`create.rs` is: validate ids, build
 struct, encode, wrap in `Fact::new` with the right scope and timestamp.
 Schema-derivable end-to-end.
 
@@ -129,31 +129,18 @@ it needs:
    on the fact; recipes call `fact.associated_data()` instead of building the
    bytes inline.
 
-## Deviations to fix first
+## Fixed-Field Guardrail
 
-The fixed-length guardrail has slipped in a handful of places. The schema
-direction does not work until these are converted to `FixedSlot<N>` or
-`[u8; N]`, or explicitly justified as bounded opaque slots per `RULES.md:82`.
+Protocol fact structs use fixed-width fields at the fact boundary:
+`FixedSlot<N>`, `FixedText<N>`, fixed arrays, or bounded structs that encode to
+a fixed layout. The non-semantic signed envelope is an auth helper with a
+bounded payload slot; child fact projectors verify signatures while projecting
+their own payloads.
 
-Open `Vec<u8>` / `String` payloads in `fact.rs`:
-
-| File | Field | Resolution |
-| --- | --- | --- |
-| `content_event/fact.rs:15` | `payload: Vec<u8>` | Pick a max, use `FixedSlot<N>` |
-| `content_file/fact.rs:44` | `sealed_metadata: Vec<u8>` | `FixedSlot<N>` |
-| `content_file_slice/fact.rs:28` | `ciphertext: Vec<u8>` | Already bounded by slice size — type as `[u8; N]` |
-| `content_message/fact.rs:25` | `ciphertext: Vec<u8>` | `[u8; CIPHERTEXT_BYTES]` |
-| `content_reaction/fact.rs:24` | `ciphertext: Vec<u8>` | `[u8; N]` (size constant exists) |
-| `auth_endpoint_shared/fact.rs:51` | `device_name: String` | `FixedSlot<N>` (mirror workspace name) |
-| `auth_user/fact.rs:16` | `username: String` | `FixedSlot<N>` |
-| `signed_fact/fact.rs:23` | `payload: Vec<u8>` | Either pick a max envelope size and use `FixedSlot<N>`, or carve out as the documented bounded-opaque exception |
-| `fact_receipt/fact.rs:23` | `origin_addr: Vec<u8>` | `FixedSlot<N>` |
-
-The `signed_fact` payload is the interesting case: it wraps an inner fact and
-its size is the sum of inner-fact wire layouts. Two options: declare a global
-max (the largest fact in the tree plus envelope overhead) and use
-`FixedSlot<MAX>`, or accept signed envelopes as the documented bounded-opaque
-slot the guardrail allows.
+The schema direction depends on this invariant. Generated fact declarations
+should reject public `Vec<T>` and `String` fields in `fact.rs`, keep opaque
+payloads bounded by named constants, and treat connection frames as fixed
+small, file-slice, or bundle carriers rather than open byte arrays.
 
 ## Supporting moves for crypto
 

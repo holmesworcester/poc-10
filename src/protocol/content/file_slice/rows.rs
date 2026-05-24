@@ -35,7 +35,7 @@ pub fn content_file_slice_row(slice_fact_id: FactId, fact: &ContentFileSliceFact
         Value::U64(u64::from(fact.slice_index)),
         Value::Bytes(slice_fact_id.to_vec()),
         Value::U64(fact.created_at_ms),
-        Value::Bytes(fact.ciphertext.clone()),
+        Value::Bytes(fact.ciphertext.bytes().to_vec()),
     ])
 }
 
@@ -81,7 +81,13 @@ mod tests {
             created_at_ms: 77,
             file_id: [2; 32],
             slice_index: 5,
-            ciphertext: vec![0xcc; 16],
+            signer_id: [6; 32],
+            signer_public_key: [7; 32],
+            ciphertext: crate::protocol::content::file_slice::fact::FileSliceCiphertext::new(
+                &[0xcc; 16],
+            )
+            .expect("ciphertext"),
+            signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         };
         let row = content_file_slice_row([9; 32], &fact);
         assert_eq!(row.table, FILE_SLICE_ROWS);

@@ -57,6 +57,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
+        super::layout::verify_signature(&slice)?;
 
         // 2. Context and deletion gates.
         let file_need = crate::core::context::ContextNeed::range(
@@ -69,14 +70,14 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
             return Ok(ProjectionOutput::new().need(file_need));
         };
-        let file = message_project::decode_signed_payload(
+        let file = message_project::decode_typed_fact(
             parent,
             file::TYPE_CONTENT_FILE,
             "file slice parent",
-        )?
-        .payload;
-        let file = file::decode_fact_payload(&file)
-            .map_err(|_| "file slice parent context is not a content file".to_string())?;
+            file::decode_fact_payload,
+        )
+        .map_err(|_| "file slice parent context is not a content file".to_string())?;
+        file::layout::verify_signature(&file)?;
         if parent.scope != scope {
             return Err("file slice parent scope does not match slice".to_string());
         }
@@ -85,6 +86,9 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         }
         if file.file_id != slice.file_id {
             return Err("file slice parent file_id does not match slice".to_string());
+        }
+        if file.signer_id != slice.signer_id || file.signer_public_key != slice.signer_public_key {
+            return Err("file slice signer does not match parent file signer".to_string());
         }
         if slice.slice_index >= file.total_slices {
             return Err("file slice index is out of range for parent file".to_string());
@@ -101,13 +105,13 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         else {
             return Ok(ProjectionOutput::new().need(file_need).need(message_need));
         };
-        let parent_message = message_project::decode_signed_fact(
+        let parent_message = message_project::decode_typed_fact(
             message_payload,
             message::TYPE_CONTENT_MESSAGE,
             "file slice message parent",
             message::decode_fact_payload,
-        )?
-        .payload;
+        )?;
+        message::layout::verify_signature(&parent_message)?;
         if parent_message.workspace_id != slice.workspace_id {
             return Err("file slice message parent workspace does not match slice".to_string());
         }
@@ -197,14 +201,10 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = message_project::decode_signed_payload(
-        payload,
-        file_deletion::TYPE_CONTENT_FILE_DELETION,
-        "file slice parent deletion",
-    )?;
-    let deletion = file_deletion::decode_fact_payload(&deletion_payload.payload).map_err(|_| {
+    let deletion = file_deletion::decode_fact_payload(payload.body()).map_err(|_| {
         "file slice parent deletion context is not a content file deletion".to_string()
     })?;
+    file_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice parent deletion workspace does not match slice".to_string());
     }
@@ -227,13 +227,13 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_project::decode_signed_fact(
+    let deletion = message_project::decode_typed_fact(
         payload,
         message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
         "file slice message parent deletion",
         message_deletion::decode_fact_payload,
-    )?
-    .payload;
+    )?;
+    message_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice message deletion workspace does not match slice".to_string());
     }

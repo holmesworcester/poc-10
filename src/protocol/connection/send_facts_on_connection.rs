@@ -23,7 +23,10 @@ use crate::protocol::{
     connection::frame::{
         create,
         frame::{self, ConnectionFrameFactBundle},
-        layout::CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES,
+        layout::{
+            CONNECTION_FRAME_BUNDLE_FACT_SLOTS, CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES,
+            CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
+        },
     },
     connection::response,
     sync::shared_fact,
@@ -297,11 +300,24 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
     let mut batch = Vec::new();
     let mut packed_len = INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
-        let item_len = INNER_FACT_LEN_BYTES + create::require_sendable_fact(&fact)?.len();
-        if INNER_BUNDLE_HEADER_BYTES + item_len > CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
-            return Err("send_facts_on_connection fact exceeds connection frame capacity".into());
+        let fact_len = create::require_sendable_fact(&fact)?.len();
+        if fact_len == crate::protocol::content::file_slice::layout::CONTENT_FILE_SLICE_BYTES {
+            if !batch.is_empty() {
+                batches.push(std::mem::take(&mut batch));
+                packed_len = INNER_BUNDLE_HEADER_BYTES;
+            }
+            batches.push(vec![fact]);
+            continue;
         }
-        if !batch.is_empty() && packed_len + item_len > CONNECTION_FRAME_LARGE_PLAINTEXT_BYTES {
+        if fact_len > CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES {
+            return Err(
+                "send_facts_on_connection fact exceeds connection frame bundle slot".into(),
+            );
+        }
+        let item_len = INNER_FACT_LEN_BYTES + fact_len;
+        let would_fit_small = packed_len + item_len <= CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES;
+        let would_fit_bundle = batch.len() < CONNECTION_FRAME_BUNDLE_FACT_SLOTS;
+        if !batch.is_empty() && !would_fit_small && !would_fit_bundle {
             batches.push(std::mem::take(&mut batch));
             packed_len = INNER_BUNDLE_HEADER_BYTES;
         }

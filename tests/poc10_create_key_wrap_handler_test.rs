@@ -1,6 +1,5 @@
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::protocol::auth;
 use topo::protocol::auth::create_key_wrap as intent;
 use topo::protocol::auth::create_key_wrap::CreateKeyWrapHandler;
 use topo::protocol::auth::key_wrap::fact::WrappedSecretKind;
@@ -8,9 +7,10 @@ use topo::protocol::auth::key_wrap::layout as key_wrap_layout;
 use topo::protocol::auth::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
 use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::auth::local_signer_secret::fact::LocalSignerSecretFact;
+use topo::protocol::auth::local_signer_secret::layout as local_signer_layout;
 use topo::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 use topo::protocol::auth::recipient_key::layout as recipient_key_layout;
-use topo::protocol::auth::signed_fact::fact::LocalSignerSecretFact;
 use topo::protocol::auth::workspace::scope as workspace_scope;
 
 #[test]
@@ -42,11 +42,7 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
 
     assert_eq!(first.facts.len(), 1);
     assert_eq!(first.facts, second.facts);
-    let envelope = auth::signed_fact::layout::decode_signed_fact(&first.facts[0].bytes)
-        .expect("decode signed key wrap");
-    assert_eq!(envelope.signer_id, endpoint);
-    assert_eq!(envelope.inner_type, key_wrap_layout::TYPE_KEY_WRAP);
-    let wrap = key_wrap_layout::decode_key_wrap(&envelope.payload).expect("decode key wrap");
+    let wrap = key_wrap_layout::decode_key_wrap(&first.facts[0].bytes).expect("decode key wrap");
     assert_eq!(wrap.workspace_id, workspace);
     assert_eq!(wrap.signer_endpoint_id, endpoint);
     assert_eq!(wrap.frontier_id, frontier);
@@ -62,17 +58,24 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
 }
 
 fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key: [u8; 32]) -> Fact {
+    let private_key = [9; 32];
+    let mut recipient = RecipientKeyFact {
+        workspace_id,
+        endpoint_id,
+        recipient_key: public_key,
+        previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
+        created_at_ms: 10,
+        signer_public_key: topo::core::crypto::ed25519_public_key(&private_key),
+        signature: [0; topo::core::crypto::ED25519_SIGNATURE_BYTES],
+    };
+    recipient.signature = topo::core::crypto::ed25519_sign(
+        &private_key,
+        &recipient_key_layout::signing_bytes(&recipient).expect("recipient signing bytes"),
+    );
     Fact::new(
         workspace_scope(workspace_id),
         10,
-        recipient_key_layout::encode_recipient_key(&RecipientKeyFact {
-            workspace_id,
-            endpoint_id,
-            recipient_key: public_key,
-            previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
-            created_at_ms: 10,
-        })
-        .expect("encode recipient"),
+        recipient_key_layout::encode_recipient_key(&recipient).expect("encode recipient"),
     )
 }
 
@@ -101,7 +104,7 @@ fn local_signer_secret_fact(workspace_id: [u8; 32], signer_id: [u8; 32]) -> Fact
     Fact::new(
         FactScope::Local,
         10,
-        auth::signed_fact::layout::encode_local_signer_secret(&LocalSignerSecretFact {
+        local_signer_layout::encode_fact(&LocalSignerSecretFact {
             workspace_id,
             signer_id,
             public_key: topo::core::crypto::ed25519_public_key(&private_key),

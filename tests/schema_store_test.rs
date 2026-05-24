@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
+use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::{SchemaSource, Store, TableName, TableRow};
 use topo::protocol::content::{file, reaction};
@@ -210,12 +211,15 @@ fn content_read_model_rows_materialize_into_typed_tables() {
         created_at_ms: 60_002,
         message_id: [9; 32],
         author_user_id: [2; 32],
+        signer_id: [3; 32],
+        signer_public_key: [4; 32],
         file_id: [11; 32],
         blob_bytes: 4096,
         total_slices: 2,
         slice_bytes: 2048,
         root_hash: [7; file::fact::FILE_ROOT_HASH_BYTES],
-        sealed_metadata: b"meta".to_vec(),
+        sealed_metadata: file::fact::SealedMetadata::new(b"meta").expect("metadata"),
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     conn.execute(
         "INSERT INTO content_files

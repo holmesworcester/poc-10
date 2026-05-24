@@ -16,9 +16,8 @@ use crate::core::runtime::Runtime;
 use crate::core::store::TableName;
 use crate::core::wire;
 use crate::protocol::auth;
-use crate::protocol::auth::signed_fact::{self, create as signed_fact_create};
 use crate::protocol::content::message::fact::{
-    ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
+    ContentMessageFact, MessageCiphertext, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::content::message::layout;
 use crate::protocol::content::message::queries;
@@ -165,23 +164,26 @@ fn build_message_fact(
     }
 
     let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
-    let message = ContentMessageFact {
+    let signer_public_key = crypto::ed25519_public_key(&signing.private_key);
+    let mut message = ContentMessageFact {
         workspace_id,
         created_at_ms,
         author_user_id,
         signer_id: signing.signer_id,
+        signer_public_key,
         frontier_id: encryption.frontier_id,
         local_history_node_secret_id: [0; 32],
         expires_at_minute,
         retention_policy_id,
         minute,
         nonce,
-        ciphertext,
+        ciphertext: MessageCiphertext::new(&ciphertext)
+            .map_err(|err| format!("content message ciphertext: {err}"))?,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let payload = layout::encode_fact(&message)?;
-    let envelope_bytes =
-        signed_fact_create::sign_payload_bytes(signing.signer_id, &signing.private_key, payload)?;
-    debug_assert_eq!(envelope_bytes.len(), signed_fact::SIGNED_FACT_BYTES);
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&signing.private_key, &layout::signing_bytes(&message)?);
+    message.signature = signature;
 
     let fact = Fact::new(
         FactScope::Scoped {
@@ -189,7 +191,7 @@ fn build_message_fact(
             id: workspace_id,
         },
         created_at_ms,
-        envelope_bytes,
+        layout::encode_fact(&message)?,
     );
 
     Ok(fact)
@@ -435,18 +437,9 @@ impl RetentionMessageView for MessageRetentionFact {
 }
 
 pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> {
-    match fact.bytes.first().copied() {
-        Some(signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = signed_fact::decode_envelope(fact.body())?;
-            match envelope.inner_type {
-                layout::TYPE_CONTENT_MESSAGE => {
-                    content_message_retention(layout::decode_fact(&envelope.payload)?)
-                }
-                _ => Err("signed fact does not contain a message".to_string()),
-            }
-        }
-        _ => Err("message fact must be signed".to_string()),
-    }
+    let message = layout::decode_fact(fact.body())?;
+    layout::verify_signature(&message)?;
+    content_message_retention(message)
 }
 
 /// Builds the keyed delete for a message row in `table`. This is a pure value

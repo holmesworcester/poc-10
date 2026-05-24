@@ -77,7 +77,7 @@ impl TypedProjector<super::Codec> for DeviceInviteProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<DeviceInviteFact>,
+        signed: auth::signed_envelope::SignedPayload<DeviceInviteFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -156,10 +156,10 @@ through core's typed adapter. The owning fact module supplies a small codec:
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = auth::signed_fact::SignedPayload<fact::DeviceInviteFact>;
+    type Payload = auth::signed_envelope::SignedPayload<fact::DeviceInviteFact>;
 
     fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
-        auth::signed_fact::decode_signed_fact_payload(
+        auth::signed_envelope::decode_signed_payload(
             fact,
             layout::TYPE_DEVICE_INVITE,
             "device_invite",
@@ -184,16 +184,16 @@ let endpoint = endpoint_shared::decode_fact_payload(&endpoint_envelope.payload)
 
 That keeps wire formatting centralized inside the owning fact module while
 letting projector policy read as typed facts and named witnesses. The same rule
-applies to signed envelopes: use `auth::signed_fact::TYPE_SIGNED_FACT`,
-`auth::signed_fact::SignedPayload<T>`, and
-`auth::signed_fact::decode_envelope`, not the signed-fact layout module.
+applies to signed envelopes: use `auth::signed_envelope::TYPE_SIGNED_ENVELOPE`,
+`auth::signed_envelope::SignedPayload<T>`, and
+`auth::signed_envelope::decode_envelope`, not the signed-envelope layout module.
 
 Family projectors use the same rule with a module-owned enum:
 
 ```rust
 pub enum ProjectionPayload {
     Message(fact::ContentMessageFact),
-    SignedMessage(auth::signed_fact::SignedPayload<fact::ContentMessageFact>),
+    SignedMessage(auth::signed_envelope::SignedPayload<fact::ContentMessageFact>),
     SecretNode(fact::SecretNodeFact),
 }
 ```

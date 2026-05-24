@@ -38,7 +38,7 @@ pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
 /// Ephemeral inbound network queue table.
 pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
-const WRITE_FRAME_BUDGET: Duration = Duration::from_millis(100);
+const WRITE_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 /// Store declarations for the two core-owned byte queues.
 ///

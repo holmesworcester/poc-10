@@ -116,7 +116,10 @@ fn closing_connection_purges_ephemeral_secret_facts_and_rows() {
     let response_body = response.response;
     let receipt = ConnectionFactReceipt {
         received_fact_id: response_fact.id,
-        origin_addr: b"127.0.0.1:41001".to_vec(),
+        origin_addr: topo::protocol::connection::fact_receipt::fact::OriginAddr::new(
+            b"127.0.0.1:41001",
+        )
+        .expect("origin"),
         local_endpoint_id: response_body.to_endpoint,
         sender_endpoint_id: response_body.from_endpoint,
         receive_path: RECEIVE_PATH_CONNECTION_RESPONSE,

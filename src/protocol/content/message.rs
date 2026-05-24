@@ -60,15 +60,9 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageFact, Str
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload =
-        crate::protocol::content::message::project::DecodedFact<fact::ContentMessageFact>;
+    type Payload = fact::ContentMessageFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        project::decode_signed_fact(
-            fact,
-            layout::TYPE_CONTENT_MESSAGE,
-            "content message",
-            decode_fact_payload,
-        )
+        decode_fact_payload(fact.body())
     }
 }

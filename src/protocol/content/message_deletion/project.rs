@@ -16,9 +16,8 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::auth;
 use crate::protocol::auth::user;
-use crate::protocol::content::message::project::{self, DecodedPayload};
+use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -47,20 +46,16 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: project::DecodedFact<super::fact::ContentMessageDeletionFact>,
+        deletion: super::fact::ContentMessageDeletionFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let project::DecodedFact {
-            payload: deletion,
-            signer,
-            envelope,
-        } = decoded;
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
+        super::layout::verify_signature(&deletion)?;
 
         // 2. Authority.
-        let signer_need = project::signer_need(fact.id, deletion.workspace_id, signer);
+        let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message_meta",
@@ -75,26 +70,27 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             deletion.author_user_id,
             deletion.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !project::validate_signer_context(
-                context,
-                need,
-                signer,
-                deletion.workspace_id,
-                Some(deletion.author_user_id),
-                "message deletion",
-            )? {
-                return Ok(output_with_needs([
-                    signer_need,
-                    Some(target_need),
-                    Some(author_need),
-                ]));
-            }
+        if !project::validate_signer_context(
+            context,
+            &signer_need,
+            FactSigner {
+                signer_id: deletion.signer_id,
+                signer_public_key: deletion.signer_public_key,
+            },
+            deletion.workspace_id,
+            Some(deletion.author_user_id),
+            "message deletion",
+        )? {
+            return Ok(output_with_needs([
+                Some(signer_need),
+                Some(target_need),
+                Some(author_need),
+            ]));
         }
         let Some(target_fact) = context_payload(context, &target_need, "message deletion target")?
         else {
             return Ok(output_with_needs([
-                signer_need,
+                Some(signer_need),
                 Some(target_need),
                 Some(author_need),
             ]));
@@ -102,14 +98,13 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         let Some(author_fact) = context_payload(context, &author_need, "message deletion author")?
         else {
             return Ok(output_with_needs([
-                signer_need,
+                Some(signer_need),
                 Some(target_need),
                 Some(author_need),
             ]));
         };
         validate_target_message(&deletion, target_fact)?;
         validate_author_user(&deletion, author_fact)?;
-        project::verify_envelope(envelope.as_ref(), "message deletion")?;
 
         // 3. Materialize.
         let row = message_deletion_row(MessageDeletionRow {
@@ -120,7 +115,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             author_user_id: deletion.author_user_id,
         });
         Ok(
-            output_with_needs([signer_need, Some(target_need), Some(author_need)])
+            output_with_needs([Some(signer_need), Some(target_need), Some(author_need)])
                 .offer(content_purge::target_purged_offer(
                     fact.id,
                     scope,
@@ -161,13 +156,14 @@ fn validate_target_message(
     if target_fact.id != deletion.target_message_id {
         return Err("message deletion target context payload id mismatch".to_string());
     }
-    let target_payload = project::decode_signed_payload(
+    let target = project::decode_typed_fact(
         target_fact,
         message::TYPE_CONTENT_MESSAGE,
         "message deletion target",
-    )?;
-    let target = message::decode_fact_payload(&target_payload.payload)
-        .map_err(|_| "message deletion target context must be a content message".to_string())?;
+        message::decode_fact_payload,
+    )
+    .map_err(|_| "message deletion target context must be a content message".to_string())?;
+    message::layout::verify_signature(&target)?;
     if target.workspace_id != deletion.workspace_id {
         return Err("message deletion target workspace does not match deletion".to_string());
     }
@@ -190,30 +186,12 @@ fn validate_author_user(
     if author_fact.id != deletion.author_user_id {
         return Err("message deletion author context payload id mismatch".to_string());
     }
-    let author_payload =
-        decode_context_payload(author_fact, user::TYPE_USER, "message deletion author")?;
-    let author = user::decode_fact_payload(&author_payload.payload)
+    let author = user::decode_fact_payload(author_fact.body())
         .map_err(|_| "message deletion author context must be an identity user".to_string())?;
     if author.workspace_id != deletion.workspace_id {
         return Err("message deletion author workspace does not match deletion".to_string());
     }
     Ok(())
-}
-
-fn decode_context_payload(
-    payload: &Fact,
-    expected_type: u8,
-    label: &str,
-) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        project::decode_signed_payload(payload, expected_type, label)
-    } else {
-        Ok(DecodedPayload {
-            payload: payload.bytes.clone(),
-            signer: None,
-            envelope: None,
-        })
-    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
@@ -237,7 +215,10 @@ mod projector_tests {
         fact::{EndpointRole, EndpointSharedFact},
         layout as endpoint_shared_layout,
     };
-    use topo::protocol::content::message::{fact::ContentMessageFact, layout as message_layout};
+    use topo::protocol::content::message::{
+        fact::{ContentMessageFact, MessageCiphertext},
+        layout as message_layout,
+    };
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::{layout, project, rows};
 
@@ -424,82 +405,100 @@ mod projector_tests {
         author_user_id: FactId,
         created_at_ms: u64,
     ) -> (ContentMessageDeletionFact, Fact) {
-        let deletion = ContentMessageDeletionFact {
+        let mut deletion = ContentMessageDeletionFact {
             workspace_id,
             created_at_ms,
             target_message_id,
             target_frontier_id: [3; 32],
             target_minute: 12,
             author_user_id,
+            signer_id: CONTENT_SIGNER_ID,
+            signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
+        deletion.signature = crypto::ed25519_sign(
+            &CONTENT_SIGNING_KEY,
+            &layout::signing_bytes(&deletion).expect("deletion signing bytes"),
+        );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
-            auth::signed_fact::create::sign_payload_bytes(
-                CONTENT_SIGNER_ID,
-                &CONTENT_SIGNING_KEY,
-                layout::encode_fact(&deletion).expect("encode deletion"),
-            )
-            .expect("sign deletion"),
+            layout::encode_fact(&deletion).expect("encode deletion"),
         );
         (deletion, fact)
     }
 
     fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-        let message = ContentMessageFact {
+        let mut message = ContentMessageFact {
             workspace_id,
             author_user_id,
             created_at_ms: 12_000,
             signer_id: CONTENT_SIGNER_ID,
+            signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
             frontier_id: [3; 32],
             local_history_node_secret_id: [0; 32],
             expires_at_minute: u64::MAX,
             retention_policy_id: [0; 32],
             minute: 12,
             nonce: [5; crate::protocol::content::message::fact::NONCE_BYTES],
-            ciphertext: vec![6; crate::protocol::content::message::fact::CIPHERTEXT_BYTES],
+            ciphertext: MessageCiphertext::new(&vec![
+                6;
+                crate::protocol::content::message::fact::CIPHERTEXT_BYTES
+            ])
+            .expect("message ciphertext"),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
+        message.signature = crypto::ed25519_sign(
+            &CONTENT_SIGNING_KEY,
+            &message_layout::signing_bytes(&message).expect("message signing bytes"),
+        );
         Fact::new(
             crate::protocol::auth::workspace::scope(workspace_id),
             message.created_at_ms,
-            auth::signed_fact::create::sign_payload_bytes(
-                CONTENT_SIGNER_ID,
-                &CONTENT_SIGNING_KEY,
-                message_layout::encode_fact(&message).expect("encode message"),
-            )
-            .expect("sign message"),
+            message_layout::encode_fact(&message).expect("encode message"),
         )
     }
 
     fn signer_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-        let signer = EndpointSharedFact {
+        let mut signer = EndpointSharedFact {
             created_at_ms: 7_000,
             workspace_id,
             user_authority_fact_id: author_user_id,
             endpoint_id: CONTENT_SIGNER_ID,
             signing_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
             endpoint_role: EndpointRole::Device,
-            device_name: "alice-device".to_string(),
+            device_name: auth::endpoint_shared::fact::EndpointDeviceName::new("alice-device")
+                .expect("device name"),
+            signer_id: [1; 32],
+            signer_public_key: crypto::ed25519_public_key(&ENDPOINT_AUTHORITY_KEY),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
+        signer.signature = crypto::ed25519_sign(
+            &ENDPOINT_AUTHORITY_KEY,
+            &endpoint_shared_layout::signing_bytes(&signer).expect("endpoint signing bytes"),
+        );
         Fact::new(
             FactScope::Global,
             signer.created_at_ms,
-            auth::signed_fact::create::sign_payload_bytes(
-                [1; 32],
-                &ENDPOINT_AUTHORITY_KEY,
-                endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
-            )
-            .expect("sign endpoint shared"),
+            endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
         )
     }
 
     fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact {
-        let user = UserFact {
+        let signing_key = [21; 32];
+        let mut user = UserFact {
             created_at_ms: 8_000,
             workspace_id,
             public_key,
-            username: username.to_string(),
+            username: auth::user::fact::Username::new(username).expect("username"),
+            signer_id: [23; 32],
+            signer_public_key: crypto::ed25519_public_key(&signing_key),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
+        user.signature = crypto::ed25519_sign(
+            &signing_key,
+            &user_layout::signing_bytes(&user).expect("user signing bytes"),
+        );
         Fact::new(
             FactScope::Global,
             user.created_at_ms,
@@ -566,9 +565,7 @@ mod projector_tests {
     }
 
     fn deletion_from_fact(deletion_fact: &Fact) -> ContentMessageDeletionFact {
-        let envelope =
-            auth::signed_fact::layout::decode_signed_fact(&deletion_fact.bytes).expect("signed");
-        layout::decode_fact(&envelope.payload).expect("decode deletion")
+        layout::decode_fact(&deletion_fact.bytes).expect("decode deletion")
     }
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {

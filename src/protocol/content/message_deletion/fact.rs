@@ -6,10 +6,12 @@
 //! projection validates that coordinate against the target message before it
 //! materializes deletion state.
 
+use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;
 pub type AuthorId = FactId;
+pub type SignerId = FactId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageDeletionFact {
@@ -19,4 +21,7 @@ pub struct ContentMessageDeletionFact {
     pub target_frontier_id: FactId,
     pub target_minute: u64,
     pub author_user_id: AuthorId,
+    pub signer_id: SignerId,
+    pub signer_public_key: Ed25519PublicKey,
+    pub signature: Ed25519Signature,
 }

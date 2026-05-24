@@ -15,7 +15,6 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::auth;
 use crate::protocol::auth::user_invite::fact::UserInviteFact;
 use crate::protocol::auth::{admin, endpoint_shared, workspace};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
@@ -45,15 +44,13 @@ impl TypedProjector<super::Codec> for UserInviteProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<UserInviteFact>,
+        user_invite: UserInviteFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user_invite fact must have global scope".to_string());
         }
-        let envelope = signed.envelope;
-        let user_invite = signed.payload;
         if user_invite.workspace_id == [0; 32] {
             return Err("user_invite fact has empty workspace_id".to_string());
         }
@@ -63,6 +60,7 @@ impl TypedProjector<super::Codec> for UserInviteProjector {
         if user_invite.public_key == [0; 32] {
             return Err("user_invite fact has empty public_key".to_string());
         }
+        super::layout::verify_signature(&user_invite)?;
 
         // 2. Authority.
         //
@@ -71,9 +69,9 @@ impl TypedProjector<super::Codec> for UserInviteProjector {
         // delegated path, where an endpoint_shared signer must be backed by the
         // named admin grant.
         if user_invite.authority_fact_id == user_invite.workspace_id {
-            project_workspace_signed(fact, &user_invite, &envelope, context)
+            project_workspace_signed(fact, &user_invite, context)
         } else {
-            project_endpoint_signed(fact, &user_invite, &envelope, context)
+            project_endpoint_signed(fact, &user_invite, context)
         }
     }
 }
@@ -81,7 +79,6 @@ impl TypedProjector<super::Codec> for UserInviteProjector {
 fn project_workspace_signed(
     fact: &Fact,
     invite: &UserInviteFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = WorkspaceSignedNeeds::new(fact.id, invite);
@@ -89,7 +86,7 @@ fn project_workspace_signed(
         return Ok(needs.output());
     };
 
-    if envelope.signer_id != invite.workspace_id {
+    if invite.signer_id != invite.workspace_id {
         return Err("bootstrap user_invite must use workspace as signer and authority".to_string());
     }
     if workspace_fact.id != invite.workspace_id {
@@ -97,12 +94,12 @@ fn project_workspace_signed(
     }
     let workspace = workspace::decode_fact_payload(workspace_fact.body())
         .map_err(|_| "user_invite authority is not a workspace fact".to_string())?;
-    if workspace.public_key != envelope.signer_public_key {
+    workspace::layout::verify_signature(&workspace)?;
+    if workspace.public_key != invite.signer_public_key {
         return Err(
             "signed user_invite signer key does not match workspace public key".to_string(),
         );
     }
-    auth::signed_fact::verify_envelope(envelope)?;
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
@@ -111,10 +108,9 @@ fn project_workspace_signed(
 fn project_endpoint_signed(
     fact: &Fact,
     invite: &UserInviteFact,
-    envelope: &auth::signed_fact::fact::SignedFactEnvelope,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let needs = EndpointAdminNeeds::new(fact.id, invite, envelope.signer_id);
+    let needs = EndpointAdminNeeds::new(fact.id, invite, invite.signer_id);
     let Some(endpoint_fact) = context.payload_for(&needs.endpoint_shared) else {
         return Ok(needs.output());
     };
@@ -122,17 +118,13 @@ fn project_endpoint_signed(
         return Ok(needs.output());
     };
 
-    if endpoint_fact.id != envelope.signer_id {
+    if endpoint_fact.id != invite.signer_id {
         return Err("user_invite signer endpoint context payload id mismatch".to_string());
     }
-    let endpoint_envelope = auth::signed_fact::decode_envelope(endpoint_fact.body())
+    let endpoint = endpoint_shared::decode_fact_payload(endpoint_fact.body())
         .map_err(|_| "user_invite signer must be workspace or endpoint_shared".to_string())?;
-    if endpoint_envelope.inner_type != endpoint_shared::TYPE_ENDPOINT_SHARED {
-        return Err("user_invite signer must be workspace or endpoint_shared".to_string());
-    }
-    let endpoint = endpoint_shared::decode_fact_payload(&endpoint_envelope.payload)
-        .map_err(|_| "user_invite signer must be workspace or endpoint_shared".to_string())?;
-    if endpoint.signing_public_key != envelope.signer_public_key {
+    endpoint_shared::layout::verify_signature(&endpoint)?;
+    if endpoint.signing_public_key != invite.signer_public_key {
         return Err(
             "signed user_invite signer key does not match endpoint_shared signing key".to_string(),
         );
@@ -152,8 +144,6 @@ fn project_endpoint_signed(
     if endpoint.user_authority_fact_id != admin.user_fact_id {
         return Err("user_invite signer user does not match admin authority user".to_string());
     }
-    auth::signed_fact::verify_envelope(envelope)?;
-
     // 3. Materialize.
     materialized_output(fact, invite, needs.output())
 }
@@ -242,15 +232,7 @@ fn materialized_output(
 fn decode_admin_payload(
     fact: &Fact,
 ) -> Result<crate::protocol::auth::admin::fact::AdminFact, String> {
-    match fact.bytes.first().copied() {
-        Some(admin::TYPE_ADMIN) => admin::decode_fact_payload(fact.body()),
-        Some(auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = auth::signed_fact::decode_envelope(fact.body())?;
-            if envelope.inner_type != admin::TYPE_ADMIN {
-                return Err("expected signed admin".to_string());
-            }
-            admin::decode_fact_payload(&envelope.payload)
-        }
-        _ => Err("expected admin".to_string()),
-    }
+    let admin = admin::decode_fact_payload(fact.body())?;
+    admin::layout::verify_signature(&admin)?;
+    Ok(admin)
 }

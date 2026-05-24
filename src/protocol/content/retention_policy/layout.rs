@@ -4,20 +4,24 @@
 //!
 //! ```text
 //! tag(1) || created_at_ms(8) || workspace_id(32) || scope_kind(1)
-//!        || scope_id(32) || author_user_id(32) || ttl_minutes(4)
-//!        || retire_minute(8) || supersedes_policy_id(32)
+//!        || scope_id(32) || author_user_id(32) || signer_id(32)
+//!        || signer_public_key(32) || ttl_minutes(4) || retire_minute(8)
+//!        || supersedes_policy_id(32) || signature(64)
 //! ```
 //!
 //! `supersedes_policy_id` uses an all-zero sentinel to encode the
 //! `None` variant (first policy in the scope's chain).
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 
 use super::fact::RetentionPolicyFact;
 
 pub const TYPE_RETENTION_POLICY: u8 = 147;
 
-pub const FACT_BYTES: usize = 1 + 8 + 32 + 1 + 32 + 32 + 4 + 8 + 32;
+pub const FACT_BYTES: usize =
+    1 + 8 + 32 + 1 + 32 + 32 + 32 + 32 + 4 + 8 + 32 + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = FACT_BYTES - ED25519_SIGNATURE_BYTES;
 
 pub const NO_PREVIOUS_POLICY_ID: [u8; 32] = [0; 32];
 
@@ -29,10 +33,13 @@ pub fn encode_fact(fact: &RetentionPolicyFact) -> Result<Vec<u8>, String> {
     wire::put_u8(fact.scope_kind, &mut out[41..42]).map_err(wire_err)?;
     out[42..74].copy_from_slice(&fact.scope_id);
     out[74..106].copy_from_slice(&fact.author_user_id);
-    wire::put_u32be(fact.ttl_minutes, &mut out[106..110]).map_err(wire_err)?;
-    wire::put_u64be(fact.retire_minute, &mut out[110..118]).map_err(wire_err)?;
+    out[106..138].copy_from_slice(&fact.signer_id);
+    out[138..170].copy_from_slice(&fact.signer_public_key);
+    wire::put_u32be(fact.ttl_minutes, &mut out[170..174]).map_err(wire_err)?;
+    wire::put_u64be(fact.retire_minute, &mut out[174..182]).map_err(wire_err)?;
     let supersedes = fact.supersedes_policy_id.unwrap_or(NO_PREVIOUS_POLICY_ID);
-    out[118..150].copy_from_slice(&supersedes);
+    out[182..214].copy_from_slice(&supersedes);
+    out[214..278].copy_from_slice(&fact.signature);
     Ok(out)
 }
 
@@ -50,10 +57,16 @@ pub fn decode_fact(bytes: &[u8]) -> Result<RetentionPolicyFact, String> {
     scope_id.copy_from_slice(&bytes[42..74]);
     let mut author_user_id = [0; 32];
     author_user_id.copy_from_slice(&bytes[74..106]);
-    let ttl_minutes = wire::take_u32be(&bytes[106..110]).map_err(wire_err)?;
-    let retire_minute = wire::take_u64be(&bytes[110..118]).map_err(wire_err)?;
+    let mut signer_id = [0; 32];
+    signer_id.copy_from_slice(&bytes[106..138]);
+    let mut signer_public_key = [0; 32];
+    signer_public_key.copy_from_slice(&bytes[138..170]);
+    let ttl_minutes = wire::take_u32be(&bytes[170..174]).map_err(wire_err)?;
+    let retire_minute = wire::take_u64be(&bytes[174..182]).map_err(wire_err)?;
     let mut supersedes_raw = [0; 32];
-    supersedes_raw.copy_from_slice(&bytes[118..150]);
+    supersedes_raw.copy_from_slice(&bytes[182..214]);
+    let mut signature = [0; ED25519_SIGNATURE_BYTES];
+    signature.copy_from_slice(&bytes[214..278]);
     let supersedes_policy_id = if supersedes_raw == NO_PREVIOUS_POLICY_ID {
         None
     } else {
@@ -67,8 +80,25 @@ pub fn decode_fact(bytes: &[u8]) -> Result<RetentionPolicyFact, String> {
         scope_kind,
         scope_id,
         author_user_id,
+        signer_id,
+        signer_public_key,
         created_at_ms,
+        signature,
     })
+}
+
+pub fn signing_bytes(fact: &RetentionPolicyFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..FACT_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &RetentionPolicyFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "retention policy",
+    )
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -88,7 +118,10 @@ mod tests {
             scope_kind: super::super::fact::SCOPE_KIND_WORKSPACE,
             scope_id: [1; 32],
             author_user_id: [3; 32],
+            signer_id: [9; 32],
+            signer_public_key: [10; 32],
             created_at_ms: 6_000_000,
+            signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }
 
@@ -104,7 +137,7 @@ mod tests {
         let mut f = fact();
         f.supersedes_policy_id = None;
         let encoded = encode_fact(&f).expect("encode");
-        assert_eq!(&encoded[118..150], &NO_PREVIOUS_POLICY_ID);
+        assert_eq!(&encoded[182..214], &NO_PREVIOUS_POLICY_ID);
         assert_eq!(decode_fact(&encoded).expect("decode"), f);
     }
 

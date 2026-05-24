@@ -1,11 +1,13 @@
 //! Fixed-width layout for recipient key facts.
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 
 use super::fact::RecipientKeyFact;
 
 pub const TYPE_RECIPIENT_KEY: u8 = 150;
-pub const RECIPIENT_KEY_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 8;
+pub const RECIPIENT_KEY_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 8 + 32 + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = RECIPIENT_KEY_BYTES - ED25519_SIGNATURE_BYTES;
 
 pub fn encode_recipient_key(fact: &RecipientKeyFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; RECIPIENT_KEY_BYTES];
@@ -15,6 +17,8 @@ pub fn encode_recipient_key(fact: &RecipientKeyFact) -> Result<Vec<u8>, String> 
     out[65..97].copy_from_slice(&fact.recipient_key);
     out[97..129].copy_from_slice(&fact.previous_recipient_key_id);
     wire::put_u64be(fact.created_at_ms, &mut out[129..137]).map_err(wire_err)?;
+    out[137..169].copy_from_slice(&fact.signer_public_key);
+    out[169..233].copy_from_slice(&fact.signature);
     Ok(out)
 }
 
@@ -29,7 +33,26 @@ pub fn decode_recipient_key(bytes: &[u8]) -> Result<RecipientKeyFact, String> {
         recipient_key: bytes[65..97].try_into().unwrap(),
         previous_recipient_key_id: bytes[97..129].try_into().unwrap(),
         created_at_ms: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
+        signer_public_key: bytes[137..169].try_into().unwrap(),
+        signature: bytes[169..233].try_into().unwrap(),
     })
+}
+
+pub fn signing_bytes(fact: &RecipientKeyFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(
+        &encode_recipient_key(fact)?,
+        SIGNATURE_OFFSET..RECIPIENT_KEY_BYTES,
+    )
+    .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &RecipientKeyFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "recipient key",
+    )
 }
 
 fn wire_err(err: wire::WireError) -> String {

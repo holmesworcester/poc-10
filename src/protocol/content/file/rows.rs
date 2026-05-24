@@ -45,7 +45,7 @@ pub fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableIn
         Value::U64(fact.blob_bytes),
         Value::U64(u64::from(fact.total_slices)),
         Value::U64(u64::from(fact.slice_bytes)),
-        Value::Bytes(fact.sealed_metadata.clone()),
+        Value::Bytes(fact.sealed_metadata.bytes().to_vec()),
         Value::Bool(false),
     ])
 }
@@ -62,12 +62,16 @@ mod tests {
             created_at_ms: 99,
             message_id: [2; 32],
             author_user_id: [3; 32],
+            signer_id: [6; 32],
+            signer_public_key: [8; 32],
             file_id: [4; 32],
             blob_bytes: 4096,
             total_slices: 1,
             slice_bytes: 4096,
             root_hash: [5; ROOT_HASH_BYTES],
-            sealed_metadata: b"meta".to_vec(),
+            sealed_metadata: crate::protocol::content::file::fact::SealedMetadata::new(b"meta")
+                .expect("metadata"),
+            signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         };
         let row = content_file_row([7; 32], &fact);
         assert_eq!(row.table, FILE_ROWS);

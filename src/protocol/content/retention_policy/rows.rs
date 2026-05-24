@@ -120,7 +120,10 @@ mod tests {
             scope_kind: SCOPE_KIND_WORKSPACE,
             scope_id: [1; 32],
             author_user_id: [3; 32],
+            signer_id: [4; 32],
+            signer_public_key: [5; 32],
             created_at_ms: 6_000_000,
+            signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         }
     }
 

@@ -19,29 +19,15 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentReactionFact, St
 pub fn decode_any_fact(
     fact: &crate::core::facts::Fact,
 ) -> Result<fact::ContentReactionFact, String> {
-    Ok(
-        crate::protocol::content::message::project::decode_signed_fact(
-            fact,
-            layout::TYPE_CONTENT_REACTION,
-            "reaction",
-            decode_fact_payload,
-        )?
-        .payload,
-    )
+    decode_fact_payload(fact.body())
 }
 
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload =
-        crate::protocol::content::message::project::DecodedFact<fact::ContentReactionFact>;
+    type Payload = fact::ContentReactionFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        crate::protocol::content::message::project::decode_signed_fact(
-            fact,
-            layout::TYPE_CONTENT_REACTION,
-            "reaction",
-            decode_fact_payload,
-        )
+        decode_fact_payload(fact.body())
     }
 }

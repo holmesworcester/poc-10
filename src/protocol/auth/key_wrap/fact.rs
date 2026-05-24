@@ -1,8 +1,8 @@
 //! Key wrap fact shape.
 //!
-//! A key wrap is shared encrypted key material signed by the frontier owner. It
-//! carries the wrapped-secret coordinate, the recipient it is addressed to, and
-//! the sealed ciphertext.
+//! A key wrap is deterministic shared encrypted key material produced by the
+//! frontier owner. It carries the wrapped-secret coordinate, the recipient it
+//! is addressed to, and the sealed ciphertext.
 
 use crate::core::crypto::{X25519PublicKey, XChaCha20Poly1305Nonce};
 use crate::core::facts::FactId;

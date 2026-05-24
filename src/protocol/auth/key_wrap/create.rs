@@ -6,7 +6,6 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::protocol::auth::signed_fact;
 
 use crate::protocol::auth::create_key_wrap::CreateKeyWrapIntent;
 use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
@@ -15,6 +14,7 @@ use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use crate::protocol::auth::local_key_secret::layout as local_key_secret_layout;
 use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
 use crate::protocol::auth::local_recipient_key::layout as local_recipient_layout;
+use crate::protocol::auth::local_signer_secret::layout as local_signer_secret_layout;
 use crate::protocol::auth::recipient_key::fact::RecipientKeyFact;
 use crate::protocol::auth::recipient_key::layout as recipient_key_layout;
 use crate::protocol::auth::removal_frontier::layout as removal_frontier_layout;
@@ -118,11 +118,7 @@ pub fn unwrap_key_wrap_fact(
         return Err("frontier fact id does not match unwrap intent".to_string());
     }
 
-    let envelope = signed_fact::layout::decode_signed_fact(&key_wrap_fact.bytes)?;
-    if envelope.inner_type != layout::TYPE_KEY_WRAP {
-        return Err("signed fact does not contain an auth key wrap".to_string());
-    }
-    let wrap = layout::decode_key_wrap(&envelope.payload)?;
+    let wrap = layout::decode_key_wrap(&key_wrap_fact.bytes)?;
     require_unwrap_coordinate(intent, &wrap)?;
 
     let recipient = recipient_key_layout::decode_recipient_key(&recipient_fact.bytes)?;
@@ -162,14 +158,14 @@ pub fn unwrap_key_wrap_fact(
     Ok(unwrapped)
 }
 
-pub fn create_signed_key_wrap_fact(
+pub fn create_validated_key_wrap_fact(
     intent: &CreateKeyWrapIntent,
     recipient_fact: &Fact,
     source_fact: &Fact,
     signer_secret_fact: &Fact,
 ) -> Result<Fact, String> {
     let wrap = create_key_wrap_fact(intent, recipient_fact, source_fact)?;
-    let signer = signed_fact::layout::decode_local_signer_secret(&signer_secret_fact.bytes)?;
+    let signer = local_signer_secret_layout::decode_fact(&signer_secret_fact.bytes)?;
     if signer_secret_fact.id != intent.signer_secret_fact_id {
         return Err("signer secret fact id does not match create_key_wrap intent".to_string());
     }
@@ -180,20 +176,11 @@ pub fn create_signed_key_wrap_fact(
     if signer.signer_id != key_wrap.signer_endpoint_id {
         return Err("signer secret does not match key wrap signer".to_string());
     }
-    let signed_bytes =
-        signed_fact::create::sign_payload_bytes(signer.signer_id, &signer.private_key, wrap.bytes)?;
-    Ok(Fact::new(wrap.scope, wrap.timestamp, signed_bytes))
+    Ok(wrap)
 }
 
-pub fn admit_signed_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
-    let envelope = signed_fact::layout::decode_signed_fact(&bytes)?;
-    if envelope.inner_type != layout::TYPE_KEY_WRAP {
-        return Err("signed fact does not contain an auth key wrap".to_string());
-    }
-    let wrap = layout::decode_key_wrap(&envelope.payload)?;
-    if envelope.signer_id != wrap.signer_endpoint_id {
-        return Err("key wrap signer does not match signed envelope signer".to_string());
-    }
+pub fn admit_key_wrap_fact(bytes: Vec<u8>) -> Result<Fact, String> {
+    let wrap = layout::decode_key_wrap(&bytes)?;
     Ok(Fact::new(
         crate::protocol::auth::workspace::scope(wrap.workspace_id),
         wrap.created_at_ms,
@@ -431,11 +418,8 @@ fn associated_data(wrap: &KeyWrapFact) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::auth::recipient_key::fact::RecipientKeyFact;
-    use crate::protocol::auth::recipient_key::layout as recipient_key_layout;
 
-    fn signed_key_wrap_bytes() -> (Vec<u8>, KeyWrapFact) {
-        let signer_private_key = [9; 32];
+    fn key_wrap_bytes() -> (Vec<u8>, KeyWrapFact) {
         let signer_id = [2; 32];
         let wrap = KeyWrapFact {
             workspace_id: [1; 32],
@@ -455,18 +439,15 @@ mod tests {
             nonce: [7; 24],
             ciphertext: [8; KEY_WRAP_CIPHERTEXT_BYTES],
         };
-        let payload = layout::encode_key_wrap(&wrap).expect("encode key wrap");
-        let bytes =
-            signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-                .expect("sign key wrap");
+        let bytes = layout::encode_key_wrap(&wrap).expect("encode key wrap");
         (bytes, wrap)
     }
 
     #[test]
-    fn admit_signed_key_wrap_uses_inner_workspace_and_created_at() {
-        let (bytes, wrap) = signed_key_wrap_bytes();
+    fn admit_key_wrap_uses_inner_workspace_and_created_at() {
+        let (bytes, wrap) = key_wrap_bytes();
 
-        let fact = admit_signed_key_wrap_fact(bytes.clone()).expect("admit signed key wrap");
+        let fact = admit_key_wrap_fact(bytes.clone()).expect("admit key wrap");
 
         assert_eq!(
             fact.scope,
@@ -477,22 +458,11 @@ mod tests {
     }
 
     #[test]
-    fn admit_signed_key_wrap_rejects_other_signed_payloads() {
-        let signer_private_key = [9; 32];
-        let signer_id = [2; 32];
-        let payload = recipient_key_layout::encode_recipient_key(&RecipientKeyFact {
-            workspace_id: [1; 32],
-            endpoint_id: signer_id,
-            recipient_key: [3; 32],
-            previous_recipient_key_id: [0; 32],
-            created_at_ms: 1_700_000_321,
-        })
-        .expect("encode recipient key");
+    fn admit_key_wrap_rejects_other_payloads() {
         let bytes =
-            signed_fact::create::sign_payload_bytes(signer_id, &signer_private_key, payload)
-                .expect("sign recipient key");
+            vec![crate::protocol::auth::recipient_key::TYPE_RECIPIENT_KEY; layout::KEY_WRAP_BYTES];
 
-        let err = admit_signed_key_wrap_fact(bytes).expect_err("recipient key is not a key wrap");
+        let err = admit_key_wrap_fact(bytes).expect_err("recipient key is not a key wrap");
         assert!(err.contains("key wrap"), "{err}");
     }
 }

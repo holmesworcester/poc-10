@@ -428,7 +428,6 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
         let production = strip_line_comments(production_text_before_unit_tests(&text));
         for marker in [
             "::layout::decode_fact",
-            "signed_fact::layout::",
             "layout as ",
             "_layout::decode_fact",
             "_layout::decode_",
@@ -648,6 +647,144 @@ fn target_facts_do_not_import_legacy_protocol_or_workers() {
     assert!(
         offenders.is_empty(),
         "target fact modules must not call into retained poc-8 protocol/workers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn protocol_fact_fields_stay_fixed_width() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in fact_family_files_named(root, "fact.rs") {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        for (line_number, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !trimmed.contains("pub ") {
+                continue;
+            }
+            if trimmed.contains(": Vec<") || trimmed.contains(": String") {
+                offenders.push(format!("{relative}:{}: {trimmed}", line_number + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "protocol fact fields must be fixed-width at the fact boundary. Use FixedSlot<N>, FixedText<N>, fixed arrays, or an owning bounded struct instead of Vec/String fields:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn retired_signing_wrapper_and_content_event_families_do_not_reappear() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden_paths = [
+        "src/protocol/auth/signed_fact.rs",
+        "src/protocol/auth/signed_fact",
+        "src/protocol/auth/signed_envelope.rs",
+        "src/protocol/auth/signed_envelope",
+        "src/protocol/content_event.rs",
+        "src/protocol/content_event",
+        "src/protocol/content/event.rs",
+        "src/protocol/content/event",
+    ];
+    let mut offenders = forbidden_paths
+        .into_iter()
+        .filter(|path| root.join(path).exists())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    for path in rust_files(&root.join("src/protocol")) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let production =
+            strip_line_comments(production_text_before_unit_tests(&source_text(&path)));
+        for marker in [
+            "signed_fact",
+            "SignedFact",
+            "TYPE_SIGNED_FACT",
+            "signed_envelope",
+            "SignedEnvelope",
+            "TYPE_SIGNED_ENVELOPE",
+            "decode_signed_envelope",
+            "decode_raw_or_signed_fact",
+            "content_event",
+            "ContentEvent",
+        ] {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "signed_fact, signed_envelope, and content_event are retired protocol wrappers. Shareable facts own natural signer fields, while deterministic key_wrap remains the raw exception:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn signing_wrappers_stay_out_of_projector_routing() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in [
+        "src/protocol/auth/signed_fact/project.rs",
+        "src/protocol/auth/signed_envelope/project.rs",
+    ] {
+        let path = root.join(path);
+        if path.exists() {
+            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
+        }
+    }
+
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
+    let fact_routes = registry
+        .split("macro_rules! handler_route")
+        .next()
+        .unwrap_or(registry.as_str());
+    for marker in [
+        "TYPE_SIGNED_FACT",
+        "TYPE_SIGNED_ENVELOPE",
+        "project_auth_signed_fact",
+        "project_auth_signed_envelope",
+    ] {
+        if fact_routes.contains(marker) {
+            offenders.push(format!("src/protocol/registry.rs contains {marker:?}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "signing wrappers are retired; child fact projectors verify natural signatures directly:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn retired_connection_frame_large_names_do_not_reappear() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in rust_files(&root.join("src/protocol")) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let production =
+            strip_line_comments(production_text_before_unit_tests(&source_text(&path)));
+        for marker in [
+            "ConnectionFrameLarge",
+            "CONNECTION_FRAME_LARGE",
+            "TYPE_CONNECTION_FRAME_LARGE",
+            "CONNECTION_FRAME_SIZE_CLASS_LARGE",
+        ] {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "connection frames are small, file-slice, or bundle frames. Do not reintroduce a generic large frame class:\n{}",
         offenders.join("\n")
     );
 }
@@ -1303,44 +1440,20 @@ fn connection_intents_treat_connection_frames_as_opaque() {
 }
 
 #[test]
-fn signed_fact_envelope_does_not_dispatch_to_child_event_modules() {
+fn retired_signed_envelope_module_does_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let signed_root = root.join("src/protocol/auth/signed_fact");
-    if !signed_root.exists() {
-        return;
-    }
-
-    let mut files = rust_files(&signed_root);
-    files.push(root.join("src/protocol/auth/signed_fact.rs"));
-
+    let signed_root = root.join("src/protocol/auth/signed_envelope");
     let mut offenders = Vec::new();
-    for path in files {
-        let text = source_text(&path);
-        let production = production_text_before_unit_tests(&text);
-        for forbidden in [
-            "protocol::auth",
-            "protocol::content::message",
-            "protocol::sync",
-            "protocol::auth::workspace",
-            "decode_key_wrap",
-            "encode_key_wrap",
-            "ContentMessage",
-            "KeyWrapFact",
-            "Intent",
-            "HandlerOutput",
-        ] {
-            if production.contains(forbidden) {
-                offenders.push(format!(
-                    "{} contains {forbidden:?}",
-                    path.strip_prefix(root).unwrap().display()
-                ));
-            }
-        }
+    if signed_root.exists() {
+        offenders.push("src/protocol/auth/signed_envelope".to_string());
+    }
+    if root.join("src/protocol/auth/signed_envelope.rs").exists() {
+        offenders.push("src/protocol/auth/signed_envelope.rs".to_string());
     }
 
     assert!(
         offenders.is_empty(),
-        "auth::signed_fact must stay an envelope helper, not a central protocol dispatcher:\n{}",
+        "auth::signed_envelope is retired; facts carry natural signatures directly:\n{}",
         offenders.join("\n")
     );
 }
@@ -1682,7 +1795,6 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
             "encode_local_key_secret",
             "encode_local_history_node_secret",
             "encode_local_recipient_key",
-            "decode_signed_fact",
             "decode_key_wrap",
             "decode_recipient_key",
             "decode_local_recipient_key",

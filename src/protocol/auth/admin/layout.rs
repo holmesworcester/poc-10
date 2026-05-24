@@ -7,12 +7,14 @@
 //!         || authority_fact_id(32) || user_fact_id(32)
 //! ```
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 
 use super::fact::AdminFact;
 
 pub const TYPE_ADMIN: u8 = 139;
-pub const FACT_BYTES: usize = 1 + 8 + (32 * 4);
+pub const FACT_BYTES: usize = 1 + 8 + (32 * 6) + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = FACT_BYTES - ED25519_SIGNATURE_BYTES;
 pub const ROW_VALUE_BYTES: usize = 8 + (32 * 3);
 
 pub fn encode_fact(fact: &AdminFact) -> Result<Vec<u8>, String> {
@@ -23,6 +25,9 @@ pub fn encode_fact(fact: &AdminFact) -> Result<Vec<u8>, String> {
     out[41..73].copy_from_slice(&fact.public_key);
     out[73..105].copy_from_slice(&fact.authority_fact_id);
     out[105..137].copy_from_slice(&fact.user_fact_id);
+    out[137..169].copy_from_slice(&fact.signer_id);
+    out[169..201].copy_from_slice(&fact.signer_public_key);
+    out[201..265].copy_from_slice(&fact.signature);
     Ok(out)
 }
 
@@ -41,13 +46,36 @@ pub fn decode_fact(bytes: &[u8]) -> Result<AdminFact, String> {
     authority_fact_id.copy_from_slice(&bytes[73..105]);
     let mut user_fact_id = [0; 32];
     user_fact_id.copy_from_slice(&bytes[105..137]);
+    let mut signer_id = [0; 32];
+    signer_id.copy_from_slice(&bytes[137..169]);
+    let mut signer_public_key = [0; 32];
+    signer_public_key.copy_from_slice(&bytes[169..201]);
+    let mut signature = [0; ED25519_SIGNATURE_BYTES];
+    signature.copy_from_slice(&bytes[201..265]);
     Ok(AdminFact {
         created_at_ms,
         workspace_id,
         public_key,
         authority_fact_id,
         user_fact_id,
+        signer_id,
+        signer_public_key,
+        signature,
     })
+}
+
+pub fn signing_bytes(fact: &AdminFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..FACT_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &AdminFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "admin",
+    )
 }
 
 /// Encodes the projection row value:
@@ -100,6 +128,9 @@ mod tests {
             public_key: [2; 32],
             authority_fact_id: [3; 32],
             user_fact_id: [4; 32],
+            signer_id: [3; 32],
+            signer_public_key: [5; 32],
+            signature: [6; ED25519_SIGNATURE_BYTES],
         }
     }
 

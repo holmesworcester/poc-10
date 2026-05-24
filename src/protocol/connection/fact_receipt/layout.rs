@@ -15,7 +15,7 @@ use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::create::normalize_origin_addr_bytes;
 use super::fact::{
-    ConnectionFactReceipt, ORIGIN_ADDR_BYTES, RECEIVE_PATH_CONNECTION_FRAME,
+    ConnectionFactReceipt, OriginAddr, ORIGIN_ADDR_BYTES, RECEIVE_PATH_CONNECTION_FRAME,
     RECEIVE_PATH_CONNECTION_REQUEST, RECEIVE_PATH_CONNECTION_RESPONSE,
 };
 
@@ -40,7 +40,7 @@ pub fn encode_fact(fact: &ConnectionFactReceipt) -> Result<Vec<u8>, String> {
     let mut out = vec![0; CONNECTION_FACT_RECEIPT_BYTES];
     wire::put_u8(TYPE_CONNECTION_FACT_RECEIPT, &mut out[0..1]).map_err(wire_err)?;
     out[RECEIVED_FACT_OFFSET..ORIGIN_OFFSET].copy_from_slice(&fact.received_fact_id);
-    let origin_addr = normalize_origin_addr_bytes(&fact.origin_addr)?;
+    let origin_addr = normalize_origin_addr_bytes(fact.origin_addr.bytes())?;
     FixedSlot::<ORIGIN_ADDR_BYTES>::new(&origin_addr)
         .map_err(wire_err)?
         .encode(&mut out[ORIGIN_OFFSET..LOCAL_ENDPOINT_OFFSET])
@@ -114,7 +114,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionFactReceipt, String> {
         received_fact_id: bytes[RECEIVED_FACT_OFFSET..ORIGIN_OFFSET]
             .try_into()
             .unwrap(),
-        origin_addr,
+        origin_addr: OriginAddr::new(&origin_addr).map_err(wire_err)?,
         local_endpoint_id: bytes[LOCAL_ENDPOINT_OFFSET..SENDER_ENDPOINT_OFFSET]
             .try_into()
             .unwrap(),
@@ -154,7 +154,7 @@ mod tests {
     fn fact() -> ConnectionFactReceipt {
         ConnectionFactReceipt {
             received_fact_id: [1; 32],
-            origin_addr: b"127.0.0.1:41001".to_vec(),
+            origin_addr: OriginAddr::new(b"127.0.0.1:41001").expect("origin"),
             local_endpoint_id: [2; 32],
             sender_endpoint_id: [3; 32],
             receive_path: RECEIVE_PATH_CONNECTION_RESPONSE,
@@ -175,11 +175,11 @@ mod tests {
     #[test]
     fn fact_receipt_encode_normalizes_friendly_origin_addr() {
         let mut fact = fact();
-        fact.origin_addr = b"127.0.0.1_41001".to_vec();
+        fact.origin_addr = OriginAddr::new(b"127.0.0.1_41001").expect("origin");
         let encoded = encode_fact(&fact).expect("encode");
         let decoded = decode_fact(&encoded).expect("decode");
 
-        assert_eq!(decoded.origin_addr, b"127.0.0.1:41001");
+        assert_eq!(decoded.origin_addr.bytes(), b"127.0.0.1:41001");
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn rejects_invalid_origin_addr() {
         let fact = ConnectionFactReceipt {
-            origin_addr: b"not-a-socket-addr".to_vec(),
+            origin_addr: OriginAddr::new(b"not-a-socket-addr").expect("origin"),
             ..fact()
         };
         assert!(encode_fact(&fact).is_err());

@@ -5,8 +5,7 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
-use topo::core::wire::FixedBytes;
-use topo::protocol::auth;
+use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::invite::layout as invite_layout;
@@ -16,12 +15,16 @@ use topo::protocol::auth::key_wrap::fact::{
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
-use topo::protocol::connection::frame::fact::{ConnectionFrameLargeFact, ConnectionFrameSmallFact};
+use topo::protocol::connection::fact_receipt::fact::OriginAddr;
+use topo::protocol::connection::frame::fact::{
+    ConnectionFrameBundleFact, ConnectionFrameSmallFact,
+};
 use topo::protocol::connection::frame::frame::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
 use topo::protocol::connection::frame::layout::{
-    self as frame_layout, CONNECTION_FRAME_SIZE_CLASS_LARGE,
+    self as frame_layout, CONNECTION_FRAME_BUNDLE_WIRE_BYTES, CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+    CONNECTION_FRAME_SMALL_WIRE_BYTES,
 };
 use topo::protocol::connection::frame::project::ConnectionFrameProjector;
 use topo::protocol::connection::receive_network_frame::{
@@ -38,6 +41,18 @@ use topo::protocol::sync::compare::layout as sync_compare_layout;
 const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;
 
+fn on_big_stack<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 fn receive_intent(frame: Vec<u8>) -> topo::core::intents::Intent {
     receive_intent_from_origin(frame, ORIGIN)
 }
@@ -53,8 +68,8 @@ fn receive_intent_from_origin(frame: Vec<u8>, origin: &[u8]) -> topo::core::inte
 
 fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
     let input = ConnectionFrameSmallFact {
-        frame,
-        origin_addr: ORIGIN.to_vec(),
+        frame: FixedSlot::<CONNECTION_FRAME_SMALL_WIRE_BYTES>::new(&frame).expect("small frame"),
+        origin_addr: OriginAddr::new(ORIGIN).expect("origin"),
         received_at_local_ms: RECEIVED_AT,
     };
     Fact::new(
@@ -64,16 +79,16 @@ fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
     )
 }
 
-fn connection_frame_large_fact(frame: Vec<u8>) -> Fact {
-    let input = ConnectionFrameLargeFact {
-        frame,
-        origin_addr: ORIGIN.to_vec(),
+fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
+    let input = ConnectionFrameBundleFact {
+        frame: FixedSlot::<CONNECTION_FRAME_BUNDLE_WIRE_BYTES>::new(&frame).expect("bundle frame"),
+        origin_addr: OriginAddr::new(ORIGIN).expect("origin"),
         received_at_local_ms: RECEIVED_AT,
     };
     Fact::new(
         FactScope::Local,
         RECEIVED_AT,
-        frame_layout::encode_large_fact(&input).expect("large connection frame"),
+        frame_layout::encode_bundle_fact(&input).expect("bundle connection frame"),
     )
 }
 
@@ -133,8 +148,7 @@ fn connection_fact() -> (Fact, ConnectionResponseFact) {
     (fact, connection)
 }
 
-fn signed_key_wrap_bytes() -> Vec<u8> {
-    let signer_private_key = [31; 32];
+fn key_wrap_bytes() -> Vec<u8> {
     let signer_id = [32; 32];
     let wrap = KeyWrapFact {
         workspace_id: [21; 32],
@@ -154,17 +168,12 @@ fn signed_key_wrap_bytes() -> Vec<u8> {
         nonce: [26; 24],
         ciphertext: [27; KEY_WRAP_CIPHERTEXT_BYTES],
     };
-    auth::signed_fact::create::sign_payload_bytes(
-        signer_id,
-        &signer_private_key,
-        auth_layout::encode_key_wrap(&wrap).expect("key wrap"),
-    )
-    .expect("signed key wrap")
+    auth_layout::encode_key_wrap(&wrap).expect("key wrap")
 }
 
 fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
     let (connection_fact, connection) = connection_fact();
-    let signed_wrap = signed_key_wrap_bytes();
+    let signed_wrap = key_wrap_bytes();
     let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
         connection_id: connection_fact.id,
         sender_endpoint_id: connection.from_endpoint,
@@ -272,11 +281,10 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
     let output = project_connection_frame_fact(&input_fact, context);
 
     assert_eq!(output.effects.facts.len(), 2);
-    let admitted_wrap =
-        auth_create::admit_signed_key_wrap_fact(signed_wrap).expect("admit expected wrap");
+    let admitted_wrap = auth_create::admit_key_wrap_fact(signed_wrap).expect("admit expected wrap");
     assert!(
         output.effects.facts.contains(&admitted_wrap),
-        "opened frame should emit the admitted signed key-wrap fact"
+        "opened frame should emit the admitted key-wrap fact"
     );
     let receipt_fact = output
         .effects
@@ -357,24 +365,26 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 }
 
 #[test]
-fn well_formed_large_frame_can_park_before_materializing_large_slot() {
-    let (connection_fact, connection) = connection_fact();
-    let frame = frame_layout::encode_frame_bytes(
-        CONNECTION_FRAME_SIZE_CLASS_LARGE,
-        FixedBytes(connection.from_endpoint),
-        FixedBytes(connection.to_endpoint),
-        FixedBytes(connection_fact.id),
-        FixedBytes([19; 24]),
-        b"not-opened-without-context",
-    )
-    .expect("large frame");
-    let input_fact = connection_frame_large_fact(frame);
+fn well_formed_bundle_frame_can_park_before_materializing_bundle_slot() {
+    on_big_stack(|| {
+        let (connection_fact, connection) = connection_fact();
+        let frame = frame_layout::encode_frame_bytes(
+            CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+            FixedBytes(connection.from_endpoint),
+            FixedBytes(connection.to_endpoint),
+            FixedBytes(connection_fact.id),
+            FixedBytes([19; 24]),
+            b"not-opened-without-context",
+        )
+        .expect("bundle frame");
+        let input_fact = connection_frame_bundle_fact(frame);
 
-    let output = project_connection_frame_fact(&input_fact, ProjectionContext::default());
+        let output = project_connection_frame_fact(&input_fact, ProjectionContext::default());
 
-    assert_eq!(output.needs.len(), 1);
-    assert_eq!(output.needs[0].role, "connection_response");
-    assert!(output.effects.facts.is_empty());
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(output.needs[0].role, "connection_response");
+        assert!(output.effects.facts.is_empty());
+    });
 }
 
 #[test]

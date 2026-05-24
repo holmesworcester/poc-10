@@ -61,6 +61,7 @@ pub fn policies_for_scope(
 
 #[cfg(test)]
 mod tests {
+    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::core::store::Store;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -107,7 +108,10 @@ mod tests {
             scope_kind: SCOPE_KIND_WORKSPACE,
             scope_id: workspace_id,
             author_user_id: [4; 32],
+            signer_id: [5; 32],
+            signer_public_key: [6; 32],
             created_at_ms,
+            signature: [7; ED25519_SIGNATURE_BYTES],
         }
     }
 }

@@ -8,20 +8,24 @@
 //! ride inside an opaque `sealed_metadata` slot encrypted with the parent
 //! message content key.
 //!
-//! Current boundaries:
-//! - Signed envelope verification is owned by `auth::signed_fact`.
-//! - Descriptor secrecy is limited to the opaque sealed metadata slot here;
-//!   CLI display resolves the parent message key before opening it.
-//! - Slice integrity is checked by the file-slice admit pipeline.
+//! Descriptor secrecy is limited to the opaque sealed metadata slot here; CLI
+//! display resolves the parent message key before opening it. Signature
+//! authority belongs to the content-file projector, and slice integrity is
+//! checked by the file-slice admit pipeline.
 
+use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;
+use crate::core::wire::FixedSlot;
 
 pub type WorkspaceId = FactId;
 pub type AuthorId = FactId;
+pub type SignerId = FactId;
 
 /// BLAKE3 root hash of the encrypted blob, carried in plaintext.
 pub const FILE_ROOT_HASH_BYTES: usize = 32;
+pub const SEALED_METADATA_BYTES: usize = 512;
 pub type RootHash = [u8; FILE_ROOT_HASH_BYTES];
+pub type SealedMetadata = FixedSlot<SEALED_METADATA_BYTES>;
 
 /// Product hard cap on declared blob size.
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -32,11 +36,14 @@ pub struct ContentFileFact {
     pub created_at_ms: u64,
     pub message_id: FactId,
     pub author_user_id: AuthorId,
+    pub signer_id: SignerId,
+    pub signer_public_key: Ed25519PublicKey,
     pub file_id: FactId,
     pub blob_bytes: u64,
     pub total_slices: u32,
     pub slice_bytes: u32,
     pub root_hash: RootHash,
     /// Opaque sealed descriptor metadata (filename + mime + AEAD tag).
-    pub sealed_metadata: Vec<u8>,
+    pub sealed_metadata: SealedMetadata,
+    pub signature: Ed25519Signature,
 }

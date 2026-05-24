@@ -33,7 +33,6 @@ pub const MESSAGES_USAGE: &str = "messages WORKSPACE_ID_HEX";
 pub const CONTENT_COUNT_USAGE: &str = "content-count WORKSPACE_ID_HEX";
 pub const VIEW_USAGE: &str = "view [WORKSPACE_ID_HEX]";
 
-const FILE_SLICE_BYTES: usize = 256 * 1024;
 const DEFAULT_MIME: &str = "application/octet-stream";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,15 +144,14 @@ pub fn react(
         created_at_ms,
         target_message_id: target.message_id,
         author_user_id,
+        signer_id: [0; 32],
+        signer_public_key: [0; 32],
         nonce,
-        ciphertext,
+        ciphertext: reaction::fact::ReactionCiphertext::new(&ciphertext)
+            .map_err(|err| format!("reaction ciphertext: {err}"))?,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let fact = signed_content_fact(
-        ctx,
-        workspace_id,
-        created_at_ms,
-        reaction::layout::encode_fact(&reaction)?,
-    )?;
+    let fact = signed_reaction_fact(ctx, workspace_id, created_at_ms, reaction)?;
     Ok(CommandOutput::new(ReactReceipt {
         workspace_id,
         reaction_fact_id: fact.id,
@@ -198,7 +196,9 @@ pub fn send_file(
     let total_slices = if payload.is_empty() {
         0
     } else {
-        payload.len().div_ceil(FILE_SLICE_BYTES) as u32
+        payload
+            .len()
+            .div_ceil(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES) as u32
     };
     let file_id = file_id_for(
         parsed.workspace_id,
@@ -222,23 +222,24 @@ pub fn send_file(
         created_at_ms,
         message_id: message_receipt.message_fact_id,
         author_user_id,
+        signer_id: [0; 32],
+        signer_public_key: [0; 32],
         file_id,
         blob_bytes: payload.len() as u64,
         total_slices,
-        slice_bytes: FILE_SLICE_BYTES as u32,
+        slice_bytes: file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES as u32,
         root_hash,
-        sealed_metadata,
+        sealed_metadata: file::fact::SealedMetadata::new(&sealed_metadata)
+            .map_err(|err| format!("file metadata: {err}"))?,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let descriptor_fact = signed_content_fact(
-        ctx,
-        parsed.workspace_id,
-        created_at_ms,
-        file::layout::encode_fact(&descriptor)?,
-    );
-    let descriptor_fact = descriptor_fact?;
+    let descriptor_fact = signed_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
     let mut facts = message_output.effects.facts;
     facts.push(descriptor_fact.clone());
-    for (slice_index, chunk) in payload.chunks(FILE_SLICE_BYTES).enumerate() {
+    for (slice_index, chunk) in payload
+        .chunks(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES)
+        .enumerate()
+    {
         let slice_nonce = deterministic_nonce_for_parts(
             b"topo:file-slice-nonce:v1",
             &[
@@ -253,13 +254,18 @@ pub fn send_file(
             created_at_ms: created_at_ms.saturating_add(1 + slice_index as u64),
             file_id,
             slice_index: slice_index as u32,
-            ciphertext,
+            signer_id: [0; 32],
+            signer_public_key: [0; 32],
+            ciphertext: file_slice::fact::FileSliceCiphertext::new(&ciphertext)
+                .map_err(|err| format!("file slice ciphertext: {err}"))?,
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        facts.push(Fact::new(
-            crate::protocol::auth::workspace::scope(parsed.workspace_id),
+        facts.push(signed_file_slice_fact(
+            ctx,
+            parsed.workspace_id,
             slice.created_at_ms,
-            file_slice::layout::encode_fact(&slice)?,
-        ));
+            slice,
+        )?);
     }
 
     Ok(CommandOutput::new(SendFileReceipt {
@@ -913,25 +919,78 @@ fn decode_file_metadata(bytes: &[u8]) -> Result<FileMetadata, String> {
     })
 }
 
-fn signed_content_fact(
+fn signing_fields(
     ctx: &CommandContext<'_>,
     workspace_id: FactId,
-    created_at_ms: u64,
-    payload: Vec<u8>,
-) -> Result<Fact, String> {
+) -> Result<(FactId, crypto::Ed25519PublicKey, crypto::Ed25519PrivateKey), String> {
     let signing = ctx.local_signing_capability(workspace_id)?;
     if signing.workspace_id != workspace_id {
         return Err("signing capability is not bound to this workspace".to_string());
     }
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
+    Ok((
         signing.signer_id,
-        &signing.private_key,
-        payload,
-    )?;
+        crypto::ed25519_public_key(&signing.private_key),
+        signing.private_key,
+    ))
+}
+
+fn signed_reaction_fact(
+    ctx: &CommandContext<'_>,
+    workspace_id: FactId,
+    created_at_ms: u64,
+    mut reaction: reaction::fact::ContentReactionFact,
+) -> Result<Fact, String> {
+    let (signer_id, signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
+    reaction.signer_id = signer_id;
+    reaction.signer_public_key = signer_public_key;
+    reaction.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&private_key, &reaction::layout::signing_bytes(&reaction)?);
+    reaction.signature = signature;
     Ok(Fact::new(
         crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
-        bytes,
+        reaction::layout::encode_fact(&reaction)?,
+    ))
+}
+
+fn signed_file_fact(
+    ctx: &CommandContext<'_>,
+    workspace_id: FactId,
+    created_at_ms: u64,
+    mut file: file::fact::ContentFileFact,
+) -> Result<Fact, String> {
+    let (signer_id, signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
+    file.signer_id = signer_id;
+    file.signer_public_key = signer_public_key;
+    file.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&private_key, &file::layout::signing_bytes(&file)?);
+    file.signature = signature;
+    Ok(Fact::new(
+        crate::protocol::auth::workspace::scope(workspace_id),
+        created_at_ms,
+        file::layout::encode_fact(&file)?,
+    ))
+}
+
+fn signed_file_slice_fact(
+    ctx: &CommandContext<'_>,
+    workspace_id: FactId,
+    created_at_ms: u64,
+    mut slice: file_slice::fact::ContentFileSliceFact,
+) -> Result<Fact, String> {
+    let (signer_id, signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
+    slice.signer_id = signer_id;
+    slice.signer_public_key = signer_public_key;
+    slice.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&private_key, &file_slice::layout::signing_bytes(&slice)?);
+    slice.signature = signature;
+    Ok(Fact::new(
+        crate::protocol::auth::workspace::scope(workspace_id),
+        created_at_ms,
+        file_slice::layout::encode_fact(&slice)?,
     ))
 }
 

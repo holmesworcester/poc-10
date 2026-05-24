@@ -8,7 +8,6 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::store::Store;
-use topo::protocol::auth::signed_fact;
 use topo::protocol::content::file_deletion::commands::delete_file;
 use topo::protocol::content::file_deletion::layout as file_deletion_layout;
 use topo::protocol::content::message_deletion::commands::delete_message;
@@ -67,14 +66,9 @@ fn delete_message_emits_decodable_target_fact() {
     assert_eq!(output.receipt.created_at_ms, 100);
     assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let envelope = signed_fact::layout::decode_signed_fact(&output.effects.facts[0].bytes)
-        .expect("decode signed deletion");
-    signed_fact::layout::verify_signed_fact(&envelope).expect("verify signed deletion");
-    assert_eq!(
-        envelope.inner_type,
-        message_deletion_layout::TYPE_CONTENT_MESSAGE_DELETION
-    );
-    let decoded = message_deletion_layout::decode_fact(&envelope.payload).expect("decode deletion");
+    let decoded = message_deletion_layout::decode_fact(&output.effects.facts[0].bytes)
+        .expect("decode deletion");
+    message_deletion_layout::verify_signature(&decoded).expect("verify signed deletion");
     assert_eq!(decoded.workspace_id, [1; 32]);
     assert_eq!(decoded.created_at_ms, 100);
     assert_eq!(decoded.target_message_id, [2; 32]);
@@ -97,14 +91,9 @@ fn delete_file_emits_decodable_target_fact() {
     assert_eq!(output.receipt.created_at_ms, 200);
     assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let envelope = signed_fact::layout::decode_signed_fact(&output.effects.facts[0].bytes)
-        .expect("decode signed deletion");
-    signed_fact::layout::verify_signed_fact(&envelope).expect("verify signed deletion");
-    assert_eq!(
-        envelope.inner_type,
-        file_deletion_layout::TYPE_CONTENT_FILE_DELETION
-    );
-    let decoded = file_deletion_layout::decode_fact(&envelope.payload).expect("decode deletion");
+    let decoded =
+        file_deletion_layout::decode_fact(&output.effects.facts[0].bytes).expect("decode deletion");
+    file_deletion_layout::verify_signature(&decoded).expect("verify signed deletion");
     assert_eq!(decoded.workspace_id, [4; 32]);
     assert_eq!(decoded.created_at_ms, 200);
     assert_eq!(decoded.target_file_id, [5; 32]);

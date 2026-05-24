@@ -6,11 +6,10 @@
 //! connected to a valid invite or authority chain before rows become visible.
 
 use crate::core::command_context::CommandOutput;
-use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
+use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::protocol::auth;
 
-use super::fact::UserFact;
+use super::fact::{UserFact, Username};
 use super::layout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,26 +58,8 @@ pub fn create_signed(input: CreateSignedUser) -> Result<CommandOutput<CreateUser
 }
 
 pub fn user_fact(input: &CreateUser) -> Result<Fact, String> {
-    if input.workspace_id == [0; 32] {
-        return Err("user workspace_id cannot be empty".to_string());
-    }
-    if input.public_key == [0; 32] {
-        return Err("user public_key cannot be empty".to_string());
-    }
-    if input.username.trim().is_empty() {
-        return Err("username must not be empty".to_string());
-    }
-    let payload = UserFact {
-        created_at_ms: input.created_at_ms,
-        workspace_id: input.workspace_id,
-        public_key: input.public_key,
-        username: input.username.clone(),
-    };
-    Ok(Fact::new(
-        FactScope::Global,
-        input.created_at_ms,
-        layout::encode_fact(&payload)?,
-    ))
+    let _ = input;
+    Err("user facts must be signed by an invite authority".to_string())
 }
 
 pub fn signed_user_fact(
@@ -97,16 +78,24 @@ pub fn signed_user_fact(
     if input.username.trim().is_empty() {
         return Err("username must not be empty".to_string());
     }
-    let payload = UserFact {
+    let signer_public_key = crypto::ed25519_public_key(&input.signer_private_key);
+    let mut payload = UserFact {
         created_at_ms: input.created_at_ms,
         workspace_id: input.workspace_id,
         public_key,
-        username: input.username.clone(),
+        username: Username::new(&input.username).map_err(|err| format!("username: {err}"))?,
+        signer_id: input.signer_id,
+        signer_public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
-        input.signer_id,
+    let (_, signature) = crypto::ed25519_sign_canonical(
         &input.signer_private_key,
+        &layout::signing_bytes(&payload)?,
+    );
+    payload.signature = signature;
+    Ok(Fact::new(
+        FactScope::Global,
+        input.created_at_ms,
         layout::encode_fact(&payload)?,
-    )?;
-    Ok(Fact::new(FactScope::Global, input.created_at_ms, bytes))
+    ))
 }

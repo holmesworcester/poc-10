@@ -11,6 +11,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
+use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     proactive_wrap_source_need, require_fact_scope,
@@ -63,8 +64,16 @@ fn recipient_key(
                 .to_string(),
         );
     }
+    super::layout::verify_signature(&recipient)?;
 
-    // 2. Context: supersession and previous-key validation.
+    // 2. Context: signer, supersession, and previous-key validation.
+    let signer_need = ContextNeed::range(
+        fact.id,
+        "content_signer",
+        scope.clone(),
+        recipient.endpoint_id,
+        recipient.endpoint_id,
+    );
     let superseded_need = ContextNeed::range(
         fact.id,
         "recipient_superseded",
@@ -73,7 +82,9 @@ fn recipient_key(
         fact.id,
     );
     let is_superseded = projection_context.payload_for(&superseded_need).is_some();
-    let mut output = ProjectionOutput::new().need(superseded_need);
+    let mut output = ProjectionOutput::new()
+        .need(signer_need.clone())
+        .need(superseded_need);
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
         let previous_need = ContextNeed::range(
@@ -96,6 +107,10 @@ fn recipient_key(
             recipient.previous_recipient_key_id,
         ));
     }
+    let Some(signer_fact) = projection_context.payload_for(&signer_need) else {
+        return Ok(output);
+    };
+    validate_recipient_signer(signer_fact, &recipient)?;
 
     // 3. Materialize: publish recipient context and proactive key-wrap work.
     output = output
@@ -153,6 +168,7 @@ fn validate_previous_recipient_key(
     let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
         "recipient key supersession previous dependency is not a recipient key".to_string()
     })?;
+    super::layout::verify_signature(&previous)?;
     if previous.workspace_id != recipient.workspace_id {
         return Err(
             "recipient key supersession previous_recipient_key workspace does not match"
@@ -165,6 +181,25 @@ fn validate_previous_recipient_key(
              (cross-endpoint supersession is rejected)"
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+fn validate_recipient_signer(
+    signer_fact: &Fact,
+    recipient: &RecipientKeyFact,
+) -> Result<(), String> {
+    let signer = endpoint_shared::decode_fact_payload(signer_fact.body())
+        .map_err(|_| "recipient key signer context must be endpoint_shared".to_string())?;
+    endpoint_shared::layout::verify_signature(&signer)?;
+    if signer.workspace_id != recipient.workspace_id {
+        return Err("recipient key signer workspace mismatch".to_string());
+    }
+    if signer.endpoint_id != recipient.endpoint_id {
+        return Err("recipient key signer endpoint mismatch".to_string());
+    }
+    if signer.signing_public_key != recipient.signer_public_key {
+        return Err("recipient key signer public key mismatch".to_string());
     }
     Ok(())
 }

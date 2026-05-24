@@ -6,6 +6,7 @@
 
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
+use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
 use crate::protocol::{auth, content};
@@ -102,6 +103,7 @@ pub fn author_set_with_auto_floor(
     };
 
     let fact = policy_fact(
+        store,
         input.workspace_id,
         previous_policy_id,
         input.ttl_minutes,
@@ -158,6 +160,7 @@ pub fn author_tighten(
         );
     }
     let fact = policy_fact(
+        store,
         input.workspace_id,
         previous_policy_id,
         input.ttl_minutes,
@@ -185,6 +188,7 @@ pub fn author_compact(
         .retire_minute
         .max(now_minute.saturating_sub(u64::from(active.ttl_minutes)));
     let fact = policy_fact(
+        store,
         input.workspace_id,
         Some(active.policy_id),
         active.ttl_minutes,
@@ -259,6 +263,7 @@ pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport
 }
 
 fn policy_fact(
+    store: &Store,
     workspace_id: FactId,
     supersedes_policy_id: Option<FactId>,
     ttl_minutes: u32,
@@ -266,7 +271,9 @@ fn policy_fact(
     author_user_id: FactId,
     created_at_ms: u64,
 ) -> Result<Fact, String> {
-    let payload = RetentionPolicyFact {
+    let (signer_id, signer_public_key, signer_private_key) =
+        local_signing_material(store, workspace_id)?;
+    let mut payload = RetentionPolicyFact {
         workspace_id,
         supersedes_policy_id,
         ttl_minutes,
@@ -274,13 +281,60 @@ fn policy_fact(
         scope_kind: SCOPE_KIND_WORKSPACE,
         scope_id: workspace_id,
         author_user_id,
+        signer_id,
+        signer_public_key,
         created_at_ms,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&signer_private_key, &layout::signing_bytes(&payload)?);
+    payload.signature = signature;
     Ok(Fact::new(
         FactScope::Global,
         created_at_ms,
         layout::encode_fact(&payload)?,
     ))
+}
+
+fn local_signing_material(
+    store: &Store,
+    workspace_id: FactId,
+) -> Result<(FactId, Ed25519PublicKey, Ed25519PrivateKey), String> {
+    auth::workspace::queries::local_membership(store, workspace_id)?
+        .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
+    let endpoint_id = local_endpoint_field(
+        store,
+        auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
+        "local endpoint id",
+    )?;
+    let public_key = local_endpoint_field(
+        store,
+        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+        "local endpoint signing public key",
+    )?;
+    let private_key = local_endpoint_field(
+        store,
+        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+        "local endpoint signing secret",
+    )?;
+    if crypto::ed25519_public_key(&private_key) != public_key {
+        return Err("local endpoint signing public key does not match secret".to_string());
+    }
+    Ok((endpoint_id, public_key, private_key))
+}
+
+fn local_endpoint_field(
+    store: &Store,
+    table: crate::core::store::TableName,
+    label: &str,
+) -> Result<[u8; 32], String> {
+    let value = store
+        .table_row(table, auth::endpoint::rows::LOCAL_KEY)
+        .map_err(|err| format!("load {label}: {err}"))?
+        .ok_or_else(|| format!("{label} is missing"))?;
+    value
+        .try_into()
+        .map_err(|_| format!("{label} row must be 32 bytes"))
 }
 
 fn local_admin_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {

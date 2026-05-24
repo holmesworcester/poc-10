@@ -29,6 +29,7 @@
 //! while calling these helpers for the byte-level work.
 
 use std::fmt;
+use std::ops::{Deref, Range};
 
 /// Errors reported by mechanical wire codecs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,8 @@ pub enum WireError {
     UnexpectedU8 { expected: u8, actual: u8 },
     /// A decoded string was not valid UTF-8.
     InvalidUtf8,
+    /// A zero-padded fixed text value contained a NUL before the padding tail.
+    InteriorNul { index: usize },
     /// A bounded padded slot had non-zero bytes after its logical length.
     NonZeroPadding { index: usize },
 }
@@ -61,6 +64,7 @@ impl fmt::Display for WireError {
                 write!(formatter, "expected byte {expected}, got {actual}")
             }
             Self::InvalidUtf8 => write!(formatter, "invalid utf-8"),
+            Self::InteriorNul { index } => write!(formatter, "interior NUL at {index}"),
             Self::NonZeroPadding { index } => write!(formatter, "non-zero padding at {index}"),
         }
     }
@@ -112,7 +116,7 @@ pub const U64_BYTES: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FixedSlot<const N: usize> {
     len: usize,
-    bytes: [u8; N],
+    bytes: Box<[u8; N]>,
 }
 
 pub type Ciphertext<const N: usize> = FixedSlot<N>;
@@ -129,7 +133,7 @@ impl<const N: usize> FixedSlot<N> {
             });
         }
 
-        let mut padded = [0; N];
+        let mut padded = boxed_zeroed_array::<N>();
         padded[..bytes.len()].copy_from_slice(bytes);
         Ok(Self {
             len: bytes.len(),
@@ -147,7 +151,10 @@ impl<const N: usize> FixedSlot<N> {
         }
 
         validate_zero_padding(&bytes, len)?;
-        Ok(Self { len, bytes })
+        Ok(Self {
+            len,
+            bytes: Box::new(bytes),
+        })
     }
 
     /// Return the logical byte length.
@@ -162,12 +169,17 @@ impl<const N: usize> FixedSlot<N> {
 
     /// Return the logical payload bytes without padding.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes.as_ref()[..self.len]
+    }
+
+    /// Alias for callers that naturally treat the logical payload as a slice.
+    pub fn as_slice(&self) -> &[u8] {
+        self.bytes()
     }
 
     /// Return the full fixed-width padded slot.
     pub fn padded_bytes(&self) -> &[u8; N] {
-        &self.bytes
+        self.bytes.as_ref()
     }
 }
 
@@ -181,6 +193,14 @@ impl<const N: usize> TryFrom<&[u8]> for FixedSlot<N> {
 
 impl<const N: usize> AsRef<[u8]> for FixedSlot<N> {
     fn as_ref(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+impl<const N: usize> Deref for FixedSlot<N> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
         self.bytes()
     }
 }
@@ -210,16 +230,149 @@ impl<const N: usize> FixedLayout for FixedSlot<N> {
             });
         }
 
-        let mut padded = [0; N];
+        let mut padded = boxed_zeroed_array::<N>();
         padded.copy_from_slice(&bytes[U32_BYTES..]);
-        validate_zero_padding(&padded, len)?;
+        validate_zero_padding(padded.as_ref(), len)?;
         Ok(Self { len, bytes: padded })
+    }
+}
+
+/// Fixed-width UTF-8 text stored as bytes followed by zero padding.
+///
+/// The encoded form has no length prefix; the first zero byte starts padding.
+/// Values with embedded NUL bytes are rejected so there is exactly one
+/// canonical padded representation for each string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FixedText<const N: usize> {
+    len: usize,
+    bytes: [u8; N],
+}
+
+impl<const N: usize> FixedText<N> {
+    /// Build fixed text from a UTF-8 string.
+    pub fn new(value: &str) -> Result<Self, WireError> {
+        if let Some(index) = value.as_bytes().iter().position(|byte| *byte == 0) {
+            return Err(WireError::InteriorNul { index });
+        }
+        if value.len() > N {
+            return Err(WireError::ValueTooLarge {
+                max: N,
+                actual: value.len(),
+            });
+        }
+
+        let mut bytes = [0; N];
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(Self {
+            len: value.len(),
+            bytes,
+        })
+    }
+
+    /// Build fixed text from its canonical padded bytes.
+    pub fn from_padded(bytes: [u8; N]) -> Result<Self, WireError> {
+        let len = bytes.iter().position(|byte| *byte == 0).unwrap_or(N);
+        validate_zero_padding(&bytes, len)?;
+        std::str::from_utf8(&bytes[..len]).map_err(|_| WireError::InvalidUtf8)?;
+        Ok(Self { len, bytes })
+    }
+
+    /// Return the decoded UTF-8 string.
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len])
+            .expect("FixedText validates UTF-8 at construction")
+    }
+
+    /// Return the logical UTF-8 bytes without padding.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    /// Return the canonical padded fixed-width bytes.
+    pub fn padded_bytes(&self) -> &[u8; N] {
+        &self.bytes
+    }
+}
+
+impl<const N: usize> TryFrom<&str> for FixedText<N> {
+    type Error = WireError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<const N: usize> AsRef<str> for FixedText<N> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> fmt::Display for FixedText<N> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<const N: usize> PartialEq<&str> for FixedText<N> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<FixedText<N>> for &str {
+    fn eq(&self, other: &FixedText<N>) -> bool {
+        *self == other.as_str()
+    }
+}
+
+impl<const N: usize> PartialEq<Vec<u8>> for FixedSlot<N> {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.bytes() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<FixedSlot<N>> for Vec<u8> {
+    fn eq(&self, other: &FixedSlot<N>) -> bool {
+        self.as_slice() == other.bytes()
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8]> for FixedSlot<N> {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.bytes() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<FixedSlot<N>> for &[u8] {
+    fn eq(&self, other: &FixedSlot<N>) -> bool {
+        *self == other.bytes()
     }
 }
 
 /// Build a compile-time fixed tag from a byte array.
 pub const fn fixed_tag<const N: usize>(bytes: &[u8; N]) -> Tag<N> {
     FixedBytes(*bytes)
+}
+
+/// Return canonical bytes with one encoded field zeroed.
+///
+/// Fact layouts use this for signatures that cover every field except the
+/// signature field itself. Core does not know what the bytes mean; the owning
+/// layout chooses the already-encoded fact bytes and exact field range.
+pub fn canonical_with_zeroed_field(
+    bytes: &[u8],
+    zeroed_field: Range<usize>,
+) -> Result<Vec<u8>, WireError> {
+    if zeroed_field.start > zeroed_field.end || zeroed_field.end > bytes.len() {
+        return Err(WireError::WrongLength {
+            expected: bytes.len(),
+            actual: zeroed_field.end,
+        });
+    }
+    let mut canonical = bytes.to_vec();
+    canonical[zeroed_field].fill(0);
+    Ok(canonical)
 }
 
 /// Require an exact byte length.
@@ -242,6 +395,14 @@ fn validate_zero_padding(bytes: &[u8], len: usize) -> Result<(), WireError> {
     } else {
         Ok(())
     }
+}
+
+fn boxed_zeroed_array<const N: usize>() -> Box<[u8; N]> {
+    vec![0; N]
+        .into_boxed_slice()
+        .try_into()
+        .ok()
+        .expect("boxed slice length matches requested array length")
 }
 
 /// Encode a single byte into an exact-width buffer.
@@ -408,6 +569,14 @@ impl Writer {
     /// Append a bounded padded slot.
     pub fn fixed_slot<const N: usize>(&mut self, bytes: &[u8]) -> Result<(), WireError> {
         let slot = FixedSlot::<N>::new(bytes)?;
+        self.fixed_slot_value(&slot)
+    }
+
+    /// Append an already validated bounded padded slot.
+    pub fn fixed_slot_value<const N: usize>(
+        &mut self,
+        slot: &FixedSlot<N>,
+    ) -> Result<(), WireError> {
         let mut encoded = vec![0; FixedSlot::<N>::LEN];
         slot.encode(&mut encoded)?;
         self.bytes.extend_from_slice(&encoded);
@@ -498,6 +667,11 @@ impl<'a> Reader<'a> {
         Ok(FixedSlot::<N>::decode(self.take(FixedSlot::<N>::LEN)?)?
             .bytes()
             .to_vec())
+    }
+
+    /// Read a bounded padded slot and return the fixed slot value.
+    pub fn fixed_slot_value<const N: usize>(&mut self) -> Result<FixedSlot<N>, WireError> {
+        FixedSlot::<N>::decode(self.take(FixedSlot::<N>::LEN)?)
     }
 
     /// Read `len` raw bytes.

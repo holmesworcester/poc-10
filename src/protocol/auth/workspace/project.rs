@@ -46,6 +46,7 @@ impl TypedProjector<super::Codec> for WorkspaceProjector {
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
+        super::layout::verify_signature(&workspace)?;
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .offer(crate::core::context::ContextOffer::range(

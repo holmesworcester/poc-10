@@ -14,14 +14,29 @@
 //!   nonce (24)
 //!   ciphertext (fixed slot)
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 
 use super::fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES};
 
 pub const TYPE_CONTENT_MESSAGE: u8 = 50;
 
-pub const CONTENT_MESSAGE_BYTES: usize =
-    1 + 32 + 8 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES;
+pub const CONTENT_MESSAGE_BYTES: usize = 1
+    + 32
+    + 8
+    + 32
+    + 32
+    + 32
+    + 32
+    + 32
+    + 8
+    + 32
+    + 8
+    + NONCE_BYTES
+    + 4
+    + CIPHERTEXT_BYTES
+    + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = CONTENT_MESSAGE_BYTES - ED25519_SIGNATURE_BYTES;
 
 pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_BYTES);
@@ -30,14 +45,15 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.u64be(fact.created_at_ms);
     out.fixed(&fact.author_user_id);
     out.fixed(&fact.signer_id);
+    out.fixed(&fact.signer_public_key);
     out.fixed(&fact.frontier_id);
     out.fixed(&fact.local_history_node_secret_id);
     out.u64be(fact.expires_at_minute);
     out.fixed(&fact.retention_policy_id);
     out.u64be(fact.minute);
     out.fixed(&fact.nonce);
-    out.fixed_slot::<CIPHERTEXT_BYTES>(&fact.ciphertext)
-        .map_err(wire_err)?;
+    out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
+    out.fixed(&fact.signature);
     out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
 }
 
@@ -53,16 +69,34 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
         created_at_ms: reader.u64be().map_err(wire_err)?,
         author_user_id: reader.array().map_err(wire_err)?,
         signer_id: reader.array().map_err(wire_err)?,
+        signer_public_key: reader.array().map_err(wire_err)?,
         frontier_id: reader.array().map_err(wire_err)?,
         local_history_node_secret_id: reader.array().map_err(wire_err)?,
         expires_at_minute: reader.u64be().map_err(wire_err)?,
         retention_policy_id: reader.array().map_err(wire_err)?,
         minute: reader.u64be().map_err(wire_err)?,
         nonce: reader.array().map_err(wire_err)?,
-        ciphertext: reader.fixed_slot::<CIPHERTEXT_BYTES>().map_err(wire_err)?,
+        ciphertext: reader
+            .fixed_slot_value::<CIPHERTEXT_BYTES>()
+            .map_err(wire_err)?,
+        signature: reader.array().map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
     Ok(fact)
+}
+
+pub fn signing_bytes(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..CONTENT_MESSAGE_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &ContentMessageFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "content message",
+    )
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -79,13 +113,16 @@ mod tests {
             created_at_ms: 180_000,
             author_user_id: [2; 32],
             signer_id: [3; 32],
+            signer_public_key: [9; 32],
             frontier_id: [4; 32],
             local_history_node_secret_id: [5; 32],
             expires_at_minute: u64::MAX,
             retention_policy_id: [6; 32],
             minute: 3,
             nonce: [8; NONCE_BYTES],
-            ciphertext: b"sealed".to_vec(),
+            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(b"sealed")
+                .expect("ciphertext"),
+            signature: [10; ED25519_SIGNATURE_BYTES],
         }
     }
 

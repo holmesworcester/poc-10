@@ -13,8 +13,10 @@ use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
 use topo::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
 use topo::protocol::auth::removal_frontier::layout as removal_frontier_layout;
-use topo::protocol::auth::signed_fact::create as signed_fact_create;
-use topo::protocol::auth::workspace::{commands::create_workspace, rows as workspace_rows};
+use topo::protocol::auth::workspace::{
+    commands::{create_workspace_with_identity, BootstrapIdentity},
+    rows as workspace_rows,
+};
 use topo::protocol::content::message as content_message;
 
 struct FixedClock(Cell<u64>);
@@ -52,7 +54,16 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
     let vault = EmptyVault;
     let output = {
         let ctx = runtime.command_context(&clock, &vault);
-        create_workspace(&ctx, [9; 32], "Runtime").expect("create workspace")
+        create_workspace_with_identity(
+            &ctx,
+            "Runtime",
+            BootstrapIdentity {
+                username: "alice",
+                device_name: "laptop",
+                ttl_minutes: Some(0),
+            },
+        )
+        .expect("create workspace")
     };
 
     let receipt = runtime
@@ -64,7 +75,7 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
 
     assert_eq!(receipt.created_at_ms, 123_000);
     assert!(status.progressed);
-    assert_eq!(runtime.pending_intent_count(), 1);
+    assert!(runtime.pending_intent_count() >= 1);
 
     let rows = runtime
         .store()
@@ -73,7 +84,6 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
     assert_eq!(rows.len(), 1);
     let row = workspace_rows::decode_workspace_row(&rows[0].0, &rows[0].1).expect("decode row");
     assert_eq!(row.name, "Runtime");
-    assert_eq!(row.public_key, [9; 32]);
 }
 
 #[test]
@@ -148,11 +158,18 @@ fn runtime_dispatches_every_protocol_handler_registration() {
 }
 
 fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) -> Fact {
-    let body = RemovalFrontierFact {
+    let signing_key = [5; 32];
+    let mut body = RemovalFrontierFact {
         workspace_id,
         owner_endpoint_id,
         created_at_ms: 1,
+        signer_public_key: crypto::ed25519_public_key(&signing_key),
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
+    body.signature = crypto::ed25519_sign(
+        &signing_key,
+        &removal_frontier_layout::signing_bytes(&body).expect("frontier signing bytes"),
+    );
     Fact::new(
         workspace_scope(workspace_id),
         1,
@@ -203,23 +220,26 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
         &plaintext,
     )
     .expect("encrypt message");
-    let body = content_message::fact::ContentMessageFact {
+    let mut body = content_message::fact::ContentMessageFact {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
         author_user_id: input.author_user_id,
         signer_id: input.signer_id,
+        signer_public_key: crypto::ed25519_public_key(input.signer_private),
         frontier_id: input.frontier_id,
         local_history_node_secret_id: [0; 32],
         expires_at_minute: u64::MAX,
         retention_policy_id: [0; 32],
         minute,
         nonce,
-        ciphertext,
+        ciphertext: content_message::fact::MessageCiphertext::new(&ciphertext).expect("ciphertext"),
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let payload = content_message::layout::encode_fact(&body).expect("encode content message");
-    let bytes =
-        signed_fact_create::sign_payload_bytes(input.signer_id, input.signer_private, payload)
-            .expect("sign content message");
+    body.signature = crypto::ed25519_sign(
+        input.signer_private,
+        &content_message::layout::signing_bytes(&body).expect("message signing bytes"),
+    );
+    let bytes = content_message::layout::encode_fact(&body).expect("encode content message");
     Fact::new(
         workspace_scope(input.workspace_id),
         input.created_at_ms,

@@ -1,3 +1,4 @@
+use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
@@ -109,15 +110,22 @@ fn local_history_node_waits_for_frontier_source_and_tombstone_context() {
 }
 
 fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at_ms: u64) -> Fact {
+    let private_key = [7; 32];
+    let mut frontier = RemovalFrontierFact {
+        workspace_id,
+        owner_endpoint_id,
+        created_at_ms,
+        signer_public_key: crypto::ed25519_public_key(&private_key),
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+    };
+    frontier.signature = crypto::ed25519_sign(
+        &private_key,
+        &removal_frontier_layout::signing_bytes(&frontier).expect("frontier signing bytes"),
+    );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
-        removal_frontier_layout::encode_removal_frontier(&RemovalFrontierFact {
-            workspace_id,
-            owner_endpoint_id,
-            created_at_ms,
-        })
-        .expect("encode frontier"),
+        removal_frontier_layout::encode_removal_frontier(&frontier).expect("encode frontier"),
     )
 }
 

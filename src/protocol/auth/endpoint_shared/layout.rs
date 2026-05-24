@@ -9,17 +9,21 @@
 //!   || device_name_utf8_zero_padded(64)
 //! ```
 //!
-//! The signed envelope wrapper is modeled by `auth::signed_fact`; this
-//! module owns only the canonical inner endpoint_shared payload and projected
-//! row value.
+//! The fact carries its own signature fields. Projection owns authority checks
+//! against device-invite or invite-server context.
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
-use crate::core::wire::FixedSlot;
+use crate::core::wire::FixedText;
 
-use super::fact::{EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES};
+use super::fact::{
+    EndpointDeviceName, EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES,
+};
 
 pub const TYPE_ENDPOINT_SHARED: u8 = 135;
-pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES;
+pub const FACT_BYTES: usize =
+    1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES + 32 + 32 + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = FACT_BYTES - ED25519_SIGNATURE_BYTES;
 pub const ROW_VALUE_BYTES: usize = 8 + 32 + 32 + 1 + 32 + ENDPOINT_DEVICE_NAME_BYTES;
 
 pub fn encode_fact(fact: &EndpointSharedFact) -> Result<Vec<u8>, String> {
@@ -31,7 +35,15 @@ pub fn encode_fact(fact: &EndpointSharedFact) -> Result<Vec<u8>, String> {
     out[73..105].copy_from_slice(&fact.endpoint_id);
     out[105..137].copy_from_slice(&fact.signing_public_key);
     wire::put_u8(fact.endpoint_role.as_u8(), &mut out[137..138]).map_err(wire_err)?;
-    write_device_name(&fact.device_name, &mut out[138..])?;
+    write_device_name(
+        &fact.device_name,
+        &mut out[138..138 + ENDPOINT_DEVICE_NAME_BYTES],
+    )?;
+    let signer_start = 138 + ENDPOINT_DEVICE_NAME_BYTES;
+    out[signer_start..signer_start + 32].copy_from_slice(&fact.signer_id);
+    out[signer_start + 32..signer_start + 64].copy_from_slice(&fact.signer_public_key);
+    out[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]
+        .copy_from_slice(&fact.signature);
     Ok(out)
 }
 
@@ -51,7 +63,15 @@ pub fn decode_fact(bytes: &[u8]) -> Result<EndpointSharedFact, String> {
     let mut signing_public_key = [0; 32];
     signing_public_key.copy_from_slice(&bytes[105..137]);
     let endpoint_role = EndpointRole::from_u8(wire::take_u8(&bytes[137..138]).map_err(wire_err)?)?;
-    let device_name = read_device_name(&bytes[138..])?;
+    let device_name = read_device_name(&bytes[138..138 + ENDPOINT_DEVICE_NAME_BYTES])?;
+    let signer_start = 138 + ENDPOINT_DEVICE_NAME_BYTES;
+    let mut signer_id = [0; 32];
+    signer_id.copy_from_slice(&bytes[signer_start..signer_start + 32]);
+    let mut signer_public_key = [0; 32];
+    signer_public_key.copy_from_slice(&bytes[signer_start + 32..signer_start + 64]);
+    let mut signature = [0; ED25519_SIGNATURE_BYTES];
+    signature
+        .copy_from_slice(&bytes[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]);
     Ok(EndpointSharedFact {
         created_at_ms,
         workspace_id,
@@ -60,7 +80,24 @@ pub fn decode_fact(bytes: &[u8]) -> Result<EndpointSharedFact, String> {
         signing_public_key,
         endpoint_role,
         device_name,
+        signer_id,
+        signer_public_key,
+        signature,
     })
+}
+
+pub fn signing_bytes(fact: &EndpointSharedFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..FACT_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &EndpointSharedFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "endpoint shared",
+    )
 }
 
 /// Encodes the projection row value:
@@ -95,7 +132,7 @@ pub(crate) fn decode_row_value(value: &[u8]) -> Result<DecodedRowValue, String> 
         signing_public_key,
         endpoint_role,
         user_authority_fact_id,
-        device_name,
+        device_name: device_name.to_string(),
     })
 }
 
@@ -108,27 +145,17 @@ pub(crate) struct DecodedRowValue {
     pub device_name: String,
 }
 
-fn write_device_name(name: &str, out: &mut [u8]) -> Result<(), String> {
+fn write_device_name(name: &EndpointDeviceName, out: &mut [u8]) -> Result<(), String> {
     wire::expect_len(out, ENDPOINT_DEVICE_NAME_BYTES).map_err(wire_err)?;
-    if name.as_bytes().contains(&0) {
-        return Err("endpoint device name cannot contain NUL".to_string());
-    }
-    let slot = FixedSlot::<ENDPOINT_DEVICE_NAME_BYTES>::new(name.as_bytes()).map_err(wire_err)?;
-    out.copy_from_slice(slot.padded_bytes());
+    out.copy_from_slice(name.padded_bytes());
     Ok(())
 }
 
-fn read_device_name(bytes: &[u8]) -> Result<String, String> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    if bytes[end..].iter().any(|byte| *byte != 0) {
-        return Err("endpoint device name has non-canonical padding".to_string());
-    }
-    std::str::from_utf8(&bytes[..end])
-        .map_err(|_| "endpoint device name is not valid utf-8".to_string())
-        .map(ToOwned::to_owned)
+fn read_device_name(bytes: &[u8]) -> Result<EndpointDeviceName, String> {
+    let padded: [u8; ENDPOINT_DEVICE_NAME_BYTES] = bytes
+        .try_into()
+        .map_err(|_| "endpoint device name slot has wrong length".to_string())?;
+    FixedText::from_padded(padded).map_err(wire_err)
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -147,7 +174,10 @@ mod tests {
             endpoint_id: [3; 32],
             signing_public_key: [4; 32],
             endpoint_role: EndpointRole::Device,
-            device_name: "laptop".to_string(),
+            device_name: EndpointDeviceName::new("laptop").expect("device name"),
+            signer_id: [6; 32],
+            signer_public_key: [7; 32],
+            signature: [8; ED25519_SIGNATURE_BYTES],
         }
     }
 
@@ -171,12 +201,8 @@ mod tests {
     #[test]
     fn rejects_nul_device_name() {
         assert_eq!(
-            encode_fact(&EndpointSharedFact {
-                device_name: "bad\0name".to_string(),
-                ..fact()
-            })
-            .expect_err("NUL name must fail"),
-            "endpoint device name cannot contain NUL"
+            EndpointDeviceName::new("bad\0name").expect_err("NUL name must fail"),
+            wire::WireError::InteriorNul { index: 3 }
         );
     }
 
@@ -187,7 +213,7 @@ mod tests {
         encoded[name_start + "laptop".len() + 1] = b'x';
         assert_eq!(
             decode_fact(&encoded).expect_err("padding must fail"),
-            "endpoint device name has non-canonical padding"
+            "NonZeroPadding { index: 7 }"
         );
     }
 

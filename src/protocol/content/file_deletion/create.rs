@@ -4,8 +4,8 @@
 //! bytes. User-facing timestamping and receipts live in `commands.rs`.
 
 use crate::core::command_context::LocalSigningCapability;
+use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::protocol::auth::signed_fact;
 
 use super::fact::{AuthorId, ContentFileDeletionFact, WorkspaceId};
 use super::layout;
@@ -22,19 +22,23 @@ pub fn delete_file(
         return Err("delete_file signing capability workspace mismatch".to_string());
     }
 
-    let deletion = ContentFileDeletionFact {
+    let signer_public_key = crypto::ed25519_public_key(&signing.private_key);
+    let mut deletion = ContentFileDeletionFact {
         workspace_id,
         created_at_ms,
         target_file_id,
         author_user_id,
+        signer_id: signing.signer_id,
+        signer_public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let payload = layout::encode_fact(&deletion)?;
-    let bytes =
-        signed_fact::create::sign_payload_bytes(signing.signer_id, &signing.private_key, payload)?;
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&signing.private_key, &layout::signing_bytes(&deletion)?);
+    deletion.signature = signature;
     Ok(Fact::new(
         crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
-        bytes,
+        layout::encode_fact(&deletion)?,
     ))
 }
 

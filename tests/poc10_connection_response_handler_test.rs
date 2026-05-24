@@ -199,7 +199,10 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     let received_at = 1_700_000_333;
     let received = ConnectionFactReceipt {
         received_fact_id: request_fact.id,
-        origin_addr: b"127.0.0.1:41001".to_vec(),
+        origin_addr: topo::protocol::connection::fact_receipt::fact::OriginAddr::new(
+            b"127.0.0.1:41001",
+        )
+        .expect("origin"),
         local_endpoint_id: request.to_endpoint,
         sender_endpoint_id: request.from_endpoint,
         receive_path: RECEIVE_PATH_CONNECTION_REQUEST,

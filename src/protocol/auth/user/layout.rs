@@ -5,14 +5,16 @@
 //! NUL bytes and decoding rejects non-canonical padding. Keep those byte
 //! invariants here; invite and admin authority checks belong to projection.
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
-use crate::core::wire::FixedSlot;
+use crate::core::wire::FixedText;
 
-use super::fact::{UserFact, USERNAME_BYTES};
+use super::fact::{UserFact, Username, USERNAME_BYTES};
 
 pub const TYPE_USER: u8 = 14;
 pub const ROW_VALUE_BYTES: usize = 8 + 32 + 32 + USERNAME_BYTES;
-pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + USERNAME_BYTES;
+pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + USERNAME_BYTES + 32 + 32 + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = FACT_BYTES - ED25519_SIGNATURE_BYTES;
 
 pub fn encode_fact(fact: &UserFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
@@ -20,7 +22,12 @@ pub fn encode_fact(fact: &UserFact) -> Result<Vec<u8>, String> {
     wire::put_u64be(fact.created_at_ms, &mut out[1..9]).map_err(wire_err)?;
     out[9..41].copy_from_slice(&fact.workspace_id);
     out[41..73].copy_from_slice(&fact.public_key);
-    write_username(&fact.username, &mut out[73..])?;
+    write_username(&fact.username, &mut out[73..73 + USERNAME_BYTES])?;
+    let signer_start = 73 + USERNAME_BYTES;
+    out[signer_start..signer_start + 32].copy_from_slice(&fact.signer_id);
+    out[signer_start + 32..signer_start + 64].copy_from_slice(&fact.signer_public_key);
+    out[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]
+        .copy_from_slice(&fact.signature);
     Ok(out)
 }
 
@@ -35,13 +42,38 @@ pub fn decode_fact(bytes: &[u8]) -> Result<UserFact, String> {
     workspace_id.copy_from_slice(&bytes[9..41]);
     let mut public_key = [0; 32];
     public_key.copy_from_slice(&bytes[41..73]);
-    let username = read_username(&bytes[73..])?;
+    let username = read_username(&bytes[73..73 + USERNAME_BYTES])?;
+    let signer_start = 73 + USERNAME_BYTES;
+    let mut signer_id = [0; 32];
+    signer_id.copy_from_slice(&bytes[signer_start..signer_start + 32]);
+    let mut signer_public_key = [0; 32];
+    signer_public_key.copy_from_slice(&bytes[signer_start + 32..signer_start + 64]);
+    let mut signature = [0; ED25519_SIGNATURE_BYTES];
+    signature
+        .copy_from_slice(&bytes[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]);
     Ok(UserFact {
         created_at_ms,
         workspace_id,
         public_key,
         username,
+        signer_id,
+        signer_public_key,
+        signature,
     })
+}
+
+pub fn signing_bytes(fact: &UserFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..FACT_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &UserFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "user",
+    )
 }
 
 /// Encodes the projection row value: `created_at(8) || public_key(32) || user_invite_id(32) || username(64)`.
@@ -69,7 +101,7 @@ pub(crate) fn decode_row_value(value: &[u8]) -> Result<DecodedRowValue, String> 
         created_at_ms,
         public_key,
         user_invite_id,
-        username,
+        username: username.to_string(),
     })
 }
 
@@ -80,27 +112,17 @@ pub(crate) struct DecodedRowValue {
     pub username: String,
 }
 
-fn write_username(username: &str, out: &mut [u8]) -> Result<(), String> {
+fn write_username(username: &Username, out: &mut [u8]) -> Result<(), String> {
     wire::expect_len(out, USERNAME_BYTES).map_err(wire_err)?;
-    if username.as_bytes().contains(&0) {
-        return Err("username cannot contain NUL".to_string());
-    }
-    let slot = FixedSlot::<USERNAME_BYTES>::new(username.as_bytes()).map_err(wire_err)?;
-    out.copy_from_slice(slot.padded_bytes());
+    out.copy_from_slice(username.padded_bytes());
     Ok(())
 }
 
-fn read_username(bytes: &[u8]) -> Result<String, String> {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    if bytes[end..].iter().any(|byte| *byte != 0) {
-        return Err("username has non-canonical padding".to_string());
-    }
-    std::str::from_utf8(&bytes[..end])
-        .map_err(|_| "username is not valid utf-8".to_string())
-        .map(ToOwned::to_owned)
+fn read_username(bytes: &[u8]) -> Result<Username, String> {
+    let padded: [u8; USERNAME_BYTES] = bytes
+        .try_into()
+        .map_err(|_| "username slot has wrong length".to_string())?;
+    FixedText::from_padded(padded).map_err(wire_err)
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -116,7 +138,10 @@ mod tests {
             created_at_ms: 42,
             workspace_id: [2; 32],
             public_key: [7; 32],
-            username: "alice".to_string(),
+            username: Username::new("alice").expect("username"),
+            signer_id: [8; 32],
+            signer_public_key: [9; 32],
+            signature: [10; ED25519_SIGNATURE_BYTES],
         }
     }
 
@@ -147,16 +172,14 @@ mod tests {
 
     #[test]
     fn rejects_long_username() {
-        let err = encode_fact(&UserFact {
-            created_at_ms: 1,
-            workspace_id: [0; 32],
-            public_key: [0; 32],
-            username: "a".repeat(USERNAME_BYTES + 1),
-        })
-        .expect_err("long username must fail");
-        assert!(
-            err.contains("ValueTooLarge") || err.contains("too"),
-            "{err}"
+        let err =
+            Username::new(&"a".repeat(USERNAME_BYTES + 1)).expect_err("long username must fail");
+        assert_eq!(
+            err,
+            wire::WireError::ValueTooLarge {
+                max: USERNAME_BYTES,
+                actual: USERNAME_BYTES + 1
+            }
         );
     }
 }

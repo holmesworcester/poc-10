@@ -2,7 +2,7 @@
 //!
 //! The projector decides that a recipient, source secret, and signer capability
 //! may meet; this handler loads those declared facts and asks the key-wrap
-//! module to build the signed wrap. The intent payload, idempotence key, and
+//! module to build the deterministic raw wrap. The intent payload, idempotence key, and
 //! constructor live here so the handler is self-contained.
 
 use crate::core::effects::PipelineEffects;
@@ -180,7 +180,8 @@ impl IntentHandler for CreateKeyWrapHandler {
         let recipient = context.require_fact(&input.recipient_key_id)?;
         let source = context.require_fact(&input.source_fact_id)?;
         let signer_secret = context.require_fact(&input.signer_secret_fact_id)?;
-        let wrap = create::create_signed_key_wrap_fact(&input, recipient, source, signer_secret)?;
+        let wrap =
+            create::create_validated_key_wrap_fact(&input, recipient, source, signer_secret)?;
         Ok(PipelineEffects::new().fact(wrap))
     }
 }

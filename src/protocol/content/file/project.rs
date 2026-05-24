@@ -16,9 +16,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::auth;
-use crate::protocol::auth::user;
-use crate::protocol::content::message::project::{self, DecodedPayload};
+use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{
     file_deletion, message, message_deletion, purge::project as content_purge,
 };
@@ -50,21 +48,17 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: project::DecodedFact<super::fact::ContentFileFact>,
+        file: super::fact::ContentFileFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let project::DecodedFact {
-            payload: file,
-            signer,
-            envelope,
-        } = decoded;
         validate_file_fields(&file)?;
         let scope = crate::protocol::auth::workspace::scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
+        super::layout::verify_signature(&file)?;
 
         // 2. Context and deletion gates.
-        let signer_need = project::signer_need(fact.id, file.workspace_id, signer);
+        let signer_need = project::signer_need(fact.id, file.workspace_id, file.signer_id);
         let parent_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message",
@@ -79,26 +73,27 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             file.author_user_id,
             file.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !project::validate_signer_context(
-                context,
-                need,
-                signer,
-                file.workspace_id,
-                Some(file.author_user_id),
-                "file",
-            )? {
-                return Ok(output_with_needs([
-                    signer_need,
-                    Some(parent_need),
-                    Some(author_need),
-                    None,
-                ]));
-            }
+        if !project::validate_signer_context(
+            context,
+            &signer_need,
+            FactSigner {
+                signer_id: file.signer_id,
+                signer_public_key: file.signer_public_key,
+            },
+            file.workspace_id,
+            Some(file.author_user_id),
+            "file",
+        )? {
+            return Ok(output_with_needs([
+                Some(signer_need),
+                Some(parent_need),
+                Some(author_need),
+                None,
+            ]));
         }
         let Some(parent_payload) = context_payload(context, &parent_need, "file parent")? else {
             return Ok(output_with_needs([
-                signer_need,
+                Some(signer_need),
                 Some(parent_need),
                 Some(author_need),
             ]));
@@ -126,7 +121,6 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         );
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
-            project::verify_envelope(envelope.as_ref(), "file")?;
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(parent_need)
                 .need(file_deletion_need)
@@ -144,7 +138,6 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
                 file.message_id,
                 parent.message.author_user_id,
             )?;
-            project::verify_envelope(envelope.as_ref(), "file")?;
             return Ok(delete_file_projection(file.workspace_id, fact.id)
                 .need(file_deletion_need)
                 .need(parent_need)
@@ -153,7 +146,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         }
         let Some(author) = context_payload(context, &author_need, "file author")? else {
             return Ok(output_with_needs([
-                signer_need,
+                Some(signer_need),
                 Some(file_deletion_need),
                 Some(parent_need),
                 Some(parent_deletion_need),
@@ -161,11 +154,10 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             ]));
         };
         validate_author_user(author, file.workspace_id, file.author_user_id)?;
-        project::verify_envelope(envelope.as_ref(), "file")?;
 
         // 3. Materialize.
         Ok(output_with_needs([
-            signer_need,
+            Some(signer_need),
             Some(file_deletion_need),
             Some(parent_need),
             Some(parent_deletion_need),
@@ -300,8 +292,7 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("file author context payload id mismatch".to_string());
     }
-    let author_payload = decode_context_payload(payload, user::TYPE_USER, "file author")?;
-    let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
+    let author = crate::protocol::auth::user::decode_fact_payload(payload.body())
         .map_err(|_| "file author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("file author workspace does not match file".to_string());
@@ -315,13 +306,9 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = project::decode_signed_payload(
-        payload,
-        file_deletion::TYPE_CONTENT_FILE_DELETION,
-        "file deletion",
-    )?;
-    let deletion = file_deletion::decode_fact_payload(&deletion_payload.payload)
+    let deletion = file_deletion::decode_fact_payload(payload.body())
         .map_err(|_| "file deletion context is not a content file deletion".to_string())?;
+    file_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("file deletion workspace does not match file".to_string());
     }
@@ -342,13 +329,9 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = project::decode_signed_payload(
-        payload,
-        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
-        "parent deletion",
-    )?;
-    let deletion = message_deletion::decode_fact_payload(&deletion_payload.payload)
+    let deletion = message_deletion::decode_fact_payload(payload.body())
         .map_err(|_| "parent deletion context is not a content message deletion".to_string())?;
+    message_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
     }
@@ -380,32 +363,20 @@ struct ParentMessage {
 }
 
 fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMessage, String> {
-    let message_payload =
-        project::decode_signed_payload(payload, message::TYPE_CONTENT_MESSAGE, label)?;
-    let message = message::decode_fact_payload(&message_payload.payload)
-        .map_err(|_| format!("{label} context is not a content message"))?;
+    let message = project::decode_typed_fact(
+        payload,
+        message::TYPE_CONTENT_MESSAGE,
+        label,
+        message::decode_fact_payload,
+    )
+    .map_err(|_| format!("{label} context is not a content message"))?;
+    message::layout::verify_signature(&message)?;
     Ok(ParentMessage {
         workspace_id: message.workspace_id,
         frontier_id: message.frontier_id,
         minute: message.minute,
         author_user_id: message.author_user_id,
     })
-}
-
-fn decode_context_payload(
-    payload: &Fact,
-    expected_type: u8,
-    label: &str,
-) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        project::decode_signed_payload(payload, expected_type, label)
-    } else {
-        Ok(DecodedPayload {
-            payload: payload.bytes.clone(),
-            signer: None,
-            envelope: None,
-        })
-    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

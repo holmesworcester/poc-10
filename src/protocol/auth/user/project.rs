@@ -13,7 +13,6 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::auth;
 use crate::protocol::auth::user_invite;
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -42,51 +41,45 @@ impl TypedProjector<super::Codec> for UserProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: auth::signed_fact::SignedPayload<super::fact::UserFact>,
+        user: super::fact::UserFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user fact must have global scope".to_string());
         }
-        let envelope = signed.envelope;
-        let user = signed.payload;
         if user.workspace_id == [0; 32] {
             return Err("user workspace_id must not be empty".to_string());
         }
         if user.public_key == [0; 32] {
             return Err("user public_key must not be empty".to_string());
         }
-        if user.username.trim().is_empty() {
+        if user.username.as_str().trim().is_empty() {
             return Err("username must not be empty".to_string());
         }
+        super::layout::verify_signature(&user)?;
 
         // 2. Authority.
         let invite_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_user_invite",
             crate::core::facts::FactScope::Global,
-            envelope.signer_id,
-            envelope.signer_id,
+            user.signer_id,
+            user.signer_id,
         );
         let Some(invite_fact) = context.payload_for(&invite_need) else {
             return Ok(ProjectionOutput::new().need(invite_need));
         };
-        auth::signed_fact::verify_envelope(&envelope)?;
-        if invite_fact.id != envelope.signer_id {
+        if invite_fact.id != user.signer_id {
             return Err("user signer context payload id mismatch".to_string());
         }
-        let invite_envelope = auth::signed_fact::decode_envelope(invite_fact.body())
-            .map_err(|_| "user signer context must be a signed user_invite fact".to_string())?;
-        if invite_envelope.inner_type != user_invite::TYPE_USER_INVITE {
-            return Err("user signer context must be a signed user_invite fact".to_string());
-        }
-        let invite = user_invite::decode_fact_payload(&invite_envelope.payload)
+        let invite = user_invite::decode_fact_payload(invite_fact.body())
             .map_err(|_| "user signer context must be a user_invite fact".to_string())?;
+        user_invite::layout::verify_signature(&invite)?;
         if invite.workspace_id != user.workspace_id {
             return Err("user workspace does not match user_invite workspace".to_string());
         }
-        if invite.public_key != envelope.signer_public_key {
+        if invite.public_key != user.signer_public_key {
             return Err("signed user signer key does not match user_invite public key".to_string());
         }
         let user_invite_id = invite_fact.id;

@@ -3,9 +3,8 @@
 //! The tests hand-build a `CommandContext` from a vault and a fixed clock,
 //! drive the command, and assert: (1) the happy path produces one fact and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
-//! signed envelope whose inner payload decodes through
-//! `content::message::layout::decode_fact` and whose ciphertext
-//! decrypts back to the original plaintext under the workspace key.
+//! naturally signed `content_message` fact whose ciphertext decrypts back to
+//! the original plaintext under the workspace key.
 
 use std::cell::Cell;
 
@@ -16,9 +15,8 @@ use topo::core::command_context::{
 use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::auth::signed_fact::layout::decode_signed_fact;
 use topo::protocol::content::message::create::{associated_data, recover_text, send_message};
-use topo::protocol::content::message::layout::{decode_fact, TYPE_CONTENT_MESSAGE};
+use topo::protocol::content::message::layout::{decode_fact, verify_signature};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 struct FixedClock(Cell<u64>);
@@ -123,12 +121,8 @@ fn send_message_happy_path_emits_one_content_message_fact() {
         "no intents in the first cut"
     );
 
-    // The fact id is the blake3 of the signed envelope bytes. Peel the
-    // envelope to recover the inner content-message payload before decoding.
-    let envelope =
-        decode_signed_fact(&output.effects.facts[0].bytes).expect("decode signed envelope");
-    assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
-    let message = decode_fact(&envelope.payload).expect("decode inner content message");
+    let message = decode_fact(&output.effects.facts[0].bytes).expect("decode content message");
+    verify_signature(&message).expect("verify content message signature");
     assert_eq!(message.workspace_id, workspace_id);
     assert_eq!(message.created_at_ms, 60_000);
     assert_eq!(message.minute, 60_000 / 60_000);
@@ -160,10 +154,8 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     let text = "round-trip me through decode_fact";
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
-    let envelope =
-        decode_signed_fact(&output.effects.facts[0].bytes).expect("decode signed envelope");
-    assert_eq!(envelope.inner_type, TYPE_CONTENT_MESSAGE);
-    let message = decode_fact(&envelope.payload).expect("decode inner content message");
+    let message = decode_fact(&output.effects.facts[0].bytes).expect("decode content message");
+    verify_signature(&message).expect("verify content message signature");
 
     // Recover the plaintext using the same workspace key the vault handed
     // to the command. The test must not be able to read the key from any

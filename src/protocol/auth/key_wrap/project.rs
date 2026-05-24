@@ -1,8 +1,7 @@
 //! Key wrap projector plus shared auth key-material wrap-source policy.
 //!
-//! POLICY. A signed key wrap is admitted iff signer, recipient, and frontier
-//! context validate; if local recipient material exists, an unwrap intent is
-//! emitted.
+//! POLICY. A key wrap is admitted iff signer, recipient, and frontier context
+//! validate; if local recipient material exists, an unwrap intent is emitted.
 //!
 //! This module also owns the wrap-source coordinate scheme and the shared
 //! projection helpers (scope checks, signer matching, wrap-source validation)
@@ -15,12 +14,12 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
+use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret;
 use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
 use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
-use crate::protocol::auth::{self, signed_fact};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
 use super::fact::KeyWrapFact;
@@ -441,26 +440,20 @@ pub(crate) fn matched_payload_fact<'a>(
     projection_context.payload_for(need)
 }
 
-pub(crate) fn has_matching_signer_public_key(
+pub(crate) fn matching_signer_public_key(
     projection_context: &ProjectionContext,
     need: &ContextNeed,
-    signer_public_key: &[u8; 32],
-) -> bool {
-    projection_context
-        .matched_payloads_for(need)
-        .any(|(_, payload)| {
-            let Ok(envelope) = signed_fact::decode_envelope(payload.body()) else {
-                return false;
-            };
-            if envelope.inner_type != auth::endpoint_shared::TYPE_ENDPOINT_SHARED {
-                return false;
-            }
-            let Ok(endpoint) = auth::endpoint_shared::decode_fact_payload(&envelope.payload) else {
-                return false;
-            };
-            endpoint.endpoint_id.as_slice() == need.start_key.as_bytes()
-                && endpoint.signing_public_key == *signer_public_key
-        })
+) -> Result<Option<[u8; 32]>, String> {
+    for (_, payload) in projection_context.matched_payloads_for(need) {
+        let Ok(endpoint) = auth::endpoint_shared::decode_fact_payload(payload.body()) else {
+            continue;
+        };
+        auth::endpoint_shared::layout::verify_signature(&endpoint)?;
+        if endpoint.endpoint_id.as_slice() == need.start_key.as_bytes() {
+            return Ok(Some(endpoint.signing_public_key));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn require_fact_scope(fact: &Fact, expected: &FactScope) -> Result<(), String> {
@@ -549,34 +542,29 @@ impl TypedProjector<super::Codec> for KeyWrapProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        signed: signed_fact::SignedPayload<KeyWrapFact>,
+        wrap: KeyWrapFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        signed_key_wrap(fact, context, signed)
+        key_wrap(fact, context, wrap)
     }
 }
 
-fn signed_key_wrap(
+fn key_wrap(
     fact: &Fact,
     projection_context: &ProjectionContext,
-    signed: signed_fact::SignedPayload<KeyWrapFact>,
+    wrap: KeyWrapFact,
 ) -> Result<ProjectionOutput, String> {
-    let envelope = signed.envelope;
-    let wrap = signed.payload;
     // 1. Structural.
     let scope = crate::protocol::auth::workspace::scope(wrap.workspace_id);
     require_fact_scope(fact, &scope)?;
-    if envelope.signer_id != wrap.signer_endpoint_id {
-        return Err("key wrap signer does not match signed envelope signer".to_string());
-    }
 
     // 2. Context: signer, recipient, frontier, and local recipient.
     let signer_need = ContextNeed::range(
         fact.id,
         "content_signer",
         scope.clone(),
-        envelope.signer_id,
-        envelope.signer_id,
+        wrap.signer_endpoint_id,
+        wrap.signer_endpoint_id,
     );
     let recipient_need = ContextNeed::range(
         fact.id,
@@ -600,11 +588,7 @@ fn signed_key_wrap(
         wrap.recipient_key_id,
     );
 
-    let signer_ready = has_matching_signer_public_key(
-        projection_context,
-        &signer_need,
-        &envelope.signer_public_key,
-    );
+    let signer_public_key = matching_signer_public_key(projection_context, &signer_need)?;
     let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
     let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
     let local_recipient_fact = matched_payload_fact(projection_context, &local_recipient_need);
@@ -615,16 +599,17 @@ fn signed_key_wrap(
         .need(frontier_need)
         .need(local_recipient_need);
 
-    if !signer_ready || recipient_fact.is_none() || frontier_fact.is_none() {
+    if signer_public_key.is_none() || recipient_fact.is_none() || frontier_fact.is_none() {
         return Ok(output);
     }
-    signed_fact::verify_envelope(&envelope)?;
+    let signer_public_key = signer_public_key.expect("checked");
 
     let recipient_fact = recipient_fact.expect("checked");
     if recipient_fact.id != wrap.recipient_key_id {
         return Err("key wrap recipient context payload id mismatch".to_string());
     }
     let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
+    recipient_key::layout::verify_signature(&recipient)?;
     if recipient.workspace_id != wrap.workspace_id {
         return Err("key wrap recipient key workspace does not match wrap".to_string());
     }
@@ -633,6 +618,7 @@ fn signed_key_wrap(
         return Err("key wrap frontier context payload id mismatch".to_string());
     }
     let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
+    removal_frontier::layout::verify_signature(&frontier)?;
     if frontier.workspace_id != wrap.workspace_id {
         return Err("key wrap removal frontier workspace does not match wrap".to_string());
     }
@@ -644,7 +630,7 @@ fn signed_key_wrap(
     output = output
         .row_mutation(RowMutation::PutRow(key_wrap_row(KeyWrapRow {
             key_wrap_id: fact.id,
-            signer_public_key: envelope.signer_public_key,
+            signer_public_key,
             wrap: wrap.clone(),
         })?))
         .offer(ContextOffer::range(

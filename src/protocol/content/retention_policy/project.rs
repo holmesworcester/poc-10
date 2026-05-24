@@ -1,8 +1,9 @@
 //! Disappearing-messages retention policy projector (poc-10 target tree).
 //!
 //! POLICY. A retention_policy is admitted iff:
-//!   1. STRUCTURAL. The body decodes, TTL/created time are non-zero, and
-//!      workspace-scoped policies name the workspace as their scope id.
+//!   1. STRUCTURAL. The body decodes, TTL/created time are non-zero, the
+//!      natural signature verifies, and workspace-scoped policies name the
+//!      workspace as their scope id.
 //!   2. AUTHORITY. The authority context is either root workspace bootstrap or
 //!      an admin grant for the author; predecessor context must match scope.
 //!   3. MATERIALIZE. Once monotonicity is validated, write the retention
@@ -59,11 +60,12 @@ impl TypedProjector<super::Codec> for RetentionPolicyProjector {
         {
             return Err("retention policy workspace-scope id must match workspace_id".to_string());
         }
+        super::layout::verify_signature(&policy)?;
 
         // 2. Authority and predecessor context.
-        let authority_need = if policy.supersedes_policy_id.is_none()
-            && policy.author_user_id == policy.workspace_id
-        {
+        let bootstrap_root =
+            policy.supersedes_policy_id.is_none() && policy.author_user_id == policy.workspace_id;
+        let authority_need = if bootstrap_root {
             crate::core::context::ContextNeed::range(
                 fact.id,
                 "auth_workspace",
@@ -80,6 +82,15 @@ impl TypedProjector<super::Codec> for RetentionPolicyProjector {
                 policy.author_user_id,
             )
         };
+        let signer_need = (!bootstrap_root).then(|| {
+            crate::core::context::ContextNeed::range(
+                fact.id,
+                "content_signer",
+                auth::workspace::scope(policy.workspace_id),
+                policy.signer_id,
+                policy.signer_id,
+            )
+        });
         let previous_need = policy.supersedes_policy_id.map(|previous_id| {
             crate::core::context::ContextNeed::range(
                 fact.id,
@@ -90,6 +101,9 @@ impl TypedProjector<super::Codec> for RetentionPolicyProjector {
             )
         });
         let mut waiting = ProjectionOutput::new().need(authority_need.clone());
+        if let Some(need) = &signer_need {
+            waiting = waiting.need(need.clone());
+        }
         if let Some(need) = &previous_need {
             waiting = waiting.need(need.clone());
         }
@@ -105,8 +119,21 @@ impl TypedProjector<super::Codec> for RetentionPolicyProjector {
         } else {
             None
         };
+        let signer_fact = if let Some(need) = &signer_need {
+            let Some(payload) = projection_context.payload_for(need) else {
+                return Ok(waiting);
+            };
+            Some(payload)
+        } else {
+            None
+        };
 
         validate_authority(authority_fact, &policy)?;
+        if let Some(signer_fact) = signer_fact {
+            validate_signer(signer_fact, &policy)?;
+        } else if bootstrap_root {
+            validate_workspace_bootstrap_signature(authority_fact, &policy)?;
+        }
         if let Some(previous) = previous_fact {
             validate_previous(previous, &policy)?;
         }
@@ -144,7 +171,7 @@ fn validate_authority(authority_fact: &Fact, policy: &RetentionPolicyFact) -> Re
     if policy.supersedes_policy_id.is_none()
         && authority_fact.id == policy.workspace_id
         && policy.author_user_id == policy.workspace_id
-        && auth::workspace::decode_fact_payload(&authority_fact.bytes).is_ok()
+        && auth::workspace::decode_fact_payload(authority_fact.body()).is_ok()
     {
         return Ok(());
     }
@@ -153,17 +180,40 @@ fn validate_authority(authority_fact: &Fact, policy: &RetentionPolicyFact) -> Re
 }
 
 fn decode_admin_payload(fact: &Fact) -> Result<auth::admin::fact::AdminFact, String> {
-    match fact.bytes.first().copied() {
-        Some(auth::admin::TYPE_ADMIN) => auth::admin::decode_fact_payload(fact.body()),
-        Some(auth::signed_fact::TYPE_SIGNED_FACT) => {
-            let envelope = auth::signed_fact::decode_envelope(fact.body())?;
-            if envelope.inner_type != auth::admin::TYPE_ADMIN {
-                return Err("expected signed admin".to_string());
-            }
-            auth::admin::decode_fact_payload(&envelope.payload)
-        }
-        _ => Err("expected admin".to_string()),
+    auth::admin::decode_fact_payload(fact.body())
+}
+
+fn validate_signer(signer_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
+    let signer = auth::endpoint_shared::decode_fact_payload(signer_fact.body())
+        .map_err(|_| "retention policy signer context must be endpoint_shared".to_string())?;
+    if signer.workspace_id != policy.workspace_id {
+        return Err("retention policy signer workspace mismatch".to_string());
     }
+    if signer.endpoint_id != policy.signer_id {
+        return Err("retention policy signer endpoint mismatch".to_string());
+    }
+    if signer.user_authority_fact_id != policy.author_user_id {
+        return Err("retention policy signer user mismatch".to_string());
+    }
+    if signer.signing_public_key != policy.signer_public_key {
+        return Err("retention policy signer public key mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn validate_workspace_bootstrap_signature(
+    workspace_fact: &Fact,
+    policy: &RetentionPolicyFact,
+) -> Result<(), String> {
+    let workspace = auth::workspace::decode_fact_payload(workspace_fact.body())
+        .map_err(|_| "retention policy bootstrap authority must be workspace".to_string())?;
+    if workspace.public_key != policy.signer_public_key {
+        return Err("retention policy bootstrap key does not match workspace".to_string());
+    }
+    if policy.signer_id != policy.workspace_id {
+        return Err("retention policy bootstrap signer must be workspace id".to_string());
+    }
+    Ok(())
 }
 
 fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(), String> {
@@ -173,6 +223,7 @@ fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Resu
     let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
         "retention policy previous context must be a retention policy fact".to_string()
     })?;
+    super::layout::verify_signature(&previous)?;
     if previous.workspace_id != policy.workspace_id
         || previous.scope_kind != policy.scope_kind
         || previous.scope_id != policy.scope_id
@@ -189,6 +240,7 @@ fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Resu
 mod projector_tests {
     use crate as topo;
 
+    use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
@@ -202,7 +254,8 @@ mod projector_tests {
     use topo::protocol::sync::share_fact_with_workspace;
 
     fn workspace_policy() -> RetentionPolicyFact {
-        RetentionPolicyFact {
+        let private_key = [9; 32];
+        let mut policy = RetentionPolicyFact {
             workspace_id: [1; 32],
             supersedes_policy_id: None,
             ttl_minutes: 60,
@@ -210,8 +263,16 @@ mod projector_tests {
             scope_kind: SCOPE_KIND_WORKSPACE,
             scope_id: [1; 32],
             author_user_id: [3; 32],
+            signer_id: [3; 32],
+            signer_public_key: crypto::ed25519_public_key(&private_key),
             created_at_ms: 6_000_000,
-        }
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        };
+        policy.signature = crypto::ed25519_sign(
+            &private_key,
+            &layout::signing_bytes(&policy).expect("policy signing bytes"),
+        );
+        policy
     }
 
     #[test]
@@ -219,20 +280,22 @@ mod projector_tests {
         let policy = workspace_policy();
         let fact = policy_fact(&policy);
         let authority = admin_fact(policy.workspace_id, policy.author_user_id);
+        let signer = signer_fact(&policy);
         let projector = project::RetentionPolicyProjector::new();
 
         let waiting = projector
             .project(&fact, &ProjectionContext::default())
             .expect("missing authority waits");
         assert!(waiting.effects.intents.is_empty());
-        assert_eq!(waiting.needs.len(), 1);
+        assert_eq!(waiting.needs.len(), 2);
 
         let projected = projector
             .project(
                 &fact,
-                &ProjectionContext::from_matches(vec![authority_match(
-                    fact.id, &policy, authority,
-                )]),
+                &ProjectionContext::from_matches(vec![
+                    authority_match(fact.id, &policy, authority),
+                    signer_match(fact.id, &policy, signer),
+                ]),
             )
             .expect("project policy");
         assert_eq!(projected.effects.intents.len(), 1);
@@ -271,26 +334,27 @@ mod projector_tests {
         };
         let fact = policy_fact(&policy);
         let authority = admin_fact(policy.workspace_id, policy.author_user_id);
+        let signer = signer_fact(&policy);
         let projector = project::RetentionPolicyProjector::new();
 
         let waiting = projector
             .project(
                 &fact,
-                &ProjectionContext::from_matches(vec![authority_match(
-                    fact.id,
-                    &policy,
-                    authority.clone(),
-                )]),
+                &ProjectionContext::from_matches(vec![
+                    authority_match(fact.id, &policy, authority.clone()),
+                    signer_match(fact.id, &policy, signer.clone()),
+                ]),
             )
             .expect("missing previous waits");
         assert!(waiting.effects.intents.is_empty());
-        assert_eq!(waiting.needs.len(), 2);
+        assert_eq!(waiting.needs.len(), 3);
 
         let projected = projector
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
                     authority_match(fact.id, &policy, authority.clone()),
+                    signer_match(fact.id, &policy, signer.clone()),
                     previous_match(fact.id, previous_fact.clone()),
                 ]),
             )
@@ -312,6 +376,7 @@ mod projector_tests {
                 &regressing_fact,
                 &ProjectionContext::from_matches(vec![
                     authority_match(regressing_fact.id, &regressing, authority),
+                    signer_match(regressing_fact.id, &regressing, signer),
                     previous_match(regressing_fact.id, previous_fact),
                 ]),
             )
@@ -354,25 +419,67 @@ mod projector_tests {
     }
 
     fn policy_fact(policy: &RetentionPolicyFact) -> Fact {
+        let private_key = [9; 32];
+        let mut policy = policy.clone();
+        policy.signer_public_key = crypto::ed25519_public_key(&private_key);
+        policy.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
+        policy.signature = crypto::ed25519_sign(
+            &private_key,
+            &layout::signing_bytes(&policy).expect("policy signing bytes"),
+        );
         Fact::new(
             FactScope::Global,
             policy.created_at_ms,
-            layout::encode_fact(policy).expect("encode policy"),
+            layout::encode_fact(&policy).expect("encode policy"),
         )
     }
 
     fn admin_fact(workspace_id: [u8; 32], user_fact_id: [u8; 32]) -> Fact {
+        let private_key = [9; 32];
+        let mut admin = AdminFact {
+            created_at_ms: 1,
+            workspace_id,
+            public_key: [8; 32],
+            authority_fact_id: workspace_id,
+            user_fact_id,
+            signer_id: workspace_id,
+            signer_public_key: crypto::ed25519_public_key(&private_key),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        };
+        admin.signature = crypto::ed25519_sign(
+            &private_key,
+            &admin::layout::signing_bytes(&admin).expect("admin signing bytes"),
+        );
         Fact::new(
             FactScope::Global,
             1,
-            admin::encode_fact_payload(&AdminFact {
-                created_at_ms: 1,
-                workspace_id,
-                public_key: [8; 32],
-                authority_fact_id: workspace_id,
-                user_fact_id,
-            })
-            .expect("encode admin"),
+            admin::encode_fact_payload(&admin).expect("encode admin"),
+        )
+    }
+
+    fn signer_fact(policy: &RetentionPolicyFact) -> Fact {
+        let private_key = [9; 32];
+        let mut signer = auth::endpoint_shared::fact::EndpointSharedFact {
+            created_at_ms: 1,
+            workspace_id: policy.workspace_id,
+            user_authority_fact_id: policy.author_user_id,
+            endpoint_id: policy.signer_id,
+            signing_public_key: crypto::ed25519_public_key(&private_key),
+            endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
+            device_name: auth::endpoint_shared::fact::EndpointDeviceName::new("laptop")
+                .expect("device name"),
+            signer_id: [8; 32],
+            signer_public_key: crypto::ed25519_public_key(&[8; 32]),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        };
+        signer.signature = crypto::ed25519_sign(
+            &[8; 32],
+            &auth::endpoint_shared::layout::signing_bytes(&signer).expect("endpoint signing bytes"),
+        );
+        Fact::new(
+            FactScope::Global,
+            signer.created_at_ms,
+            auth::endpoint_shared::layout::encode_fact(&signer).expect("encode signer"),
         )
     }
 
@@ -397,6 +504,26 @@ mod projector_tests {
                 policy.author_user_id,
             ),
             authority,
+        )
+    }
+
+    fn signer_match(owner: [u8; 32], policy: &RetentionPolicyFact, signer: Fact) -> MatchedContext {
+        matched(
+            crate::core::context::ContextNeed::range(
+                owner,
+                "content_signer",
+                auth::workspace::scope(policy.workspace_id),
+                policy.signer_id,
+                policy.signer_id,
+            ),
+            crate::core::context::ContextOffer::range(
+                signer.id,
+                "content_signer",
+                auth::workspace::scope(policy.workspace_id),
+                policy.signer_id,
+                policy.signer_id,
+            ),
+            signer,
         )
     }
 

@@ -7,7 +7,7 @@
 //! grant when it is later submitted or received.
 
 use crate::core::command_context::{CommandContext, CommandOutput};
-use crate::core::crypto::Ed25519PrivateKey;
+use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth;
 
@@ -55,6 +55,9 @@ pub fn grant_admin(
         public_key: target.public_key,
         authority_fact_id: authority_admin_id,
         user_fact_id: target.user_id,
+        signer_id: authority_admin_id,
+        signer_public_key: local_endpoint.signing_public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_admin_fact(
         input.created_at_ms,
@@ -69,12 +72,17 @@ pub fn signed_admin_fact(
     created_at_ms: u64,
     signer_id: FactId,
     signer_private_key: Ed25519PrivateKey,
-    grant: AdminFact,
+    mut grant: AdminFact,
 ) -> Result<Fact, String> {
-    let bytes = auth::signed_fact::create::sign_payload_bytes(
-        signer_id,
-        &signer_private_key,
+    grant.signer_id = signer_id;
+    grant.signer_public_key = crypto::ed25519_public_key(&signer_private_key);
+    grant.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
+    let (_, signature) =
+        crypto::ed25519_sign_canonical(&signer_private_key, &layout::signing_bytes(&grant)?);
+    grant.signature = signature;
+    Ok(Fact::new(
+        FactScope::Global,
+        created_at_ms,
         layout::encode_fact(&grant)?,
-    )?;
-    Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
+    ))
 }

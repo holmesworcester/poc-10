@@ -111,13 +111,16 @@ mod tests {
             created_at_ms: 60_000,
             author_user_id: [2; 32],
             signer_id: [3; 32],
+            signer_public_key: [7; 32],
             frontier_id: [4; 32],
             local_history_node_secret_id: [5; 32],
             expires_at_minute: u64::MAX,
             retention_policy_id: [6; 32],
             minute: 1,
             nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
-            ciphertext: b"sealed".to_vec(),
+            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(b"sealed")
+                .expect("ciphertext"),
+            signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         };
         let row = content_message_row([9; 32], &fact);
         assert_eq!(row.table, CONTENT_MESSAGE_ROWS);

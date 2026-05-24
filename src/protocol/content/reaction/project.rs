@@ -15,9 +15,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::auth;
-use crate::protocol::auth::user;
-use crate::protocol::content::message::project::{self, DecodedPayload};
+use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, message_deletion, purge::project as content_purge};
 use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
 
@@ -46,20 +44,16 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        decoded: project::DecodedFact<super::fact::ContentReactionFact>,
+        reaction: super::fact::ContentReactionFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        let project::DecodedFact {
-            payload: reaction,
-            signer,
-            envelope,
-        } = decoded;
         let scope = crate::protocol::auth::workspace::scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
+        super::layout::verify_signature(&reaction)?;
 
         // 2. Context and deletion gates.
-        let signer_need = project::signer_need(fact.id, reaction.workspace_id, signer);
+        let signer_need = project::signer_need(fact.id, reaction.workspace_id, reaction.signer_id);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message",
@@ -74,26 +68,27 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             reaction.author_user_id,
             reaction.author_user_id,
         );
-        if let (Some(signer), Some(need)) = (signer, signer_need.as_ref()) {
-            if !project::validate_signer_context(
-                context,
-                need,
-                signer,
-                reaction.workspace_id,
-                Some(reaction.author_user_id),
-                "reaction",
-            )? {
-                return Ok(output_with_needs([
-                    signer_need,
-                    Some(target_need),
-                    Some(author_need),
-                    None,
-                ]));
-            }
+        if !project::validate_signer_context(
+            context,
+            &signer_need,
+            FactSigner {
+                signer_id: reaction.signer_id,
+                signer_public_key: reaction.signer_public_key,
+            },
+            reaction.workspace_id,
+            Some(reaction.author_user_id),
+            "reaction",
+        )? {
+            return Ok(output_with_needs([
+                Some(signer_need),
+                Some(target_need),
+                Some(author_need),
+                None,
+            ]));
         }
         let Some(target) = context_payload(context, &target_need, "reaction target")? else {
             return Ok(output_with_needs([
-                signer_need,
+                Some(signer_need),
                 Some(target_need),
                 Some(author_need),
                 None,
@@ -124,7 +119,6 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
                 reaction.target_message_id,
                 target_context.message.author_user_id,
             )?;
-            project::verify_envelope(envelope.as_ref(), "reaction")?;
             return Ok(delete_reaction_projection(reaction.workspace_id, fact.id)
                 .need(target_need)
                 .need(target_deletion_need)
@@ -132,14 +126,13 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
         }
         let Some(author) = context_payload(context, &author_need, "reaction author")? else {
             return Ok(output_with_needs([
-                signer_need,
+                Some(signer_need),
                 Some(target_need),
                 Some(target_deletion_need),
                 Some(author_need),
             ]));
         };
         validate_author_user(author, reaction.workspace_id, reaction.author_user_id)?;
-        project::verify_envelope(envelope.as_ref(), "reaction")?;
 
         // 3. Materialize.
         let row = reaction_row(ReactionRow {
@@ -149,10 +142,10 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             target_message_id: reaction.target_message_id,
             author_user_id: reaction.author_user_id,
             nonce: reaction.nonce,
-            ciphertext: reaction.ciphertext,
+            ciphertext: reaction.ciphertext.bytes().to_vec(),
         })?;
         Ok(output_with_needs([
-            signer_need,
+            Some(signer_need),
             Some(target_need),
             Some(target_deletion_need),
             Some(author_need),
@@ -213,8 +206,7 @@ fn validate_author_user(
     if payload.id != author_user_id {
         return Err("reaction author context payload id mismatch".to_string());
     }
-    let author_payload = decode_context_payload(payload, user::TYPE_USER, "reaction author")?;
-    let author = crate::protocol::auth::user::decode_fact_payload(&author_payload.payload)
+    let author = crate::protocol::auth::user::decode_fact_payload(payload.body())
         .map_err(|_| "reaction author context is not an identity user".to_string())?;
     if author.workspace_id != workspace_id {
         return Err("reaction author workspace does not match reaction".to_string());
@@ -248,13 +240,9 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion_payload = project::decode_signed_payload(
-        payload,
-        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
-        "target deletion",
-    )?;
-    let deletion = message_deletion::decode_fact_payload(&deletion_payload.payload)
+    let deletion = message_deletion::decode_fact_payload(payload.body())
         .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
+    message_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
     }
@@ -286,32 +274,20 @@ struct TargetMessage {
 }
 
 fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMessage, String> {
-    let message_payload =
-        project::decode_signed_payload(payload, message::TYPE_CONTENT_MESSAGE, label)?;
-    let message = message::decode_fact_payload(&message_payload.payload)
-        .map_err(|_| format!("{label} context is not a content message"))?;
+    let message = project::decode_typed_fact(
+        payload,
+        message::TYPE_CONTENT_MESSAGE,
+        label,
+        message::decode_fact_payload,
+    )
+    .map_err(|_| format!("{label} context is not a content message"))?;
+    message::layout::verify_signature(&message)?;
     Ok(TargetMessage {
         workspace_id: message.workspace_id,
         frontier_id: message.frontier_id,
         minute: message.minute,
         author_user_id: message.author_user_id,
     })
-}
-
-fn decode_context_payload(
-    payload: &Fact,
-    expected_type: u8,
-    label: &str,
-) -> Result<DecodedPayload, String> {
-    if payload.bytes.first().copied() == Some(auth::signed_fact::TYPE_SIGNED_FACT) {
-        project::decode_signed_payload(payload, expected_type, label)
-    } else {
-        Ok(DecodedPayload {
-            payload: payload.bytes.clone(),
-            signer: None,
-            envelope: None,
-        })
-    }
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

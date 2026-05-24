@@ -110,16 +110,16 @@ fn con_create_workspace_accepts_positional_identity_shape() {
 fn con_create_workspace_uses_target_runtime() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = temp_db(&temp, "con.db");
-    let public_key = "0707070707070707070707070707070707070707070707070707070707070707";
 
     let stdout = assert_success(con_cli(&[
         "--db",
         &db,
         "create-workspace",
-        "--public-key",
-        public_key,
-        "--name",
         "Runtime CLI",
+        "--username",
+        "alice",
+        "--devicename",
+        "alice-laptop",
     ]));
 
     let workspace_id = line_value(&stdout, "workspace_id");
@@ -130,7 +130,7 @@ fn con_create_workspace_uses_target_runtime() {
     assert!(
         workspaces.contains("workspaces: 1")
             && workspaces.contains(&workspace_id)
-            && workspaces.contains(&format!("public_key={public_key} name=Runtime CLI")),
+            && workspaces.contains(" name=Runtime CLI"),
         "created workspace should be visible through the real read command; got:\n{workspaces}"
     );
 }
@@ -144,30 +144,28 @@ fn con_workspace_reads_use_target_rows() {
         "--db",
         &db,
         "create-workspace",
-        "--public-key",
-        "0101010101010101010101010101010101010101010101010101010101010101",
-        "--name",
         "Alpha",
+        "--username",
+        "alice-alpha",
+        "--devicename",
+        "alice-alpha-laptop",
     ]));
     assert_success(con_cli(&[
         "--db",
         &db,
         "create-workspace",
-        "--public-key",
-        "0202020202020202020202020202020202020202020202020202020202020202",
-        "--name",
         "Beta",
+        "--username",
+        "alice-beta",
+        "--devicename",
+        "alice-beta-laptop",
     ]));
 
     let workspaces = assert_success(con_cli(&["--db", &db, "workspaces"]));
     assert!(
         workspaces.contains("workspaces: 2")
-            && workspaces.contains(
-                "public_key=0101010101010101010101010101010101010101010101010101010101010101 name=Alpha"
-            )
-            && workspaces.contains(
-                "public_key=0202020202020202020202020202020202020202020202020202020202020202 name=Beta"
-            ),
+            && workspaces.contains(" name=Alpha")
+            && workspaces.contains(" name=Beta"),
         "workspace list should be decoded from target rows; got:\n{workspaces}"
     );
 

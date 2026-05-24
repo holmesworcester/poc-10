@@ -567,7 +567,10 @@ mod projector_tests {
     ) -> MatchedContext {
         let received = ConnectionFactReceipt {
             received_fact_id: response_id,
-            origin_addr: b"127.0.0.1:41002".to_vec(),
+            origin_addr: crate::protocol::connection::fact_receipt::fact::OriginAddr::new(
+                b"127.0.0.1:41002",
+            )
+            .expect("origin"),
             local_endpoint_id: response.to_endpoint,
             sender_endpoint_id: response.from_endpoint,
             receive_path: RECEIVE_PATH_CONNECTION_RESPONSE,

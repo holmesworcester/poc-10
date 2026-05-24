@@ -54,6 +54,7 @@ fn removal_frontier(
     // 1. Structural.
     let scope = crate::protocol::auth::workspace::scope(frontier.workspace_id);
     require_fact_scope(fact, &scope)?;
+    super::layout::verify_signature(&frontier)?;
 
     // 2. Authority.
     let owner_signer_need = ContextNeed::range(
@@ -101,22 +102,19 @@ fn validate_frontier_endpoint_shared_owner(
     owner_fact: &Fact,
     frontier: &RemovalFrontierFact,
 ) -> Result<(), String> {
-    if let Ok(owner) = auth::signed_fact::decode_signed_fact_payload(
-        owner_fact,
-        auth::endpoint_shared::TYPE_ENDPOINT_SHARED,
-        "endpoint_shared",
-        auth::endpoint_shared::decode_fact_payload,
-    ) {
-        let owner = owner.payload;
-        if owner.workspace_id != frontier.workspace_id {
-            return Err("removal frontier owner workspace mismatch".to_string());
-        }
-        if owner.endpoint_id != frontier.owner_endpoint_id {
-            return Err("removal frontier owner endpoint mismatch".to_string());
-        }
-        return Ok(());
+    let owner = auth::endpoint_shared::decode_fact_payload(owner_fact.body())
+        .map_err(|_| "removal frontier owner context must be endpoint_shared".to_string())?;
+    auth::endpoint_shared::layout::verify_signature(&owner)?;
+    if owner.workspace_id != frontier.workspace_id {
+        return Err("removal frontier owner workspace mismatch".to_string());
     }
-    Err("removal frontier owner context must be endpoint_shared".to_string())
+    if owner.endpoint_id != frontier.owner_endpoint_id {
+        return Err("removal frontier owner endpoint mismatch".to_string());
+    }
+    if owner.signing_public_key != frontier.signer_public_key {
+        return Err("removal frontier owner signing key mismatch".to_string());
+    }
+    Ok(())
 }
 
 fn validate_frontier_local_owner(
@@ -124,7 +122,7 @@ fn validate_frontier_local_owner(
     frontier: &RemovalFrontierFact,
 ) -> Result<(), String> {
     let owner =
-        auth::signed_fact::decode_local_signer_secret_payload(owner_fact.body()).map_err(|_| {
+        auth::local_signer_secret::decode_fact_payload(owner_fact.body()).map_err(|_| {
             "removal frontier local owner context must be local signer secret".to_string()
         })?;
     if owner.workspace_id != frontier.workspace_id {
@@ -132,6 +130,9 @@ fn validate_frontier_local_owner(
     }
     if owner.signer_id != frontier.owner_endpoint_id {
         return Err("removal frontier local owner endpoint mismatch".to_string());
+    }
+    if owner.public_key != frontier.signer_public_key {
+        return Err("removal frontier local owner signing key mismatch".to_string());
     }
     Ok(())
 }

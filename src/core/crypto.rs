@@ -89,6 +89,21 @@ pub fn ed25519_sign(private_key: &Ed25519PrivateKey, bytes: &[u8]) -> Ed25519Sig
     SigningKey::from_bytes(private_key).sign(bytes).to_bytes()
 }
 
+/// Return the public key and Ed25519 signature for caller-owned canonical bytes.
+///
+/// Protocol layouts own canonicalization and pass the exact bytes here. This
+/// helper keeps fact constructors from repeating public-key derivation and
+/// signing boilerplate without giving core any protocol field knowledge.
+pub fn ed25519_sign_canonical(
+    private_key: &Ed25519PrivateKey,
+    canonical_bytes: &[u8],
+) -> (Ed25519PublicKey, Ed25519Signature) {
+    (
+        ed25519_public_key(private_key),
+        ed25519_sign(private_key, canonical_bytes),
+    )
+}
+
 /// Verify an Ed25519 signature over canonical bytes.
 pub fn ed25519_verify(
     public_key: &Ed25519PublicKey,
@@ -100,6 +115,23 @@ pub fn ed25519_verify(
     };
     let signature = Signature::from_bytes(signature);
     public_key.verify(bytes, &signature).is_ok()
+}
+
+/// Verify an Ed25519 signature and return a protocol-friendly error.
+///
+/// The caller supplies the label and canonical bytes. Core checks only the
+/// primitive; signer authority and field relationships remain projector-owned.
+pub fn ed25519_verify_canonical(
+    public_key: &Ed25519PublicKey,
+    canonical_bytes: &[u8],
+    signature: &Ed25519Signature,
+    label: &str,
+) -> Result<(), String> {
+    if ed25519_verify(public_key, canonical_bytes, signature) {
+        Ok(())
+    } else {
+        Err(format!("{label} signature verification failed"))
+    }
 }
 
 /// Generate a new X25519 private key with OS randomness.
@@ -321,7 +353,7 @@ mod tests {
     fn ed25519_signatures_verify_with_matching_key_and_bytes() {
         let private_key = [7; ED25519_PRIVATE_KEY_BYTES];
         let public_key = ed25519_public_key(&private_key);
-        let bytes = b"canonical signed envelope bytes";
+        let bytes = b"canonical signed fact bytes";
 
         let signature = ed25519_sign(&private_key, bytes);
 

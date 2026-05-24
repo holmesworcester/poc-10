@@ -6,6 +6,7 @@
 //! endpoint admission. Keep byte shape here and invite authority checks in the
 //! device-invite projector.
 
+use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 
 use super::fact::DeviceInviteFact;
@@ -14,7 +15,8 @@ pub const TYPE_DEVICE_INVITE: u8 = 134;
 /// Layout: `type(1) || created_at_ms(8) || workspace_id(32) ||
 /// user_authority_fact_id(32) || user_invite_fact_id_or_zero(32) ||
 /// public_key(32)`.
-pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32;
+pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 32 + 32 + ED25519_SIGNATURE_BYTES;
+const SIGNATURE_OFFSET: usize = FACT_BYTES - ED25519_SIGNATURE_BYTES;
 /// Row value layout: `created_at_ms(8) || user_authority_fact_id(32) ||
 /// user_invite_fact_id_or_zero(32) || public_key(32)`.
 pub const ROW_VALUE_BYTES: usize = 8 + 32 + 32 + 32;
@@ -27,6 +29,9 @@ pub fn encode_fact(fact: &DeviceInviteFact) -> Result<Vec<u8>, String> {
     out[41..73].copy_from_slice(&fact.user_authority_fact_id);
     out[73..105].copy_from_slice(&fact.user_invite_fact_id.unwrap_or([0; 32]));
     out[105..137].copy_from_slice(&fact.public_key);
+    out[137..169].copy_from_slice(&fact.signer_id);
+    out[169..201].copy_from_slice(&fact.signer_public_key);
+    out[201..265].copy_from_slice(&fact.signature);
     Ok(out)
 }
 
@@ -50,13 +55,36 @@ pub fn decode_fact(bytes: &[u8]) -> Result<DeviceInviteFact, String> {
     };
     let mut public_key = [0; 32];
     public_key.copy_from_slice(&bytes[105..137]);
+    let mut signer_id = [0; 32];
+    signer_id.copy_from_slice(&bytes[137..169]);
+    let mut signer_public_key = [0; 32];
+    signer_public_key.copy_from_slice(&bytes[169..201]);
+    let mut signature = [0; ED25519_SIGNATURE_BYTES];
+    signature.copy_from_slice(&bytes[201..265]);
     Ok(DeviceInviteFact {
         created_at_ms,
         workspace_id,
         user_authority_fact_id,
         user_invite_fact_id,
         public_key,
+        signer_id,
+        signer_public_key,
+        signature,
     })
+}
+
+pub fn signing_bytes(fact: &DeviceInviteFact) -> Result<Vec<u8>, String> {
+    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..FACT_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn verify_signature(fact: &DeviceInviteFact) -> Result<(), String> {
+    crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &signing_bytes(fact)?,
+        &fact.signature,
+        "device invite",
+    )
 }
 
 pub(crate) fn encode_row_value(fact: &DeviceInviteFact) -> Result<Vec<u8>, String> {
@@ -112,6 +140,9 @@ mod tests {
             user_authority_fact_id: [2; 32],
             user_invite_fact_id: Some([4; 32]),
             public_key: [3; 32],
+            signer_id: [2; 32],
+            signer_public_key: [5; 32],
+            signature: [6; ED25519_SIGNATURE_BYTES],
         }
     }
 

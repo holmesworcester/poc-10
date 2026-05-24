@@ -13,6 +13,7 @@ use crate::core::command_context::{
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::runtime::Runtime;
+use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
 use crate::protocol::auth::local_history_node_secret::{
@@ -175,15 +176,29 @@ pub fn create_recipient_key(
     if membership.endpoint_role != auth::endpoint_shared::fact::EndpointRole::Device {
         return Err("local endpoint role cannot receive key wraps".to_string());
     }
+    let signing = ctx.local_signing_capability(input.workspace_id)?;
+    if signing.signer_id != membership.endpoint_id {
+        return Err("local signing capability does not match workspace endpoint".to_string());
+    }
+    if signing.public_key != membership.signing_public_key {
+        return Err("local signing capability public key does not match membership".to_string());
+    }
     let recipient_secret = crypto::random_x25519_private_key();
     let recipient_key = crypto::x25519_public_key(&recipient_secret);
-    let recipient = RecipientKeyFact {
+    let mut recipient = RecipientKeyFact {
         workspace_id: input.workspace_id,
         endpoint_id: membership.endpoint_id,
         recipient_key,
         previous_recipient_key_id: input.previous_recipient_key_id,
         created_at_ms: input.created_at_ms,
+        signer_public_key: signing.public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
+    let (_, signature) = crypto::ed25519_sign_canonical(
+        &signing.private_key,
+        &recipient_key_layout::signing_bytes(&recipient)?,
+    );
+    recipient.signature = signature;
     let recipient_fact = Fact::new(
         crate::protocol::auth::workspace::scope(input.workspace_id),
         input.created_at_ms,
@@ -219,11 +234,18 @@ pub fn create_key_frontier(
     if membership.endpoint_id != endpoint.endpoint {
         return Err("local endpoint membership does not match local endpoint".to_string());
     }
-    let frontier = RemovalFrontierFact {
+    let mut frontier = RemovalFrontierFact {
         workspace_id: input.workspace_id,
         owner_endpoint_id: endpoint.endpoint,
         created_at_ms: input.created_at_ms,
+        signer_public_key: endpoint.signing_public_key,
+        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
+    let (_, signature) = crypto::ed25519_sign_canonical(
+        &endpoint.signing_secret,
+        &removal_frontier_layout::signing_bytes(&frontier)?,
+    );
+    frontier.signature = signature;
     let frontier_fact = Fact::new(
         crate::protocol::auth::workspace::scope(input.workspace_id),
         input.created_at_ms,
@@ -241,7 +263,7 @@ pub fn create_key_frontier(
         input.created_at_ms,
         local_key_secret_layout::encode_local_key_secret(&local_secret)?,
     );
-    let signer = auth::signed_fact::fact::LocalSignerSecretFact {
+    let signer = auth::local_signer_secret::fact::LocalSignerSecretFact {
         workspace_id: input.workspace_id,
         signer_id: endpoint.endpoint,
         public_key: endpoint.signing_public_key,
@@ -250,7 +272,7 @@ pub fn create_key_frontier(
     let signer_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        auth::signed_fact::layout::encode_local_signer_secret(&signer)?,
+        auth::local_signer_secret::layout::encode_fact(&signer)?,
     );
     Ok(CommandOutput::new(CreateKeyFrontierReceipt {
         workspace_id: input.workspace_id,
@@ -550,7 +572,7 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
     let old_recipient = latest_local_recipient_key(runtime, input.workspace_id)?;
     if let Some(previous) = old_recipient {
         let clock = FixedClock(input.created_at_ms);
-        let vault = EmptyVault;
+        let vault = KeyMaterialVault::new(runtime.store());
         let output = {
             let ctx = runtime.command_context(&clock, &vault);
             create_recipient_key(
@@ -676,14 +698,39 @@ impl CommandClock for FixedClock {
     }
 }
 
-struct EmptyVault;
+pub struct KeyMaterialVault<'a> {
+    store: &'a Store,
+}
 
-impl IdentityVault for EmptyVault {
+impl<'a> KeyMaterialVault<'a> {
+    pub fn new(store: &'a Store) -> Self {
+        Self { store }
+    }
+}
+
+impl IdentityVault for KeyMaterialVault<'_> {
     fn local_signing_capability(
         &self,
-        _workspace_id: WorkspaceId,
+        workspace_id: WorkspaceId,
     ) -> Result<LocalSigningCapability, String> {
-        Err("local signing capability is not configured for this command".to_string())
+        let endpoint = auth::endpoint::create::local_endpoint(self.store)?
+            .ok_or_else(|| "local endpoint is not initialized".to_string())?;
+        let membership = auth::workspace::queries::local_membership(self.store, workspace_id)?
+            .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
+        if membership.endpoint_id != endpoint.endpoint {
+            return Err("local endpoint membership does not match local endpoint".to_string());
+        }
+        if membership.signing_public_key != endpoint.signing_public_key {
+            return Err(
+                "local endpoint signing key does not match workspace membership".to_string(),
+            );
+        }
+        Ok(LocalSigningCapability {
+            workspace_id,
+            signer_id: endpoint.endpoint,
+            public_key: endpoint.signing_public_key,
+            private_key: endpoint.signing_secret,
+        })
     }
 
     fn local_encryption_capability(
