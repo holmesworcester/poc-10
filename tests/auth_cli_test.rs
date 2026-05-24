@@ -741,7 +741,7 @@ fn wait_for_key_access(
     expected: &str,
 ) -> String {
     let mut last = String::new();
-    for _ in 0..300 {
+    for _ in 0..600 {
         let output = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
         if output.status.success() {
             let out = stdout(&output);

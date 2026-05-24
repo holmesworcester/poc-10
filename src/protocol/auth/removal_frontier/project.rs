@@ -12,7 +12,9 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::fact::RemovalFrontierFact;
 
@@ -73,28 +75,34 @@ fn removal_frontier(
     let waiting = ProjectionOutput::new()
         .need(owner_signer_need.clone())
         .need(local_signer_need.clone());
-    match (
+    let context_have = match (
         context.payload_for(&owner_signer_need),
         context.payload_for(&local_signer_need),
     ) {
-        (Some(owner_fact), _) => validate_frontier_endpoint_shared_owner(owner_fact, &frontier)?,
-        (None, Some(owner_fact)) => validate_frontier_local_owner(owner_fact, &frontier)?,
+        (Some(owner_fact), _) => {
+            validate_frontier_endpoint_shared_owner(owner_fact, &frontier)?;
+            context_have_from_needs(context, [&owner_signer_need])
+        }
+        (None, Some(owner_fact)) => {
+            validate_frontier_local_owner(owner_fact, &frontier)?;
+            Vec::new()
+        }
         (None, None) => return Ok(waiting),
-    }
+    };
 
     // 3. Materialize.
-    Ok(waiting
-        .offer(ContextOffer::range(
+    Ok(share_fact_with_negentropy(
+        waiting.offer(ContextOffer::range(
             fact.id,
             "auth_removal_frontier",
             scope,
             fact.id,
             fact.id,
-        ))
-        .intent(share_fact_with_workspace_intent_for_fact(
-            frontier.workspace_id,
-            fact,
-        )))
+        )),
+        frontier.workspace_id,
+        fact,
+        context_have,
+    ))
 }
 
 fn validate_frontier_endpoint_shared_owner(

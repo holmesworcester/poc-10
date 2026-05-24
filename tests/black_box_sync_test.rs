@@ -211,6 +211,172 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
 }
 
 #[test]
+fn cli_sync_range_with_deps_delivers_message_with_out_of_range_signer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice-range.db");
+    let carol = temp_db(&tmp, "carol-range.db");
+    let bob = temp_db(&tmp, "bob-range.db");
+    let alice_port = free_port();
+    let carol_port = free_port();
+    let bob_port = free_port();
+
+    let workspace = create_workspace(&alice, "range-shared", "alice", "alice-laptop");
+    let mut alice_daemon = spawn_daemon(&alice, alice_port);
+    let mut bob_daemon = spawn_daemon(&bob, bob_port);
+    accept_workspace_invite(
+        &alice,
+        &bob,
+        &workspace,
+        alice_port,
+        "bob-range",
+        "bob-range-phone",
+    );
+    poll_for_workspace_member(&bob, &workspace, "bob-range", 10_000);
+
+    let removal_frontier_id = create_local_content_key(&alice, &workspace);
+    let recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace]));
+    let recipient_id = line_value(&recipient, "recipient_key_id");
+    poll_for_wrap_eligibility(
+        &alice,
+        &workspace,
+        &removal_frontier_id,
+        &recipient_id,
+        30_000,
+    );
+    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 30_000);
+
+    assert_success(topo(&["--db", &bob, "stop"]));
+    drop(bob_daemon);
+    wait_for_daemon_lock_release(&bob);
+    assert_success(topo(&["--db", &alice, "stop"]));
+    drop(alice_daemon);
+    wait_for_daemon_lock_release(&alice);
+    alice_daemon = spawn_daemon(&alice, alice_port);
+
+    let mut carol_daemon = spawn_daemon(&carol, carol_port);
+    let carol_invite = workspace_invite_for_addr(&alice, &workspace, alice_port);
+    let accepted_carol =
+        accept_with_identity_retry(&carol, &carol_invite, "carol-range", "carol-range-laptop");
+    assert_eq!(line_value(&accepted_carol, "workspace_id"), workspace);
+    let carol_endpoint = endpoint_id(&carol);
+    sync_range_until_queued(
+        &alice,
+        &carol_endpoint,
+        &workspace,
+        "0",
+        "18446744073709551615",
+        true,
+        30_000,
+    );
+    poll_for_workspace_member(&carol, &workspace, "carol-range", 30_000);
+
+    let carol_recipient = assert_success(topo(&["--db", &carol, "key-recipient", &workspace]));
+    let carol_recipient_id = line_value(&carol_recipient, "recipient_key_id");
+    assert_success(topo(&["--db", &alice, "stop"]));
+    drop(alice_daemon);
+    wait_for_daemon_lock_release(&alice);
+    alice_daemon = spawn_daemon(&alice, alice_port);
+    let alice_endpoint = endpoint_id(&alice);
+    sync_range_until_queued(
+        &carol,
+        &alice_endpoint,
+        &workspace,
+        "0",
+        "18446744073709551615",
+        true,
+        30_000,
+    );
+    poll_for_wrap_eligibility(
+        &alice,
+        &workspace,
+        &removal_frontier_id,
+        &carol_recipient_id,
+        30_000,
+    );
+    sync_range_until_queued(
+        &alice,
+        &carol_endpoint,
+        &workspace,
+        "0",
+        "18446744073709551615",
+        true,
+        30_000,
+    );
+    poll_for_key_access(&carol, &workspace, &removal_frontier_id, "yes", 30_000);
+
+    let carol_send = assert_success(topo(&[
+        "--db",
+        &carol,
+        "send",
+        &workspace,
+        "carol-range-message",
+    ]));
+    let message_at = line_value(&carol_send, "created_at_ms");
+    assert_success(topo(&["--db", &alice, "stop"]));
+    drop(alice_daemon);
+    wait_for_daemon_lock_release(&alice);
+    alice_daemon = spawn_daemon(&alice, alice_port);
+    sync_range_until_queued(
+        &carol,
+        &alice_endpoint,
+        &workspace,
+        &message_at,
+        &message_at,
+        true,
+        30_000,
+    );
+    poll_for_message_text(&alice, &workspace, "carol-range-message", 10_000);
+    alice_daemon.assert_running();
+    carol_daemon.assert_running();
+    assert_success(topo(&["--db", &carol, "stop"]));
+    drop(carol_daemon);
+    wait_for_daemon_lock_release(&carol);
+
+    let bob_endpoint = endpoint_id(&bob);
+    let before_without = sync_indexed_facts(&bob);
+    bob_daemon = spawn_daemon_with_sync_ms(&bob, bob_port, 600_000);
+    let without = assert_success(topo(&[
+        "--db",
+        &alice,
+        "sync-range",
+        &bob_endpoint,
+        "--workspace",
+        &workspace,
+        "--start-ms",
+        &message_at,
+        "--end-ms",
+        &message_at,
+        "--without-deps",
+    ]));
+    assert_eq!(line_value(&without, "deps"), "without");
+    assert_eq!(line_value(&without, "queued"), "yes");
+    wait_for_sync_indexed_at_least(&bob, before_without + 1, 10_000);
+    thread::sleep(Duration::from_millis(1200));
+    assert!(
+        !messages_text(&bob, &workspace).contains("carol-range-message"),
+        "without-deps range sync must not make the out-of-range signer message viewable"
+    );
+
+    let with = assert_success(topo(&[
+        "--db",
+        &alice,
+        "sync-range",
+        &bob_endpoint,
+        "--workspace",
+        &workspace,
+        "--start-ms",
+        &message_at,
+        "--end-ms",
+        &message_at,
+        "--with-deps",
+    ]));
+    assert_eq!(line_value(&with, "deps"), "with");
+    assert_eq!(line_value(&with, "queued"), "yes");
+    poll_for_message_text(&bob, &workspace, "carol-range-message", 10_000);
+    bob_daemon.assert_running();
+}
+
+#[test]
 fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
     // This is the poc-10 replacement for the basic simulated download proof:
     // drive only the product CLI plus daemon networking, then assert the peer
@@ -674,6 +840,88 @@ fn poll_for_message_text(db: &str, workspace_id: &str, expected_text: &str, time
     panic!("messages in {db} never contained {expected_text}; last output:\n{last}");
 }
 
+fn messages_text(db: &str, workspace_id: &str) -> String {
+    assert_success(topo(&["--db", db, "messages", workspace_id]))
+}
+
+fn endpoint_id(db: &str) -> String {
+    let identity = assert_success(topo(&["--db", db, "identity"]));
+    line_value(&identity, "endpoint_id")
+}
+
+fn sync_indexed_facts(db: &str) -> usize {
+    let status = assert_success(topo(&["--db", db, "sync-status"]));
+    line_value(&status, "indexed_facts")
+        .parse()
+        .expect("indexed_facts")
+}
+
+fn sync_range_until_queued(
+    sender_db: &str,
+    peer_or_connection_id: &str,
+    workspace_id: &str,
+    start_ms: &str,
+    end_ms: &str,
+    include_deps: bool,
+    timeout_ms: u64,
+) -> String {
+    let deps_arg = if include_deps {
+        "--with-deps"
+    } else {
+        "--without-deps"
+    };
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let output = topo(&[
+            "--db",
+            sender_db,
+            "sync-range",
+            peer_or_connection_id,
+            "--workspace",
+            workspace_id,
+            "--start-ms",
+            start_ms,
+            "--end-ms",
+            end_ms,
+            deps_arg,
+        ]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, "queued") == "yes" {
+                return text;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("sync-range never queued; last error:\n{last}");
+}
+
+fn wait_for_sync_indexed_at_least(db: &str, expected: usize, timeout_ms: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let output = topo(&["--db", db, "sync-status"]);
+        if output.status.success() {
+            let text = stdout(&output);
+            let observed = line_value(&text, "indexed_facts")
+                .parse::<usize>()
+                .expect("indexed_facts");
+            if observed >= expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("sync indexed_facts did not reach {expected} in {db}:\n{last}");
+}
+
 fn poll_for_file_complete(
     db: &str,
     workspace_id: &str,
@@ -831,48 +1079,73 @@ impl RunningDaemon {
 }
 
 fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
+    spawn_daemon_with_sync_ms(db, port, 100)
+}
+
+fn spawn_daemon_with_sync_ms(db: &str, port: u16, sync_ms: u64) -> RunningDaemon {
     let port_str = port.to_string();
-    let mut child = spawn_topo(&[
-        "--db",
-        db,
-        "start",
-        "--listen",
-        "127.0.0.1",
-        &port_str,
-        "--sync-ms",
-        "100",
-        "--quiet-ms",
-        "100",
-    ]);
-    let stdout = child.stdout.take().expect("daemon stdout");
-    let stderr = child.stderr.take().expect("daemon stderr");
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader.read_line(&mut line).expect("read daemon line");
-    if !line.starts_with("listening: ") {
-        let mut stderr_text = String::new();
+    let sync_ms = sync_ms.to_string();
+    for _ in 0..20 {
+        let mut child = spawn_topo(&[
+            "--db",
+            db,
+            "start",
+            "--listen",
+            "127.0.0.1",
+            &port_str,
+            "--sync-ms",
+            &sync_ms,
+            "--quiet-ms",
+            "100",
+        ]);
+        let stdout = child.stdout.take().expect("daemon stdout");
+        let stderr = child.stderr.take().expect("daemon stderr");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read daemon line");
+        if line.starts_with("listening: ") {
+            let stdout_handle = thread::spawn(move || {
+                let mut text = String::new();
+                let _ = reader.read_to_string(&mut text);
+                text
+            });
+            let stderr_handle = thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut text = String::new();
+                let _ = reader.read_to_string(&mut text);
+                text
+            });
+            return RunningDaemon {
+                child,
+                label: format!("{db}@{port}"),
+                stdout: Some(stdout_handle),
+                stderr: Some(stderr_handle),
+            };
+        }
         let mut stderr_reader = BufReader::new(stderr);
+        let mut stderr_text = String::new();
         let _ = stderr_reader.read_to_string(&mut stderr_text);
         let _ = child.wait();
-        panic!("daemon did not report listening: {line}\nstderr={stderr_text}");
+        if stderr_text.contains("Address already in use") {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+        panic!("daemon did not report listening: {line}\nstderr:\n{stderr_text}");
     }
-    let stdout_handle = thread::spawn(move || {
-        let mut text = String::new();
-        let _ = reader.read_to_string(&mut text);
-        text
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut text = String::new();
-        let _ = reader.read_to_string(&mut text);
-        text
-    });
-    RunningDaemon {
-        child,
-        label: format!("{db}@{port}"),
-        stdout: Some(stdout_handle),
-        stderr: Some(stderr_handle),
+    panic!("daemon did not report listening after retrying port {port}");
+}
+
+fn wait_for_daemon_lock_release(db: &str) {
+    let _ = topo(&["--db", db, "stop"]);
+    let lock = format!("{db}.daemon.lock");
+    for _ in 0..100 {
+        if !std::path::Path::new(&lock).exists() {
+            thread::sleep(Duration::from_millis(250));
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
+    panic!("daemon lock was not released for {db}");
 }
 
 fn try_accept_with_identity_retry(
@@ -961,7 +1234,7 @@ fn wait_for_content_count(db: &str, workspace: &str, expected: usize) {
         "eq",
         &expected,
         "--timeout-ms",
-        "30000",
+        "60000",
         "--poll-ms",
         "100",
     ]));

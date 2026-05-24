@@ -24,7 +24,9 @@ use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project as message_project;
 use crate::protocol::content::message_deletion;
 use crate::protocol::content::purge::project as content_purge;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
 
@@ -166,20 +168,30 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
                 )))
                 .purge_self(fact.id));
         }
+        let context_have = context_have_from_needs(
+            context,
+            [
+                &file_need,
+                &message_need,
+                &file_deletion_need,
+                &parent_deletion_need,
+            ],
+        );
 
         // 3. Materialize.
-        Ok(ProjectionOutput::new()
-            .need(file_need)
-            .need(message_need)
-            .need(file_deletion_need)
-            .need(parent_deletion_need)
-            .row_mutation(RowMutation::InsertValues(content_file_slice_row(
-                fact.id, &slice,
-            )))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                slice.workspace_id,
-                fact,
-            )))
+        Ok(share_fact_with_negentropy(
+            ProjectionOutput::new()
+                .need(file_need)
+                .need(message_need)
+                .need(file_deletion_need)
+                .need(parent_deletion_need)
+                .row_mutation(RowMutation::InsertValues(content_file_slice_row(
+                    fact.id, &slice,
+                ))),
+            slice.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }
 

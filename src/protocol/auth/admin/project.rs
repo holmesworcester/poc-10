@@ -20,7 +20,9 @@ use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::user;
 use crate::protocol::auth::workspace;
 use crate::protocol::auth::workspace::fact::WorkspaceFact;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::layout;
 use super::rows::admin_row;
@@ -111,9 +113,10 @@ fn project_bootstrap_admin(
         return Err("admin public_key does not match root workspace public_key".to_string());
     }
     auth::signed_fact::verify_envelope(envelope)?;
+    let context_have = context_have_from_needs(context, [&needs.workspace]);
 
     // 3. Materialize.
-    materialized_output(fact, admin, needs.output())
+    materialized_output(fact, admin, needs.output(), context_have)
 }
 
 fn project_delegated_admin(
@@ -162,9 +165,11 @@ fn project_delegated_admin(
         return Err("admin public_key does not match user public_key".to_string());
     }
     auth::signed_fact::verify_envelope(envelope)?;
+    let context_have =
+        context_have_from_needs(context, [&needs.workspace, &needs.authority, &needs.user]);
 
     // 3. Materialize.
-    materialized_output(fact, admin, needs.output())
+    materialized_output(fact, admin, needs.output(), context_have)
 }
 
 struct BootstrapAdminNeeds {
@@ -245,27 +250,29 @@ fn materialized_output(
     fact: &Fact,
     admin: &AdminFact,
     output: ProjectionOutput,
+    context_have: Vec<FactId>,
 ) -> Result<ProjectionOutput, String> {
-    Ok(output
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "auth_admin",
-            crate::core::facts::FactScope::Global,
-            fact.id,
-            fact.id,
-        ))
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "auth_admin",
-            crate::protocol::auth::workspace::scope(admin.workspace_id),
-            admin.user_fact_id,
-            admin.user_fact_id,
-        ))
-        .row_mutation(RowMutation::PutRow(admin_row(fact.id, admin)?))
-        .intent(share_fact_with_workspace_intent_for_fact(
-            admin.workspace_id,
-            fact,
-        )))
+    Ok(share_fact_with_negentropy(
+        output
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_admin",
+                crate::core::facts::FactScope::Global,
+                fact.id,
+                fact.id,
+            ))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_admin",
+                crate::protocol::auth::workspace::scope(admin.workspace_id),
+                admin.user_fact_id,
+                admin.user_fact_id,
+            ))
+            .row_mutation(RowMutation::PutRow(admin_row(fact.id, admin)?)),
+        admin.workspace_id,
+        fact,
+        context_have,
+    ))
 }
 
 fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {

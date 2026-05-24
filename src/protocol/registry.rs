@@ -289,6 +289,8 @@ CREATE TABLE IF NOT EXISTS sync_compare_rows (row_key BLOB PRIMARY KEY NOT NULL,
 CREATE TABLE IF NOT EXISTS sync_have_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_need_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
 CREATE TABLE IF NOT EXISTS message_deletion_rows (
     workspace_id BLOB NOT NULL,
@@ -337,6 +339,8 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::have_id::rows::SYNC_HAVE_ID_ROWS,
         sync::need_id::rows::SYNC_NEED_ID_ROWS,
         sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
+        sync::shared_fact::rows::NEGENTROPY_LEAF_ROWS,
+        sync::shared_fact::rows::NEGENTROPY_CONTEXT_HAVE_ROWS,
         content::retention_policy::rows::RETENTION_POLICY_ROWS,
     ],
 };
@@ -486,6 +490,11 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         "sync-status",
         sync::shared_fact::cli::SYNC_STATUS_USAGE,
         sync_status
+    ),
+    cli_command!(
+        "sync-range",
+        sync::shared_fact::cli::SYNC_RANGE_USAGE,
+        sync_range
     ),
     cli_command!(
         "content-count",
@@ -668,6 +677,11 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "share_fact_with_workspace",
         sync::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
         sync::share_fact_with_workspace::ShareFactWithWorkspaceHandler
+    ),
+    handler_route!(
+        "update_negentropy_tree",
+        sync::update_negentropy_tree::UPDATE_NEGENTROPY_TREE,
+        sync::update_negentropy_tree::UpdateNegentropyTreeHandler
     ),
     handler_route!(
         "seed_connection_sync",

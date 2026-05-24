@@ -19,7 +19,9 @@ use crate::protocol::auth;
 use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, DecodedPayload};
 use crate::protocol::content::{message, message_deletion, purge::project as content_purge};
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_optional_needs, share_fact_with_negentropy,
+};
 
 use super::rows::{reaction_row, ReactionRow, REACTION_KEY_COLUMNS, REACTION_ROWS};
 
@@ -140,6 +142,15 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
         };
         validate_author_user(author, reaction.workspace_id, reaction.author_user_id)?;
         project::verify_envelope(envelope.as_ref(), "reaction")?;
+        let context_have = context_have_from_optional_needs(
+            context,
+            [
+                signer_need.as_ref(),
+                Some(&target_need),
+                Some(&target_deletion_need),
+                Some(&author_need),
+            ],
+        );
 
         // 3. Materialize.
         let row = reaction_row(ReactionRow {
@@ -151,17 +162,18 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             nonce: reaction.nonce,
             ciphertext: reaction.ciphertext,
         })?;
-        Ok(output_with_needs([
-            signer_need,
-            Some(target_need),
-            Some(target_deletion_need),
-            Some(author_need),
-        ])
-        .row_mutation(RowMutation::InsertValues(row))
-        .intent(share_fact_with_workspace_intent_for_fact(
+        Ok(share_fact_with_negentropy(
+            output_with_needs([
+                signer_need,
+                Some(target_need),
+                Some(target_deletion_need),
+                Some(author_need),
+            ])
+            .row_mutation(RowMutation::InsertValues(row)),
             reaction.workspace_id,
             fact,
-        )))
+            context_have,
+        ))
     }
 }
 

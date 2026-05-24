@@ -18,7 +18,9 @@ use crate::core::projectors::{
 use crate::protocol::auth;
 use crate::protocol::auth::invite_server::fact::InviteServerFact;
 use crate::protocol::auth::{admin, endpoint_shared, workspace};
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::rows::invite_server_row;
 
@@ -105,9 +107,10 @@ fn project_workspace_signed(
         );
     }
     auth::signed_fact::verify_envelope(envelope)?;
+    let context_have = context_have_from_needs(context, [&needs.workspace]);
 
     // 3. Materialize.
-    materialized_output(fact, invite, needs.output())
+    materialized_output(fact, invite, needs.output(), context_have)
 }
 
 fn project_endpoint_signed(
@@ -156,9 +159,10 @@ fn project_endpoint_signed(
         return Err("invite_server signer user does not match admin authority user".to_string());
     }
     auth::signed_fact::verify_envelope(envelope)?;
+    let context_have = context_have_from_needs(context, [&needs.endpoint_shared, &needs.admin]);
 
     // 3. Materialize.
-    materialized_output(fact, invite, needs.output())
+    materialized_output(fact, invite, needs.output(), context_have)
 }
 
 struct WorkspaceSignedNeeds {
@@ -219,27 +223,29 @@ fn materialized_output(
     fact: &Fact,
     invite: &InviteServerFact,
     output: ProjectionOutput,
+    context_have: Vec<FactId>,
 ) -> Result<ProjectionOutput, String> {
-    Ok(output
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "auth_invite_server",
-            crate::core::facts::FactScope::Global,
-            fact.id,
-            fact.id,
-        ))
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "auth_invite_server_key",
-            crate::protocol::auth::workspace::scope(invite.workspace_id),
-            invite.public_key.to_vec(),
-            invite.public_key,
-        ))
-        .row_mutation(RowMutation::PutRow(invite_server_row(fact.id, invite)?))
-        .intent(share_fact_with_workspace_intent_for_fact(
-            invite.workspace_id,
-            fact,
-        )))
+    Ok(share_fact_with_negentropy(
+        output
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_invite_server",
+                crate::core::facts::FactScope::Global,
+                fact.id,
+                fact.id,
+            ))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_invite_server_key",
+                crate::protocol::auth::workspace::scope(invite.workspace_id),
+                invite.public_key.to_vec(),
+                invite.public_key,
+            ))
+            .row_mutation(RowMutation::PutRow(invite_server_row(fact.id, invite)?)),
+        invite.workspace_id,
+        fact,
+        context_have,
+    ))
 }
 
 fn decode_admin_payload(
