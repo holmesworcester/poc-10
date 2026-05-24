@@ -54,3 +54,31 @@ pub fn verify_signature(fact: &RemovalFrontierFact) -> Result<(), String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> RemovalFrontierFact {
+        RemovalFrontierFact {
+            workspace_id: [1; 32],
+            owner_endpoint_id: [2; 32],
+            created_at_ms: 123,
+            signer_public_key: [3; 32],
+            signature: [4; ED25519_SIGNATURE_BYTES],
+        }
+    }
+
+    #[test]
+    fn removal_frontier_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_removal_frontier(&fact).expect("encode removal frontier");
+
+        assert_eq!(encoded.len(), REMOVAL_FRONTIER_BYTES);
+        assert_eq!(
+            decode_removal_frontier(&encoded).expect("decode removal frontier"),
+            fact
+        );
+    }
+}

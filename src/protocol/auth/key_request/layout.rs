@@ -60,3 +60,34 @@ pub fn verify_signature(fact: &KeyRequestFact) -> Result<(), String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> KeyRequestFact {
+        KeyRequestFact {
+            workspace_id: [1; 32],
+            requester_endpoint_id: [2; 32],
+            responder_endpoint_id: [3; 32],
+            frontier_id: [4; 32],
+            recipient_key_id: [5; 32],
+            created_at_ms: 123,
+            signer_public_key: [6; 32],
+            signature: [7; ED25519_SIGNATURE_BYTES],
+        }
+    }
+
+    #[test]
+    fn key_request_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_key_request(&fact).expect("encode key request");
+
+        assert_eq!(encoded.len(), KEY_REQUEST_BYTES);
+        assert_eq!(
+            decode_key_request(&encoded).expect("decode key request"),
+            fact
+        );
+    }
+}

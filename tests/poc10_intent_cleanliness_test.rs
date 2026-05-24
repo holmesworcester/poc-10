@@ -86,6 +86,55 @@ fn strip_line_comments(text: &str) -> String {
         .join("\n")
 }
 
+fn public_wire_byte_constants(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let rest = trimmed.strip_prefix("pub const ")?;
+            let (name, rest) = rest.split_once(':')?;
+            if !rest.trim_start().starts_with("usize") {
+                return None;
+            }
+            let name = name.trim();
+            if name == "FACT_BYTES" || name == "ENCODED_BYTES" || name.ends_with("_BYTES") {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn exact_len_guard_constants(text: &str, constants: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+
+    for constant in constants {
+        for marker in [
+            format!("expect_len(bytes, {constant})"),
+            format!(".expect_len({constant})"),
+            format!("finish_exact({constant})"),
+            format!("const LEN: usize = {constant}"),
+            format!("bytes.len() != {constant}"),
+        ] {
+            if text.contains(&marker) {
+                found.insert(constant.clone());
+            }
+        }
+    }
+
+    found
+}
+
+fn layout_has_fact_codec(text: &str) -> bool {
+    text.contains("pub fn encode") && text.contains("pub fn decode")
+}
+
+fn test_text(text: &str) -> &str {
+    text.find("#[cfg(test)]")
+        .map(|index| &text[index..])
+        .unwrap_or("")
+}
+
 /// Protocol scope directories. Since the package-by-scope migration
 /// each scope directory holds BOTH fact-family modules and verb-named intent
 /// handler files, replacing the old `src/protocol/facts` and
@@ -673,6 +722,46 @@ fn protocol_fact_fields_stay_fixed_width() {
     assert!(
         offenders.is_empty(),
         "protocol fact fields must be fixed-width at the fact boundary. Use FixedSlot<N>, FixedText<N>, fixed arrays, or an owning bounded struct instead of Vec/String fields:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn protocol_fact_layouts_have_exact_byte_roundtrip_guardrails() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in fact_family_files_named(root, "layout.rs") {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        if !layout_has_fact_codec(&production) {
+            continue;
+        }
+
+        let constants = public_wire_byte_constants(&production);
+        let exact_constants = exact_len_guard_constants(&production, &constants);
+        if exact_constants.is_empty() {
+            offenders.push(format!(
+                "{relative}: public layout codecs need a public exact *_BYTES constant used by expect_len, finish_exact, FixedLayout::LEN, or an explicit bytes.len() check"
+            ));
+        }
+
+        let tests = test_text(&text);
+        let lower_tests = tests.to_ascii_lowercase();
+        let mentions_exact_length_assertion = exact_constants
+            .iter()
+            .any(|constant| tests.contains(constant) && tests.contains(".len()"));
+        if !lower_tests.contains("roundtrip") || !mentions_exact_length_assertion {
+            offenders.push(format!(
+                "{relative}: add a local fixed-width encode/decode roundtrip test that asserts encoded.len() against the exact layout byte constant"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "protocol fact layouts must make exact byte width executable, not just conventional:\n{}",
         offenders.join("\n")
     );
 }

@@ -94,3 +94,37 @@ pub(crate) fn validate_history_node_coordinate(
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> LocalHistoryNodeSecretFact {
+        LocalHistoryNodeSecretFact {
+            workspace_id: [1; 32],
+            frontier_id: [2; 32],
+            owner_endpoint_id: [3; 32],
+            source_secret_id: [4; 32],
+            range_start: 0,
+            range_width: 1,
+            bit_depth: 256,
+            fact_id_prefix: [5; 32],
+            tombstone_node_id: [6; 32],
+            node_secret: [7; XCHACHA20_POLY1305_KEY_BYTES],
+        }
+    }
+
+    #[test]
+    fn local_history_node_secret_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded =
+            encode_local_history_node_secret(&fact).expect("encode local history node secret");
+
+        assert_eq!(encoded.len(), LOCAL_HISTORY_NODE_SECRET_BYTES);
+        assert_eq!(
+            decode_local_history_node_secret(&encoded).expect("decode local history node secret"),
+            fact
+        );
+    }
+}

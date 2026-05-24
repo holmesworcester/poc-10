@@ -51,3 +51,31 @@ fn validate_fact(fact: &LocalSecretRetirementFact) -> Result<(), String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> LocalSecretRetirementFact {
+        LocalSecretRetirementFact {
+            workspace_id: [1; 32],
+            target_secret_id: [2; 32],
+            reason_kind: RETIRE_REASON_CHOP,
+            floor_minute: 10,
+            created_at_ms: 123,
+        }
+    }
+
+    #[test]
+    fn local_secret_retirement_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_fact(&fact).expect("encode local secret retirement");
+
+        assert_eq!(encoded.len(), LOCAL_SECRET_RETIREMENT_BYTES);
+        assert_eq!(
+            decode_fact(&encoded).expect("decode local secret retirement"),
+            fact
+        );
+    }
+}

@@ -206,3 +206,39 @@ pub fn validate_key_wrap(fact: &KeyWrapFact) -> Result<(), String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> KeyWrapFact {
+        KeyWrapFact {
+            workspace_id: [1; 32],
+            created_at_ms: 123,
+            signer_endpoint_id: [2; 32],
+            frontier_id: [3; 32],
+            wrapped_secret_kind: WrappedSecretKind::FrontierRoot,
+            wrapped_secret_id: [4; 32],
+            wrapped_source_secret_id: [0; 32],
+            wrapped_tombstone_node_id: [0; 32],
+            range_start: 0,
+            range_width: 0,
+            bit_depth: 0,
+            fact_id_prefix: [0; 32],
+            recipient_key_id: [5; 32],
+            sender_wrap_public_key: [6; X25519_PUBLIC_KEY_BYTES],
+            nonce: [7; XCHACHA20_POLY1305_NONCE_BYTES],
+            ciphertext: [8; KEY_WRAP_CIPHERTEXT_BYTES],
+        }
+    }
+
+    #[test]
+    fn key_wrap_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_key_wrap(&fact).expect("encode key wrap");
+
+        assert_eq!(encoded.len(), KEY_WRAP_BYTES);
+        assert_eq!(decode_key_wrap(&encoded).expect("decode key wrap"), fact);
+    }
+}

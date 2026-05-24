@@ -44,3 +44,26 @@ pub fn decode_fact(bytes: &[u8]) -> Result<SyncRangeRequestFact, String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_range_request_roundtrips_fixed_width() {
+        let fact = SyncRangeRequestFact {
+            workspace_id: [1; 32],
+            connection_id: [2; 32],
+            start: 10,
+            end: 20,
+        };
+
+        let encoded = encode_fact(&fact).expect("encode sync range request");
+
+        assert_eq!(encoded.len(), ENCODED_BYTES);
+        assert_eq!(
+            decode_fact(&encoded).expect("decode sync range request"),
+            fact
+        );
+    }
+}

@@ -1093,3 +1093,76 @@ impl<'a> Reader<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Debug;
+
+    fn id(byte: u8) -> Id32 {
+        FixedBytes([byte; 32])
+    }
+
+    fn nonce(byte: u8) -> Nonce24 {
+        FixedBytes([byte; XCHACHA20_POLY1305_NONCE_BYTES])
+    }
+
+    fn assert_frame_roundtrips_fixed_width<T>(frame: T, expected_len: usize)
+    where
+        T: FixedLayout + PartialEq + Debug,
+    {
+        let mut encoded = vec![0; T::LEN];
+
+        frame.encode(&mut encoded).expect("encode frame");
+
+        assert_eq!(encoded.len(), expected_len);
+        assert_eq!(T::decode(&encoded).expect("decode frame"), frame);
+    }
+
+    #[test]
+    fn connection_frame_roundtrips_fixed_width() {
+        assert_frame_roundtrips_fixed_width(
+            ConnectionFrameSmallV1 {
+                sender_endpoint_id: id(1),
+                receiver_endpoint_id: id(2),
+                connection_id: id(3),
+                nonce: nonce(4),
+                ciphertext: Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::new(&vec![
+                    5;
+                    CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES
+                ])
+                .expect("small ciphertext"),
+            },
+            CONNECTION_FRAME_SMALL_WIRE_BYTES,
+        );
+
+        assert_frame_roundtrips_fixed_width(
+            ConnectionFrameBundleV1 {
+                sender_endpoint_id: id(1),
+                receiver_endpoint_id: id(2),
+                connection_id: id(3),
+                nonce: nonce(4),
+                ciphertext: Ciphertext::<CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES>::new(&vec![
+                    6;
+                    CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES
+                ])
+                .expect("bundle ciphertext"),
+            },
+            CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
+        );
+
+        assert_frame_roundtrips_fixed_width(
+            ConnectionFrameFileSliceV1 {
+                sender_endpoint_id: id(1),
+                receiver_endpoint_id: id(2),
+                connection_id: id(3),
+                nonce: nonce(4),
+                ciphertext: Ciphertext::<CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES>::new(
+                    &vec![7; CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES],
+                )
+                .expect("file-slice ciphertext"),
+            },
+            CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+        );
+    }
+}

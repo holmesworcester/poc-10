@@ -34,3 +34,24 @@ pub fn decode_fact(bytes: &[u8]) -> Result<KeyWrapAvailableFact, String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_wrap_available_roundtrips_fixed_width() {
+        let fact = KeyWrapAvailableFact {
+            workspace_id: [1; 32],
+            key_wrap_id: [2; 32],
+        };
+
+        let encoded = encode_fact(&fact).expect("encode key wrap available");
+
+        assert_eq!(encoded.len(), ENCODED_BYTES);
+        assert_eq!(
+            decode_fact(&encoded).expect("decode key wrap available"),
+            fact
+        );
+    }
+}

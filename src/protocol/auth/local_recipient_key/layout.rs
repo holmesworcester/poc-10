@@ -61,3 +61,32 @@ fn validate_local_recipient_key(fact: &LocalRecipientKeyFact) -> Result<(), Stri
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> LocalRecipientKeyFact {
+        let recipient_secret = [7; X25519_PRIVATE_KEY_BYTES];
+        let recipient_key = crypto::x25519_public_key(&recipient_secret);
+        LocalRecipientKeyFact {
+            workspace_id: [1; 32],
+            recipient_key_id: [2; 32],
+            recipient_key,
+            recipient_secret,
+        }
+    }
+
+    #[test]
+    fn local_recipient_key_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_local_recipient_key(&fact).expect("encode local recipient key");
+
+        assert_eq!(encoded.len(), LOCAL_RECIPIENT_KEY_BYTES);
+        assert_eq!(
+            decode_local_recipient_key(&encoded).expect("decode local recipient key"),
+            fact
+        );
+    }
+}

@@ -59,3 +59,32 @@ fn validate(fact: &LocalSignerSecretFact) -> Result<(), String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> LocalSignerSecretFact {
+        let private_key = [9; 32];
+        let public_key = crypto::ed25519_public_key(&private_key);
+        LocalSignerSecretFact {
+            workspace_id: [1; 32],
+            signer_id: [2; 32],
+            public_key,
+            private_key,
+        }
+    }
+
+    #[test]
+    fn local_signer_secret_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_fact(&fact).expect("encode local signer secret");
+
+        assert_eq!(encoded.len(), LOCAL_SIGNER_SECRET_BYTES);
+        assert_eq!(
+            decode_fact(&encoded).expect("decode local signer secret"),
+            fact
+        );
+    }
+}

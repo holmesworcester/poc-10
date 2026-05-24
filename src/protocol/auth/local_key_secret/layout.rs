@@ -40,3 +40,31 @@ pub fn decode_local_key_secret(bytes: &[u8]) -> Result<LocalKeySecretFact, Strin
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_fact() -> LocalKeySecretFact {
+        LocalKeySecretFact {
+            workspace_id: [1; 32],
+            frontier_id: [2; 32],
+            owner_endpoint_id: [3; 32],
+            created_at_ms: 123,
+            key_secret: [4; 32],
+        }
+    }
+
+    #[test]
+    fn local_key_secret_roundtrips_fixed_width() {
+        let fact = sample_fact();
+
+        let encoded = encode_local_key_secret(&fact).expect("encode local key secret");
+
+        assert_eq!(encoded.len(), LOCAL_KEY_SECRET_BYTES);
+        assert_eq!(
+            decode_local_key_secret(&encoded).expect("decode local key secret"),
+            fact
+        );
+    }
+}

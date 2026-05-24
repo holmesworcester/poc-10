@@ -34,3 +34,21 @@ pub fn decode_fact(bytes: &[u8]) -> Result<SharedFact, String> {
 fn wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_fact_roundtrips_fixed_width() {
+        let fact = SharedFact {
+            workspace_id: [1; 32],
+            fact_id: [2; 32],
+        };
+
+        let encoded = encode_fact(&fact).expect("encode shared fact");
+
+        assert_eq!(encoded.len(), ENCODED_BYTES);
+        assert_eq!(decode_fact(&encoded).expect("decode shared fact"), fact);
+    }
+}
