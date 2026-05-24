@@ -9,16 +9,15 @@
 //! write.
 //!
 //! The intent key is `(request_id, initiator_ephemeral_secret_id, addr)`, so
-//! retries are idempotent for the same bootstrap target. Change this file for
-//! pre-connection send payload or retry behavior. Established connection frames
-//! use `send_network_frame`.
+//! duplicate attempts are idempotent for the same bootstrap target. Retry timing
+//! is owned by the request projector's peer-retry time wake. Change this file
+//! for pre-connection send payload behavior. Established connection frames use
+//! `send_network_frame`.
 
 use std::net::SocketAddr;
 
 use crate::core::effects::PipelineEffects;
-use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerResult, IntentHandler,
-};
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::connection::request::create as addr;
@@ -122,9 +121,9 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
             &ephemeral.ephemeral_private_key,
         )?;
         let target = NetworkTarget::new(input.addr);
-        network::send(context.store()?, target, OutboundFrame { bytes: sealed }).map_err(
-            |err| retry_intent(format!("send_bootstrap_connection_request tcp send: {err}")),
-        )?;
+        if network::send(context.store()?, target, OutboundFrame { bytes: sealed }).is_err() {
+            return Ok(PipelineEffects::new());
+        }
         Ok(PipelineEffects::new())
     }
 }
@@ -147,7 +146,7 @@ mod tests {
     use super::*;
     use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::intents::{retry_intent_reason, IntentHandler};
+    use crate::core::intents::IntentHandler;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
@@ -212,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_bootstrap_peer_requests_retry_without_consuming_intent() {
+    fn unreachable_bootstrap_peer_consumes_attempt_for_projected_retry() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
         let addr = listener.local_addr().expect("listener addr");
         drop(listener);
@@ -231,15 +230,12 @@ mod tests {
         ])
         .expect("store");
 
-        let err = SendBootstrapConnectionRequestHandler::new()
+        SendBootstrapConnectionRequestHandler::new()
             .handle(
                 &intent,
                 &HandlerContext::with_facts([request_fact, ephemeral_fact]).with_store(&store),
             )
-            .expect_err("unreachable peer should request retry");
-
-        assert!(retry_intent_reason(&err).is_some(), "{err}");
-        assert!(err.contains("open tcp stream"), "{err}");
+            .expect("unreachable peer attempt is consumed");
     }
 
     fn request_and_ephemeral(

@@ -65,13 +65,4 @@ impl PipelineEffects {
         self.local_intents.push(intent);
         self
     }
-
-    pub(crate) fn effects_are_empty(&self) -> bool {
-        self.facts.is_empty()
-            && self.ephemeral_facts.is_empty()
-            && self.purged_facts.is_empty()
-            && self.row_mutations.is_empty()
-            && self.intents.is_empty()
-            && self.local_intents.is_empty()
-    }
 }

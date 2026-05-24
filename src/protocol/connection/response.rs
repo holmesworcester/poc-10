@@ -16,6 +16,11 @@ pub mod layout;
 pub mod project;
 pub mod rows;
 
+pub fn seed_sync_timeline() -> crate::core::projectors::Timeline {
+    crate::core::projectors::Timeline::new("connection_seed_sync")
+        .expect("valid connection seed-sync timeline")
+}
+
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionResponseFact, String> {
     layout::decode_fact(bytes)
 }

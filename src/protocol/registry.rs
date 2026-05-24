@@ -506,6 +506,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
+    "send_bootstrap_connection_request",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",

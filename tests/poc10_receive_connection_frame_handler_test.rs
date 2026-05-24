@@ -475,7 +475,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 }
 
 #[test]
-fn well_formed_large_frame_can_park_before_materializing_large_slot() {
+fn well_formed_large_frame_without_connection_context_emits_transient_need_only() {
     let (connection_fact, _) = connection_fact();
     let frame = frame_layout::encode_frame_bytes(
         CONNECTION_FRAME_SIZE_CLASS_LARGE,
@@ -489,7 +489,7 @@ fn well_formed_large_frame_can_park_before_materializing_large_slot() {
     let output = project_connection_frame_fact(&input_fact, ProjectionContext::default());
 
     assert_eq!(output.needs.len(), 1);
-    assert_eq!(output.needs[0].role, "connection_response");
+    assert_eq!(output.needs[0].role.as_str(), "connection_response");
     assert!(output.effects.facts.is_empty());
 }
 
