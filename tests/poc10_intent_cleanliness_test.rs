@@ -1458,7 +1458,12 @@ fn received_connection_frame_families_have_create_role_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
-    for family in ["frame_small", "frame_file_slice", "frame_bundle"] {
+    for family in [
+        "frame_small",
+        "frame_file_slice",
+        "frame_bundle",
+        "frame_observation",
+    ] {
         let manifest = root
             .join("src/protocol/connection")
             .join(format!("{family}.rs"));
@@ -1478,6 +1483,93 @@ fn received_connection_frame_families_have_create_role_files() {
     assert!(
         offenders.is_empty(),
         "received connection-frame fact families must keep boundary construction in create.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn connection_frame_wire_facts_do_not_embed_observation_metadata() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for family in ["frame_small", "frame_file_slice", "frame_bundle"] {
+        let fact = source_text(
+            &root
+                .join("src/protocol/connection")
+                .join(family)
+                .join("fact.rs"),
+        );
+        for forbidden in ["origin_addr", "received_at_local_ms", "OriginAddr"] {
+            if fact.contains(forbidden) {
+                offenders.push(format!(
+                    "src/protocol/connection/{family}/fact.rs embeds {forbidden:?}"
+                ));
+            }
+        }
+        if !fact.contains("pub frame:") {
+            offenders.push(format!(
+                "src/protocol/connection/{family}/fact.rs does not expose the wire frame"
+            ));
+        }
+    }
+
+    let observation = source_text(
+        &root
+            .join("src/protocol/connection/frame_observation")
+            .join("fact.rs"),
+    );
+    for required in ["frame_fact_id", "origin_addr", "received_at_local_ms"] {
+        if !observation.contains(required) {
+            offenders.push(format!(
+                "src/protocol/connection/frame_observation/fact.rs missing {required:?}"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "connection frame facts must stay canonical wire facts; receive metadata belongs only in connection_frame_observation:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn connection_frame_send_and_receive_paths_use_frame_fact_create_helpers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let receive = source_text(&root.join("src/protocol/connection/receive_network_frame.rs"));
+    let send = source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
+    let frame_policy = source_text(&root.join("src/protocol/connection_frame.rs"));
+    let mut offenders = Vec::new();
+
+    for family in ["frame_small", "frame_file_slice", "frame_bundle"] {
+        let direct_create = format!("{family}::create::fact_from_wire");
+        if !receive.contains(&direct_create) {
+            offenders.push(format!(
+                "receive_network_frame.rs does not create {family} through create.rs"
+            ));
+        }
+        let policy_create = format!("connection::{family}::create::fact_from_wire");
+        if !frame_policy.contains(&policy_create) {
+            offenders.push(format!(
+                "connection_frame.rs does not route send frame bytes through {family}::create"
+            ));
+        }
+    }
+    if !send.contains("frame_policy::frame_fact_from_wire") {
+        offenders.push(
+            "send_facts_on_connection.rs bypasses canonical frame fact construction".to_string(),
+        );
+    }
+    if !send.contains("frame_policy::wire_from_frame_fact") {
+        offenders.push(
+            "send_facts_on_connection.rs does not send bytes extracted from a frame fact"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "send and receive should share frame fact constructors; only receive persists observation context:\n{}",
         offenders.join("\n")
     );
 }

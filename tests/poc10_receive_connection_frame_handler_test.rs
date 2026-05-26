@@ -17,11 +17,12 @@ use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
 use topo::protocol::connection::bootstrap_request;
 use topo::protocol::connection::bootstrap_response;
-use topo::protocol::connection::fact_receipt::fact::OriginAddr;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
 use topo::protocol::connection::frame_file_slice::layout as frame_file_slice_layout;
+use topo::protocol::connection::frame_observation::create as frame_observation_create;
+use topo::protocol::connection::frame_observation::layout as frame_observation_layout;
 use topo::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
 use topo::protocol::connection::frame_small::layout as frame_small_layout;
 use topo::protocol::connection::frame_small::project::ConnectionFrameSmallProjector;
@@ -75,8 +76,6 @@ fn receive_intent_from_origin(frame: Vec<u8>, origin: &[u8]) -> topo::core::inte
 fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
     let input = ConnectionFrameSmallFact {
         frame: FixedSlot::<CONNECTION_FRAME_SMALL_WIRE_BYTES>::new(&frame).expect("small frame"),
-        origin_addr: OriginAddr::new(ORIGIN).expect("origin"),
-        received_at_local_ms: RECEIVED_AT,
     };
     Fact::new(
         FactScope::Local,
@@ -88,8 +87,6 @@ fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
 fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
     let input = ConnectionFrameBundleFact {
         frame: FixedSlot::<CONNECTION_FRAME_BUNDLE_WIRE_BYTES>::new(&frame).expect("bundle frame"),
-        origin_addr: OriginAddr::new(ORIGIN).expect("origin"),
-        received_at_local_ms: RECEIVED_AT,
     };
     Fact::new(
         FactScope::Local,
@@ -142,6 +139,30 @@ fn exact_match(
         },
         payload,
     }
+}
+
+fn observation_match(frame_fact: &Fact) -> MatchedContext {
+    let observation =
+        frame_observation_create::fact_from_observation(frame_fact.id, ORIGIN, RECEIVED_AT)
+            .expect("frame observation");
+    exact_match(
+        frame_fact.id,
+        "connection_frame_observation",
+        frame_fact.id,
+        observation,
+    )
+}
+
+fn observed_connection_context(frame_fact: &Fact, connection_fact: Fact) -> ProjectionContext {
+    ProjectionContext::from_matches(vec![
+        observation_match(frame_fact),
+        exact_match(
+            frame_fact.id,
+            "connection_response",
+            connection_fact.id,
+            connection_fact,
+        ),
+    ])
 }
 
 fn connection_fact() -> (Fact, ConnectionResponseFact) {
@@ -212,13 +233,16 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
         .handle(&intent, &HandlerContext::new())
         .expect("receive intent becomes connection frame input");
 
-    assert!(output.facts.is_empty());
+    assert_eq!(output.facts.len(), 1);
     assert_eq!(output.ephemeral_facts.len(), 1);
     let input = frame_small_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode small connection frame");
     assert_eq!(input.frame, frame);
-    assert_eq!(input.origin_addr, ORIGIN);
-    assert_eq!(input.received_at_local_ms, RECEIVED_AT);
+    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
+        .expect("decode frame observation");
+    assert_eq!(observation.frame_fact_id, output.ephemeral_facts[0].id);
+    assert_eq!(observation.origin_addr, ORIGIN);
+    assert_eq!(observation.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
@@ -236,13 +260,16 @@ fn receive_handler_emits_ephemeral_connection_frame_file_slice() {
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
         .expect("receive intent becomes file-slice connection frame input");
 
-    assert!(output.facts.is_empty());
+    assert_eq!(output.facts.len(), 1);
     assert_eq!(output.ephemeral_facts.len(), 1);
     let input = frame_file_slice_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode file-slice connection frame");
     assert_eq!(input.frame, frame);
-    assert_eq!(input.origin_addr, ORIGIN);
-    assert_eq!(input.received_at_local_ms, RECEIVED_AT);
+    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
+        .expect("decode frame observation");
+    assert_eq!(observation.frame_fact_id, output.ephemeral_facts[0].id);
+    assert_eq!(observation.origin_addr, ORIGIN);
+    assert_eq!(observation.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
@@ -260,13 +287,16 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
         .expect("receive intent becomes bundle connection frame input");
 
-    assert!(output.facts.is_empty());
+    assert_eq!(output.facts.len(), 1);
     assert_eq!(output.ephemeral_facts.len(), 1);
     let input = frame_bundle_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode bundle connection frame");
     assert_eq!(input.frame, frame);
-    assert_eq!(input.origin_addr, ORIGIN);
-    assert_eq!(input.received_at_local_ms, RECEIVED_AT);
+    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
+        .expect("decode frame observation");
+    assert_eq!(observation.frame_fact_id, output.ephemeral_facts[0].id);
+    assert_eq!(observation.origin_addr, ORIGIN);
+    assert_eq!(observation.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
@@ -401,12 +431,7 @@ fn receive_handler_emits_ephemeral_bootstrap_response_fact() {
 fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
     let (frame, connection_fact, connection, signed_wrap) = encrypted_small_frame();
     let input_fact = connection_frame_small_fact(frame.clone());
-    let context = ProjectionContext::from_matches(vec![exact_match(
-        input_fact.id,
-        "connection_response",
-        connection_fact.id,
-        connection_fact.clone(),
-    )]);
+    let context = observed_connection_context(&input_fact, connection_fact.clone());
 
     let output = project_connection_frame_fact(&input_fact, context);
 
@@ -443,9 +468,9 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
         .handle(&intent, &HandlerContext::new())
         .expect("receive connection::frame stages input");
 
-    let input = frame_small_layout::decode_fact(output.ephemeral_facts[0].body())
-        .expect("decode small connection frame");
-    assert_eq!(input.origin_addr, ORIGIN);
+    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
+        .expect("decode frame observation");
+    assert_eq!(observation.origin_addr, ORIGIN);
 }
 
 #[test]
@@ -471,12 +496,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
     })
     .expect("seal connection::frame frame");
     let input_fact = connection_frame_small_fact(frame);
-    let context = ProjectionContext::from_matches(vec![exact_match(
-        input_fact.id,
-        "connection_response",
-        connection_fact.id,
-        connection_fact,
-    )]);
+    let context = observed_connection_context(&input_fact, connection_fact);
 
     let output = project_connection_frame_fact(&input_fact, context);
 
@@ -495,7 +515,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 }
 
 #[test]
-fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only() {
+fn well_formed_bundle_frame_without_observation_context_emits_transient_need_only() {
     on_big_stack(|| {
         let (connection_fact, _) = connection_fact();
         let frame = frame_wire::encode_frame_bytes(
@@ -508,6 +528,31 @@ fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only
         let input_fact = connection_frame_bundle_fact(frame);
 
         let output = project_connection_frame_fact(&input_fact, ProjectionContext::default());
+
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(
+            output.needs[0].role.as_str(),
+            "connection_frame_observation"
+        );
+        assert!(output.effects.facts.is_empty());
+    });
+}
+
+#[test]
+fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only() {
+    on_big_stack(|| {
+        let (connection_fact, _) = connection_fact();
+        let frame = frame_wire::encode_frame_bytes(
+            CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+            FixedBytes(connection_fact.id),
+            FixedBytes([19; 24]),
+            b"not-opened-without-context",
+        )
+        .expect("bundle frame");
+        let input_fact = connection_frame_bundle_fact(frame);
+        let context = ProjectionContext::from_matches(vec![observation_match(&input_fact)]);
+
+        let output = project_connection_frame_fact(&input_fact, context);
 
         assert_eq!(output.needs.len(), 1);
         assert_eq!(output.needs[0].role.as_str(), "connection_response");

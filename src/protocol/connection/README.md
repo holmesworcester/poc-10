@@ -227,42 +227,52 @@ fact_receipt {
 
 ### `frame_small` (tag 168)
 
-Local receive wrapper for one established small encrypted frame. Projection
-needs the referenced local connection response, opens the frame, emits durable
-child facts, and emits one receipt per child.
+Local wire fact for one established small encrypted frame. Projection needs a
+matching local `frame_observation` plus the referenced local connection
+response, opens the frame, emits durable child facts, and emits one receipt per
+child.
 
 ```text
 frame_small {
-  origin_addr: "198.51.100.20:41000"
-  received_at_local_ms: 1715000005000
   frame: bytes:TRNS_small_frame
 }
 ```
 
 ### `frame_file_slice` (tag 169)
 
-Local receive wrapper for an established frame sized for one content file-slice
-fact. It uses the same projection path as `frame_small` but the frame layout
-has a larger fixed ciphertext slot.
+Local wire fact for an established frame sized for one content file-slice fact.
+It uses the same projection path as `frame_small` but the frame layout has a
+larger fixed ciphertext slot.
 
 ```text
 frame_file_slice {
-  origin_addr: "198.51.100.20:41000"
-  received_at_local_ms: 1715000006000
   frame: bytes:TRNS_file_slice_frame
 }
 ```
 
 ### `frame_bundle` (tag 170)
 
-Local receive wrapper for an established bundled frame. Projection opens the
-bundle and admits each contained fact with a receipt.
+Local wire fact for an established bundled frame. Projection opens the bundle
+and admits each contained fact with a receipt.
 
 ```text
 frame_bundle {
-  origin_addr: "198.51.100.20:41000"
-  received_at_local_ms: 1715000007000
   frame: bytes:TRNS_bundle_frame
+}
+```
+
+### `frame_observation` (tag 173)
+
+Local receive metadata for one frame fact. Projection offers
+`connection_frame_observation` context keyed by `frame_fact_id`; the matching
+frame projector consumes that context when it needs origin and receive-time
+metadata for fact receipts.
+
+```text
+frame_observation {
+  frame_fact_id: fact:connection_frame_small
+  origin_addr: "198.51.100.20:41000"
+  received_at_local_ms: 1715000005000
 }
 ```
 
@@ -317,8 +327,9 @@ established connection transfer:
   sync selected facts
     -> send_facts_on_connection
     -> send_network_frame
-    -> remote frame_small/frame_bundle/frame_file_slice wrappers
-       need connection_response
+    -> remote frame_small/frame_bundle/frame_file_slice wire fact
+    -> remote frame_observation metadata fact
+       need frame_observation + connection_response
        open to child facts + fact_receipts
 ```
 

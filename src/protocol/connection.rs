@@ -26,6 +26,7 @@ pub mod ephemeral_secret;
 pub mod fact_receipt;
 pub mod frame_bundle;
 pub mod frame_file_slice;
+pub mod frame_observation;
 pub mod frame_small;
 pub mod receive_network_frame;
 pub mod request;

@@ -102,7 +102,7 @@ use crate::protocol::connection::bootstrap_response::create::{
     is_bootstrap_response_frame, received_bootstrap_response_frame_effect,
 };
 use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small};
-use crate::protocol::connection_frame::{self, ReceivedConnectionFrameKind};
+use crate::protocol::connection_frame::{self, ConnectionFrameKind};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveNetworkFrameHandler;
@@ -139,31 +139,23 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
                 return Ok(effects);
             }
         }
-        Ok(
-            match connection_frame::classify_received_frame(&input.frame) {
-                Some(ReceivedConnectionFrameKind::Small) => {
-                    frame_small::create::received_frame_effect(
-                        &input.frame,
-                        &input.origin_addr,
-                        input.received_at_local_ms,
-                    )?
-                }
-                Some(ReceivedConnectionFrameKind::FileSlice) => {
-                    frame_file_slice::create::received_frame_effect(
-                        &input.frame,
-                        &input.origin_addr,
-                        input.received_at_local_ms,
-                    )?
-                }
-                Some(ReceivedConnectionFrameKind::Bundle) => {
-                    frame_bundle::create::received_frame_effect(
-                        &input.frame,
-                        &input.origin_addr,
-                        input.received_at_local_ms,
-                    )?
-                }
-                None => crate::core::effects::PipelineEffects::new(),
-            },
-        )
+        Ok(match connection_frame::classify_frame(&input.frame) {
+            Some(ConnectionFrameKind::Small) => connection_frame::observed_frame_effect(
+                frame_small::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?,
+            Some(ConnectionFrameKind::FileSlice) => connection_frame::observed_frame_effect(
+                frame_file_slice::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?,
+            Some(ConnectionFrameKind::Bundle) => connection_frame::observed_frame_effect(
+                frame_bundle::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?,
+            None => crate::core::effects::PipelineEffects::new(),
+        })
     }
 }
