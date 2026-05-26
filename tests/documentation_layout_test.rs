@@ -132,6 +132,8 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
     );
 
     for removed in [
+        "Primary source modules:",
+        "`src/protocol/registry.rs`",
         "## 5) Range Sync Dependency Closure",
         "## 6) Example Workspace Fact Graph",
         "message_hello",

@@ -4,16 +4,6 @@ These are GitHub-renderable Mermaid flowcharts for the current Context
 architecture. They are a visual companion to `README.md`, `docs/RULES.md`, and
 the scope READMEs; the Rust modules remain the source of truth.
 
-Primary source modules:
-
-- `src/core/*`
-- `src/core/pipeline/*`
-- `src/protocol/registry.rs`
-- `src/protocol/auth/*`
-- `src/protocol/content/*`
-- `src/protocol/connection/*`
-- `src/protocol/sync/*`
-
 ## 0) Runtime Boundaries
 
 Context has one protocol-neutral runtime and several protocol scopes. Core owns
