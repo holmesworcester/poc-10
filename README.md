@@ -199,11 +199,12 @@ schema-owned rows.
 Active design and maintenance docs are:
 
 - `README.md`: architecture overview and protocol function boundaries.
+- `ARCHITECTURE_DIAGRAMS.md`: GitHub-renderable architecture flowcharts.
 - `docs/RULES.md`: architecture rules, projector rules, and guardrails.
+- `docs/todo-add-verus-proofs.md`: TODO plan for adding Verus proofs.
 - `src/core/README.md`: core/runtime responsibility boundaries.
 - `src/core/pipeline/README.md`: projection and handler commit boundaries.
 - `src/protocol/*/README.md`: fact-scope responsibilities, facts, handlers,
   row state, and cross-scope interfaces.
-- `verus_plan.md`: verification plan.
 
 Planning notes live under `docs/archived/`.

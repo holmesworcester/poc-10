@@ -1,9 +1,9 @@
-# Verus Proof Plan
+# TODO: Add Verus Proofs
 
-This plan describes how poc-10 should use Verus to prove projection, context,
-sync, and key-material invariants in the current fact-based architecture. Core
-may match candidates, queue work, and commit replacement state. Protocol fact
-families still own meaning and authority.
+This document records the work needed to use Verus to prove projection,
+context, sync, and key-material invariants in the current fact-based
+architecture. Core may match candidates, queue work, and commit replacement
+state. Protocol fact families still own meaning and authority.
 
 ## Goal
 
@@ -27,9 +27,8 @@ producing output.
 
 ## Proof Target Selection
 
-Use the documentation standard from `docs/documentation_guide.md` and
-`docs/RULES.md` when choosing proof work. A proof target is meaningful only if
-it names:
+Use the architecture rules in `docs/RULES.md` when choosing proof work. A proof
+target is meaningful only if it names:
 
 1. The protected output: row, context offer, intent, sync share, or purge.
 2. The executable boundary that emits the output.

@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::Path;
 
+const VERUS_TODO_PATH: &str = "docs/todo-add-verus-proofs.md";
+
 fn verus_plan() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::read_to_string(root.join("verus_plan.md")).expect("read verus_plan.md")
+    fs::read_to_string(root.join(VERUS_TODO_PATH)).expect("read Verus TODO doc")
 }
 
 #[test]
@@ -30,7 +32,7 @@ fn verus_plan_uses_current_fact_layout_and_context_terms() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "verus_plan.md is missing current-layout proof terms:\n{}",
+        "{VERUS_TODO_PATH} is missing current-layout proof terms:\n{}",
         missing.join("\n")
     );
 
@@ -55,7 +57,7 @@ fn verus_plan_uses_current_fact_layout_and_context_terms() {
         .collect::<Vec<_>>();
     assert!(
         present.is_empty(),
-        "verus_plan.md still contains retired proof-plan terms:\n{}",
+        "{VERUS_TODO_PATH} still contains retired proof-plan terms:\n{}",
         present.join("\n")
     );
 
@@ -65,7 +67,7 @@ fn verus_plan_uses_current_fact_layout_and_context_terms() {
         .collect::<Vec<_>>();
     assert!(
         old_terms.is_empty(),
-        "verus_plan.md should use fact terminology, not retired event terms"
+        "{VERUS_TODO_PATH} should use fact terminology, not retired event terms"
     );
 }
 
@@ -102,7 +104,7 @@ fn verus_plan_names_meaningful_security_proof_targets() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "verus_plan.md is missing meaningful security proof targets:\n{}",
+        "{VERUS_TODO_PATH} is missing meaningful security proof targets:\n{}",
         missing.join("\n")
     );
 }

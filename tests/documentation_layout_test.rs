@@ -15,14 +15,15 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
 
     for live_doc in [
         "README.md",
+        "ARCHITECTURE_DIAGRAMS.md",
         "docs/RULES.md",
+        "docs/todo-add-verus-proofs.md",
         "src/core/README.md",
         "src/core/pipeline/README.md",
         "src/protocol/auth/README.md",
         "src/protocol/content/README.md",
         "src/protocol/connection/README.md",
         "src/protocol/sync/README.md",
-        "verus_plan.md",
     ] {
         assert!(
             root.join(live_doc).is_file(),
@@ -59,6 +60,7 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "simplification_todo.md",
         "sqlite_plan.md",
         "transit_connection_redesign.md",
+        "verus_plan.md",
     ] {
         assert!(
             !root.join(stale_root_doc).exists(),
@@ -77,6 +79,46 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
             "duplicated standalone documentation should be folded into active READMEs: {removed_duplicate_doc}"
         );
     }
+}
+
+#[test]
+fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let diagrams = source_text(&root.join("ARCHITECTURE_DIAGRAMS.md"));
+    let normalized = normalize_whitespace(&diagrams);
+
+    for required in [
+        "# Architecture Diagrams",
+        "GitHub-renderable Mermaid flowcharts",
+        "## 0) Runtime Boundaries",
+        "## 1) Fact Admission And Context Matching",
+        "Context is a range relationship",
+        "offer can satisfy many needs",
+        "offer may exist before a later fact creates the matching need",
+        "## 2) Context As The Cross-Scope Interface",
+        "## 3) Connection Bootstrap And Established Frames",
+        "## 4) Sync Seed, Live Tail, And Catch-Up",
+        "## 5) Range Sync Dependency Closure",
+        "## 6) Example Workspace Fact Graph",
+        "## 7) Responsibility Summary",
+        "```mermaid",
+        "flowchart TD",
+        "flowchart LR",
+        "share_fact_with_sync",
+        "context_have",
+        "seed_connection_sync",
+        "connection_fact_receipt",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "ARCHITECTURE_DIAGRAMS.md is missing current architecture flowchart detail {required:?}"
+        );
+    }
+
+    assert!(
+        diagrams.matches("```mermaid").count() >= 8,
+        "ARCHITECTURE_DIAGRAMS.md should contain one Mermaid block per diagram"
+    );
 }
 
 #[test]
