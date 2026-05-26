@@ -2,9 +2,9 @@
 //!
 //! The durable `connection::request` and `connection::response` facts remain
 //! canonical local/projection state. Network bootstrap traffic uses these
-//! sealed wrappers instead: public headers carry only the endpoint/request ids
-//! and ephemeral public keys needed to derive the opening key, while the
-//! canonical fact bytes travel inside X25519 + XChaCha20-Poly1305.
+//! sealed wrappers instead: public headers carry only the ephemeral public key
+//! needed to derive the opening key plus a nonce, while the canonical fact
+//! bytes travel inside X25519 + XChaCha20-Poly1305.
 
 use crate::core::crypto::{
     self, X25519PrivateKey, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_NONCE_BYTES,
@@ -20,8 +20,8 @@ const VERSION: u8 = 1;
 const REQUEST_PURPOSE: &[u8] = b"topo-sealed-connection-request-v1";
 const RESPONSE_PURPOSE: &[u8] = b"topo-sealed-connection-response-v1";
 
-const REQUEST_HEADER_BYTES: usize = 1 + 1 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES;
-const RESPONSE_HEADER_BYTES: usize = 1 + 1 + 32 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES;
+const REQUEST_HEADER_BYTES: usize = 1 + 1 + 32 + XCHACHA20_POLY1305_NONCE_BYTES;
+const RESPONSE_HEADER_BYTES: usize = 1 + 1 + 32 + XCHACHA20_POLY1305_NONCE_BYTES;
 
 pub const SEALED_CONNECTION_REQUEST_BYTES: usize =
     REQUEST_HEADER_BYTES + request::layout::FACT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
@@ -40,11 +40,7 @@ pub fn seal_connection_request(
     }
 
     let nonce = crypto::random_xchacha20poly1305_nonce();
-    let header = request_header(
-        request.to_endpoint,
-        request.initiator_ephemeral_public_key,
-        nonce,
-    );
+    let header = request_header(request.initiator_ephemeral_public_key, nonce);
     let ciphertext = crypto::x25519_xchacha20poly1305_encrypt(
         initiator_ephemeral_private_key,
         &request.to_endpoint,
@@ -73,14 +69,9 @@ pub fn open_connection_request(
     if frame[0] != TYPE_SEALED_CONNECTION_REQUEST || frame[1] != VERSION {
         return Err("sealed connection request has unsupported header".to_string());
     }
-    let mut to_endpoint = [0; 32];
-    to_endpoint.copy_from_slice(&frame[2..34]);
-    if to_endpoint != local_endpoint.endpoint {
-        return Err("sealed connection request is addressed to another endpoint".to_string());
-    }
     let mut initiator_ephemeral_public_key = [0; 32];
-    initiator_ephemeral_public_key.copy_from_slice(&frame[34..66]);
-    let nonce = nonce_from(&frame[66..90]);
+    initiator_ephemeral_public_key.copy_from_slice(&frame[2..34]);
+    let nonce = nonce_from(&frame[34..58]);
     let header = &frame[..REQUEST_HEADER_BYTES];
     let ciphertext = &frame[REQUEST_HEADER_BYTES..];
 
@@ -93,8 +84,8 @@ pub fn open_connection_request(
         ciphertext,
     )?;
     let request = request::layout::decode_fact(&plaintext)?;
-    if request.to_endpoint != to_endpoint {
-        return Err("sealed connection request inner endpoint does not match header".to_string());
+    if request.to_endpoint != local_endpoint.endpoint {
+        return Err("sealed connection request is addressed to another endpoint".to_string());
     }
     if request.initiator_ephemeral_public_key != initiator_ephemeral_public_key {
         return Err(
@@ -116,12 +107,7 @@ pub fn seal_connection_response(
     }
 
     let nonce = crypto::random_xchacha20poly1305_nonce();
-    let header = response_header(
-        response.to_endpoint,
-        response.request_id,
-        response.responder_ephemeral_public_key,
-        nonce,
-    );
+    let header = response_header(response.responder_ephemeral_public_key, nonce);
     let ciphertext = crypto::x25519_xchacha20poly1305_encrypt(
         responder_ephemeral_private_key,
         &response.to_endpoint,
@@ -150,16 +136,9 @@ pub fn open_connection_response(
     if frame[0] != TYPE_SEALED_CONNECTION_RESPONSE || frame[1] != VERSION {
         return Err("sealed connection response has unsupported header".to_string());
     }
-    let mut to_endpoint = [0; 32];
-    to_endpoint.copy_from_slice(&frame[2..34]);
-    if to_endpoint != local_endpoint.endpoint {
-        return Err("sealed connection response is addressed to another endpoint".to_string());
-    }
-    let mut request_id = [0; 32];
-    request_id.copy_from_slice(&frame[34..66]);
     let mut responder_ephemeral_public_key = [0; 32];
-    responder_ephemeral_public_key.copy_from_slice(&frame[66..98]);
-    let nonce = nonce_from(&frame[98..122]);
+    responder_ephemeral_public_key.copy_from_slice(&frame[2..34]);
+    let nonce = nonce_from(&frame[34..58]);
     let header = &frame[..RESPONSE_HEADER_BYTES];
     let ciphertext = &frame[RESPONSE_HEADER_BYTES..];
 
@@ -172,13 +151,8 @@ pub fn open_connection_response(
         ciphertext,
     )?;
     let response = response::layout::decode_fact(&plaintext)?;
-    if response.to_endpoint != to_endpoint {
-        return Err("sealed connection response inner endpoint does not match header".to_string());
-    }
-    if response.request_id != request_id {
-        return Err(
-            "sealed connection response inner request id does not match header".to_string(),
-        );
+    if response.to_endpoint != local_endpoint.endpoint {
+        return Err("sealed connection response is addressed to another endpoint".to_string());
     }
     if response.responder_ephemeral_public_key != responder_ephemeral_public_key {
         return Err(
@@ -189,30 +163,24 @@ pub fn open_connection_response(
 }
 
 fn request_header(
-    to_endpoint: [u8; 32],
     initiator_ephemeral_public_key: [u8; 32],
     nonce: XChaCha20Poly1305Nonce,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(REQUEST_HEADER_BYTES);
     out.push(TYPE_SEALED_CONNECTION_REQUEST);
     out.push(VERSION);
-    out.extend_from_slice(&to_endpoint);
     out.extend_from_slice(&initiator_ephemeral_public_key);
     out.extend_from_slice(&nonce);
     out
 }
 
 fn response_header(
-    to_endpoint: [u8; 32],
-    request_id: [u8; 32],
     responder_ephemeral_public_key: [u8; 32],
     nonce: XChaCha20Poly1305Nonce,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(RESPONSE_HEADER_BYTES);
     out.push(TYPE_SEALED_CONNECTION_RESPONSE);
     out.push(VERSION);
-    out.extend_from_slice(&to_endpoint);
-    out.extend_from_slice(&request_id);
     out.extend_from_slice(&responder_ephemeral_public_key);
     out.extend_from_slice(&nonce);
     out
@@ -241,6 +209,10 @@ mod tests {
         }
     }
 
+    fn contains_id(bytes: &[u8], id: &[u8; 32]) -> bool {
+        bytes.windows(id.len()).any(|window| window == id)
+    }
+
     #[test]
     fn sealed_request_opens_only_for_addressed_endpoint() {
         let responder = endpoint([2; 32]);
@@ -266,6 +238,17 @@ mod tests {
         assert_eq!(sealed[0], TYPE_SEALED_CONNECTION_REQUEST);
         assert_eq!(sealed.len(), SEALED_CONNECTION_REQUEST_BYTES);
         assert_ne!(sealed, bytes);
+        assert_eq!(
+            REQUEST_HEADER_BYTES,
+            1 + 1 + 32 + XCHACHA20_POLY1305_NONCE_BYTES
+        );
+        let public_header = &sealed[..REQUEST_HEADER_BYTES];
+        assert_eq!(
+            &public_header[2..34],
+            &request.initiator_ephemeral_public_key
+        );
+        assert!(!contains_id(public_header, &request.from_endpoint));
+        assert!(!contains_id(public_header, &request.to_endpoint));
         assert_eq!(
             open_connection_request(&sealed, &responder).expect("open request"),
             bytes
@@ -299,6 +282,18 @@ mod tests {
 
         assert_eq!(sealed[0], TYPE_SEALED_CONNECTION_RESPONSE);
         assert_eq!(sealed.len(), SEALED_CONNECTION_RESPONSE_BYTES);
+        assert_eq!(
+            RESPONSE_HEADER_BYTES,
+            1 + 1 + 32 + XCHACHA20_POLY1305_NONCE_BYTES
+        );
+        let public_header = &sealed[..RESPONSE_HEADER_BYTES];
+        assert_eq!(
+            &public_header[2..34],
+            &response.responder_ephemeral_public_key
+        );
+        assert!(!contains_id(public_header, &response.from_endpoint));
+        assert!(!contains_id(public_header, &response.to_endpoint));
+        assert!(!contains_id(public_header, &response.request_id));
         assert!(!sealed
             .windows(response.connection_secret.len())
             .any(|window| window == response.connection_secret));
@@ -327,7 +322,7 @@ mod tests {
         let mut sealed =
             seal_connection_response(&bytes, &responder_ephemeral_private).expect("seal response");
 
-        sealed[34] ^= 0x80;
+        sealed[2] ^= 0x80;
 
         assert!(open_connection_response(&sealed, &initiator).is_err());
     }

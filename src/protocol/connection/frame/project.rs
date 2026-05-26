@@ -11,9 +11,11 @@
 //!      connection frame whose body encodes the corresponding fixed outer frame
 //!      shape.
 //!   2. CONTEXT. The public frame header names an exact local
-//!      connection_response fact. Missing context parks the ephemeral input
-//!      until the connection context arrives; malformed or undecryptable frames
-//!      complete with no durable output.
+//!      connection_response fact. Missing context emits only a transient need
+//!      so core can attach already-available context during the projection
+//!      fixed point; if no context is available, the one-shot input is
+//!      discarded with no durable output. Malformed and undecryptable frames
+//!      also complete with no durable output.
 //!   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
 //!      each with a durable `connection::fact_receipt`. The child
 //!      facts project immediately or park on their own durable context in the
@@ -92,7 +94,7 @@ impl TypedProjector<super::Codec> for ConnectionFrameProjector {
             connection_id,
         );
         let Some(connection_fact) = context.payload_for(&connection_need) else {
-            return Ok(waiting_output([connection_need]));
+            return Ok(ProjectionOutput::new().need(connection_need));
         };
         if connection_fact.id != connection_id {
             return Err("connection::frame connection context id does not match frame".to_string());
@@ -116,14 +118,6 @@ impl TypedProjector<super::Codec> for ConnectionFrameProjector {
 
 fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 32]) -> ContextNeed {
     ContextNeed::range(owner, role, scope, key, key)
-}
-
-fn waiting_output<const N: usize>(needs: [ContextNeed; N]) -> ProjectionOutput {
-    let mut output = ProjectionOutput::new();
-    for need in needs {
-        output = output.need(need);
-    }
-    output
 }
 
 fn facts_output(facts: Vec<Fact>) -> ProjectionOutput {

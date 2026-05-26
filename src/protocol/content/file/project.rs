@@ -20,7 +20,9 @@ use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{
     file_deletion, message, message_deletion, purge::project as content_purge,
 };
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_optional_needs, share_fact_with_negentropy,
+};
 
 use super::fact::MAX_FILE_BYTES;
 use super::rows::{content_file_row, FILE_KEY_COLUMNS, FILE_ROWS};
@@ -154,34 +156,45 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
             ]));
         };
         validate_author_user(author, file.workspace_id, file.author_user_id)?;
+        let context_have = context_have_from_optional_needs(
+            context,
+            [
+                Some(&signer_need),
+                Some(&file_deletion_need),
+                Some(&parent_need),
+                Some(&parent_deletion_need),
+                Some(&author_need),
+            ],
+        );
 
         // 3. Materialize.
-        Ok(output_with_needs([
-            Some(signer_need),
-            Some(file_deletion_need),
-            Some(parent_need),
-            Some(parent_deletion_need),
-            Some(author_need),
-        ])
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "content_file",
-            scope,
-            file.file_id,
-            file.file_id,
-        ))
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "sync_exact_fact",
-            crate::protocol::auth::workspace::scope(file.workspace_id),
-            fact.id,
-            fact.id,
-        ))
-        .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file)))
-        .intent(share_fact_with_workspace_intent_for_fact(
+        Ok(share_fact_with_negentropy(
+            output_with_needs([
+                Some(signer_need),
+                Some(file_deletion_need),
+                Some(parent_need),
+                Some(parent_deletion_need),
+                Some(author_need),
+            ])
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "content_file",
+                scope,
+                file.file_id,
+                file.file_id,
+            ))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "sync_exact_fact",
+                crate::protocol::auth::workspace::scope(file.workspace_id),
+                fact.id,
+                fact.id,
+            ))
+            .row_mutation(RowMutation::InsertValues(content_file_row(fact.id, &file))),
             file.workspace_id,
             fact,
-        )))
+            context_have,
+        ))
     }
 }
 

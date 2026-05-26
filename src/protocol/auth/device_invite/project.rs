@@ -17,7 +17,9 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, user, user_invite, workspace};
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::rows::device_invite_row;
 
@@ -127,9 +129,11 @@ fn project_user_signed(
     if user_invite.public_key != user.signer_public_key {
         return Err("device_invite user_invite key does not match user".to_string());
     }
+    let context_have =
+        context_have_from_needs(context, [&needs.workspace, &needs.user, &needs.user_invite]);
 
     // 3. Materialize.
-    materialized_output(fact, invite, needs.output())
+    materialized_output(fact, invite, needs.output(), context_have)
 }
 
 fn project_endpoint_signed(
@@ -169,8 +173,10 @@ fn project_endpoint_signed(
             "endpoint_shared-signed device_invite user authority does not match signer".to_string(),
         );
     }
+    let context_have = context_have_from_needs(context, [&needs.workspace, &needs.endpoint_shared]);
+
     // 3. Materialize.
-    materialized_output(fact, invite, needs.output())
+    materialized_output(fact, invite, needs.output(), context_have)
 }
 
 struct UserSignedNeeds {
@@ -259,28 +265,30 @@ fn materialized_output(
     fact: &Fact,
     invite: &DeviceInviteFact,
     output: ProjectionOutput,
+    context_have: Vec<FactId>,
 ) -> Result<ProjectionOutput, String> {
     let device_invite_key = device_invite_key(invite.user_authority_fact_id, invite.public_key);
-    Ok(output
-        .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "auth_device_invite",
-            crate::core::facts::FactScope::Global,
-            fact.id,
-            fact.id,
-        ))
-        .offer(crate::core::context::ContextOffer::range(
-            fact.id,
-            "auth_device_invite_key",
-            crate::protocol::auth::workspace::scope(invite.workspace_id),
-            device_invite_key.clone(),
-            device_invite_key,
-        ))
-        .intent(share_fact_with_workspace_intent_for_fact(
-            invite.workspace_id,
-            fact,
-        )))
+    Ok(share_fact_with_negentropy(
+        output
+            .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_device_invite",
+                crate::core::facts::FactScope::Global,
+                fact.id,
+                fact.id,
+            ))
+            .offer(crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_device_invite_key",
+                crate::protocol::auth::workspace::scope(invite.workspace_id),
+                device_invite_key.clone(),
+                device_invite_key,
+            )),
+        invite.workspace_id,
+        fact,
+        context_have,
+    ))
 }
 
 fn device_invite_key(user_authority_fact_id: FactId, public_key: [u8; 32]) -> Vec<u8> {

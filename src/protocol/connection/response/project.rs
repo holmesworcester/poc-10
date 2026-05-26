@@ -14,9 +14,11 @@
 //!      initiator secret; local responses require responder secret. Close
 //!      context removes the response row and purges this response fact.
 //!   3. MATERIALIZE. Valid responses write the connection_response row, publish
-//!      local connection context, and seed sync for the materialized connection.
+//!      local connection context. Only received responses emit the initial
+//!      one-shot sync seed, because the peer that receives the response owns the
+//!      single bidirectional bootstrap sync.
 //!
-//! Change this projector for response admission, parking behavior, connection
+//! Change this projector for response admission, context waits, connection
 //! context offers, or sync seeding. Response byte compatibility belongs in
 //! `layout.rs`; key-schedule construction belongs in `create.rs`.
 
@@ -219,7 +221,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
                 return Err("connection response secret does not match handshake".to_string());
             }
             // 3. Materialize received response.
-            return materialized_output(fact.id, &response);
+            return materialized_output(fact, &response, SeedSync::Immediate);
         }
 
         // 2b. Local response path.
@@ -259,8 +261,14 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
             );
         }
         // 3. Materialize local response.
-        materialized_output(fact.id, &response)
+        materialized_output(fact, &response, SeedSync::None)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeedSync {
+    None,
+    Immediate,
 }
 
 fn validate_response_fields(response: &ConnectionResponseFact) -> Result<(), String> {
@@ -348,10 +356,12 @@ fn validate_fact_receipt(
 }
 
 fn materialized_output(
-    response_id: [u8; 32],
+    fact: &Fact,
     response: &ConnectionResponseFact,
+    seed_sync: SeedSync,
 ) -> Result<ProjectionOutput, String> {
-    Ok(ProjectionOutput::new()
+    let response_id = fact.id;
+    let mut output = ProjectionOutput::new()
         .need(close::connection_closed_need(response_id, response_id))
         .offer(crate::core::context::ContextOffer::range(
             response_id,
@@ -360,13 +370,20 @@ fn materialized_output(
             response_id,
             response_id,
         ))
+        .offer(request::connection_response_for_request_offer(
+            response_id,
+            response.request_id,
+        ))
         .row_mutation(RowMutation::PutRow(connection_response_row(
             response_id,
             response,
-        )?))
-        .intent(seed_connection_sync_intent(SeedConnectionSync {
+        )?));
+    if seed_sync == SeedSync::Immediate {
+        output = output.intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: response_id,
-        })))
+        }));
+    }
+    Ok(output)
 }
 
 fn closed_output(response_id: [u8; 32]) -> Result<ProjectionOutput, String> {
@@ -410,6 +427,7 @@ mod projector_tests {
         fact::ConnectionRequestFact, layout as request_layout,
     };
     use topo::protocol::connection::response::{create, layout, project, rows};
+    use topo::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 
     struct Scenario {
         request_fact: Fact,
@@ -638,7 +656,8 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
-        assert_eq!(output.effects.intents.len(), 1);
+        assert!(output.effects.intents.is_empty());
+        assert!(output.time_wakes.is_empty());
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
@@ -656,6 +675,32 @@ mod projector_tests {
         );
         assert_eq!(row.handshake_hash, response.handshake_hash);
         assert_eq!(row.connection_secret, response.connection_secret);
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == "connection_response_for_request"
+                && offer.start_key.as_bytes() == &scenario.request_fact.id[..]
+                && offer.end_key.as_bytes() == &scenario.request_fact.id[..]));
+    }
+
+    #[test]
+    fn local_response_does_not_seed_bootstrap_sync() {
+        let scenario = scenario();
+        let context = ProjectionContext::from_matches(vec![
+            request_match(scenario.response_fact.id, scenario.request_fact.clone()),
+            invite_match(scenario.response_fact.id, scenario.invite_fact.clone()),
+            ephemeral_match(
+                scenario.response_fact.id,
+                scenario.responder_ephemeral_fact.clone(),
+            ),
+        ]);
+
+        let output = project::ConnectionResponseProjector::new()
+            .project(&scenario.response_fact, &context)
+            .expect("project response");
+
+        assert!(output.effects.intents.is_empty());
+        assert!(output.time_wakes.is_empty());
     }
 
     #[test]
@@ -682,6 +727,11 @@ mod projector_tests {
             .expect("project received response");
 
         assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            SEED_CONNECTION_SYNC
+        );
+        assert!(output.time_wakes.is_empty());
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
@@ -690,6 +740,12 @@ mod projector_tests {
             .expect("decode connection response row");
         assert_eq!(row.connection_id, scenario.response_fact.id);
         assert_eq!(row.to_endpoint, response.to_endpoint);
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == "connection_response_for_request"
+                && offer.start_key.as_bytes() == &scenario.request_fact.id[..]
+                && offer.end_key.as_bytes() == &scenario.request_fact.id[..]));
     }
 
     #[test]

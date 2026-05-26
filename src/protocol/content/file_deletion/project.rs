@@ -18,7 +18,9 @@ use crate::protocol::auth::user;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{file, message, purge::project as content_purge};
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_optional_needs, share_fact_with_negentropy,
+};
 
 use super::rows::{file_deletion_row, FileDeletionRow};
 
@@ -123,6 +125,15 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             ]));
         };
         validate_author_user(&deletion, author_fact)?;
+        let context_have = context_have_from_optional_needs(
+            context,
+            [
+                Some(&signer_need),
+                Some(&target_need),
+                Some(&parent_need),
+                Some(&author_need),
+            ],
+        );
 
         // 3. Materialize.
         let row = file_deletion_row(FileDeletionRow {
@@ -132,24 +143,25 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         });
-        Ok(output_with_needs([
-            Some(signer_need),
-            Some(target_need),
-            Some(parent_need),
-            Some(author_need),
-        ])
-        .offer(content_purge::target_purged_offer(
-            fact.id,
-            scope,
-            parent.frontier_id,
-            unix_minute_for(target.created_at_ms),
-            deletion.target_file_id,
-        ))
-        .row_mutation(RowMutation::InsertValues(row))
-        .intent(share_fact_with_workspace_intent_for_fact(
+        Ok(share_fact_with_negentropy(
+            output_with_needs([
+                Some(signer_need),
+                Some(target_need),
+                Some(parent_need),
+                Some(author_need),
+            ])
+            .offer(content_purge::target_purged_offer(
+                fact.id,
+                scope,
+                parent.frontier_id,
+                unix_minute_for(target.created_at_ms),
+                deletion.target_file_id,
+            ))
+            .row_mutation(RowMutation::InsertValues(row)),
             deletion.workspace_id,
             fact,
-        )))
+            context_have,
+        ))
     }
 }
 

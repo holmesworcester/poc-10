@@ -3,7 +3,8 @@
 //! A response completes a handshake and is the local connection fact: its fact
 //! id is the connection id, and its body contains the connection secret used to
 //! open established frames. Projection validates request and secret context,
-//! writes connection rows, publishes local connection context, and seeds sync.
+//! writes connection rows, publishes local connection context, and has the
+//! receiving side seed the single bidirectional bootstrap sync.
 //!
 //! This family owns response payload bytes, responder key-schedule
 //! construction, row materialization, and response admission policy. Frame

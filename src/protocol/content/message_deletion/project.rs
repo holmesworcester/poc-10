@@ -19,7 +19,9 @@ use crate::core::projectors::{
 use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, purge::project as content_purge};
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_optional_needs, share_fact_with_negentropy,
+};
 
 use super::rows::{message_deletion_row, MessageDeletionRow};
 
@@ -105,6 +107,10 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
         };
         validate_target_message(&deletion, target_fact)?;
         validate_author_user(&deletion, author_fact)?;
+        let context_have = context_have_from_optional_needs(
+            context,
+            [Some(&signer_need), Some(&target_need), Some(&author_need)],
+        );
 
         // 3. Materialize.
         let row = message_deletion_row(MessageDeletionRow {
@@ -114,7 +120,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         });
-        Ok(
+        Ok(share_fact_with_negentropy(
             output_with_needs([Some(signer_need), Some(target_need), Some(author_need)])
                 .offer(content_purge::target_purged_offer(
                     fact.id,
@@ -123,12 +129,11 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
                     deletion.target_minute,
                     deletion.target_message_id,
                 ))
-                .row_mutation(RowMutation::InsertValues(row))
-                .intent(share_fact_with_workspace_intent_for_fact(
-                    deletion.workspace_id,
-                    fact,
-                )),
-        )
+                .row_mutation(RowMutation::InsertValues(row)),
+            deletion.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }
 
@@ -246,7 +251,7 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 3);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_purged");
-        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(output.effects.intents.len(), 2);
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
             panic!("expected insert values mutation");

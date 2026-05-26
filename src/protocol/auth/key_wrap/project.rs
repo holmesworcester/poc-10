@@ -20,7 +20,9 @@ use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
 use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::fact::KeyWrapFact;
 use super::rows::{key_wrap_row, KeyWrapRow};
@@ -594,9 +596,9 @@ fn key_wrap(
     let local_recipient_fact = matched_payload_fact(projection_context, &local_recipient_need);
 
     let mut output = ProjectionOutput::new()
-        .need(signer_need)
-        .need(recipient_need)
-        .need(frontier_need)
+        .need(signer_need.clone())
+        .need(recipient_need.clone())
+        .need(frontier_need.clone())
         .need(local_recipient_need);
 
     if signer_public_key.is_none() || recipient_fact.is_none() || frontier_fact.is_none() {
@@ -625,32 +627,37 @@ fn key_wrap(
     if frontier.owner_endpoint_id != wrap.signer_endpoint_id {
         return Err("key wrap signer does not own removal frontier".to_string());
     }
+    let context_have = context_have_from_needs(
+        projection_context,
+        [&signer_need, &recipient_need, &frontier_need],
+    );
 
     // 3. Materialize: write the accepted wrap row and emit unwrap work.
-    output = output
-        .row_mutation(RowMutation::PutRow(key_wrap_row(KeyWrapRow {
-            key_wrap_id: fact.id,
-            signer_public_key,
-            wrap: wrap.clone(),
-        })?))
-        .offer(ContextOffer::range(
-            fact.id,
-            "sync_exact_fact",
-            scope.clone(),
-            fact.id,
-            fact.id,
-        ))
-        .offer(ContextOffer::range(
-            fact.id,
-            "sync_key_wrap",
-            scope,
-            fact.id,
-            fact.id,
-        ))
-        .intent(share_fact_with_workspace_intent_for_fact(
-            wrap.workspace_id,
-            fact,
-        ));
+    output = share_fact_with_negentropy(
+        output
+            .row_mutation(RowMutation::PutRow(key_wrap_row(KeyWrapRow {
+                key_wrap_id: fact.id,
+                signer_public_key,
+                wrap: wrap.clone(),
+            })?))
+            .offer(ContextOffer::range(
+                fact.id,
+                "sync_exact_fact",
+                scope.clone(),
+                fact.id,
+                fact.id,
+            ))
+            .offer(ContextOffer::range(
+                fact.id,
+                "sync_key_wrap",
+                scope,
+                fact.id,
+                fact.id,
+            )),
+        wrap.workspace_id,
+        fact,
+        context_have,
+    );
 
     if let Some(local_recipient_fact) = local_recipient_fact {
         if local_recipient_fact.scope != FactScope::Local {

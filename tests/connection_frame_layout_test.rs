@@ -32,8 +32,6 @@ const SECRET: [u8; 32] = [0x66; 32];
 
 fn small_sample() -> ConnectionFrameSmallV1 {
     ConnectionFrameSmallV1 {
-        sender_endpoint_id: FixedBytes(SENDER),
-        receiver_endpoint_id: FixedBytes(RECEIVER),
         connection_id: FixedBytes(CONNECTION),
         nonce: FixedBytes(NONCE),
         ciphertext: Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::new(b"hello small")
@@ -57,8 +55,6 @@ where
 
 fn file_slice_sample() -> Box<ConnectionFrameFileSliceV1> {
     Box::new(ConnectionFrameFileSliceV1 {
-        sender_endpoint_id: FixedBytes(SENDER),
-        receiver_endpoint_id: FixedBytes(RECEIVER),
         connection_id: FixedBytes(CONNECTION),
         nonce: FixedBytes(NONCE),
         ciphertext: Ciphertext::<CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES>::new(
@@ -70,8 +66,6 @@ fn file_slice_sample() -> Box<ConnectionFrameFileSliceV1> {
 
 fn bundle_sample() -> ConnectionFrameBundleV1 {
     ConnectionFrameBundleV1 {
-        sender_endpoint_id: FixedBytes(SENDER),
-        receiver_endpoint_id: FixedBytes(RECEIVER),
         connection_id: FixedBytes(CONNECTION),
         nonce: FixedBytes(NONCE),
         ciphertext: Ciphertext::<CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES>::new(b"hello bundle")
@@ -81,7 +75,7 @@ fn bundle_sample() -> ConnectionFrameBundleV1 {
 
 #[test]
 fn connection_frame_constants_match_architecture_shape() {
-    assert_eq!(CONNECTION_FRAME_HEADER_BYTES, 4 + 1 + 1 + 32 + 32 + 32 + 24);
+    assert_eq!(CONNECTION_FRAME_HEADER_BYTES, 4 + 1 + 1 + 32 + 24);
     assert_eq!(CONNECTION_FRAME_VERSION, 1);
     assert_eq!(CONNECTION_FRAME_SIZE_CLASS_SMALL, 0);
     assert_eq!(CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE, 1);
@@ -90,17 +84,19 @@ fn connection_frame_constants_match_architecture_shape() {
     assert_eq!(CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, 4 * 1024);
     assert_eq!(
         CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES,
-        4 + 1 + 4 + 4 + CONTENT_FILE_SLICE_BYTES
+        4 + 1 + 32 + 32 + 4 + 4 + CONTENT_FILE_SLICE_BYTES
     );
     assert_eq!(CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONTENT_FILE_BYTES);
     assert!(CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES >= CONTENT_FILE_BYTES);
     assert_eq!(
         CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
-        (64 * 1024 - (4 + 1 + 4)) / (4 + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)
+        (64 * 1024 - (4 + 1 + 32 + 32 + 4)) / (4 + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)
     );
     assert_eq!(
         CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES,
         4 + 1
+            + 32
+            + 32
             + 4
             + CONNECTION_FRAME_BUNDLE_FACT_SLOTS * (4 + CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES)
     );
@@ -166,16 +162,20 @@ fn small_frame_header_has_golden_byte_layout() {
     // Version + size class.
     assert_eq!(out[4], CONNECTION_FRAME_VERSION);
     assert_eq!(out[5], CONNECTION_FRAME_SIZE_CLASS_SMALL);
-    // Addressing fields.
-    assert_eq!(&out[6..38], &SENDER);
-    assert_eq!(&out[38..70], &RECEIVER);
-    assert_eq!(&out[70..102], &CONNECTION);
+    // Public connection id; endpoint ids are encrypted inside the frame.
+    assert_eq!(&out[6..38], &CONNECTION);
+    assert!(!out[..CONNECTION_FRAME_HEADER_BYTES]
+        .windows(SENDER.len())
+        .any(|window| window == SENDER));
+    assert!(!out[..CONNECTION_FRAME_HEADER_BYTES]
+        .windows(RECEIVER.len())
+        .any(|window| window == RECEIVER));
     // Nonce.
-    assert_eq!(&out[102..126], &NONCE);
+    assert_eq!(&out[38..62], &NONCE);
     // Inner ciphertext length prefix (FixedSlot writes u32be length first).
-    let inner_len = u32::from_be_bytes(out[126..130].try_into().unwrap()) as usize;
+    let inner_len = u32::from_be_bytes(out[62..66].try_into().unwrap()) as usize;
     assert_eq!(inner_len, "hello small".len());
-    assert_eq!(&out[130..130 + inner_len], b"hello small");
+    assert_eq!(&out[66..66 + inner_len], b"hello small");
 }
 
 #[test]
@@ -188,10 +188,8 @@ fn file_slice_frame_header_uses_file_slice_size_class_byte() {
         assert_eq!(&out[..4], b"TRNS");
         assert_eq!(out[4], CONNECTION_FRAME_VERSION);
         assert_eq!(out[5], CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE);
-        assert_eq!(&out[6..38], &SENDER);
-        assert_eq!(&out[38..70], &RECEIVER);
-        assert_eq!(&out[70..102], &CONNECTION);
-        assert_eq!(&out[102..126], &NONCE);
+        assert_eq!(&out[6..38], &CONNECTION);
+        assert_eq!(&out[38..62], &NONCE);
     });
 }
 
@@ -204,10 +202,14 @@ fn bundle_frame_header_uses_bundle_size_class_byte() {
     assert_eq!(&out[..4], b"TRNS");
     assert_eq!(out[4], CONNECTION_FRAME_VERSION);
     assert_eq!(out[5], CONNECTION_FRAME_SIZE_CLASS_BUNDLE);
-    assert_eq!(&out[6..38], &SENDER);
-    assert_eq!(&out[38..70], &RECEIVER);
-    assert_eq!(&out[70..102], &CONNECTION);
-    assert_eq!(&out[102..126], &NONCE);
+    assert_eq!(&out[6..38], &CONNECTION);
+    assert!(!out[..CONNECTION_FRAME_HEADER_BYTES]
+        .windows(SENDER.len())
+        .any(|window| window == SENDER));
+    assert!(!out[..CONNECTION_FRAME_HEADER_BYTES]
+        .windows(RECEIVER.len())
+        .any(|window| window == RECEIVER));
+    assert_eq!(&out[38..62], &NONCE);
 }
 
 #[test]
@@ -352,7 +354,7 @@ fn wrong_version_byte_is_rejected() {
 }
 
 #[test]
-fn peek_header_recovers_addressing_without_decrypting() {
+fn peek_header_recovers_public_connection_id_without_decrypting() {
     let small = small_sample();
     let mut buf = vec![0u8; ConnectionFrameSmallV1::LEN];
     small.encode(&mut buf).unwrap();
@@ -362,8 +364,6 @@ fn peek_header_recovers_addressing_without_decrypting() {
         header,
         ConnectionFrameHeader {
             size_class: CONNECTION_FRAME_SIZE_CLASS_SMALL,
-            sender_endpoint_id: FixedBytes(SENDER),
-            receiver_endpoint_id: FixedBytes(RECEIVER),
             connection_id: FixedBytes(CONNECTION),
             nonce: FixedBytes(NONCE),
         }
@@ -384,8 +384,6 @@ fn peek_header_recovers_addressing_without_decrypting() {
 fn ciphertext_slot_capacity_accepts_full_plaintext_plus_aead_tag() {
     let payload = vec![0xaa; CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES];
     let frame = ConnectionFrameSmallV1 {
-        sender_endpoint_id: FixedBytes(SENDER),
-        receiver_endpoint_id: FixedBytes(RECEIVER),
         connection_id: FixedBytes(CONNECTION),
         nonce: FixedBytes(NONCE),
         ciphertext: Ciphertext::<CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES>::new(&payload).unwrap(),
@@ -425,6 +423,8 @@ fn sealed_small_connection_frame_fills_fixed_ciphertext_slot() {
 
     let opened = connection_frame::open_connection_frame(&frame, &SECRET)
         .expect("open small connection::frame frame");
+    assert_eq!(opened.sender_endpoint_id, SENDER);
+    assert_eq!(opened.receiver_endpoint_id, RECEIVER);
     assert_eq!(
         opened.facts.into_iter().collect::<Vec<_>>(),
         vec![b"alpha".to_vec(), b"beta".to_vec()]
@@ -486,6 +486,8 @@ fn sealed_file_slice_connection_frame_fills_fixed_ciphertext_slot() {
 
         let opened = connection_frame::open_connection_frame(&frame, &SECRET)
             .expect("open file-slice connection::frame frame");
+        assert_eq!(opened.sender_endpoint_id, SENDER);
+        assert_eq!(opened.receiver_endpoint_id, RECEIVER);
         assert_eq!(
             opened.facts.into_iter().collect::<Vec<_>>(),
             vec![file_slice_fact]
@@ -497,8 +499,6 @@ fn sealed_file_slice_connection_frame_fills_fixed_ciphertext_slot() {
 fn opening_rejects_variable_length_ciphertext_slot() {
     let frame = topo::protocol::connection::frame::layout::encode_frame_bytes(
         CONNECTION_FRAME_SIZE_CLASS_SMALL,
-        FixedBytes(SENDER),
-        FixedBytes(RECEIVER),
         FixedBytes(CONNECTION),
         FixedBytes(NONCE),
         b"short ciphertext",

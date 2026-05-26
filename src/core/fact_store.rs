@@ -61,7 +61,7 @@ pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqli
 /// Ephemeral inputs use the `Fact` container for id, scope, timestamp, and
 /// bytes, but they are not inserted into durable `facts` or
 /// `local_fact_admissions`. Projection may read durable context and emit durable
-/// facts, then the input row is removed according to the projection decision.
+/// facts, then the input row is removed when projection commits.
 pub(crate) fn insert_ephemeral_fact_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
     let (scope, scope_kind, scope_id) = fact_scope_columns(&fact.scope);
     let changed = store.conn().execute(

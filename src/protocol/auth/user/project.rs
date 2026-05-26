@@ -14,7 +14,9 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::user_invite;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::rows::user_row;
 
@@ -83,25 +85,27 @@ impl TypedProjector<super::Codec> for UserProjector {
             return Err("signed user signer key does not match user_invite public key".to_string());
         }
         let user_invite_id = invite_fact.id;
+        let context_have = context_have_from_needs(context, [&invite_need]);
 
         // 3. Materialize.
-        Ok(ProjectionOutput::new()
-            .need(invite_need)
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "auth_user",
-                crate::core::facts::FactScope::Global,
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::PutRow(user_row(
-                fact.id,
-                user_invite_id,
-                &user,
-            )?))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                user.workspace_id,
-                fact,
-            )))
+        Ok(share_fact_with_negentropy(
+            ProjectionOutput::new()
+                .need(invite_need)
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "auth_user",
+                    crate::core::facts::FactScope::Global,
+                    fact.id,
+                    fact.id,
+                ))
+                .row_mutation(RowMutation::PutRow(user_row(
+                    fact.id,
+                    user_invite_id,
+                    &user,
+                )?)),
+            user.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }

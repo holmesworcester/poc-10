@@ -180,6 +180,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "send_needed_fact_id",
                 "send_requested_fact",
                 "share_fact_with_workspace",
+                "update_negentropy_tree",
             ],
         ),
     ];
@@ -1285,8 +1286,8 @@ fn target_intents_are_self_contained_handler_files_without_driver_or_intent_subm
 /// The canonical intent verb vocabulary. Intent handler files are named
 /// `<verb>_<object>`; this set is deliberately small, and growing it is a
 /// deliberate act — add a verb here only when no existing verb fits.
-const INTENT_VERBS: [&str; 7] = [
-    "create", "send", "receive", "purge", "share", "seed", "unwrap",
+const INTENT_VERBS: [&str; 9] = [
+    "add", "create", "send", "receive", "purge", "share", "seed", "unwrap", "update",
 ];
 
 /// A name is verb-first when it begins with `<verb>_` for a canonical intent

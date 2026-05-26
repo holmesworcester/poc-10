@@ -24,6 +24,7 @@ pub mod key_wrap_available;
 pub mod need_id;
 pub mod range_request;
 pub mod shared_fact;
+pub mod update_negentropy_tree;
 
 // Intents: move peer convergence forward — seed a new connection, respond to
 // compares, request missing ids, send requested facts, mark facts shareable.

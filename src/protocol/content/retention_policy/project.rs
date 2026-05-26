@@ -17,7 +17,9 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth;
 use crate::protocol::content::message;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_optional_needs, share_fact_with_negentropy,
+};
 
 use super::fact::RetentionPolicyFact;
 use super::rows::policy_row;
@@ -137,23 +139,32 @@ impl TypedProjector<super::Codec> for RetentionPolicyProjector {
         if let Some(previous) = previous_fact {
             validate_previous(previous, &policy)?;
         }
+        let context_have = context_have_from_optional_needs(
+            projection_context,
+            [
+                Some(&authority_need),
+                signer_need.as_ref(),
+                previous_need.as_ref(),
+            ],
+        );
 
         // 3. Materialize.
         let row = policy_row(fact.id, &policy)?;
-        Ok(waiting
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "sync_exact_fact",
-                FactScope::Global,
-                fact.id,
-                fact.id,
-            ))
-            .offer(message::retention_floor_offer(fact.id, policy.workspace_id))
-            .row_mutation(RowMutation::PutRow(row))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                policy.workspace_id,
-                fact,
-            )))
+        Ok(share_fact_with_negentropy(
+            waiting
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "sync_exact_fact",
+                    FactScope::Global,
+                    fact.id,
+                    fact.id,
+                ))
+                .offer(message::retention_floor_offer(fact.id, policy.workspace_id))
+                .row_mutation(RowMutation::PutRow(row)),
+            policy.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }
 
@@ -298,7 +309,7 @@ mod projector_tests {
                 ]),
             )
             .expect("project policy");
-        assert_eq!(projected.effects.intents.len(), 1);
+        assert_eq!(projected.effects.intents.len(), 2);
         assert_eq!(projected.effects.row_mutations.len(), 1);
         assert!(projected
             .offers

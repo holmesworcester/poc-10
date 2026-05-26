@@ -104,7 +104,12 @@ pub fn seal_connection_send_frame(
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
-        nonce: frame::connection_send_nonce(connection_id, fact_ids),
+        nonce: frame::connection_send_nonce(
+            connection_id,
+            connection.from_endpoint,
+            connection.to_endpoint,
+            fact_ids,
+        ),
         facts: bundle,
     })
 }

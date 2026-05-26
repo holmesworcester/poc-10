@@ -39,6 +39,7 @@ pub const SHAREABLE_BUCKET_TIMESTAMPS: u64 = 4096;
 
 const EXPLICIT_FACTS_PAYLOAD: u8 = 1;
 const SHAREABLE_RANGE_PAYLOAD: u8 = 2;
+const SHAREABLE_RANGE_WITH_DEPS_PAYLOAD: u8 = 3;
 const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 4;
 const INNER_FACT_LEN_BYTES: usize = 4;
 
@@ -79,8 +80,43 @@ pub fn send_shareable_bucket_on_connection_intent(
 ) -> Intent {
     let start_timestamp_ms = timestamp_ms - (timestamp_ms % SHAREABLE_BUCKET_TIMESTAMPS);
     let end_timestamp_ms = start_timestamp_ms.saturating_add(SHAREABLE_BUCKET_TIMESTAMPS - 1);
+    send_shareable_range_on_connection_intent_with_trigger(
+        connection_id,
+        start_timestamp_ms,
+        end_timestamp_ms,
+        false,
+        trigger_fact_id,
+    )
+}
+
+pub fn send_shareable_range_on_connection_intent(
+    connection_id: HandlerId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+    include_deps: bool,
+) -> Intent {
+    send_shareable_range_on_connection_intent_with_trigger(
+        connection_id,
+        start_timestamp_ms,
+        end_timestamp_ms,
+        include_deps,
+        [0; 32],
+    )
+}
+
+fn send_shareable_range_on_connection_intent_with_trigger(
+    connection_id: HandlerId,
+    start_timestamp_ms: u64,
+    end_timestamp_ms: u64,
+    include_deps: bool,
+    trigger_fact_id: HandlerId,
+) -> Intent {
     let mut payload = PayloadWriter::with_capacity(1 + 32 + 8 + 8 + 32);
-    payload.u8(SHAREABLE_RANGE_PAYLOAD);
+    payload.u8(if include_deps {
+        SHAREABLE_RANGE_WITH_DEPS_PAYLOAD
+    } else {
+        SHAREABLE_RANGE_PAYLOAD
+    });
     payload.fixed(&connection_id);
     payload.u64be(start_timestamp_ms);
     payload.u64be(end_timestamp_ms);
@@ -91,6 +127,7 @@ pub fn send_shareable_bucket_on_connection_intent(
             connection_id,
             start_timestamp_ms,
             end_timestamp_ms,
+            include_deps,
             trigger_fact_id,
         ),
         payload.finish(),
@@ -134,9 +171,10 @@ fn decode_send_facts_on_connection_work(
                 fact_ids,
             }))
         }
-        SHAREABLE_RANGE_PAYLOAD => {
+        SHAREABLE_RANGE_PAYLOAD | SHAREABLE_RANGE_WITH_DEPS_PAYLOAD => {
             let start_timestamp_ms = reader.u64be().map_err(payload_error)?;
             let end_timestamp_ms = reader.u64be().map_err(payload_error)?;
+            let include_deps = payload_kind == SHAREABLE_RANGE_WITH_DEPS_PAYLOAD;
             let trigger_fact_id = reader.array::<32>().map_err(payload_error)?;
             reader.finish().map_err(payload_error)?;
             if start_timestamp_ms > end_timestamp_ms {
@@ -147,6 +185,7 @@ fn decode_send_facts_on_connection_work(
                     connection_id,
                     start_timestamp_ms,
                     end_timestamp_ms,
+                    include_deps,
                     trigger_fact_id,
                 )
             {
@@ -157,6 +196,7 @@ fn decode_send_facts_on_connection_work(
                     connection_id,
                     start_timestamp_ms,
                     end_timestamp_ms,
+                    include_deps,
                 },
             ))
         }
@@ -178,6 +218,7 @@ fn shareable_range_key(
     connection_id: HandlerId,
     start_timestamp_ms: u64,
     end_timestamp_ms: u64,
+    include_deps: bool,
     trigger_fact_id: HandlerId,
 ) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
@@ -185,6 +226,7 @@ fn shareable_range_key(
     hash.update(&connection_id);
     hash.update(&start_timestamp_ms.to_be_bytes());
     hash.update(&end_timestamp_ms.to_be_bytes());
+    hash.update(&[u8::from(include_deps)]);
     hash.update(&trigger_fact_id);
     hash.finalize().as_bytes().to_vec()
 }
@@ -198,6 +240,7 @@ struct SendShareableRangeOnConnection {
     connection_id: HandlerId,
     start_timestamp_ms: u64,
     end_timestamp_ms: u64,
+    include_deps: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,15 +341,15 @@ fn facts_for_work(
             .iter()
             .map(|fact_id| context.require_fact(fact_id).cloned())
             .collect(),
-        SendFactsOnConnectionWork::ShareableRange(input) => Ok(
-            shared_fact::shareable_facts_for_connection(context.store()?, input.connection_id)?
-                .into_iter()
-                .filter(|fact| {
-                    input.start_timestamp_ms <= fact.timestamp
-                        && fact.timestamp <= input.end_timestamp_ms
-                })
-                .collect(),
-        ),
+        SendFactsOnConnectionWork::ShareableRange(input) => {
+            Ok(shared_fact::shareable_facts_for_connection_range(
+                context.store()?,
+                input.connection_id,
+                input.start_timestamp_ms,
+                input.end_timestamp_ms,
+                input.include_deps,
+            )?)
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::share_fact_with_negentropy;
 
 use super::rows::workspace_row;
 
@@ -48,15 +48,45 @@ impl TypedProjector<super::Codec> for WorkspaceProjector {
         }
         super::layout::verify_signature(&workspace)?;
         // 3. Materialize.
-        Ok(ProjectionOutput::new()
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "auth_workspace",
-                crate::core::facts::FactScope::Global,
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::PutRow(workspace_row(fact.id, &workspace)?))
-            .intent(share_fact_with_workspace_intent_for_fact(fact.id, fact)))
+        Ok(share_fact_with_negentropy(
+            ProjectionOutput::new()
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "auth_workspace",
+                    crate::core::facts::FactScope::Global,
+                    fact.id,
+                    fact.id,
+                ))
+                .row_mutation(RowMutation::PutRow(workspace_row(fact.id, &workspace)?)),
+            fact.id,
+            fact,
+            Vec::new(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod projector_tests {
+    use super::*;
+    use crate::protocol::auth::workspace::create;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn workspace_projector_marks_fact_shareable_and_updates_negentropy_tree() {
+        let fact = create::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
+        let projected = WorkspaceProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project workspace");
+
+        let intent_kinds = projected
+            .effects
+            .intents
+            .iter()
+            .map(|intent| intent.kind.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            intent_kinds,
+            BTreeSet::from(["share_fact_with_workspace", "update_negentropy_tree"])
+        );
     }
 }

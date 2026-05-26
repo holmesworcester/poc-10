@@ -17,7 +17,9 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
-use crate::protocol::sync::share_fact_with_workspace::share_fact_with_workspace_intent_for_fact;
+use crate::protocol::sync::shared_fact::project::{
+    context_have_from_needs, share_fact_with_negentropy,
+};
 
 use super::fact::EndpointRole;
 use super::rows::endpoint_shared_row;
@@ -71,29 +73,31 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
         if !has_valid_authority(&authority_need, &shared, context)? {
             return Ok(ProjectionOutput::new().need(authority_need));
         }
+        let context_have = context_have_from_needs(context, [&authority_need]);
 
         // 3. Materialize.
-        Ok(ProjectionOutput::new()
-            .need(authority_need)
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "content_signer",
-                crate::protocol::auth::workspace::scope(shared.workspace_id),
-                shared.endpoint_id,
-                shared.endpoint_id,
-            ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "auth_endpoint_shared",
-                crate::core::facts::FactScope::Global,
-                fact.id,
-                fact.id,
-            ))
-            .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &shared)?))
-            .intent(share_fact_with_workspace_intent_for_fact(
-                shared.workspace_id,
-                fact,
-            )))
+        Ok(share_fact_with_negentropy(
+            ProjectionOutput::new()
+                .need(authority_need)
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "content_signer",
+                    crate::protocol::auth::workspace::scope(shared.workspace_id),
+                    shared.endpoint_id,
+                    shared.endpoint_id,
+                ))
+                .offer(crate::core::context::ContextOffer::range(
+                    fact.id,
+                    "auth_endpoint_shared",
+                    crate::core::facts::FactScope::Global,
+                    fact.id,
+                    fact.id,
+                ))
+                .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &shared)?)),
+            shared.workspace_id,
+            fact,
+            context_have,
+        ))
     }
 }
 

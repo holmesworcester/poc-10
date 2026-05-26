@@ -328,7 +328,19 @@ core-opened runtime, call fact-scope command/query functions, and return
 `CliOutput` for core to print. Daemon-sensitive work belongs in facts,
 projectors, and intent handlers. For example, accepting an invite creates a
 local `connection_request` fact; projecting that fact schedules the bootstrap
-network intent, so the running daemon owns the network effect.
+network retry, so the running daemon owns the network effect. The root CLI host
+settles command-visible work after authoring commands and before queries that
+depend on fresh projected state. It uses the runtime's command handler set,
+which excludes protocol-declared daemon/network effect handlers, so synchronous
+CLI chains can observe local projection without sending network IO inline.
+
+Ongoing protocol work should be modeled as projected state plus time wakes, not
+as a stuck intent row. A local `connection_request` projects a durable need for
+the matching `connection_response` and a `peer_retry` wake. The daemon declares
+that wake timeline in `MATCH_DAEMON_TIME_WAKES`; when wall-clock time reaches a
+declared wake, core supplies time context and reruns projection. If response
+context is still missing, the projector emits one bootstrap-send intent and the
+next wake. If the response offer is present, the retry path stops emitting work.
 
 Do not create compatibility bridges around the runtime. Behavior belongs in
 the runtime, fact modules, intent handlers, and queries.
@@ -547,6 +559,14 @@ transient "project once without already-available context" state for facts such 
 encrypted messages or deletions. The cost is that one pending fact can run its
 projector and matching SQL more than once; the loop is bounded and monotonic, and
 core still does not know which needs are required.
+
+Durable facts persist the final settled context surface. Ephemeral projection
+inputs use the same fixed-point loop differently: their emitted needs are
+transient probes against already durable offers, not standing context. Final
+ephemeral needs are never written to `context_edges`; if an ephemeral input
+settles with only unresolved needs, core deletes it. If an ephemeral output has
+effects, it must have settled all transient needs first. Ephemeral inputs also
+cannot publish durable offers or time wakes.
 
 The source of truth is the `ContextNeed` / `ContextOffer` model, not protocol
 helper files. A projector first inspects the supplied `ProjectionContext`. If
@@ -920,7 +940,7 @@ pending projection worker
   match newly emitted needs against already stored offers
   rerun with larger ProjectionContext until it settles or hits the bound
   apply row mutations
-  replace the fact's context_edges
+  replace durable context_edges or delete the settled ephemeral input
   wake context matches with SQL
   persist durable intents
   persist ephemeral intents in TEMP local_intents
@@ -946,6 +966,12 @@ repeat until the work budget is exhausted
 
 Core runtime pipelines own the mechanics and transaction boundaries. Fact
 modules and intent handlers own protocol meaning.
+
+Command-visible settling uses the same runtime machinery with a filtered handler
+set. It repeatedly runs projection, dispatches non-excluded local handlers, and
+runs projection again until the bounded command work pass is idle. This lets a
+CLI command return results that can be immediately queried by the next command
+without teaching command modules how to drive projection queues.
 
 ## Wire And Codecs
 
