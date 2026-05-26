@@ -70,6 +70,12 @@ These repository rules keep the architecture mechanically visible:
 tick, and dispatches registered protocol commands without knowing their names
 or behavior.
 
+Runtime turns are serialized per database. A daemon tick and a normal protocol
+CLI command both acquire `<db>.runtime.lock` before entering the runtime, so they
+cannot consume projection or intent queues concurrently. The daemon releases the
+turn after each bounded tick; CLI commands wait for the next turn, and `reset`
+removes the runtime lock file along with the database and daemon lock files.
+
 Runtime work moves through these core-owned queues:
 
 ```text
