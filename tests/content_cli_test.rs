@@ -14,7 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use cli_harness::*;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
+use topo::core::crypto;
 
 #[test]
 fn cli_send_then_messages_lists_authored_messages() {
@@ -138,6 +139,23 @@ fn cli_stores_reactions_and_files_as_ciphertext() {
     assert!(
         !blob_contains(&slice_ciphertext, &payload),
         "file payload leaked into slice ciphertext"
+    );
+    let root_hash: Vec<u8> = conn
+        .query_row(
+            "SELECT root_hash FROM content_files WHERE deleted = 0 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("file root hash");
+    assert_ne!(
+        root_hash,
+        crypto::hash(&payload).to_vec(),
+        "file root hash must commit to encrypted bytes, not plaintext"
+    );
+    assert_eq!(
+        root_hash,
+        crypto::hash(&slice_ciphertext).to_vec(),
+        "single-slice file root hash must match stored encrypted blob"
     );
 }
 
@@ -437,6 +455,60 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
         "deleted parent message must hide direct file saves\nstdout={}\nstderr={}",
         stdout(&hidden_save),
         stderr(&hidden_save)
+    );
+}
+
+#[test]
+fn cli_save_file_rejects_root_hash_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+
+    let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
+    let in_path = tmp.path().join("input.bin");
+    fs::write(&in_path, &payload).expect("write input");
+
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "send-file",
+        &workspace_id,
+        "see attached",
+        "--file",
+        in_path.to_str().expect("path utf-8"),
+    ]));
+
+    let conn = Connection::open(&db).expect("open db");
+    conn.execute(
+        "UPDATE content_files SET root_hash = ?1 WHERE deleted = 0",
+        params![vec![0x7fu8; crypto::HASH_BYTES]],
+    )
+    .expect("tamper root hash");
+
+    let out_path = tmp.path().join("out.bin");
+    let output = topo(&[
+        "--db",
+        &db,
+        "save-file",
+        &workspace_id,
+        "#1",
+        out_path.to_str().expect("path utf-8"),
+    ]);
+    assert!(
+        !output.status.success(),
+        "save-file unexpectedly succeeded\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("file encrypted root hash mismatch"),
+        "wrong error:\n{}",
+        stderr(&output)
+    );
+    assert!(
+        !out_path.exists(),
+        "save-file wrote bytes after root mismatch"
     );
 }
 

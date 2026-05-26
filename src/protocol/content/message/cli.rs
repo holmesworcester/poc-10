@@ -192,7 +192,6 @@ pub fn send_file(
     let author_user_id = local_author_user_id(ctx.store(), parsed.workspace_id)?;
     let created_at_ms = message_receipt.created_at_ms.saturating_add(1);
     let encryption = ctx.local_encryption_capability(parsed.workspace_id)?;
-    let root_hash = crypto::hash(&payload);
     let total_slices = if payload.is_empty() {
         0
     } else {
@@ -200,6 +199,14 @@ pub fn send_file(
             .len()
             .div_ceil(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES) as u32
     };
+    let encrypted_slices = encrypted_file_slices(
+        &payload,
+        &encryption.key_secret,
+        parsed.workspace_id,
+        message_receipt.message_fact_id,
+        created_at_ms,
+    )?;
+    let root_hash = encrypted_blob_root_hash(&encrypted_slices);
     let file_id = file_id_for(
         parsed.workspace_id,
         message_receipt.message_fact_id,
@@ -236,27 +243,15 @@ pub fn send_file(
     let descriptor_fact = signed_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
     let mut facts = message_output.effects.facts;
     facts.push(descriptor_fact.clone());
-    for (slice_index, chunk) in payload
-        .chunks(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES)
-        .enumerate()
-    {
-        let slice_nonce = deterministic_nonce_for_parts(
-            b"topo:file-slice-nonce:v1",
-            &[
-                &parsed.workspace_id,
-                &file_id,
-                &(slice_index as u64).to_be_bytes(),
-            ],
-        );
-        let ciphertext = seal_bytes(&encryption.key_secret, &slice_nonce, chunk, "file slice")?;
+    for encrypted in encrypted_slices {
         let slice = file_slice::fact::ContentFileSliceFact {
             workspace_id: parsed.workspace_id,
-            created_at_ms: created_at_ms.saturating_add(1 + slice_index as u64),
+            created_at_ms: encrypted.created_at_ms,
             file_id,
-            slice_index: slice_index as u32,
+            slice_index: encrypted.slice_index,
             signer_id: [0; 32],
             signer_public_key: [0; 32],
-            ciphertext: file_slice::fact::FileSliceCiphertext::new(&ciphertext)
+            ciphertext: file_slice::fact::FileSliceCiphertext::new(&encrypted.ciphertext)
                 .map_err(|err| format!("file slice ciphertext: {err}"))?,
             signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
@@ -449,17 +444,21 @@ pub fn save_file(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutpu
         message.frontier_id,
         message.minute,
     )?;
+    let mut encrypted_blob = Vec::new();
     for slice in file_slices(ctx.store(), workspace_id, file.file_id)? {
-        let nonce = deterministic_nonce_for_parts(
-            b"topo:file-slice-nonce:v1",
-            &[
-                &workspace_id,
-                &file.file_id,
-                &u64::from(slice.slice_index).to_be_bytes(),
-            ],
+        encrypted_blob.extend_from_slice(&slice.ciphertext);
+        let nonce = file_slice_nonce(
+            workspace_id,
+            file.message_id,
+            file.created_at_ms,
+            slice.slice_index,
         );
         let plaintext = open_bytes(&key, &nonce, &slice.ciphertext, "file slice")?;
         bytes.extend_from_slice(&plaintext);
+    }
+    let actual_root_hash = crypto::hash(&encrypted_blob);
+    if actual_root_hash != file.root_hash {
+        return Err("file encrypted root hash mismatch".to_string());
     }
     bytes.truncate(file.blob_bytes as usize);
     write_file_bytes(args.get(2).unwrap(), &bytes)?;
@@ -731,6 +730,7 @@ struct FileDisplayRow {
     blob_bytes: u64,
     total_slices: u32,
     slices_received: u32,
+    root_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
@@ -817,6 +817,7 @@ fn visible_files(store: &Store, workspace_id: FactId) -> Result<Vec<FileDisplayR
                 blob_bytes: row.blob_bytes,
                 total_slices: row.total_slices,
                 slices_received,
+                root_hash: row.root_hash,
             }))
         })
         .collect::<Result<Vec<_>, String>>()?
@@ -994,6 +995,44 @@ fn signed_file_slice_fact(
     ))
 }
 
+struct EncryptedFileSlice {
+    created_at_ms: u64,
+    slice_index: u32,
+    ciphertext: Vec<u8>,
+}
+
+fn encrypted_file_slices(
+    payload: &[u8],
+    key: &XChaCha20Poly1305Key,
+    workspace_id: FactId,
+    message_id: FactId,
+    file_created_at_ms: u64,
+) -> Result<Vec<EncryptedFileSlice>, String> {
+    let mut slices = Vec::new();
+    for (slice_index, chunk) in payload
+        .chunks(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES)
+        .enumerate()
+    {
+        let slice_index = slice_index as u32;
+        let nonce = file_slice_nonce(workspace_id, message_id, file_created_at_ms, slice_index);
+        slices.push(EncryptedFileSlice {
+            created_at_ms: file_created_at_ms.saturating_add(1 + u64::from(slice_index)),
+            slice_index,
+            ciphertext: seal_bytes(key, &nonce, chunk, "file slice")?,
+        });
+    }
+    Ok(slices)
+}
+
+fn encrypted_blob_root_hash(slices: &[EncryptedFileSlice]) -> [u8; 32] {
+    let len = slices.iter().map(|slice| slice.ciphertext.len()).sum();
+    let mut encrypted_blob = Vec::with_capacity(len);
+    for slice in slices {
+        encrypted_blob.extend_from_slice(&slice.ciphertext);
+    }
+    crypto::hash(&encrypted_blob)
+}
+
 fn seal_bytes(
     key: &XChaCha20Poly1305Key,
     nonce: &XChaCha20Poly1305Nonce,
@@ -1061,6 +1100,23 @@ fn file_id_for(
     input.extend_from_slice(filename.as_bytes());
     input.extend_from_slice(root_hash);
     crypto::hash(&input)
+}
+
+fn file_slice_nonce(
+    workspace_id: FactId,
+    message_id: FactId,
+    file_created_at_ms: u64,
+    slice_index: u32,
+) -> XChaCha20Poly1305Nonce {
+    deterministic_nonce_for_parts(
+        b"topo:file-slice-nonce:v2",
+        &[
+            &workspace_id,
+            &message_id,
+            &file_created_at_ms.to_be_bytes(),
+            &slice_index.to_be_bytes(),
+        ],
+    )
 }
 
 fn deterministic_nonce(
