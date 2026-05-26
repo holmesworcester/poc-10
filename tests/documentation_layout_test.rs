@@ -5,6 +5,10 @@ fn source_text(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
 }
 
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -71,6 +75,32 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         assert!(
             !root.join(removed_duplicate_doc).exists(),
             "duplicated standalone documentation should be folded into active READMEs: {removed_duplicate_doc}"
+        );
+    }
+}
+
+#[test]
+fn root_readme_describes_context_project_aims() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = source_text(&root.join("README.md"));
+    let normalized = normalize_whitespace(&readme);
+
+    for required in [
+        "fact-based protocol runtime",
+        "It is called Context because the central idea is that facts offer context to other facts",
+        "Context is a more general relationship than blocking",
+        "context offers can be projected before the facts they refer to exist",
+        "standing relationship surface",
+        "Protocol aspects such as connection, sync, and auth are all described as facts",
+        "consistent way to reason about concurrency and network interaction",
+        "bytes from another node enter as facts",
+        "core matches context",
+        "the owning projector validates meaning",
+        "handlers perform bounded retryable work",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "README.md is missing Context project aim detail {required:?}"
         );
     }
 }

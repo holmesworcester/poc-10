@@ -1,7 +1,28 @@
 # Context Architecture
 
-This repository is the poc-10 implementation of Context. The current
-architecture has a small vocabulary:
+This repository is the poc-10 implementation of Context. Context is a
+fact-based protocol runtime for building networked workspaces from immutable
+facts, deterministic projection, and bounded side effects.
+
+## Aim
+
+It is called Context because the central idea is that facts offer context to
+other facts. Context is a more general relationship than blocking: a context
+need can name an exact fact, but it can also name a range of facts, and context
+offers can be projected before the facts they refer to exist. That gives the
+runtime a standing relationship surface. Later facts can wake when relevant
+context appears, and earlier offers can satisfy later needs without hidden
+callbacks or broad scans.
+
+Protocol aspects such as connection, sync, and auth are all described as
+facts. Connection handshakes, sealed frame receipts, sync compares, key wraps,
+workspace authority, messages, deletions, and retention policy are admitted and
+projected through the same fact model. This gives the project a consistent way
+to reason about concurrency and network interaction: bytes from another node
+enter as facts, core matches context, the owning projector validates meaning,
+and handlers perform bounded retryable work.
+
+The current architecture has a small vocabulary:
 
 ```text
 facts
