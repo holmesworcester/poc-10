@@ -57,6 +57,7 @@ impl TypedProjector<super::Codec> for EndpointProjector {
             endpoint.endpoint,
             endpoint.endpoint,
         ));
+        output = output.offer(super::daemon_endpoint_offer(fact.id));
         for row in endpoint_rows(&endpoint) {
             output = output.row_mutation(RowMutation::PutRow(row));
         }

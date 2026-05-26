@@ -10,9 +10,15 @@ use crate::core::crypto::{
     self, X25519PrivateKey, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_NONCE_BYTES,
     XCHACHA20_POLY1305_TAG_BYTES,
 };
+use crate::core::wire::{self, FixedLayout, FixedSlot, Reader, Writer};
 use crate::protocol::auth::endpoint::fact::EndpointFact;
+use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
+use crate::protocol::connection::fact_receipt::fact::{OriginAddr, ORIGIN_ADDR_BYTES};
 use crate::protocol::connection::{request, response};
 
+use super::fact::ConnectionBootstrapFact;
+
+pub const TYPE_CONNECTION_BOOTSTRAP: u8 = 171;
 pub const TYPE_SEALED_CONNECTION_REQUEST: u8 = 46;
 pub const TYPE_SEALED_CONNECTION_RESPONSE: u8 = 47;
 
@@ -27,6 +33,78 @@ pub const SEALED_CONNECTION_REQUEST_BYTES: usize =
     REQUEST_HEADER_BYTES + request::layout::FACT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
 pub const SEALED_CONNECTION_RESPONSE_BYTES: usize =
     RESPONSE_HEADER_BYTES + response::layout::FACT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+
+pub const SEALED_BOOTSTRAP_FRAME_BYTES: usize =
+    if SEALED_CONNECTION_REQUEST_BYTES > SEALED_CONNECTION_RESPONSE_BYTES {
+        SEALED_CONNECTION_REQUEST_BYTES
+    } else {
+        SEALED_CONNECTION_RESPONSE_BYTES
+    };
+pub const CONNECTION_BOOTSTRAP_FACT_BYTES: usize =
+    1 + 8 + FixedSlot::<ORIGIN_ADDR_BYTES>::LEN + FixedSlot::<SEALED_BOOTSTRAP_FRAME_BYTES>::LEN;
+
+pub fn encode_fact(fact: &ConnectionBootstrapFact) -> Result<Vec<u8>, String> {
+    validate_sealed_frame(fact.frame.bytes())?;
+    let origin_addr = normalize_origin_addr_bytes(fact.origin_addr.bytes())?;
+
+    let mut writer = Writer::with_capacity(CONNECTION_BOOTSTRAP_FACT_BYTES);
+    writer.u8(TYPE_CONNECTION_BOOTSTRAP);
+    writer.u64be(fact.received_at_local_ms);
+    writer
+        .fixed_slot::<ORIGIN_ADDR_BYTES>(&origin_addr)
+        .map_err(wire_err)?;
+    writer.fixed_slot_value(&fact.frame).map_err(wire_err)?;
+    writer
+        .finish_exact(CONNECTION_BOOTSTRAP_FACT_BYTES)
+        .map_err(wire_err)
+}
+
+pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionBootstrapFact, String> {
+    let mut reader = Reader::new(bytes);
+    reader
+        .expect_len(CONNECTION_BOOTSTRAP_FACT_BYTES)
+        .map_err(wire_err)?;
+    reader
+        .expect_u8(TYPE_CONNECTION_BOOTSTRAP)
+        .map_err(wire_err)?;
+    let received_at_local_ms = reader.u64be().map_err(wire_err)?;
+    let origin_addr_bytes = reader.fixed_slot::<ORIGIN_ADDR_BYTES>().map_err(wire_err)?;
+    let canonical_origin_addr = normalize_origin_addr_bytes(&origin_addr_bytes)?;
+    if canonical_origin_addr != origin_addr_bytes {
+        return Err("connection bootstrap origin addr is not canonical".to_string());
+    }
+    let frame = reader
+        .fixed_slot_value::<SEALED_BOOTSTRAP_FRAME_BYTES>()
+        .map_err(wire_err)?;
+    reader.finish().map_err(wire_err)?;
+    validate_sealed_frame(frame.bytes())?;
+    Ok(ConnectionBootstrapFact {
+        origin_addr: OriginAddr::new(&origin_addr_bytes).map_err(wire_err)?,
+        received_at_local_ms,
+        frame,
+    })
+}
+
+pub fn validate_sealed_frame(frame: &[u8]) -> Result<(), String> {
+    match frame.first().copied() {
+        Some(TYPE_SEALED_CONNECTION_REQUEST) if frame.len() == SEALED_CONNECTION_REQUEST_BYTES => {
+            Ok(())
+        }
+        Some(TYPE_SEALED_CONNECTION_RESPONSE)
+            if frame.len() == SEALED_CONNECTION_RESPONSE_BYTES =>
+        {
+            Ok(())
+        }
+        Some(TYPE_SEALED_CONNECTION_REQUEST) => {
+            Err("sealed connection request has wrong length".to_string())
+        }
+        Some(TYPE_SEALED_CONNECTION_RESPONSE) => {
+            Err("sealed connection response has wrong length".to_string())
+        }
+        Some(other) => Err(format!("unknown sealed bootstrap frame tag {other}")),
+        None => Err("sealed bootstrap frame is empty".to_string()),
+    }
+}
 
 pub fn seal_connection_request(
     request_bytes: &[u8],
@@ -192,11 +270,17 @@ fn nonce_from(bytes: &[u8]) -> XChaCha20Poly1305Nonce {
     nonce
 }
 
+fn wire_err(err: wire::WireError) -> String {
+    format!("{err:?}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
+    use crate::protocol::connection::bootstrap::fact::ConnectionBootstrapFact;
+    use crate::protocol::connection::fact_receipt::fact::OriginAddr;
     use crate::protocol::connection::request::fact::ConnectionRequestFact;
     use crate::protocol::connection::response::fact::ConnectionResponseFact;
 
@@ -211,6 +295,24 @@ mod tests {
 
     fn contains_id(bytes: &[u8], id: &[u8; 32]) -> bool {
         bytes.windows(id.len()).any(|window| window == id)
+    }
+
+    #[test]
+    fn connection_bootstrap_fact_roundtrips_fixed_width() {
+        let fact = ConnectionBootstrapFact {
+            origin_addr: OriginAddr::new(b"127.0.0.1:41001").expect("origin"),
+            received_at_local_ms: 123,
+            frame: crate::core::wire::FixedSlot::new(&vec![
+                TYPE_SEALED_CONNECTION_RESPONSE;
+                SEALED_CONNECTION_RESPONSE_BYTES
+            ])
+            .expect("frame"),
+        };
+
+        let encoded = encode_fact(&fact).expect("encode");
+
+        assert_eq!(encoded.len(), CONNECTION_BOOTSTRAP_FACT_BYTES);
+        assert_eq!(decode_fact(&encoded).expect("decode"), fact);
     }
 
     #[test]

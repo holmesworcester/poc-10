@@ -15,6 +15,33 @@ pub mod rows;
 
 pub const TYPE_LOCAL_ENDPOINT: u8 = layout::TYPE_LOCAL_ENDPOINT;
 
+const DAEMON_ENDPOINT_ROLE: &str = "auth_daemon_endpoint";
+const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
+
+pub fn daemon_endpoint_need(
+    owner: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        DAEMON_ENDPOINT_ROLE,
+        crate::core::facts::FactScope::Local,
+        DAEMON_ENDPOINT_KEY,
+        DAEMON_ENDPOINT_KEY,
+    )
+}
+
+pub fn daemon_endpoint_offer(
+    owner: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        DAEMON_ENDPOINT_ROLE,
+        crate::core::facts::FactScope::Local,
+        DAEMON_ENDPOINT_KEY,
+        DAEMON_ENDPOINT_KEY,
+    )
+}
+
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::EndpointFact, String> {
     layout::decode_fact(bytes)
 }

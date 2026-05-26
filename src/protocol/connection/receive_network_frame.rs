@@ -116,11 +116,10 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         Ok(Vec::new())
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
+    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
         if is_bootstrap_frame(&input.frame) {
             if let Some(effects) = received_bootstrap_frame_effect(
-                context.store()?,
                 &input.frame,
                 &input.origin_addr,
                 input.received_at_local_ms,

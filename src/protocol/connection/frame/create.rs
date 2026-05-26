@@ -57,8 +57,8 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
         connection::close::layout::TYPE_CONNECTION_CLOSE
-            | connection::bootstrap::TYPE_SEALED_CONNECTION_REQUEST
-            | connection::bootstrap::TYPE_SEALED_CONNECTION_RESPONSE
+            | connection::bootstrap::layout::TYPE_SEALED_CONNECTION_REQUEST
+            | connection::bootstrap::layout::TYPE_SEALED_CONNECTION_RESPONSE
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::request::layout::TYPE_CONNECTION_REQUEST
             | connection::response::layout::TYPE_CONNECTION_RESPONSE

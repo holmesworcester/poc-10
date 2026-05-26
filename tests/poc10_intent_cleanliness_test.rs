@@ -1437,6 +1437,53 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
 }
 
 #[test]
+fn fact_like_family_directories_are_registered_normal_fact_modules() {
+    // A directory that owns a fact shape (`fact.rs`) or byte tag/layout
+    // (`layout.rs`) is a real fact family. Real fact families have uniform
+    // role files and must be present in the protocol projector route table;
+    // helper/context-only modules are not fact-like unless they introduce a
+    // fact shape or layout.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
+    let mut offenders = Vec::new();
+
+    for scope_dir in scope_dirs(root) {
+        let scope = scope_dir.file_name().unwrap().to_str().unwrap();
+        for family_dir in immediate_subdirs(&scope_dir) {
+            let family = family_dir.file_name().unwrap().to_str().unwrap();
+            let has_fact = family_dir.join("fact.rs").is_file();
+            let has_layout = family_dir.join("layout.rs").is_file();
+            if !has_fact && !has_layout {
+                continue;
+            }
+
+            let relative = family_dir.strip_prefix(root).unwrap().display();
+            let has_project = family_dir.join("project.rs").is_file();
+            if !has_fact || !has_layout || !has_project {
+                offenders.push(format!(
+                    "{relative} is fact-like but does not have fact.rs, layout.rs, and project.rs"
+                ));
+                continue;
+            }
+
+            let layout_route = format!("{scope}::{family}::layout::");
+            let project_route = format!("{scope}::{family}::project::");
+            if !registry.contains(&layout_route) || !registry.contains(&project_route) {
+                offenders.push(format!(
+                    "{relative} is fact-like but is not registered in FACT_ROUTES"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "fact-like protocol directories must be normal registered fact modules:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
