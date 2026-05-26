@@ -23,8 +23,8 @@
 //!
 //! Change this file for frame network mechanics: listener setup,
 //! length-prefix framing, queue idempotence, local row cleanup, or bounded IO.
-//! Change `connection::frame` or connection network intents when the bytes
-//! inside a frame need new protocol meaning.
+//! Change connection-frame protocol helpers or connection network intents when
+//! the bytes inside a frame need new protocol meaning.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};

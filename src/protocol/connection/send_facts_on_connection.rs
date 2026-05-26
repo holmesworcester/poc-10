@@ -7,9 +7,9 @@
 //! `send_network_frame` intents.
 //!
 //! This is not socket IO and it is not sync visibility policy. Sync owns the
-//! shareable index and requested ids, `connection::frame` owns byte-level
-//! sendability and sealing, and `send_network_frame` owns the final opaque
-//! socket write.
+//! shareable index and requested ids, protocol-level connection-frame helpers
+//! own byte-level sendability and sealing, and `send_network_frame` owns the
+//! final opaque socket write.
 
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
@@ -20,14 +20,11 @@ use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::{
     auth::endpoint,
-    connection::frame::{
-        create,
-        frame::{
-            self, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
-            CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
-        },
-    },
     connection::response,
+    connection_frame::{
+        self as frame_policy, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
+        CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
+    },
     sync::shared_fact,
 };
 
@@ -301,12 +298,12 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
             let mut bundle = ConnectionFrameFactBundle::new();
             for fact in &batch {
-                bundle.push(create::require_sendable_fact(fact)?.to_vec());
+                bundle.push(frame_policy::require_sendable_fact(fact)?.to_vec());
             }
             output = output.local_intent(send_network_frame::send_network_frame_intent(
                 SendNetworkFrame {
                     routing_key: connection_id,
-                    frame: frame::seal_connection_send_frame(
+                    frame: frame_policy::seal_connection_send_frame(
                         connection_id,
                         sender_endpoint,
                         receiver_endpoint,
@@ -357,7 +354,7 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
     let mut batch = Vec::new();
     let mut packed_len = INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
-        let fact_len = create::require_sendable_fact(&fact)?.len();
+        let fact_len = frame_policy::require_sendable_fact(&fact)?.len();
         if fact_len == crate::protocol::content::file_slice::layout::CONTENT_FILE_SLICE_BYTES {
             if !batch.is_empty() {
                 batches.push(std::mem::take(&mut batch));

@@ -1,6 +1,6 @@
 //! Bundled connection-frame receive fact layout.
 
-use crate::protocol::connection::frame::wire;
+use crate::protocol::connection_frame_wire as wire;
 
 use super::fact::ConnectionFrameBundleFact;
 

@@ -10,7 +10,8 @@
 //! This file owns byte compatibility, size-class constants, AEAD associated
 //! data, nonce derivation, and inner-bundle packing. It does not decide which
 //! semantic facts are allowed to travel or whether an opened child fact is
-//! valid; those checks live in `create.rs` and the child fact projectors.
+//! valid; those checks live in `connection_frame.rs` and the child fact
+//! projectors.
 
 use crate::core::crypto::{
     self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,

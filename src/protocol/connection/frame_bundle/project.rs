@@ -13,8 +13,8 @@ use crate::core::facts::Fact;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::connection::frame::create;
 
+use super::create;
 use super::fact::ConnectionFrameBundleFact;
 
 #[derive(Debug, Clone, Default)]
@@ -46,12 +46,6 @@ impl TypedProjector<super::Codec> for ConnectionFrameBundleProjector {
         // 1. Structural.
         // 2. Context.
         // 3. Materialize.
-        create::project_received_frame(
-            fact,
-            input.origin_addr,
-            input.received_at_local_ms,
-            input.frame.bytes(),
-            context,
-        )
+        create::project_received_frame(fact, input, context)
     }
 }

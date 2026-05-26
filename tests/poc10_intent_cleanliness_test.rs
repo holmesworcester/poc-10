@@ -1109,7 +1109,7 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 9] = [
+const STANDARD_FAMILY_FILES: [&str; 8] = [
     "fact.rs",
     "layout.rs",
     "project.rs",
@@ -1118,11 +1118,13 @@ const STANDARD_FAMILY_FILES: [&str; 9] = [
     "create.rs",
     "commands.rs",
     "cli.rs",
-    "wire.rs",
 ];
 
 /// Fact families that do not yet meet the standard-role-file rule.
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
+
+/// Scope-local directories that are deliberately not fact families.
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 1] = ["content/purge"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
@@ -1426,6 +1428,20 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
                     family_dir.strip_prefix(root).unwrap().display()
                 ));
             }
+            let scope = scope_dir.file_name().unwrap().to_str().unwrap();
+            let family = family_dir.file_name().unwrap().to_str().unwrap();
+            let relative_key = format!("{scope}/{family}");
+            let has_normal_fact_shape = family_dir.join("fact.rs").is_file()
+                && family_dir.join("layout.rs").is_file()
+                && family_dir.join("project.rs").is_file();
+            if !has_normal_fact_shape
+                && !NON_FACT_SCOPE_DIR_EXCEPTIONS.contains(&relative_key.as_str())
+            {
+                offenders.push(format!(
+                    "{} is a scope-local helper directory, not a normal fact family",
+                    family_dir.strip_prefix(root).unwrap().display()
+                ));
+            }
         }
     }
 
@@ -1433,6 +1449,55 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
         offenders.is_empty(),
         "directly under a scope, only intent handlers and `<family>.rs` manifests \
          (each paired with a `<family>/` directory) may appear:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn received_connection_frame_families_have_create_role_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for family in ["frame_small", "frame_file_slice", "frame_bundle"] {
+        let manifest = root
+            .join("src/protocol/connection")
+            .join(format!("{family}.rs"));
+        let dir = root.join("src/protocol/connection").join(family);
+        if !dir.join("create.rs").is_file() {
+            offenders.push(format!(
+                "src/protocol/connection/{family}/create.rs is missing"
+            ));
+        }
+        if !source_text(&manifest).contains("pub mod create;") {
+            offenders.push(format!(
+                "src/protocol/connection/{family}.rs does not declare create"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "received connection-frame fact families must keep boundary construction in create.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn connection_frame_helper_family_does_not_reappear() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in [
+        "src/protocol/connection/frame.rs",
+        "src/protocol/connection/frame",
+    ] {
+        if root.join(path).exists() {
+            offenders.push(path);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "`connection::frame` must not be a scope-local family/helper namespace; use the concrete frame_small, frame_file_slice, and frame_bundle fact families:\n{}",
         offenders.join("\n")
     );
 }

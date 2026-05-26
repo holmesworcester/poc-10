@@ -4,6 +4,7 @@
 //! small encrypted connection frame. Projection opens the frame with local
 //! connection context and emits durable child facts plus receipts.
 
+pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;

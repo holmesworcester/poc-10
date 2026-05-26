@@ -8,8 +8,9 @@
 //!
 //! The intent key is deterministic over origin, receive time, and frame bytes
 //! so duplicate local submissions collapse while distinct observations remain
-//! separate. Change this file for receive-intent payload shape or metadata
-//! normalization. Change `connection::frame` for protocol byte classification.
+//! separate. Change this file for receive-intent payload shape, metadata
+//! normalization, or the choice of which received-frame fact family should
+//! stage an established connection frame.
 
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
@@ -100,9 +101,8 @@ use crate::protocol::connection::bootstrap_request::create::{
 use crate::protocol::connection::bootstrap_response::create::{
     is_bootstrap_response_frame, received_bootstrap_response_frame_effect,
 };
-use crate::protocol::connection::frame::create::{
-    received_network_frame_effect, ReceivedNetworkFrame as ClassifiedNetworkFrame,
-};
+use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small};
+use crate::protocol::connection_frame::{self, ReceivedConnectionFrameKind};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveNetworkFrameHandler;
@@ -139,10 +139,31 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
                 return Ok(effects);
             }
         }
-        Ok(received_network_frame_effect(ClassifiedNetworkFrame {
-            frame: &input.frame,
-            origin_addr: &input.origin_addr,
-            received_at_local_ms: input.received_at_local_ms,
-        })?)
+        Ok(
+            match connection_frame::classify_received_frame(&input.frame) {
+                Some(ReceivedConnectionFrameKind::Small) => {
+                    frame_small::create::received_frame_effect(
+                        &input.frame,
+                        &input.origin_addr,
+                        input.received_at_local_ms,
+                    )?
+                }
+                Some(ReceivedConnectionFrameKind::FileSlice) => {
+                    frame_file_slice::create::received_frame_effect(
+                        &input.frame,
+                        &input.origin_addr,
+                        input.received_at_local_ms,
+                    )?
+                }
+                Some(ReceivedConnectionFrameKind::Bundle) => {
+                    frame_bundle::create::received_frame_effect(
+                        &input.frame,
+                        &input.origin_addr,
+                        input.received_at_local_ms,
+                    )?
+                }
+                None => crate::core::effects::PipelineEffects::new(),
+            },
+        )
     }
 }

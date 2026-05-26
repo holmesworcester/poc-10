@@ -739,7 +739,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
-    let receive = source_text(&root.join("src/protocol/connection/frame/create.rs"));
+    let receive = source_text(&root.join("src/protocol/connection_frame.rs"));
 
     for required in [
         "content::message",

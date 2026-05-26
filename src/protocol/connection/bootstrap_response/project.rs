@@ -22,7 +22,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::endpoint;
-use crate::protocol::connection::frame::create::received_connection_response_fact_effect;
+use crate::protocol::connection_frame::received_connection_response_fact_effect;
 
 use super::fact::ConnectionBootstrapResponseFact;
 

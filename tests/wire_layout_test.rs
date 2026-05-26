@@ -6,7 +6,7 @@ use topo::core::wire::{
     take_u32be, take_u64be, take_u8, Ciphertext, FixedBytes, FixedLayout, FixedSlot, Id32, Nonce24,
     Tag, WireError, U16_BYTES, U32_BYTES, U64_BYTES, U8_BYTES,
 };
-use topo::protocol::connection::frame::wire::{
+use topo::protocol::connection_frame_wire::{
     CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES, CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES,
     CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES, CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES,
     CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
