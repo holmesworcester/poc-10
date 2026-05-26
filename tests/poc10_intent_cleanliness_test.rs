@@ -164,7 +164,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "connection",
             &[
-                "create_response",
+                "create_connection_response",
                 "receive_network_frame",
                 "send_bootstrap_request",
                 "send_facts_on_connection",

@@ -117,7 +117,7 @@ const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
 const INTENT_HANDLER_FILES: [&str; 12] = [
-    "src/protocol/connection/create_response.rs",
+    "src/protocol/connection/create_connection_response.rs",
     "src/protocol/connection/receive_network_frame.rs",
     "src/protocol/connection/send_bootstrap_request.rs",
     "src/protocol/connection/send_facts_on_connection.rs",

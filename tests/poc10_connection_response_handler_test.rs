@@ -20,7 +20,7 @@ use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::invite::layout as invite_layout;
 use topo::protocol::connection::bootstrap_response;
-use topo::protocol::connection::create_response::{
+use topo::protocol::connection::create_connection_response::{
     create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
 };
 use topo::protocol::connection::ephemeral_secret::layout as ephemeral_layout;

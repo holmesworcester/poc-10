@@ -35,7 +35,7 @@ pub mod response;
 // Intents: delayed handshake work. Projection emits these when a request has
 // enough context to answer or when an invite/server bootstrap should send a
 // request over the network.
-pub mod create_response;
+pub mod create_connection_response;
 pub mod send_bootstrap_request;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

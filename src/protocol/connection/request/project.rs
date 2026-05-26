@@ -21,7 +21,7 @@
 //! Change this projector for request admission, branch-specific context proofs,
 //! peer-retry behavior, or materialized request rows. Bootstrap wrapper opening
 //! belongs in `bootstrap_request::project`, request byte layout belongs in
-//! `layout.rs`, and response construction belongs in `create_response.rs` plus
+//! `layout.rs`, and response construction belongs in `create_connection_response.rs` plus
 //! `response::create`.
 
 use crate::core::crypto;
@@ -32,7 +32,7 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::auth::{endpoint, invite};
-use crate::protocol::connection::create_response::{
+use crate::protocol::connection::create_connection_response::{
     create_connection_response_intent, CreateConnectionResponse,
 };
 use crate::protocol::connection::ephemeral_secret;
@@ -387,7 +387,7 @@ mod projector_tests {
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
-    use topo::protocol::connection::create_response::{
+    use topo::protocol::connection::create_connection_response::{
         decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
     };
     use topo::protocol::connection::ephemeral_secret::{

@@ -654,8 +654,8 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     ),
     handler_route!(
         "create_connection_response",
-        connection::create_response::CREATE_CONNECTION_RESPONSE,
-        connection::create_response::CreateConnectionResponseHandler
+        connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
+        connection::create_connection_response::CreateConnectionResponseHandler
     ),
     handler_route!(
         "send_sync_compare_response",
