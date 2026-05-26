@@ -98,7 +98,9 @@ flowchart TD
 
 Cross-scope proof usually travels through context, not direct row reads.
 Projectors publish role-scoped ranges; later projectors consume matched payload
-facts through `ProjectionContext` and still validate them locally.
+facts through `ProjectionContext` and still validate them locally. This diagram
+shows context as a proof surface; fact emission from bootstrap and frame opening
+is shown in the connection flow below.
 
 ```mermaid
 flowchart LR
@@ -120,16 +122,14 @@ flowchart LR
       MSG_NEEDS["message needs signer + key coverage"]
       FILE_NEEDS["file/slice needs message + key coverage"]
       DELETE_NEEDS["deletion needs target + admin proof"]
-      BOOT_NEEDS["bootstrap needs local endpoint"]
       REQUEST_NEEDS["request needs invite secret"]
       RESPONSE_NEEDS["response needs request + invite proof"]
-      FRAME_NEEDS["frame needs connection response"]
     end
 
     subgraph OUTPUTS["Validated outputs"]
       OPENED["opened content rows"]
-      CONNECTION_ROWS["connection rows"]
-      CHILD_FACTS["opened child facts"]
+      CONTENT_CONTEXT["content context offers"]
+      CONNECTION_ROWS["connection rows and context"]
     end
 
     AUTH_WS --> CONTEXT
@@ -145,18 +145,15 @@ flowchart LR
     CONTEXT --> MSG_NEEDS
     CONTEXT --> FILE_NEEDS
     CONTEXT --> DELETE_NEEDS
-    CONTEXT --> BOOT_NEEDS
     CONTEXT --> REQUEST_NEEDS
     CONTEXT --> RESPONSE_NEEDS
-    CONTEXT --> FRAME_NEEDS
 
     MSG_NEEDS --> OPENED
+    MSG_NEEDS --> CONTENT_CONTEXT
     FILE_NEEDS --> OPENED
     DELETE_NEEDS --> OPENED
-    BOOT_NEEDS --> CHILD_FACTS
     REQUEST_NEEDS --> CONNECTION_ROWS
     RESPONSE_NEEDS --> CONNECTION_ROWS
-    FRAME_NEEDS --> CHILD_FACTS
 ```
 
 ## 3) Connection Bootstrap And Established Frames
