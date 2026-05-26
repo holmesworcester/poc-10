@@ -7,6 +7,7 @@
 //! validity of the underlying facts.
 
 pub mod cli;
+pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
@@ -28,10 +29,11 @@ impl crate::core::projectors::FactCodec for Codec {
     }
 }
 
+pub use create::{plan_sync_contribution, record_sync_contribution, SyncContributionPlan};
 pub use rows::{
-    connection_id_for_peer_or_connection, connection_ids_for_shareable_fact,
-    expand_fact_ids_with_context_for_connection, negentropy_context_have_for_leaf,
-    range_summary_for_connection, record_sync_contribution, shareable_fact_for_connection,
+    connection_id_for_peer_or_connection, connection_ids_authorized_for_workspace,
+    connection_ids_for_shareable_fact, expand_fact_ids_with_context_for_connection,
+    negentropy_context_have_for_leaf, range_summary_for_connection, shareable_fact_for_connection,
     shareable_fact_row, shareable_fact_rows, shareable_facts_for_connection,
     shareable_facts_for_connection_range, sync_status, NegentropyContextHaveRow, NegentropyLeafRow,
     NegentropyNodeRow, ShareableFactRow, NEGENTROPY_CONTEXT_HAVE_ROWS, NEGENTROPY_LEAF_ROWS,

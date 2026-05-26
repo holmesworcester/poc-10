@@ -130,6 +130,7 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
 
     for excluded in [
         "send_bootstrap_connection_request",
+        "create_connection_response",
         "send_facts_on_connection",
         "send_network_frame",
         "receive_network_frame",

@@ -8,12 +8,18 @@
 //! dependency closure from fact bodies.
 
 use crate::core::{
+    effects::PipelineEffects,
     fact_store::persisted_fact,
-    facts::FactId,
+    facts::{Fact, FactId},
     intents::{HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind},
+    store::Store,
+};
+use crate::protocol::connection::send_facts_on_connection::{
+    send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
-use crate::protocol::sync::{seed_connection, shared_fact};
+use crate::protocol::sync::shared_fact;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const SHARE_FACT_WITH_SYNC: &str = "share_fact_with_sync";
 
@@ -187,41 +193,113 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     };
                     HandlerContext::with_facts([fact]).require_non_local_fact_bytes(fact_id)?;
                 }
-                let changed =
-                    shared_fact::record_sync_contribution(context.store()?, &input, Some(owner))?;
-                if changed {
+                let plan =
+                    shared_fact::plan_sync_contribution(context.store()?, &input, Some(owner))?;
+                let mut output = PipelineEffects::new();
+                output.row_mutations.extend(plan.row_mutations);
+                if plan.changed {
                     let excluded =
                         crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
                             context.store()?,
                             input.owner_fact_id,
                         )?
                         .into_iter()
-                        .collect::<std::collections::BTreeSet<_>>();
-                    seed_connection::advertise_indexed_fact_to_connections_except(
+                        .collect::<BTreeSet<_>>();
+                    advertise_planned_share_to_connections_except(
+                        output,
                         context.store()?,
+                        input.workspace_id,
                         owner,
+                        &plan.context_have,
                         &excluded,
                     )
                 } else {
-                    Ok(crate::core::effects::PipelineEffects::new())
+                    Ok(output)
                 }
             }
             SyncShareState::Retract => {
-                shared_fact::record_sync_contribution(context.store()?, &input, None)?;
-                Ok(crate::core::effects::PipelineEffects::new())
+                let plan = shared_fact::plan_sync_contribution(context.store()?, &input, None)?;
+                let mut output = PipelineEffects::new();
+                output.row_mutations.extend(plan.row_mutations);
+                Ok(output)
             }
         }
     }
+}
+
+fn advertise_planned_share_to_connections_except(
+    mut output: PipelineEffects,
+    store: &Store,
+    workspace_id: FactId,
+    owner: &Fact,
+    context_have: &[FactId],
+    excluded_connection_ids: &BTreeSet<FactId>,
+) -> HandlerResult {
+    for connection_id in shared_fact::connection_ids_authorized_for_workspace(store, workspace_id)?
+    {
+        if excluded_connection_ids.contains(&connection_id) {
+            continue;
+        }
+        output = output.intent(send_facts_on_connection_intent(SendFactsOnConnection {
+            connection_id,
+            fact_ids: planned_live_tail_fact_ids(
+                store,
+                connection_id,
+                workspace_id,
+                owner,
+                context_have,
+            )?,
+        }));
+    }
+    Ok(output)
+}
+
+fn planned_live_tail_fact_ids(
+    store: &Store,
+    connection_id: FactId,
+    workspace_id: FactId,
+    owner: &Fact,
+    context_have: &[FactId],
+) -> Result<Vec<FactId>, String> {
+    let available = shared_fact::shareable_facts_for_connection(store, connection_id)?
+        .into_iter()
+        .map(|fact| (fact.id, fact))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::<FactId>::new();
+    let mut pending = VecDeque::<FactId>::new();
+    for fact_id in context_have {
+        if available.contains_key(fact_id) && selected.insert(*fact_id) {
+            pending.push_back(*fact_id);
+        }
+    }
+    while let Some(fact_id) = pending.pop_front() {
+        for dep_id in shared_fact::negentropy_context_have_for_leaf(store, workspace_id, fact_id)? {
+            if available.contains_key(&dep_id) && selected.insert(dep_id) {
+                pending.push_back(dep_id);
+            }
+        }
+    }
+
+    let mut facts = selected
+        .into_iter()
+        .filter_map(|fact_id| available.get(&fact_id).cloned())
+        .collect::<Vec<_>>();
+    facts.push(owner.clone());
+    facts.sort_by_key(|fact| (fact.timestamp, fact.id));
+    let mut fact_ids = facts.into_iter().map(|fact| fact.id).collect::<Vec<_>>();
+    fact_ids.dedup();
+    Ok(fact_ids)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::crypto;
-    use crate::core::facts::{Fact, FactScope, ScopeKind};
+    use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
     use crate::core::intents::{HandlerContext, IntentHandler};
+    use crate::core::pipeline::commit_pipeline_effects_to_store;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
-    use crate::core::store::Store;
+    use crate::core::store::{Store, TableName};
     use crate::protocol::auth::endpoint::{fact::EndpointFact, rows as endpoint_rows};
     use crate::protocol::auth::endpoint_shared::{
         fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
@@ -322,6 +400,10 @@ mod tests {
             )
             .expect("share with sync");
 
+        assert!(!output.row_mutations.is_empty());
+        assert!(shared_fact::shareable_fact_rows(&store)
+            .expect("precommit shareable rows")
+            .is_empty());
         assert_eq!(output.intents.len(), 1);
         let send = connection::send_facts_on_connection::decode_send_facts_on_connection(
             &output.intents[0],
@@ -329,5 +411,154 @@ mod tests {
         .expect("send facts intent");
         assert_eq!(send.connection_id, other_connection_id);
         assert_eq!(send.fact_ids, vec![owner.id]);
+
+        commit_pipeline_effects_to_store(
+            &store,
+            &output,
+            &sync_contribution_tables(),
+            "commit share_fact_with_sync handler output",
+        )
+        .expect("commit effects");
+        assert_eq!(
+            shared_fact::shareable_fact_rows(&store)
+                .expect("postcommit shareable rows")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn share_fact_with_sync_live_tail_includes_existing_context_without_precommit_index() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        let workspace_id = [9; 32];
+        let local_secret = [11; 32];
+        let local_endpoint = crypto::x25519_public_key(&local_secret);
+        let remote_endpoint = [2; 32];
+        let connection_id = [4; 32];
+        let root_context_fact = Fact::new(workspace_scope(workspace_id), 5, vec![99, 0]);
+        let context_fact = Fact::new(workspace_scope(workspace_id), 10, vec![99, 1]);
+        let owner = Fact::new(workspace_scope(workspace_id), 20, vec![99, 2]);
+
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &root_context_fact)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &context_fact)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &owner)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        let mut rows = endpoint_rows::endpoint_rows(&EndpointFact {
+            endpoint: local_endpoint,
+            secret: local_secret,
+            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
+            signing_secret: [13; 32],
+        });
+        rows.push(
+            endpoint_shared_rows::endpoint_shared_row(
+                [5; 32],
+                &EndpointSharedFact {
+                    created_at_ms: 1,
+                    workspace_id,
+                    user_authority_fact_id: [6; 32],
+                    endpoint_id: remote_endpoint,
+                    signing_public_key: [7; 32],
+                    endpoint_role: EndpointRole::Device,
+                    device_name: EndpointDeviceName::new("remote").expect("device name"),
+                    signer_id: [6; 32],
+                    signer_public_key: crypto::ed25519_public_key(&[17; 32]),
+                    signature: [18; crypto::ED25519_SIGNATURE_BYTES],
+                },
+            )
+            .expect("endpoint shared row"),
+        );
+        rows.push(
+            connection::response::rows::connection_response_row(
+                connection_id,
+                &connection::response::fact::ConnectionResponseFact {
+                    from_endpoint: local_endpoint,
+                    to_endpoint: remote_endpoint,
+                    request_id: [8; 32],
+                    invite_secret_fact_id: [9; 32],
+                    initiator_ephemeral_secret_fact_id: [10; 32],
+                    responder_ephemeral_secret_fact_id: [11; 32],
+                    responder_ephemeral_public_key: [12; 32],
+                    handshake_hash: [13; 32],
+                    connection_secret: [14; 32],
+                },
+            )
+            .expect("connection row"),
+        );
+        store.insert_table_rows(rows).expect("seed rows");
+        shared_fact::record_sync_contribution(
+            &store,
+            &ShareFactWithSync {
+                workspace_id,
+                owner_fact_id: root_context_fact.id,
+                timestamp_ms: root_context_fact.timestamp,
+                state: SyncShareState::Upsert,
+                context_have: Vec::new(),
+            },
+            Some(&root_context_fact),
+        )
+        .expect("record root context share");
+        shared_fact::record_sync_contribution(
+            &store,
+            &ShareFactWithSync {
+                workspace_id,
+                owner_fact_id: context_fact.id,
+                timestamp_ms: context_fact.timestamp,
+                state: SyncShareState::Upsert,
+                context_have: vec![root_context_fact.id],
+            },
+            Some(&context_fact),
+        )
+        .expect("record context share");
+
+        let intent = share_fact_with_sync_intent_for_fact(
+            workspace_id,
+            owner.id,
+            owner.timestamp,
+            vec![context_fact.id],
+        );
+        let output = ShareFactWithSyncHandler::new()
+            .handle(
+                &intent,
+                &HandlerContext::with_facts([owner.clone()]).with_store(&store),
+            )
+            .expect("share with sync");
+
+        assert_eq!(
+            shared_fact::shareable_fact_rows(&store)
+                .expect("precommit shareable rows")
+                .len(),
+            2
+        );
+        let send = connection::send_facts_on_connection::decode_send_facts_on_connection(
+            &output.intents[0],
+        )
+        .expect("send facts intent");
+        assert_eq!(send.connection_id, connection_id);
+        assert_eq!(
+            send.fact_ids,
+            vec![root_context_fact.id, context_fact.id, owner.id]
+        );
+    }
+
+    fn workspace_scope(workspace_id: FactId) -> FactScope {
+        FactScope::Scoped {
+            kind: ScopeKind::new("workspace").unwrap(),
+            id: workspace_id,
+        }
+    }
+
+    fn sync_contribution_tables() -> [TableName; 4] {
+        [
+            shared_fact::SHAREABLE_FACT_ROWS,
+            shared_fact::NEGENTROPY_LEAF_ROWS,
+            shared_fact::NEGENTROPY_CONTEXT_HAVE_ROWS,
+            shared_fact::NEGENTROPY_NODE_ROWS,
+        ]
     }
 }

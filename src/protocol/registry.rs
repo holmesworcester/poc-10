@@ -511,6 +511,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_bootstrap_connection_request",
+    "create_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -550,6 +551,10 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::compare::rows::SYNC_COMPARE_ROWS,
     sync::have_id::rows::SYNC_HAVE_ID_ROWS,
     sync::need_id::rows::SYNC_NEED_ID_ROWS,
+    sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
+    sync::shared_fact::rows::NEGENTROPY_LEAF_ROWS,
+    sync::shared_fact::rows::NEGENTROPY_CONTEXT_HAVE_ROWS,
+    sync::shared_fact::rows::NEGENTROPY_NODE_ROWS,
 ];
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {

@@ -199,6 +199,39 @@ fn intent_handler_file_set(root: &Path) -> BTreeSet<PathBuf> {
     intent_handler_files(root).into_iter().collect()
 }
 
+fn command_excluded_handler_routes(root: &Path) -> BTreeSet<String> {
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
+    let marker = "pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES";
+    let Some((_, rest)) = registry.split_once(marker) else {
+        panic!("missing COMMAND_EXCLUDED_HANDLER_ROUTES");
+    };
+    let Some((array, _)) = rest.split_once("];") else {
+        panic!("unterminated COMMAND_EXCLUDED_HANDLER_ROUTES");
+    };
+
+    array
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim().trim_end_matches(',');
+            line.strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn intent_handler_route_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("handler file stem");
+    match stem {
+        "create_response" => "create_connection_response".to_string(),
+        "send_bootstrap_request" => "send_bootstrap_connection_request".to_string(),
+        _ => stem.to_string(),
+    }
+}
+
 /// All rust files under the six scope directories that are NOT verb-named
 /// intent handler files: every fact-family module, scope-level fact file, and
 /// fact CLI/command adapter.
@@ -1856,6 +1889,78 @@ fn target_handlers_do_not_own_projection_rows_or_projector_context() {
     assert!(
         offenders.is_empty(),
         "handlers should do deferred effects/checkpoints, not projection row or context work:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn command_safe_handlers_do_not_mutate_store_or_network_before_pipeline_commit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let command_excluded = command_excluded_handler_routes(root);
+    let mut offenders = Vec::new();
+
+    for path in intent_handler_files(root) {
+        let route_name = intent_handler_route_name(&path);
+        if command_excluded.contains(&route_name) {
+            continue;
+        }
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        for forbidden in [
+            ".write_transaction(",
+            ".insert_table_rows(",
+            ".delete_table_rows(",
+            "insert_table_rows_in_tx",
+            "delete_table_rows_in_tx",
+            ".conn().execute(",
+            "commit_pipeline_effects",
+            "record_sync_contribution(",
+            "network::send(",
+            "enqueue_outbound(",
+            "delete_outbound(",
+            "enqueue_inbound(",
+            "delete_inbound(",
+        ] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} is command-safe but contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "command-safe intent handlers must return PipelineEffects only. Direct store/network writes can become visible before dispatch wins the queued-intent commit boundary; make the handler effect-only or add truly daemon-owned network routes to COMMAND_EXCLUDED_HANDLER_ROUTES:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn handlers_that_send_network_frames_are_daemon_owned() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let command_excluded = command_excluded_handler_routes(root);
+    let mut offenders = Vec::new();
+
+    for path in intent_handler_files(root) {
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        if !production.contains("network::send(") {
+            continue;
+        }
+        let route_name = intent_handler_route_name(&path);
+        if !command_excluded.contains(&route_name) {
+            offenders.push(format!(
+                "{} calls network::send but route {route_name:?} is command-safe",
+                path.strip_prefix(root).unwrap().display()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "socket-sending handlers must be daemon-owned, not run by synchronous CLI command settling:\n{}",
         offenders.join("\n")
     );
 }
