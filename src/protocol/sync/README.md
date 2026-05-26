@@ -70,14 +70,21 @@ publishing context, or queuing sync-owned intents such as `share_fact_with_sync`
 
 ## Visibility And Dependency Closure
 
-Bounded catch-up follows from the same convergence model. When a peer compares
-or requests a time range, the response includes the owner facts in that range
-plus the out-of-range context facts needed to project them quickly. For
-encrypted content that can include authority facts, recipient keys, key wraps,
-retained key-node wraps, and deletion or retention context. The server remains
-untrusted: it may relay range summaries and bytes, but authority, key access,
-and key healing are still ordinary facts, context, projectors, and bounded
-handlers.
+Range sync exists so a peer can make a bounded user-visible slice useful
+without downloading every shared fact in the workspace. A view such as latest
+messages starts from a requested time range, but facts inside that range often
+depend on facts outside it: signer authority, recipient keys, key wraps,
+retained key-node wraps, deletion facts, or retention policy context. If sync
+sent only the owner facts in the requested range, the receiver could store the
+bytes but many projectors would park, leaving the user-visible data incomplete.
+
+Dependency closure is the compromise: when a peer compares or requests a range,
+the response includes the owner facts in that range plus the out-of-range
+context facts needed to project them quickly. This keeps catch-up bounded by
+the requested view and its validated dependency graph rather than by the whole
+workspace history. The server remains untrusted: it may relay range summaries
+and bytes, but authority, key access, and key healing are still ordinary facts,
+context, projectors, and bounded handlers.
 
 Projectors own sync membership. A projector that can decode a fact and
 determine its sync scope emits `share_fact_with_sync` in the same projection
