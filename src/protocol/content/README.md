@@ -1,9 +1,10 @@
 # Content Fact Scope
 
-Content facts are the user-visible workspace data and policy: messages,
-reactions, file descriptors, file slices, deletion facts, and retention
-policies. The scope owns authoring constructors, encrypted payload envelopes,
-deletion/retention coordinates, and the read models used by CLI queries.
+Content is the workspace data scope. We use it to author, validate, display,
+delete, expire, and retain messages, reactions, files, and file slices. The
+scope owns encrypted user payload facts, deletion and retention policy facts,
+authoring constructors, key/deletion coordinates, and the read models used by
+CLI queries.
 
 ## Interface To Core
 
@@ -33,18 +34,24 @@ validation, and read-model row shape.
 
 ## Interfaces To Other Scopes
 
+### Context Interface
+
 Auth provides `content_signer`, `auth_user`, `auth_admin`, and
 `secret_coverage` context. Content never opens encrypted text or admits signed
-content until those witnesses match the payload.
+content until those witnesses match the payload. Content publishes
+`content_message`, `content_message_meta`, `content_file`, `content_purged`,
+and `content_retention_floor` context so child content, deletion, retention,
+and key-material projectors can make bounded progress without scanning content
+rows.
+
+### Other Interfaces
 
 Sync receives content share/retract work through sync-owned
 `share_fact_with_sync` intents only after the content projector has validated
 its own proof. Sync does not decide whether a message, reaction, file, or
-deletion is valid.
-
-Connection is only a carrier for content facts. Received connection frames
-produce ordinary content facts plus receipts; the content projector then runs
-the same validation path as local command output.
+deletion is valid. Connection is only a carrier for content fact bytes.
+Received connection frames produce ordinary content facts plus receipts; the
+content projector then runs the same validation path as local command output.
 
 ## Invariants And Responsibility
 

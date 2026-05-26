@@ -1,9 +1,11 @@
 # Auth Fact Scope
 
-Auth facts define the authority graph for a workspace and the local key
-material this store may use. The scope owns workspace identity, user identity,
-admin grants, invite paths, endpoint membership, recipient keys, removal
-frontiers, key-wrap production, key-wrap recovery, and local-only secrets.
+Auth is the workspace authority and local key-material scope. We use it to
+decide who can act in a workspace, which endpoint or signer is trusted, which
+recipient keys can receive wrapped content keys, and which local secrets may
+decrypt or wrap data. The scope owns workspace identity, users, admin grants,
+invite paths, endpoint membership, recipient keys, removal frontiers, key-wrap
+production/recovery, and local-only secrets.
 
 ## Interface To Core
 
@@ -35,22 +37,31 @@ signer may author content, or whether a key wrap is decryptable.
 
 ## Interfaces To Other Scopes
 
-Content consumes `content_signer`, `auth_user`, `auth_admin`, and
-`secret_coverage` context. It treats auth rows and context as proof that a
-message, reaction, file, deletion, or retention policy can be admitted.
+### Context Interface
 
-Connection consumes local endpoint context and invite-secret context. The
-daemon endpoint offer lets sealed bootstrap frames open locally, and
-`connection_invite_secret` authorizes bootstrap request signatures.
+Auth's primary cross-scope interface is context. Content consumes
+`content_signer`, `auth_user`, `auth_admin`, and `secret_coverage` offers as
+bounded proof that a message, reaction, file, deletion, or retention policy can
+continue projection. Connection consumes `auth_daemon_endpoint`,
+`auth_local_endpoint`, and `connection_invite_secret`; those offers let sealed
+bootstrap frames open locally and let request/response projection validate
+invite signatures.
 
-Sync consumes auth share contributions and auth-owned exact/key-wrap offers.
+Sync and auth also meet through context roles. Auth publishes exact/key-wrap
+offers that sync can record as validated dependencies, and auth can consume
+sync-owned exact-fact dependency context in places such as retention and
+key-wrap dependency matching. Auth still decodes and validates every matched
+payload before trusting the context.
+
+### Other Interfaces
+
 Auth projectors enqueue sync-owned `share_fact_with_sync` intents after a fact
 is admitted so connection sync can advertise only facts whose own authority
-proof has already passed.
-
-Auth also depends on sync for exact-fact dependency context in a few places,
-for example retention/key-wrap dependency matching, but auth still validates the
-matched payload before trusting it.
+proof has already passed. Connection and sync may transport auth facts as
+ordinary fact bytes, but auth admission still happens only when the owning auth
+projector runs. The auth-owned `create_key_wrap` and `unwrap_key_wrap` routes
+are handler registrations with core; other scopes do not call those handlers
+directly.
 
 ## Invariants And Responsibility
 

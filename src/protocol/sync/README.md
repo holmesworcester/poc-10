@@ -1,8 +1,10 @@
 # Sync Fact Scope
 
-Sync facts describe convergence, not domain validity. The scope records which
-facts are shareable in a workspace, summarizes shareable fact ranges, advertises
-exact ids, requests missing ids, and asks connection to move selected facts.
+Sync is the replication planning scope. We use it to decide which already
+admitted facts should be visible to a peer, summarize shareable ranges, compare
+peer state, request missing ids, and ask connection to carry selected facts
+with validated context dependencies. The scope owns shareability rows,
+negentropy rows, compare/have/need facts, and sync handler work.
 
 ## Interface To Core
 
@@ -28,15 +30,22 @@ sendability through the owning helpers.
 
 ## Interfaces To Other Scopes
 
+### Context Interface
+
+Sync publishes context such as `sync_exact_fact` and `sync_key_wrap` so
+projectors in auth, content, connection, or sync can wait for exact dependency
+or key-wrap availability without asking sync to interpret their payloads. The
+matched projector still validates the payload fact after core supplies the
+context match.
+
+### Other Interfaces
+
 Auth and content projectors enqueue the sync-owned `share_fact_with_sync`
 intent only after their own authority checks pass. Sync records those
-contributions and their validated context dependencies.
-
-Connection supplies established connection rows and frame send handlers. Sync
-asks connection to send fact ids; connection decides frame size, sealing, and
-socket IO.
-
-Auth endpoint rows are used when building connection-specific visibility:
+contributions and their validated context dependencies. Connection supplies
+established connection rows and frame send handlers. Sync asks connection to
+send fact ids; connection decides frame size, sealing, and socket IO. Auth
+endpoint rows are used when building connection-specific visibility:
 shareable-fact queries check workspace membership and connection peer identity
 before returning facts to send.
 

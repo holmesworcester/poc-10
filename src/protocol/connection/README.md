@@ -1,10 +1,11 @@
 # Connection Fact Scope
 
-Connection facts model how peers establish a secure relationship and how facts
-move over that relationship. The scope owns bootstrap request/response
-wrappers, semantic request/response facts, local handshake secrets, receive
-receipts, established encrypted frame wrappers, close signals, and the network
-intent handlers that bridge core networking to protocol facts.
+Connection is the peer transport and session scope. We use it to turn invite
+and bootstrap material into a local connection id, receive and open sealed
+frames, record receipts for transported facts, close sessions, and ask core
+networking to move opaque bytes. The scope owns bootstrap wrappers,
+request/response handshake facts, local handshake secrets, established frame
+wrappers, receive receipts, close signals, and connection network handlers.
 
 ## Interface To Core
 
@@ -35,17 +36,25 @@ which child facts may be emitted from received bytes.
 
 ## Interfaces To Other Scopes
 
+### Context Interface
+
 Auth supplies local endpoint and invite-secret context. Bootstrap frame
 projectors use `auth_daemon_endpoint`; request/response projection uses
-`connection_invite_secret` and `auth_local_endpoint`.
+`connection_invite_secret` and `auth_local_endpoint`. Connection publishes
+context such as `connection_request`, `connection_response`,
+`connection_response_for_request`, and `connection_fact_receipt` so later
+connection projectors can validate request/response/frame paths without direct
+row scans.
 
-Sync decides which facts should be sent on a connection. Connection then loads
-those ids, checks sendability, batches them into frames, and sends opaque
-network bytes. Connection does not decide sync visibility.
+### Other Interfaces
 
-Content, auth, and sync facts can travel inside established frames only if they
-are non-local and not tagged as private/local. Once opened, they are admitted as
-ordinary child facts and validated by their owning projectors.
+Sync decides which fact ids should be sent on a connection by queuing
+connection-owned send work. Connection then loads those ids, checks
+sendability, batches them into frames, and sends opaque network bytes.
+Connection does not decide sync visibility. Content, auth, and sync facts can
+travel inside established frames only if they are non-local and not tagged as
+private/local. Once opened, they are admitted as ordinary child facts and
+validated by their owning projectors.
 
 ## Invariants And Responsibility
 

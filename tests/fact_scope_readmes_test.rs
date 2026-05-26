@@ -176,6 +176,46 @@ fn readme_core_interface_sections_do_not_name_scope_owned_intent_routes() {
     }
 }
 
+#[test]
+fn readme_other_scope_interfaces_separate_context_from_other_mechanisms() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for scope in ["auth", "content", "connection", "sync"] {
+        let readme_path = root
+            .join("src")
+            .join("protocol")
+            .join(scope)
+            .join("README.md");
+        let readme = fs::read_to_string(&readme_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+        let other_scopes = section(&readme, "## Interfaces To Other Scopes");
+        for heading in ["### Context Interface", "### Other Interfaces"] {
+            assert!(
+                other_scopes.contains(heading),
+                "{scope} README should separate context from other cross-scope mechanisms"
+            );
+        }
+    }
+}
+
+#[test]
+fn scope_readmes_open_with_what_the_scope_is_used_for() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for scope in ["auth", "content", "connection", "sync"] {
+        let readme_path = root
+            .join("src")
+            .join("protocol")
+            .join(scope)
+            .join("README.md");
+        let readme = fs::read_to_string(&readme_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+        let intro = first_paragraph(&readme);
+        assert!(
+            intro.contains("We use it to"),
+            "{scope} README should open with what the scope is used for"
+        );
+    }
+}
+
 fn section<'a>(readme: &'a str, heading: &str) -> &'a str {
     let start = readme
         .find(heading)
@@ -186,6 +226,17 @@ fn section<'a>(readme: &'a str, heading: &str) -> &'a str {
     } else {
         after_heading
     }
+}
+
+fn first_paragraph(readme: &str) -> &str {
+    let after_title = readme
+        .split_once("\n\n")
+        .map(|(_, rest)| rest)
+        .expect("README should have a title and intro paragraph");
+    after_title
+        .split_once("\n\n")
+        .map(|(paragraph, _)| paragraph)
+        .unwrap_or(after_title)
 }
 
 struct ScopeDocs {
