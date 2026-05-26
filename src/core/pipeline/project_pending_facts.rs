@@ -526,7 +526,22 @@ fn validate_ephemeral_projection(effects: &ProjectionEffects) -> Result<(), Stri
     if !effects.next_time_wakes.is_empty() {
         return Err("ephemeral projection input cannot emit time wakes".to_string());
     }
+    if !effects.next_context.needs.is_empty() && !pipeline_effects_are_empty(&effects.pipeline) {
+        return Err(
+            "ephemeral projection input cannot emit effects while transient needs remain"
+                .to_string(),
+        );
+    }
     Ok(())
+}
+
+fn pipeline_effects_are_empty(effects: &PipelineEffects) -> bool {
+    effects.facts.is_empty()
+        && effects.ephemeral_facts.is_empty()
+        && effects.purged_facts.is_empty()
+        && effects.row_mutations.is_empty()
+        && effects.intents.is_empty()
+        && effects.local_intents.is_empty()
 }
 
 fn commit_projector_pipeline_effects_in_tx(
@@ -1247,6 +1262,40 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_input_cannot_emit_effects_while_transient_needs_remain() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-partial".to_vec());
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_ephemeral_fact_in_tx(tx, &parent)
+            })
+            .expect("insert ephemeral input");
+
+        let err = drain_pending_projection(
+            &EphemeralNeedAndIntentProjector {
+                role: Role::new("exact").unwrap(),
+                key: ContextKey::from_bytes([9; 32]),
+            },
+            &store,
+            &[],
+            10,
+        )
+        .expect_err("ephemeral inputs cannot partially succeed with unresolved probes");
+
+        assert!(err.contains("transient needs remain"), "{err}");
+        assert!(
+            crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
+                .expect("load ephemeral")
+                .is_some()
+        );
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert!(context.needs.is_empty());
+        assert!(context.offers.is_empty());
+    }
+
+    #[test]
     fn ephemeral_input_cannot_emit_durable_offers() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
@@ -1664,6 +1713,33 @@ mod tests {
                 start_key: ContextKey::from_bytes(fact.id),
                 end_key: ContextKey::from_bytes(fact.id),
             }))
+        }
+    }
+
+    struct EphemeralNeedAndIntentProjector {
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for EphemeralNeedAndIntentProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new()
+                .need(ContextNeed {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    start_key: self.key.clone(),
+                    end_key: self.key.clone(),
+                })
+                .intent(Intent::new(
+                    IntentKind::new("ephemeral_partial").unwrap(),
+                    fact.id,
+                    Vec::new(),
+                )))
         }
     }
 }
