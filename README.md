@@ -22,12 +22,60 @@ durable retry in one model.
 ## Approach
 
 In Context, a central idea is that facts offer context to other facts. Context
-is a more general relationship than blocking: a context
-need can name an exact fact, but it can also name a range of facts, and context
+is a more general relationship than blocking: a context need can name an exact
+fact, but it can also name a range of facts, and context
 offers can be projected before the facts they refer to exist. That gives the
 runtime a standing relationship surface. Later facts can wake when relevant
 context appears, and earlier offers can satisfy later needs without hidden
 callbacks or broad scans.
+
+### Needs And Offers
+
+Every context row is either a need or an offer. A need says "wake and
+reproject this owner fact when matching context appears." An offer says "this
+owner fact can be loaded as candidate context for matching needs." Both have
+the same matching shape: owner fact id, role, fact scope, and an inclusive byte
+range. Core only matches role/scope/range overlap and loads the offer owner as
+payload; the woken projector decides whether that payload actually proves what
+it needs.
+
+Readable examples look like this; real keys are canonical protocol bytes:
+
+```text
+need
+  owner: fact:content_message:7f2a
+  role: content_signer
+  scope: workspace:acme
+  range: endpoint:alice_phone..endpoint:alice_phone
+offer
+  owner: fact:endpoint_shared:51de
+  role: content_signer
+  scope: workspace:acme
+  range: endpoint:alice_phone..endpoint:alice_phone
+
+need
+  owner: fact:connection_response:c810
+  role: connection_fact_receipt
+  scope: local
+  range: fact:connection_response:c810..fact:connection_response:c810
+offer
+  owner: fact:connection_fact_receipt:03db
+  role: connection_fact_receipt
+  scope: local
+  range: fact:connection_response:c810..fact:connection_response:c810
+
+need
+  owner: fact:content_message:9af3
+  role: secret_coverage
+  scope: workspace:acme
+  range: (frontier:room_key_v4, minute:28583333, leaf:9af3)..same
+offer
+  owner: fact:local_history_node_secret:6e15
+  role: secret_coverage
+  scope: workspace:acme
+  range: (frontier:room_key_v4, minute:28583280, leaf:9a00)
+      ..(frontier:room_key_v4, minute:28584600, leaf:9aff)
+```
 
 Because context is projector-described evidence, it is more powerful than a
 Boolean dependency block. A projector decides which context proves the fact,

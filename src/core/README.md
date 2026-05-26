@@ -59,6 +59,53 @@ Time enters through daemon-owned `DaemonTimeWake` declarations. Core selects
 due `time_wakes`, attaches the due `TimeRange` to projection context, and lets
 the owning projector decide whether that time proves anything.
 
+## How Core Works
+
+Core is the reusable runtime loop around a protocol declaration. At startup the
+app hands core a `ProtocolDescription`; core opens the selected SQLite store,
+applies core, network, and protocol schemas, builds the command registry, and
+constructs a `Runtime` from the declared projector, handler registry, row
+allowlist, schema sources, and daemon hooks. From that point on, core does not
+ask what a protocol fact means. It only moves facts, context, rows, intents,
+time wakes, and opaque network bytes through the declared pipeline.
+
+A normal command is a serialized runtime turn. Core opens the store, builds a
+`CommandContext`, calls the protocol command, and commits the command's
+`PipelineEffects`. If the command emitted facts, core stores their immutable
+bytes, records local admission metadata, and marks them pending for projection.
+The command can return human-readable `CliOutput`, but durable protocol state
+must enter through facts, row mutations, or intents.
+
+Projection is core's deterministic reaction step. Core drains
+`pending_projection`, loads one fact and its matched context, calls the
+protocol projector, and commits the settled output. That commit replaces the
+fact's owned needs, offers, and time wakes; applies allowed row mutations;
+admits emitted facts; queues follow-up intents; and wakes other fact owners
+whose standing needs now overlap newly added offers. Core performs the overlap
+query mechanically, but projectors decide what the matched payload proves.
+
+Intents are core's bounded stateful work step. A projector or command emits an
+intent when the next action should not happen inside deterministic projection:
+sending bytes, building a response fact, creating a key wrap, seeding sync, or
+performing any other retryable action. Core claims one durable or local intent,
+loads only the fact inputs declared by that handler, calls the registered
+handler, and commits the handler's output atomically with queue consumption.
+Retry leaves the row queued; success deletes the row with its effects.
+
+The daemon runs the same mechanics without a user command on the stack. Each
+tick stages accepted network bytes as local protocol intents, admits due
+time-wake ranges as pending projection, drains projection, dispatches intents,
+and drains projection again for handler-emitted facts. The runtime lock ensures
+this daemon work cannot race with a CLI command that is admitting new facts into
+the same store.
+
+Core's job is therefore coordination, persistence, and mechanical validation.
+It owns the serialized turn shape, SQLite transaction boundaries, queue
+fairness, idempotent fact and intent admission, protocol-blind context matching,
+network byte pumping, and schema/row allowlist checks. It leaves protocol
+meaning in the protocol scopes: fact layouts, authority checks, sync policy,
+connection-frame opening, read-model rows, commands, and queries.
+
 ## Invariants
 
 - Fact ids are deterministic BLAKE3 hashes of immutable fact bytes. Scope and
@@ -91,32 +138,110 @@ use core syntax and contracts, but core must not import their semantic rules.
 
 ## Module Map
 
-- `app.rs`: generic CLI/application runner over a `ProtocolDescription`.
-- `cli.rs`: small command registry, argument helpers, and text output type.
-- `clock.rs`: store-local monotonic timestamp helper.
-- `command_context.rs`: read-only command boundary plus identity capability
-  traits.
-- `context.rs`: public context vocabulary and canonical key helpers.
-- `crypto.rs`: protocol-neutral cryptographic primitives.
-- `daemon.rs`: process lifecycle, daemon tick ordering, time wake admission,
-  and inbound network staging.
-- `effects.rs`: shared `PipelineEffects` returned by commands, projectors, and
-  handlers.
-- `fact_store.rs`: fact admission, local admission metadata, ephemeral
-  projection inputs, and purge helpers.
-- `facts.rs`: fact ids, scopes, and immutable fact bytes.
-- `intents.rs`: intent identity, row mutation types, and handler contracts.
-- `network.rs`: opaque inbound/outbound network queues and TCP frame pump.
-- `pipeline.rs`: facade for SQL-backed queue workers.
-- `perf_profile.rs`: env-gated phase timing helpers for command and pipeline
-  performance profiling.
-- `projectors.rs`: projection contract, projection context, output, time wakes,
-  and typed fact adapters.
-- `runtime.rs`: executable core engine for one protocol description.
-- `schema.rs`: core-owned SQL tables and table constants.
-- `store.rs`: SQLite substrate, schema application, transactions, and opaque
-  row helpers.
-- `wire.rs`: fixed-layout wire reader/writer primitives.
+### Top-Level Files
+
+- `app.rs`: generic process runner over a `ProtocolDescription`. It owns the
+  product-independent CLI shape: `--db`, daemon lifecycle commands, command
+  lookup, runtime opening, command dispatch, and the `assert eventually` helper.
+  Protocol code supplies declarations and command functions; core supplies the
+  stable host behavior.
+- `cli.rs`: tiny command registry and text-output boundary. It validates
+  duplicate command names, reports unknown commands with usage, carries
+  positional arguments, and returns display lines. It does not parse
+  protocol-specific options beyond handing arguments to the registered command.
+- `clock.rs`: store-local logical clock for deterministic authoring and tests.
+  It is local runtime metadata, not synced protocol state. Commands use it as a
+  lower bound for new timestamps without changing the timestamp semantics of
+  already-authored facts.
+- `command_context.rs`: read-only command boundary. Commands get store queries,
+  monotonic timestamp allocation, and identity-owned signing/encryption
+  capabilities through this type. They do not get a runtime handle, handler
+  dispatcher, network socket, or write transaction.
+- `context.rs`: public vocabulary for standing context relationships. It
+  defines needs, offers, roles, opaque byte keys, canonical key construction,
+  complete replacement context sets, and the protocol-blind overlap rule that
+  lets core wake facts without understanding their semantics.
+- `crypto.rs`: reusable primitive facade for hashes, signatures, key exchange,
+  authenticated encryption, and checked byte slices. It centralizes low-level
+  library calls. Protocol modules still own signing domains, associated data,
+  key lifetimes, authority checks, and semantic validation.
+- `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
+  store lock, listener setup, readiness/stop/reset handling, inbound frame
+  staging, due time-wake admission, and bounded projection/intent/projection
+  drain loop. The protocol declaration decides how inbound bytes become local
+  intents and which time-wake timelines are active.
+- `effects.rs`: shared effect language for commands, projectors, and handlers.
+  `PipelineEffects` names facts to admit, ephemeral facts, exact purges, row
+  mutations, durable intents, and local intents. The pipeline commits this
+  mechanical description atomically; display-only command data stays outside it.
+- `fact_store.rs`: immutable fact storage and local admission metadata. It
+  inserts content-addressed fact bytes, records local scope/timestamp/admission
+  ordering, marks facts pending for projection, reads facts back with their
+  local metadata, and purges exact fact ids plus core-owned derived rows.
+- `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
+  fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
+  `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
+  not interpret fact tags, signatures, messages, keys, or sync payloads.
+- `intents.rs`: queued work and handler contract types. It defines durable and
+  local intent identity, opaque payloads, row mutation values, handler input
+  declarations, retry/fatal handler errors, and the rule that handlers return
+  `PipelineEffects` instead of mutating runtime state directly.
+- `network.rs`: opaque network IO boundary. It owns memory-local inbound and
+  outbound queue rows, deterministic route+bytes row keys, listener setup,
+  length-prefixed TCP frame reading/writing, and cleanup. It does not classify
+  bootstrap frames, connection frames, auth facts, sync facts, or content facts.
+- `pipeline.rs`: public facade for SQL-backed queue workers. Runtime calls this
+  file to submit facts and intents, admit due time wakes, drain pending
+  projection, dispatch queued intents, and purge exact facts. The concrete
+  commit and scheduling code lives in the pipeline submodules below.
+- `perf_profile.rs`: env-gated performance instrumentation. It records coarse
+  phase timings in thread-local state only when explicitly enabled, preserving
+  normal command output by default. It is for runtime profiling, not protocol
+  measurement semantics.
+- `projectors.rs`: projection contract from one fact plus matched context to
+  deterministic output. It defines `Projector`, `TypedProjector`,
+  `ProjectionContext`, `ProjectionOutput`, time wakes, self-purge, and typed
+  decode adapters. It enforces the owner rule: a projector emits replacement
+  context and time wakes for the fact being projected.
+- `runtime.rs`: executable engine for one selected protocol description. It
+  opens stores, applies declared schemas, submits command effects, drains
+  projection and intent queues, admits due time wakes, filters command-safe
+  handlers, and composes the pipeline pieces into bounded runtime turns.
+- `schema.rs`: core-owned SQL table inventory. It declares facts, local
+  admissions, context edges, time wakes, pending projection, ephemeral
+  projection inputs, intent queues, local network tables, and the local clock
+  table. Protocol rows live in protocol schema sources.
+- `store.rs`: SQLite substrate below runtime policy. It applies schema batches,
+  opens transactions, quotes identifiers, validates opaque row-table allowlists,
+  and provides generic keyed row helpers. It does not know what a fact, context
+  role, network frame, or protocol row means.
+- `wire.rs`: fixed-layout byte primitive layer. It provides exact-length
+  readers/writers, big-endian integers, one-byte booleans, bounded padded
+  slots, and trailing-byte checks. Owning fact and intent modules layer tags,
+  semantic validation, signatures, and test vectors on top.
+
+### Pipeline Submodules
+
+- `pipeline/commit_effects.rs`: shared atomic commit path for
+  `PipelineEffects`. It validates duplicate or conflicting effects, purges exact
+  facts, admits durable and ephemeral facts, applies allowed row mutations, and
+  queues follow-up intents inside the caller's transaction.
+- `pipeline/context.rs`: SQL implementation of standing context. It stores
+  need/offer edges, assembles projection context with matched payload facts,
+  computes replacement deltas by owner, and fans out pending projection rows
+  when new needs and offers overlap.
+- `pipeline/dispatch.rs`: intent queue worker. It claims one durable or local
+  intent, loads only the handler-declared fact inputs, calls the registered
+  handler, handles retry/fatal outcomes, and commits handler output atomically
+  with queue-row deletion.
+- `pipeline/insert_select.rs`: checked `INSERT OR IGNORE ... SELECT` helper
+  used by queue fanout. It accepts only static comment-free `SELECT` statements
+  over declared source tables and bound parameters, keeping dynamic scheduling
+  SQL narrow and auditable.
+- `pipeline/project_pending_facts.rs`: fact projection worker. It admits facts
+  to pending projection, turns due time wakes into pending work, loads matched
+  context, runs the registered projector to a settled output, replaces the
+  owner's context/time wakes, and commits projector effects.
 
 ## Example Runtime Graph
 
