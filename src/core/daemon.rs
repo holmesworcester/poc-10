@@ -29,6 +29,7 @@ use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -219,9 +220,13 @@ pub fn start(
         ..DaemonReport::default()
     };
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-        let tick_activity = tick(&listener, options.work_limit)?;
+        let tick_activity = {
+            let _turn = RuntimeTurnLock::acquire(db_path)?;
+            tick(&listener, options.work_limit)?
+        };
         let sleep_after_tick = sleep_after_tick(&options, tick_activity);
         report.ticks += 1;
+        std::thread::yield_now();
         if let Some(duration) = sleep_after_tick {
             std::thread::sleep(duration);
         }
@@ -384,6 +389,7 @@ fn reset_db_files(db_path: &Path) -> Result<Vec<String>, String> {
         sibling_path(&db_path, "-wal"),
         sibling_path(&db_path, "-shm"),
         lock_path(&db_path),
+        runtime_turn_lock_path(&db_path),
     ];
     let mut deleted = Vec::new();
     for candidate in &candidates {
@@ -485,6 +491,39 @@ struct DaemonLock {
     _file: File,
 }
 
+pub struct RuntimeTurnLock {
+    file: File,
+}
+
+impl RuntimeTurnLock {
+    pub fn acquire(db_path: &Path) -> Result<Self, String> {
+        let path = runtime_turn_lock_path(db_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("create runtime lock dir: {err}"))?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .map_err(|err| format!("open runtime turn lock: {err}"))?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(format!(
+                "acquire runtime turn lock: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RuntimeTurnLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 impl DaemonLock {
     fn acquire(db_path: &Path) -> Result<Self, String> {
         let path = lock_path(db_path);
@@ -537,6 +576,17 @@ fn lock_path(db_path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .map(|name| format!("{name}.daemon.lock"))
         .unwrap_or_else(|| "daemon.lock".to_string());
+    path.set_file_name(lock_name);
+    path
+}
+
+fn runtime_turn_lock_path(db_path: &Path) -> PathBuf {
+    let mut path = db_path.to_path_buf();
+    let lock_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}.runtime.lock"))
+        .unwrap_or_else(|| "runtime.lock".to_string());
     path.set_file_name(lock_name);
     path
 }

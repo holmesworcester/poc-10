@@ -212,7 +212,7 @@ fn cli_reset_deletes_db_and_lock_files() {
     let out = assert_success(topo(&["--db", &db, "reset"]));
     assert!(out.contains("reset complete"), "reset output: {out}");
 
-    for suffix in ["", "-wal", "-shm", ".daemon.lock"] {
+    for suffix in ["", "-wal", "-shm", ".daemon.lock", ".runtime.lock"] {
         let path = format!("{db}{suffix}");
         assert!(!Path::new(&path).exists(), "reset should delete {path}");
     }
@@ -245,7 +245,7 @@ fn cli_reset_stops_running_daemon_first() {
         !process_alive(pid),
         "daemon process {pid} should be gone after wait_clean_exit"
     );
-    for suffix in ["", "-wal", "-shm", ".daemon.lock"] {
+    for suffix in ["", "-wal", "-shm", ".daemon.lock", ".runtime.lock"] {
         let path = format!("{db}{suffix}");
         assert!(!Path::new(&path).exists(), "reset should delete {path}");
     }
