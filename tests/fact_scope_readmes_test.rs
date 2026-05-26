@@ -247,6 +247,65 @@ fn scope_readmes_open_with_what_the_scope_is_used_for() {
     }
 }
 
+#[test]
+fn auth_readme_contains_integrated_key_material_model() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme_path = root.join("src/protocol/auth/README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+    let normalized = normalize_whitespace(&readme);
+
+    for required in [
+        "## Authority And Key Material Model",
+        "### Content Key Tree",
+        "### Key Wraps",
+        "### Proactive Sharing",
+        "### Key Requests",
+        "### Forward Secrecy And Recipient Rotation",
+        "### Disappearing Messages And Purge",
+        "### Open Content",
+        "Late arrivals do not retroactively change message expiry",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "auth README should contain integrated auth/key-material guidance: missing {required:?}"
+        );
+    }
+}
+
+#[test]
+fn sync_readme_contains_integrated_projector_owned_negentropy_model() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme_path = root.join("src/protocol/sync/README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+    let normalized = normalize_whitespace(&readme);
+
+    for required in [
+        "## Visibility And Dependency Closure",
+        "make shared facts converge between endpoints",
+        "other scopes can rely on eventual consistency for admitted shared facts",
+        "fast wall-clock display of fact state in a requested range",
+        "requires syncing the range's dependency closure",
+        "Projectors own sync membership",
+        "state: upsert | retract",
+        "`context_have` contains direct sync-eligible context facts",
+        "Raw `ContextNeed` selectors are not stored in negentropy state",
+        "walk that owner's projector-supplied `context_have` facts",
+        "without dependencies sends only the owner leaves",
+        "Removal uses the same ownership boundary",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "sync README should contain integrated dep-aware negentropy guidance: missing {required:?}"
+        );
+    }
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn section<'a>(readme: &'a str, heading: &str) -> &'a str {
     let start = readme
         .find(heading)

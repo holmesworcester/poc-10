@@ -204,10 +204,11 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "src/core/schema.rs",
         "src/core/network.rs",
         "src/protocol/registry.rs",
-        "### Projector Style",
-        "### Intent Handler Style",
-        "### Wire And Codec Style",
-        "### Connection Frame Style",
+        "## Protocol Function Boundaries",
+        "### Projectors",
+        "### Intent Handlers",
+        "### Wire Layouts And Codecs",
+        "### Connection Frames",
         "### Simplicity Guardrails",
     ];
 
@@ -570,21 +571,29 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
 }
 
 #[test]
-fn poc10_architecture_docs_describe_legacy_queues_as_removed_mechanisms() {
+fn poc10_architecture_docs_describe_required_runtime_work_surfaces() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let architecture = source_text(&root.join("README.md"));
     let rules = source_text(&root.join("docs/RULES.md"));
+    let docs = format!("{architecture}\n{rules}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     for required in [
-        "These names are legacy/removal vocabulary only.",
-        "must not reappear in",
-        "target code paths except in tests or documentation",
-        "No old labels, blocker tables, ready queues, canonical ingress queues",
-        "recently-valid queues, pending reprojection queues, or worker catalogs remain",
+        "Production work is represented with immutable facts",
+        "standing context",
+        "time-wake schedules",
+        "pending projection",
+        "durable intents",
+        "ephemeral intents",
+        "The declared runtime pipeline is the complete work surface",
+        "production state enters that pipeline",
+        "facts, context, time wakes, intents, or schema-owned rows",
     ] {
         assert!(
-            architecture.contains(required) || rules.contains(required),
-            "architecture docs must frame old worker queues as removed target mechanisms: {required}"
+            docs.contains(required),
+            "architecture docs must describe required runtime work surfaces: {required}"
         );
     }
 }

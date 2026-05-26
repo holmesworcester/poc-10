@@ -60,21 +60,22 @@ continue projection. Connection consumes `auth_daemon_endpoint`,
 bootstrap frames open locally and let request/response projection validate
 invite signatures.
 
-Sync and auth also meet through context roles. Auth publishes exact/key-wrap
-offers that sync can record as validated dependencies, and auth can consume
-sync-owned exact-fact dependency context in places such as retention and
-key-wrap dependency matching. Auth still decodes and validates every matched
-payload before trusting the context.
+Auth can consume sync-owned exact-fact or key-wrap availability context when an
+auth projector is waiting for a named fact that arrived through replication.
+That context is only a wake/proof locator: auth still decodes and validates the
+matched payload before trusting it.
 
 ### Other Interfaces
 
 Auth projectors enqueue sync-owned `share_fact_with_sync` intents after a fact
 is admitted so connection sync can advertise only facts whose own authority
-proof has already passed. Connection and sync may transport auth facts as
-ordinary fact bytes, but auth admission still happens only when the owning auth
-projector runs. The auth-owned `create_key_wrap` and `unwrap_key_wrap` routes
-are handler registrations with core; other scopes do not call those handlers
-directly.
+proof has already passed. When projection consumes validated context, auth
+passes those dependency fact ids as the same projector-supplied `context_have`
+graph used by other scopes. Sync records that graph without interpreting auth
+semantics. Connection and sync may transport auth facts as ordinary fact bytes,
+but auth admission still happens only when the owning auth projector runs. The
+auth-owned `create_key_wrap` and `unwrap_key_wrap` routes are handler
+registrations with core; other scopes do not call those handlers directly.
 
 ## Cross-Scope Row Reads
 
@@ -102,6 +103,166 @@ requests, and encrypted wraps. Local facts hold private secrets, publish wrap
 sources and secret coverage, and self-purge when retirement context names them.
 Changes to key tree coordinates, wrap-source matching, or encrypted message key
 coverage belong in auth key-material modules, not in content or sync.
+
+## Authority And Key Material Model
+
+Auth combines workspace identity, endpoint authority, naturally signed facts,
+recipient public keys, removal frontiers, deterministic key wraps, and local
+secret material because those facts form one proof boundary: who can act in a
+workspace and what this store is allowed to open or share for that authority.
+Content retention and deletion live in `protocol::content`; they interact with
+auth keys by emitting purge context that auth projectors can range-match.
+
+### Fact Family Roles
+
+Auth fact families are grouped by protocol role:
+
+- `workspace` creates the shared namespace for users, endpoints, content, and
+  sync.
+- `user`, `admin`, `user_invite`, `device_invite`, `invite`,
+  `invite_accepted`, and `invite_server` form shared authority edges for
+  joining, granting, and accepting workspace authority.
+- `endpoint` and `endpoint_shared` hold local and shared endpoint identity
+  material.
+- `removal_frontier` names a content-key frontier and its owner.
+- `recipient_key` publishes a shared endpoint public key for receiving wraps.
+- `local_recipient_key` stores private material paired with one recipient key.
+- `key_wrap` is a deterministic shared fact wrapping either a frontier root or
+  retained history-node secret to one recipient key. Its integrity comes from
+  deterministic coordinate validation and AEAD associated data, not a natural
+  signature.
+- `key_request` asks an authorized responder for missing key material for one
+  frontier.
+- `local_key_secret` stores a local opened frontier/root secret.
+- `local_history_node_secret` stores a local retained node in the time/trie key
+  tree.
+
+Content facts name their frontier, minute, and target fact coordinate in their
+encrypted fields. Deletion, expiry, and retention-floor facts make content
+unavailable and wake key-purge behavior by publishing content-owned purge
+context; they are not auth fact families.
+
+### Content Key Tree
+
+Each frontier has one root secret. Content derives per-message or per-file leaf
+keys by walking a deterministic tree:
+
+```text
+frontier root -> time node -> in-minute trie node -> content leaf
+```
+
+The target coordinate is recoverable from canonical fact fields, so peers can
+describe what key coverage they need without decrypting the content first.
+Retained history-node secrets let a peer keep decrypting surviving content
+after the root and a deleted descendant path have been purged.
+
+Projection represents this with context:
+
+- encrypted content emits a need for secret coverage over its frontier, minute,
+  and target coordinate;
+- local key material emits offers for the coverage it can derive;
+- coverage matching wakes encrypted content when a root, retained node, or leaf
+  covers the requested coordinate.
+
+### Key Wraps
+
+Wraps are deterministic and idempotent for a wrap edge:
+
+```text
+workspace
+frontier
+recipient_key
+source key material
+source coordinate
+```
+
+The wrap idempotence key does not include request entropy. A duplicate request
+for the same edge converges on the same pending wrap or fact, preventing key
+amplification.
+
+Generated wraps use the source fact time. Root wraps use frontier/root source
+time; retained-node wraps use the retained node source time. Request time may
+be recorded separately as provenance, but it does not affect wrap identity.
+
+### Proactive Sharing
+
+Learning a current recipient key proactively creates deterministic wraps for
+current eligible sources, usually before the recipient asks. This makes the
+initial share and the key-request response the same operation: materialize the
+deterministic wrap edge if authorized and absent.
+
+Superseded recipient keys do not receive old frontiers. Their standing needs
+are replaced by supersession cleanup, not by more wrap requests.
+
+### Key Requests
+
+Key requests are facts, not transport privileges. The request projector
+validates:
+
+- the requester matches the recipient key being served;
+- the responder owns the requested frontier or retained source;
+- the requested recipient, frontier, and source all belong to the same
+  workspace;
+- the source is still shareable: root if available, retained nodes if the root
+  has been purged.
+
+For a partitioned valid member joining after deletion, the responder cannot
+share a purged root. It wraps all retained path nodes needed to cover surviving
+content in the requested frontier.
+
+### Forward Secrecy And Recipient Rotation
+
+When deletion, expiry, or floor advancement purges a frontier root or makes it
+unavailable for future sharing, recipient keys rotate. This prevents peers from
+continuing to wrap new material to a key that may have been exposed before the
+root was retired.
+
+Local private material for a superseded recipient key is purged by exact
+supersession proof. Shared superseded public keys remain as context so peers can
+reason about why old wraps stopped.
+
+Forward secrecy here is post-compromise secrecy for retired content: after the
+retirement transaction commits, remaining local disk state is not enough to
+derive the retired leaf. It does not erase plaintext or keys an attacker saw
+before retirement.
+
+### Disappearing Messages And Purge
+
+Disappearing content has semantic expiry and floor facts. Those facts wake
+content projection and purge handlers through context offers. Late arrivals do
+not retroactively change message expiry; content facts keep the retention
+policy coordinate they were authored under.
+
+Purge is event-centric:
+
+- semantic deletion, expiry, and floor facts authorize removal;
+- projectors emit deterministic purge intents once proof is present;
+- purge handlers perform bounded physical deletion of canonical bytes or local
+  secret material;
+- purge does not authorize remote erasure; it removes only local retained
+  material after durable semantic facts preserve what peers need to know.
+
+Deleting one event that used a recipient wrap is a natural trigger for pruning
+obsolete recipient key material and stale wrap relevance. Core key correctness
+comes from facts, context, projectors, and bounded handlers rather than a
+time-only cleanup path.
+
+### Open Content
+
+Opening encrypted content is projector work when all inputs are provided as
+context and the operation is deterministic: validate the signed content-message
+context, find covering local key material, derive or validate the leaf, decrypt
+the encrypted fields, and emit opened rows via row mutations.
+
+Message metadata is intentionally separate from opened content. After signer
+and author context validate, a content-message projector may emit
+`content_message_meta` so an author deletion can be validated and purged before
+any key material arrives. It emits the normal `content_message` offer and
+opened rows only after decrypting the encrypted fields, so files and reactions
+still depend on opened message context.
+
+If opening requires broad scans, IO, clock reads, or external mutation, that
+step belongs in a bounded intent/handler, not in a generic opening worker.
 
 ## Intent Handlers
 

@@ -11,11 +11,13 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
 
     for live_doc in [
         "README.md",
-        "docs/README.md",
         "docs/RULES.md",
-        "docs/documentation_guide.md",
-        "docs/auth.md",
-        "docs/negentropy_recs.md",
+        "src/core/README.md",
+        "src/core/pipeline/README.md",
+        "src/protocol/auth/README.md",
+        "src/protocol/content/README.md",
+        "src/protocol/connection/README.md",
+        "src/protocol/sync/README.md",
         "verus_plan.md",
     ] {
         assert!(
@@ -57,6 +59,18 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         assert!(
             !root.join(stale_root_doc).exists(),
             "stale root documentation file should live under docs/: {stale_root_doc}"
+        );
+    }
+
+    for removed_duplicate_doc in [
+        "docs/README.md",
+        "docs/documentation_guide.md",
+        "docs/auth.md",
+        "docs/negentropy_recs.md",
+    ] {
+        assert!(
+            !root.join(removed_duplicate_doc).exists(),
+            "duplicated standalone documentation should be folded into active READMEs: {removed_duplicate_doc}"
         );
     }
 }
@@ -135,5 +149,37 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
             pipeline.contains(required),
             "src/core/pipeline/README.md is missing pipeline detail {required:?}"
         );
+    }
+}
+
+#[test]
+fn active_readmes_do_not_refer_to_previous_designs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for readme in [
+        "README.md",
+        "src/core/README.md",
+        "src/core/pipeline/README.md",
+        "src/protocol/auth/README.md",
+        "src/protocol/content/README.md",
+        "src/protocol/connection/README.md",
+        "src/protocol/sync/README.md",
+    ] {
+        let text = source_text(&root.join(readme));
+        for forbidden in [
+            "old layer names",
+            "old labels",
+            "old source island",
+            "legacy/removal",
+            "no longer the source of truth",
+            "previous designs",
+            "previous implementation",
+            "past implementation",
+            "Superseded planning notes",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{readme} should describe the current design without prior-design language: {forbidden:?}"
+            );
+        }
     }
 }

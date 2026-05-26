@@ -177,7 +177,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
 // first policy and any later admin `disappearing-set` form a chain
 // of policies — there is no separate "workspace TTL fallback" anymore.
 //
-// This is the load-bearing invariant from `docs/auth.md`:
+// This is the load-bearing invariant from `src/protocol/auth/README.md`:
 // "Late arrivals do not retroactively change message expiry."
 // ---------------------------------------------------------------------------
 

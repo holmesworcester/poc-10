@@ -1,10 +1,12 @@
 # Sync Fact Scope
 
-Sync is the replication planning scope. We use it to decide which already
-admitted facts should be visible to a peer, summarize shareable ranges, compare
-peer state, request missing ids, and ask connection to carry selected facts
-with validated context dependencies. The scope owns shareability rows,
-negentropy rows, compare/have/need facts, and sync handler work.
+Sync is the replication planning scope. We use it to make shared facts
+converge between endpoints so other scopes can rely on eventual consistency for
+admitted shared facts. A secondary goal is fast wall-clock display of fact
+state in a requested range, such as latest messages; that requires syncing the
+range's dependency closure, not only the owner facts in the range. The scope
+owns shareability rows, projector-owned range summaries, compare/have/need
+facts, and sync handler work.
 
 ## Interface To Core
 
@@ -30,9 +32,11 @@ scope and tag sendability through the owning helpers.
 
 Sync owns shareable-fact rows, negentropy leaf rows, negentropy context-have
 rows, negentropy node rows, compare rows, have-id rows, need-id rows, and
-cascade-test staging rows. These rows are the durable sync index: they record
-which facts are eligible to send, which validated dependencies should travel
-with them, and how range summaries differ.
+cascade-test staging rows. These rows are the durable visibility index:
+shareable and leaf rows record which owner facts are eligible to send in a sync
+scope, context-have rows record direct validated dependency facts supplied by
+the owner projector, node rows store deterministic range counts and
+fingerprints, and compare/have/need rows record received control facts.
 
 Sync rows are internal planning state. Other scopes enqueue sync work or
 consume sync context; they should not treat sync rows as their admission
@@ -50,14 +54,15 @@ context match.
 
 ### Other Interfaces
 
-Auth and content projectors enqueue the sync-owned `share_fact_with_sync`
-intent only after their own authority checks pass. Sync records those
-contributions and their validated context dependencies. Connection supplies
-established connection rows and frame send handlers. Sync asks connection to
-send fact ids; connection decides frame size, sealing, and socket IO. Auth
-endpoint rows are used when building connection-specific visibility:
-shareable-fact queries check workspace membership and connection peer identity
-before returning facts to send.
+Fact projectors in other scopes enqueue the sync-owned `share_fact_with_sync`
+intent after they can identify the sync scope and the validated context that
+should travel with the owner fact. Sync records that projector-supplied graph;
+it does not rediscover dependencies by scanning protocol rows or parsing
+payload bytes. Connection supplies established connection rows and frame send
+handlers. Sync asks connection to send fact ids; connection decides frame size,
+sealing, and socket IO. Auth endpoint rows are used when building
+connection-specific visibility: shareable-fact queries check workspace
+membership and connection peer identity before returning facts to send.
 
 ## Cross-Scope Row Reads
 
@@ -65,31 +70,98 @@ No other protocol scope should read sync-owned rows directly. Sync handlers and
 queries own those rows. Other scopes interact with sync by emitting facts,
 publishing context, or queuing sync-owned intents such as `share_fact_with_sync`.
 
+## Visibility And Dependency Closure
+
+Bounded catch-up follows from the same convergence model. When a peer compares
+or requests a time range, the response includes the owner facts in that range
+plus the out-of-range context facts needed to project them quickly. For
+encrypted content that can include authority facts, recipient keys, key wraps,
+retained key-node wraps, and deletion or retention context. The server remains
+untrusted: it may relay range summaries and bytes, but authority, key access,
+and key healing are still ordinary facts, context, projectors, and bounded
+handlers.
+
+Projectors own sync membership. A projector that can decode a fact and
+determine its sync scope emits `share_fact_with_sync` in the same projection
+pass that emits its rows, offers, needs, wakes, or purge effects. This applies
+even when the fact is parked for missing context. Parking means the read model
+is not materialized yet; it does not hide the owner fact from sync if the
+projector already knows the sync scope and any validated context facts that
+should travel with it.
+
+A `share_fact_with_sync` payload is the complete projector view for one owner
+fact in one sync scope:
+
+```text
+sync_scope
+owner_fact_id
+owner_timestamp_ms
+leaf_range
+state: upsert | retract
+context_have: [fact:direct_validated_dependency, ...]
+```
+
+`context_have` contains direct sync-eligible context facts that the projector
+validated or consumed in this pass. It should name exact input parents, matched
+update/about facts, authority facts, key wraps, retained key nodes, and other
+out-of-range witnesses that help a receiver project the owner fact. It should
+not name local-only secrets. Raw `ContextNeed` selectors are not stored in
+negentropy state, hashed into summaries, or sent as dependency closure; needs
+are local wake hints until they are satisfied by validated offers.
+
+The `share_fact_with_sync` handler is the only durable visibility path. It
+loads the owner fact, rejects local/private payloads, validates that listed
+context facts are sendable if they still exist, stores the contribution, and
+refreshes the shareable rows, leaf rows, context-have rows, and range summaries.
+The update is incremental: changing one leaf touches that stored contribution
+and its ancestor path, not the whole namespace. Replaying the same contribution
+is a no-op, and older queued snapshots cannot remove richer context learned by
+a later projection; context rows are inserted idempotently and kept as a union
+unless the owner projector emits an explicit prune or retraction.
+
+Compare and response handlers read only the durable sync index for the
+connection-authorized scope. For dependency-aware sends, they include each
+in-range owner, then walk that owner's projector-supplied `context_have` facts,
+then each dependency's own `context_have` facts until the authorized shareable
+graph is exhausted. The walk stops at missing, purged, unauthorized, or
+local-only facts because those facts have no sendable shareable row for the
+connection. A range send without dependencies sends only the owner leaves; that
+mode is useful for proving tests are not passing because a full-range sync
+happened accidentally.
+
+Live-tail egress is the same contribution path. When a new or changed
+contribution is stored, sync can advertise it to established authorized
+connections. If the fact arrived from a connection and has a projected receipt
+for that connection, live-tail advertisement skips that origin connection while
+still advertising the fact to other authorized connections.
+
+Removal uses the same ownership boundary. When a target projector observes
+deletion, expiry, supersession, or retirement context for its own fact, it emits
+ordinary row deletions or self-purge plus a `share_fact_with_sync` retraction
+for that owner id. The handler removes the stored contribution and refreshes
+ancestor summaries before or with physical fact-byte purge. Sync does not
+rediscover purged ids from broad fact scans.
+
 ## Invariants And Responsibility
 
-A shareable fact contribution must name an existing non-local owner fact whose
-scope is either global or the same workspace scope. Context dependencies
-recorded with that contribution must also be non-local if they still exist when
-the handler runs.
+A shareable fact contribution names an existing non-local owner fact whose
+scope is global or the same workspace scope. Listed context facts are non-local
+sendable facts if they still exist when the handler runs. The share index stores
+ids, timestamps, direct dependency edges, and deterministic summary rows; it
+does not store payload copies.
 
-The share index stores ids and timestamps, not payload copies. If a fact is
-purged later, connection-specific queries skip it.
-
-Negentropy summaries are deterministic over connection-visible shareable rows.
-Compare facts are hints. If summaries differ, handlers either split ranges,
-send exact have-id facts, or send exact requested facts; the receiver still
-admits each payload through its owning projector.
-
-Range matching and dependency closure belong in sync rows and handlers.
-Semantic admission remains in the fact family that owns the payload.
+Range summaries are deterministic over connection-visible shareable rows plus
+their stored dependency closure. Compare facts are hints. If summaries differ,
+handlers split ranges, send exact have-id facts, or send exact requested facts.
+The receiver still admits each payload through its owning projector, so
+semantic admission remains in the fact family that owns the payload.
 
 ## Intent Handlers
 
-`share_fact_with_sync` records or retracts one fact's sync contribution. On
-upsert it loads the owner fact, rejects local/private owner bytes, validates
-context dependencies if present, updates shareable and negentropy rows, and
-live-tail advertises the fact to established connections except the origin
-connection that supplied it.
+`share_fact_with_sync` implements the contribution path described above. It
+upserts or retracts one owner fact's durable sync visibility, applies the
+incremental range-summary update, and triggers live-tail advertisement while
+skipping the origin connection that supplied the fact.
 
 `seed_connection_sync` runs after a connection response becomes durable. It
 loads the connection fact, computes the root range summary for facts visible on

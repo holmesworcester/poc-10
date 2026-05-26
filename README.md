@@ -90,7 +90,7 @@ opaque byte rows and written by the core TCP pump.
 
 ## Scope Layout
 
-Protocol state is organized by scope, not by old layer names:
+Protocol state is organized by scope:
 
 ```text
 src/protocol.rs
@@ -113,59 +113,70 @@ Each fact family owns its fact type, fixed wire layout, command constructors,
 projector, rows, queries, and CLI adapter if it has one. Each intent handler is
 a verb-named file directly under its scope.
 
-## Style Rules
+## Protocol Function Boundaries
 
-### Projector Style
+The protocol separates durable data, deterministic derivation, bounded
+stateful work, byte syntax, and transport sessions. Keeping those functions
+separate makes it clear which component is allowed to interpret bytes, wait for
+context, touch external IO, or commit state.
 
-Projectors are pure functions over one fact plus supplied context. A projector
-does protocol validation, not IO. It decodes the primary fact through the
-typed adapter, checks scope and structure, declares exact context needs, reads
-matched context through `ProjectionContext` helpers, validates authority, and
-returns the complete replacement context plus materialization effects.
+### Projectors
 
-Missing context parks. Mismatched context rejects. Deletion is target-owned: a
-target fact keeps the need or time wake that can remove it, and when that
-context appears it deletes only its own rows and may purge only itself.
+Projectors are the deterministic derivation path from one fact to local state.
+They decode the primary fact, check scope and structure, declare exact context
+needs, validate matched context, and return the complete replacement context
+plus materialization effects. They are separate from handlers because missing
+context parks projection, while IO and retryable stateful work belongs in
+queued intents.
 
-### Intent Handler Style
+Deletion is target-owned: a target fact keeps the need or time wake that can
+remove it, and when that context appears it deletes only its own rows and may
+purge only itself.
 
-Handlers own bounded stateful work. They decode their intent, name exact input
-facts for core to load, perform one effect, and return `PipelineEffects`.
-Retryable absence of input or IO returns retry so the queue row remains. A
-handler may call the owning fact module's `create.rs` helpers, but it must not
-inline shared fact layouts, run projectors, or mutate read-model rows outside
-the pipeline effect boundary.
+### Intent Handlers
 
-### Wire And Codec Style
+Intent handlers are the bounded stateful work path. They decode one queued
+intent, name exact fact inputs for core to load, perform one effect, and return
+`PipelineEffects`. They are separate from projectors so network sends,
+key-wrap creation, sync responses, and other retryable work have an idempotent
+queue identity and an atomic commit boundary with queue consumption.
 
-Use `core::wire` primitives for fixed ids, hashes, keys, signatures, nonces,
-integers, tags, and bounded slots. Decoders reject wrong tags, wrong lengths,
-trailing bytes, non-canonical padding, and invalid enum values. Store code is a
-generic row substrate and must not learn protocol table meaning.
+### Wire Layouts And Codecs
 
-### Connection Frame Style
+Wire layout code is the byte syntax boundary. It uses `core::wire` primitives
+for fixed ids, hashes, keys, signatures, nonces, integers, tags, and bounded
+slots, and it rejects wrong tags, wrong lengths, trailing bytes,
+non-canonical padding, and invalid enum values. It is separate from projection
+so byte compatibility stays local to the owning fact module while semantic
+admission remains in the projector.
 
-Connection frames are opaque fixed-size envelopes until opened by the
-connection-frame projector with exact connection context. Connection fact
-receipts are local facts plus context offers about recovered shared facts, not
-projector side channels.
+### Connection Frames
+
+Connection frames are the transport envelope boundary. They are opaque
+fixed-size byte envelopes until opened by a connection projector with exact
+connection context. They are separate from auth, content, and sync semantics:
+frames move bytes and produce receipts, while the owning fact projector
+validates every recovered fact.
 
 ### Simplicity Guardrails
 
-No old labels, blocker tables, ready queues, canonical ingress queues,
-recently-valid queues, pending reprojection queues, or worker catalogs remain.
-These names are legacy/removal vocabulary only. They must not reappear in
-target code paths except in tests or documentation.
+Production work is represented with immutable facts, standing context,
+time-wake schedules, pending projection, durable intents, and ephemeral intents.
+Protocol progress is visible through those mechanisms and through schema-owned
+rows. The declared runtime pipeline is the complete work surface: production
+state enters that pipeline as facts, context, time wakes, intents, or
+schema-owned rows.
 
 ## Documentation
 
-Live design and maintenance docs live under `docs/`:
+Active design and maintenance docs are:
 
-- `docs/README.md` indexes the live and archived documentation sets.
-- `docs/RULES.md` records architecture rules and projector style.
-- `docs/documentation_guide.md` records documentation style.
-- `docs/auth.md` records auth and key-material invariants.
-- `docs/negentropy_recs.md` records dep-aware sync recommendations.
+- `README.md`: architecture overview and protocol function boundaries.
+- `docs/RULES.md`: architecture rules, projector rules, and guardrails.
+- `src/core/README.md`: core/runtime responsibility boundaries.
+- `src/core/pipeline/README.md`: projection and handler commit boundaries.
+- `src/protocol/*/README.md`: fact-scope responsibilities, facts, handlers,
+  row state, and cross-scope interfaces.
+- `verus_plan.md`: verification plan.
 
-Superseded planning notes live under `docs/archived/`. `verus_plan.md` remains
-at the repository root because it is a separate verification plan.
+Planning notes live under `docs/archived/`.

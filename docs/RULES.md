@@ -1,7 +1,7 @@
 # Rules
 
-These rules describe the current poc-10 architecture. The old source island
-has been removed; new behavior belongs in `src/core` or `src/protocol`.
+These rules describe the current poc-10 architecture. Runtime behavior belongs
+in `src/core` or `src/protocol`.
 
 ## Architecture Boundary
 
@@ -258,18 +258,18 @@ keys already observed before retirement.
   correct, update the boundary test with the rule that makes it correct.
 - Tests should not seed protocol rows directly unless they are explicitly unit
   tests for that row codec.
-- Guardrails should fail on old vocabulary in target code: labels, blockers,
-  ready queues, canonical ingress queues, worker catalogs, handler subdirs, and
-  direct protocol/worker imports.
+- Guardrails should fail when production code routes work outside the declared
+  fact, context, time-wake, projection, intent, and schema-owned row surfaces.
 
 ### Simplicity Guardrails
 
-No old labels, blocker tables, ready queues, canonical ingress queues,
-recently-valid queues, pending reprojection queues, or worker catalogs remain.
-These names are legacy/removal vocabulary only. They must not reappear in
-target code paths except in tests or documentation. If a new file shape or
-import is correct, update the boundary test with the rule that makes it
-correct.
+Production work is represented with immutable facts, standing context,
+time-wake schedules, pending projection, durable intents, and ephemeral intents.
+Protocol progress is visible through those mechanisms and through schema-owned
+rows. The declared runtime pipeline is the complete work surface: production
+state enters that pipeline as facts, context, time wakes, intents, or
+schema-owned rows. If a new file shape or import is correct, update the
+boundary test with the rule that makes it correct.
 
 ## In-Line Documentation
 
@@ -280,5 +280,5 @@ obvious code.
 Do not reference transient delivery state in source comments: branch names,
 commit hashes, task numbers, slice numbers, "before/after merge" phrasing, or
 abandoned plan filenames. Stable architecture docs such as `README.md`, this
-file, and `docs/auth.md` may be referenced when the comment is pinning a
-lasting invariant.
+file, and scope READMEs under `src/protocol/` may be referenced when the
+comment is pinning a lasting invariant.
