@@ -413,8 +413,8 @@ fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots(
     let paths = vec![
         root.join("src/protocol/connection/send_facts_on_connection.rs"),
         root.join("src/protocol/connection/send_network_frame.rs"),
-        root.join("src/protocol/connection/frame/create.rs"),
-        root.join("src/protocol/connection/frame/wire.rs"),
+        root.join("src/protocol/connection_frame.rs"),
+        root.join("src/protocol/connection_frame_wire.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -836,7 +836,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
     paths.extend(intent_handler_files(&root));
-    paths.push(root.join("src/protocol/connection/frame/create.rs"));
+    paths.push(root.join("src/protocol/connection_frame.rs"));
 
     let offenders = matching_code_lines(
         &root,

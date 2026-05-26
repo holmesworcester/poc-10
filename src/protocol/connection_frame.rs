@@ -3,24 +3,29 @@
 //! Outbound connection sends call this module to reject private/local payloads
 //! and seal an ordered fact bundle into fixed small, file-slice, or bundle
 //! frame bytes.
-//! Inbound receive handling calls this module for established-connection frame
-//! facts. Frame projection calls it again to open a frame and turn each inner
-//! payload into a durable child fact plus receipt.
+//! Inbound receive handling uses this module only to classify established
+//! connection frame bytes. The `connection::frame_*` fact families construct
+//! the actual local facts, then call back here to open a frame and turn each
+//! inner payload into a durable child fact plus receipt.
 //!
 //! The invariants are deliberately split: socket metadata enters only through
-//! `ReceivedNetworkFrame`, connection secrets come only from matched local
+//! receive-network handler, connection secrets come only from matched local
 //! `connection::response` context, and child facts are admitted through their
-//! owning typed codecs. Keep cryptographic frame mechanics here; keep socket IO
-//! in core/network handlers and semantic child validation in each child family.
+//! owning typed codecs. Keep cryptographic frame mechanics in
+//! `connection_frame_wire`, keep socket IO in core/network handlers, and keep
+//! received-frame fact construction in the frame fact families.
 
 use crate::core::context::ContextNeed;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{FactCodec, ProjectionContext, ProjectionOutput};
 use crate::core::wire::FixedSlot;
+use crate::protocol::connection_frame_wire as wire;
+pub(crate) use crate::protocol::connection_frame_wire::{
+    seal_connection_send_frame, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
+    CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
+};
 use crate::protocol::{auth, connection, content, sync};
-
-use super::wire::{self, ConnectionFrameFactBundle, SealConnectionFrame};
 
 /// Return the bytes that may be packaged into a connection::frame frame.
 ///
@@ -74,60 +79,27 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
     )
 }
 
-pub fn seal_connection_send_frame(
-    connection_id: FactId,
-    fact_ids: &[FactId],
-    connection_fact: &Fact,
-    facts: &[&Fact],
-) -> Result<Vec<u8>, String> {
-    if connection_fact.id != connection_id {
-        return Err("send_facts_on_connection connection fact id mismatch".to_string());
-    }
-    if fact_ids.len() != facts.len() {
-        return Err(
-            "send_facts_on_connection fact id list does not match loaded facts".to_string(),
-        );
-    }
-    let connection = connection::response::layout::decode_fact(connection_fact.body())?;
-
-    let mut bundle = ConnectionFrameFactBundle::new();
-    for (expected_id, fact) in fact_ids.iter().zip(facts.iter().copied()) {
-        if fact.id != *expected_id {
-            return Err("send_facts_on_connection loaded fact id mismatch".to_string());
-        }
-        bundle.push(require_sendable_fact(fact)?.to_vec());
-    }
-
-    wire::seal_connection_frame(SealConnectionFrame {
-        connection_id,
-        sender_endpoint_id: connection.from_endpoint,
-        receiver_endpoint_id: connection.to_endpoint,
-        connection_secret: connection.connection_secret,
-        nonce: wire::connection_send_nonce(
-            connection_id,
-            connection.from_endpoint,
-            connection.to_endpoint,
-            fact_ids,
-        ),
-        facts: bundle,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Receive-side admission.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy)]
-pub struct ReceivedNetworkFrame<'a> {
-    pub frame: &'a [u8],
-    pub origin_addr: &'a [u8],
-    pub received_at_local_ms: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceivedConnectionFrameKind {
+    Small,
+    FileSlice,
+    Bundle,
 }
 
-pub fn received_network_frame_effect(
-    input: ReceivedNetworkFrame<'_>,
-) -> Result<PipelineEffects, String> {
-    received_connection_frame_effect(input)
+pub(crate) fn classify_received_frame(frame: &[u8]) -> Option<ReceivedConnectionFrameKind> {
+    let parts = wire::decode_frame_parts(frame).ok()?;
+    match parts.header.size_class {
+        wire::CONNECTION_FRAME_SIZE_CLASS_SMALL => Some(ReceivedConnectionFrameKind::Small),
+        wire::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
+            Some(ReceivedConnectionFrameKind::FileSlice)
+        }
+        wire::CONNECTION_FRAME_SIZE_CLASS_BUNDLE => Some(ReceivedConnectionFrameKind::Bundle),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,54 +167,7 @@ pub fn received_connection_response_fact_effect(
     Ok(PipelineEffects::new().fact(response_fact).fact(receipt))
 }
 
-fn received_connection_frame_effect(
-    input: ReceivedNetworkFrame<'_>,
-) -> Result<PipelineEffects, String> {
-    let Ok(parts) = wire::decode_frame_parts(input.frame) else {
-        return Ok(PipelineEffects::new());
-    };
-    match parts.header.size_class {
-        wire::CONNECTION_FRAME_SIZE_CLASS_SMALL => {
-            let fact = connection::frame_small::fact::ConnectionFrameSmallFact {
-                origin_addr: origin_addr_slot(input.origin_addr)?,
-                received_at_local_ms: input.received_at_local_ms,
-                frame: exact_frame_slot(input.frame)?,
-            };
-            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
-                FactScope::Local,
-                input.received_at_local_ms,
-                connection::frame_small::layout::encode_fact(&fact)?,
-            )))
-        }
-        wire::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
-            let fact = connection::frame_file_slice::fact::ConnectionFrameFileSliceFact {
-                origin_addr: origin_addr_slot(input.origin_addr)?,
-                received_at_local_ms: input.received_at_local_ms,
-                frame: exact_frame_slot(input.frame)?,
-            };
-            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
-                FactScope::Local,
-                input.received_at_local_ms,
-                connection::frame_file_slice::layout::encode_fact(&fact)?,
-            )))
-        }
-        wire::CONNECTION_FRAME_SIZE_CLASS_BUNDLE => {
-            let fact = connection::frame_bundle::fact::ConnectionFrameBundleFact {
-                origin_addr: origin_addr_slot(input.origin_addr)?,
-                received_at_local_ms: input.received_at_local_ms,
-                frame: exact_frame_slot(input.frame)?,
-            };
-            Ok(PipelineEffects::new().ephemeral_fact(Fact::new(
-                FactScope::Local,
-                input.received_at_local_ms,
-                connection::frame_bundle::layout::encode_fact(&fact)?,
-            )))
-        }
-        _ => Ok(PipelineEffects::new()),
-    }
-}
-
-fn origin_addr_slot(
+pub(crate) fn origin_addr_slot(
     origin_addr: &[u8],
 ) -> Result<connection::fact_receipt::fact::OriginAddr, String> {
     let normalized = connection::fact_receipt::create::normalize_origin_addr_bytes(origin_addr)?;
@@ -250,7 +175,7 @@ fn origin_addr_slot(
         .map_err(|err| format!("connection frame origin addr: {err}"))
 }
 
-fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot<N>, String> {
+pub(crate) fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot<N>, String> {
     if frame.len() != N {
         return Err(format!("connection frame must be exactly {N} bytes"));
     }

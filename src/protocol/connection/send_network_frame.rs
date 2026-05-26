@@ -8,8 +8,8 @@
 //!
 //! The payload is only `(routing_key, frame bytes)`, and the idempotence key is
 //! deterministic over both fields. Change this file for route lookup, retry
-//! behavior, or outbound network queue interaction. Change `connection::frame`
-//! for frame byte semantics.
+//! behavior, or outbound network queue interaction. Change connection-frame
+//! protocol helpers for frame byte semantics.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
@@ -18,7 +18,7 @@ use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 /// Stable intent kind for outbound network frame sends.
 pub const SEND_NETWORK_FRAME: &str = "send_network_frame";
 
-/// Maximum frame size accepted by the handler. Mirrors the largest connection::frame
+/// Maximum frame size accepted by the handler. Mirrors the largest connection-frame
 /// frame size class with a small headroom; oversized frames are rejected
 /// before any route lookup or socket work is attempted.
 pub const MAX_FRAME_BYTES: usize = 1 << 21; // 2 MiB
@@ -32,7 +32,7 @@ pub type RoutingKey = [u8; 32];
 pub struct SendNetworkFrame {
     /// Routing key for the destination socket / connection.
     pub routing_key: RoutingKey,
-    /// Opaque outbound frame bytes. Already packaged by the connection::frame layer.
+    /// Opaque outbound frame bytes. Already packaged by connection-frame helpers.
     pub frame: Vec<u8>,
 }
 

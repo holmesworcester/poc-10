@@ -24,7 +24,6 @@ pub mod bootstrap_response;
 pub mod close;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
-pub mod frame;
 pub mod frame_bundle;
 pub mod frame_file_slice;
 pub mod frame_small;

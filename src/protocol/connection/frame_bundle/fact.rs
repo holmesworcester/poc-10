@@ -2,7 +2,7 @@
 
 use crate::core::wire::FixedSlot;
 use crate::protocol::connection::fact_receipt::fact::OriginAddr;
-use crate::protocol::connection::frame::wire::CONNECTION_FRAME_BUNDLE_WIRE_BYTES;
+use crate::protocol::connection_frame_wire::CONNECTION_FRAME_BUNDLE_WIRE_BYTES;
 
 pub type ConnectionFrameBundleBytes = FixedSlot<CONNECTION_FRAME_BUNDLE_WIRE_BYTES>;
 

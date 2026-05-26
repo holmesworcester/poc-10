@@ -21,10 +21,14 @@
 //!
 //! Scopes are: auth authority and key material, content and retention,
 //! connection protocol, and sync convergence. `payload` holds intent payload
-//! machinery shared across scope intent modules.
+//! machinery shared across scope intent modules. `connection_frame*` holds the
+//! established-connection encrypted byte machinery shared by connection frame
+//! fact families and send/receive intents; it is not itself a fact family.
 
 pub mod app;
 pub(crate) mod cli;
+pub(crate) mod connection_frame;
+pub mod connection_frame_wire;
 pub mod payload;
 pub mod registry;
 

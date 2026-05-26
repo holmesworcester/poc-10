@@ -18,16 +18,10 @@ use topo::protocol::connection;
 use topo::protocol::connection::bootstrap_request;
 use topo::protocol::connection::bootstrap_response;
 use topo::protocol::connection::fact_receipt::fact::OriginAddr;
-use topo::protocol::connection::frame::wire::{
-    self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
-};
-use topo::protocol::connection::frame::wire::{
-    self as frame_wire, CONNECTION_FRAME_BUNDLE_WIRE_BYTES, CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-    CONNECTION_FRAME_SMALL_WIRE_BYTES,
-};
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
+use topo::protocol::connection::frame_file_slice::layout as frame_file_slice_layout;
 use topo::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
 use topo::protocol::connection::frame_small::layout as frame_small_layout;
 use topo::protocol::connection::frame_small::project::ConnectionFrameSmallProjector;
@@ -39,6 +33,14 @@ use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection::response::fact::ConnectionResponseFact;
 use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::connection_frame_wire::{
+    self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
+};
+use topo::protocol::connection_frame_wire::{
+    self as frame_wire, CONNECTION_FRAME_BUNDLE_WIRE_BYTES, CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+    CONNECTION_FRAME_SIZE_CLASS_BUNDLE, CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+    CONNECTION_FRAME_SMALL_WIRE_BYTES,
+};
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 use topo::protocol::sync::compare::layout as sync_compare_layout;
 
@@ -214,6 +216,54 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
     assert_eq!(output.ephemeral_facts.len(), 1);
     let input = frame_small_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode small connection frame");
+    assert_eq!(input.frame, frame);
+    assert_eq!(input.origin_addr, ORIGIN);
+    assert_eq!(input.received_at_local_ms, RECEIVED_AT);
+}
+
+#[test]
+fn receive_handler_emits_ephemeral_connection_frame_file_slice() {
+    let frame = frame_wire::encode_frame_bytes(
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+        FixedBytes([1; 32]),
+        FixedBytes([2; 24]),
+        b"classified file-slice frame",
+    )
+    .expect("file-slice frame");
+    assert_eq!(frame.len(), CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES);
+
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .expect("receive intent becomes file-slice connection frame input");
+
+    assert!(output.facts.is_empty());
+    assert_eq!(output.ephemeral_facts.len(), 1);
+    let input = frame_file_slice_layout::decode_fact(output.ephemeral_facts[0].body())
+        .expect("decode file-slice connection frame");
+    assert_eq!(input.frame, frame);
+    assert_eq!(input.origin_addr, ORIGIN);
+    assert_eq!(input.received_at_local_ms, RECEIVED_AT);
+}
+
+#[test]
+fn receive_handler_emits_ephemeral_connection_frame_bundle() {
+    let frame = frame_wire::encode_frame_bytes(
+        CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+        FixedBytes([3; 32]),
+        FixedBytes([4; 24]),
+        b"classified bundle frame",
+    )
+    .expect("bundle frame");
+    assert_eq!(frame.len(), CONNECTION_FRAME_BUNDLE_WIRE_BYTES);
+
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .expect("receive intent becomes bundle connection frame input");
+
+    assert!(output.facts.is_empty());
+    assert_eq!(output.ephemeral_facts.len(), 1);
+    let input = frame_bundle_layout::decode_fact(output.ephemeral_facts[0].body())
+        .expect("decode bundle connection frame");
     assert_eq!(input.frame, frame);
     assert_eq!(input.origin_addr, ORIGIN);
     assert_eq!(input.received_at_local_ms, RECEIVED_AT);
