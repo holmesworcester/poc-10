@@ -432,7 +432,7 @@ impl Runtime {
         start_exclusive: Option<u64>,
         end_inclusive: u64,
         limit: usize,
-    ) -> usize {
+    ) -> Result<usize, String> {
         pipeline::process_due_time_range(
             &self.store,
             timeline,
@@ -440,7 +440,6 @@ impl Runtime {
             end_inclusive,
             limit,
         )
-        .expect("runtime time wake should persist pending projection")
     }
 }
 
@@ -494,6 +493,25 @@ mod tests {
         assert!(
             runtime.facts().any(|fact| fact.id == external_fact.id),
             "fact iteration should read externally committed facts from SQLite"
+        );
+    }
+
+    #[test]
+    fn process_due_time_range_rejects_oversized_time_without_panicking() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+
+        let err = runtime
+            .process_due_time_range(
+                Timeline::new("test_time").expect("timeline"),
+                None,
+                i64::MAX as u64 + 1,
+                1,
+            )
+            .expect_err("oversized SQLite time should return an error");
+
+        assert!(
+            err.contains("SQL value exceeds SQLite integer range"),
+            "{err}"
         );
     }
 }

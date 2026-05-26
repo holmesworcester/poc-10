@@ -392,7 +392,7 @@ fn settle_due_message_time_wakes(ctx: &mut MatchCliContext) -> Result<(), String
             None,
             now_minute,
             COMMAND_SETTLE_LIMIT,
-        );
+        )?;
         ctx.settle_local_command_work()?;
         if due == 0 {
             return Ok(());

@@ -166,7 +166,8 @@ fn drain_time_wakes(
         let Some(end_inclusive) = (wake.end_inclusive)(runtime.store())? else {
             continue;
         };
-        due += runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, work_limit);
+        due +=
+            runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, work_limit)?;
     }
     Ok(WorkStatus::progressed(due > 0))
 }
