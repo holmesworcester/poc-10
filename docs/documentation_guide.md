@@ -115,10 +115,10 @@ For public structs, traits, and important helpers:
 2. Name the atomicity, idempotence, ordering, or ownership rule if there is one.
 3. Say what the caller still owns.
 
-For projector files, use this guide together with `projector_style.md`. The
-general documentation standard still applies, but projector prose also has to
-make admission policy, context proof shape, parking behavior, and materialized
-row ownership visible.
+For projector files, use this guide together with the projector section in
+`docs/RULES.md`. The general documentation standard still applies, but
+projector prose also has to make admission policy, context proof shape, parking
+behavior, and materialized row ownership visible.
 
 Examples:
 

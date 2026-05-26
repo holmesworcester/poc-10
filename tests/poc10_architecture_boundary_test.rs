@@ -190,7 +190,7 @@ fn meaningful_manifest_lines(text: &str) -> Vec<&str> {
 #[test]
 fn poc10_success_criteria_are_recorded_in_architecture_doc() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let doc = source_text(&root.join("new_architecture.md"));
+    let doc = source_text(&root.join("README.md"));
     let required = [
         "## Architecture Criteria",
         "There is no `mod.rs` anywhere in the repository.",
@@ -216,7 +216,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "new_architecture.md is missing poc-10 success criteria:\n{}",
+        "README.md is missing poc-10 success criteria:\n{}",
         missing.join("\n")
     );
 }
@@ -571,8 +571,8 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
 #[test]
 fn poc10_architecture_docs_describe_legacy_queues_as_removed_mechanisms() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let architecture = source_text(&root.join("new_architecture.md"));
-    let migration = source_text(&root.join("poc10_migration.md"));
+    let architecture = source_text(&root.join("README.md"));
+    let rules = source_text(&root.join("docs/RULES.md"));
 
     for required in [
         "These names are legacy/removal vocabulary only.",
@@ -582,7 +582,7 @@ fn poc10_architecture_docs_describe_legacy_queues_as_removed_mechanisms() {
         "recently-valid queues, pending reprojection queues, or worker catalogs remain",
     ] {
         assert!(
-            architecture.contains(required) || migration.contains(required),
+            architecture.contains(required) || rules.contains(required),
             "architecture docs must frame old worker queues as removed target mechanisms: {required}"
         );
     }
@@ -594,7 +594,7 @@ fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents() {
     let projector_paths = target_projector_files(root);
     assert!(
         !projector_paths.is_empty(),
-        "scan target src/protocol/facts/**/project.rs files"
+        "scan target src/protocol/<scope>/**/project.rs files"
     );
     let forbidden = [
         "ProjectionOutput::rows",

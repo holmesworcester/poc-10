@@ -9,7 +9,7 @@ workspace and what this store is allowed to open or share for that authority.
 Content retention and deletion live in `protocol::content`; they interact with
 auth keys by emitting purge context that auth projectors can range-match.
 Production code expresses these relationships with facts, context
-needs/offers, `WakeLoop`, projectors, and handlers.
+needs/offers, the core runtime pipeline, projectors, and handlers.
 
 ## Fact Families
 

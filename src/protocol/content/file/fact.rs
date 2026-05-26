@@ -4,7 +4,7 @@
 //! naming a file's encrypted blob. The public envelope carries the workspace,
 //! parent message, author, file id, blob byte count, slice budget, and the
 //! BLAKE3 root hash of the encrypted blob (carried in plaintext per the design
-//! note in `new_architecture.md`). Filename, mime, and other descriptor secrets
+//! note in `README.md`). Filename, mime, and other descriptor secrets
 //! ride inside an opaque `sealed_metadata` slot encrypted with the parent
 //! message content key.
 //!

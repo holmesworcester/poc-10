@@ -544,7 +544,7 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_projector_owned() {
         );
     }
 
-    let style = source_text(&root.join("projector_style.md"));
+    let style = source_text(&root.join("docs/RULES.md"));
     for required_pattern in [
         "## Deletion Pattern",
         "Deletion is target-owned",
@@ -553,7 +553,7 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_projector_owned() {
     ] {
         assert!(
             style.contains(required_pattern),
-            "projector_style.md must remember the target-owned deletion pattern; missing {required_pattern:?}"
+            "docs/RULES.md must remember the target-owned deletion pattern; missing {required_pattern:?}"
         );
     }
 
