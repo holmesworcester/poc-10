@@ -9,13 +9,12 @@
 //!      matching.
 
 use crate::core::context::ContextNeed;
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use std::collections::BTreeSet;
 
-use crate::protocol::sync::encrypted_root::project::require_fact_scope;
 use crate::protocol::sync::share_fact_with_sync as share_sync;
 
 #[derive(Debug, Clone, Default)]
@@ -105,4 +104,12 @@ pub fn context_have_from_optional_needs<'a>(
     needs: impl IntoIterator<Item = Option<&'a ContextNeed>>,
 ) -> Vec<FactId> {
     context_have_from_needs(context, needs.into_iter().flatten())
+}
+
+fn require_fact_scope(fact: &Fact, expected: &FactScope) -> Result<(), String> {
+    if &fact.scope == expected {
+        Ok(())
+    } else {
+        Err("sync context fact scope does not match body workspace".to_string())
+    }
 }

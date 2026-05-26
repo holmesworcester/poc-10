@@ -6,12 +6,10 @@
 //!   2. MATERIALIZE. The fact records no rows; full-range connect sync and
 //!      progressive send own transfer for this protocol slice.
 
-use crate::core::facts::Fact;
+use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-
-use crate::protocol::sync::encrypted_root::project as encrypted_root_project;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncRangeRequestProjector;
@@ -41,9 +39,17 @@ impl TypedProjector<super::Codec> for SyncRangeRequestProjector {
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
-        encrypted_root_project::require_fact_scope(fact, &scope)?;
+        require_fact_scope(fact, &scope)?;
 
         // 2. Materialize.
         Ok(ProjectionOutput::new())
+    }
+}
+
+fn require_fact_scope(fact: &Fact, expected: &FactScope) -> Result<(), String> {
+    if &fact.scope == expected {
+        Ok(())
+    } else {
+        Err("sync context fact scope does not match body workspace".to_string())
     }
 }

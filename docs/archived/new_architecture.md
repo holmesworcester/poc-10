@@ -249,9 +249,8 @@ A fact module is one fact family. A directory that defines several durable
 fact types is a bundle and should be split before review, even when the facts
 are conceptually related. This rule applies to auth and sync equally:
 `recipient_key`, `local_recipient_key`, `key_wrap`, `sync_compare`,
-`sync_have_id`, `sync_need_id`, `sync_range_request`, `sync_encrypted_root`,
-`sync_shared_fact`, and `sync_key_wrap_available` are separate fact-family
-modules.
+`sync_have_id`, `sync_need_id`, `sync_range_request`, and `sync_shared_fact`
+are separate fact-family modules.
 
 A fact-family directory contains ONLY the standard role files, and only the
 ones it needs: `fact.rs`, `layout.rs`, `project.rs`, `rows.rs`, `queries.rs`,

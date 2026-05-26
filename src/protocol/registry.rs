@@ -623,9 +623,7 @@ projector_routes! {
     project_invite_accepted => auth::invite_accepted::layout::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector;
     project_retention_policy => content::retention_policy::layout::TYPE_RETENTION_POLICY, content::retention_policy::project::RetentionPolicyProjector;
     project_sync_range_request => sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector;
-    project_sync_encrypted_root => sync::encrypted_root::layout::TYPE_ENCRYPTED_ROOT, sync::encrypted_root::project::SyncEncryptedRootProjector;
     project_sync_shared_fact => sync::shared_fact::layout::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector;
-    project_sync_key_wrap_available => sync::key_wrap_available::layout::TYPE_KEY_WRAP_AVAILABLE, sync::key_wrap_available::project::SyncKeyWrapAvailableProjector;
     project_sync_compare => sync::compare::layout::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector;
     project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector;
     project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector;
