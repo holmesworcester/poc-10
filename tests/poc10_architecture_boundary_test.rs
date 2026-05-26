@@ -191,19 +191,23 @@ fn meaningful_manifest_lines(text: &str) -> Vec<&str> {
 fn poc10_success_criteria_are_recorded_in_architecture_doc() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc = source_text(&root.join("README.md"));
+    let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
     let required = [
         "## Architecture Principles",
-        "## Rules",
-        "There is no `mod.rs` anywhere in the repository.",
-        "There is no root `src/commands` module",
         "src/core/command_context.rs",
         "src/protocol.rs",
         "src/protocol/<scope>.rs",
-        "There is no product `demo` or `smoke` command",
         "generic runtime/app mechanics",
         "src/core/schema.rs",
         "src/core/network.rs",
         "src/protocol/registry.rs",
+        "## Runtime Shape",
+        "Protocol manifests declare their commands, fact families, intent handlers, schemas, and daemon hooks",
+        "app assembles those declarations into a `ProtocolDescription`",
+        "Core uses that description to build the `con` CLI",
+        "without hard-coding their names or behavior",
+        "Runtime turns are serialized per database to avoid races between command-created facts and ongoing projection or intent activity",
+        "a command cannot admit facts while another turn is draining pending facts, matching context, committing projector output, or running handlers",
         "## Protocol Function Boundaries",
         "### Projectors",
         "### Intent Handlers",
@@ -214,12 +218,17 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
 
     let missing = required
         .into_iter()
-        .filter(|needle| !doc.contains(needle))
+        .filter(|needle| !normalized.contains(needle))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
         "README.md is missing poc-10 success criteria:\n{}",
         missing.join("\n")
+    );
+
+    assert!(
+        !doc.contains("## Rules"),
+        "README.md should keep architecture description separate from rules"
     );
 }
 

@@ -29,6 +29,14 @@ runtime a standing relationship surface. Later facts can wake when relevant
 context appears, and earlier offers can satisfy later needs without hidden
 callbacks or broad scans.
 
+Because context is projector-described evidence, it is more powerful than a
+Boolean dependency block. A projector decides which context proves the fact,
+whether missing context parks or rejects it, whether derived state is durable or
+ephemeral, what context it offers to later facts, what future context should
+wake it, and which bounded intents should run. Core stores facts, matches
+context, schedules wakes, and commits declared effects; the narrative for what
+happens when a fact exists stays in the owning projector.
+
 Protocol aspects such as connection, sync, and auth are all described as
 facts. Connection handshakes, sealed frame receipts, sync compares, key wraps,
 workspace authority, messages, deletions, and retention policy are admitted and
@@ -58,59 +66,55 @@ scheduler, one intent scheduling surface, and one product-facing binary:
 
 The current architecture is described by these boundaries:
 
-- Core owns protocol-neutral mechanics: facts, context, command context,
-  byte-range context matching,
+- **Core mechanics.** Core owns protocol-neutral mechanics: facts, context,
+  command context (`src/core/command_context.rs`), byte-range context matching,
   generic runtime/app mechanics, pending fact processing, context wake fanout,
   intent dispatch, storage mechanics, wire field primitives, network queues,
   TCP, clock, and crypto helpers.
-- Protocol scopes own fact semantics: layouts, projectors, context
+- **Scope semantics.** Protocol scopes own fact semantics: layouts,
+  projectors, context
   roles/ranges, command constructors, read-model rows, queries, CLI adapters,
   and protocol validation rules.
-- `src/protocol.rs` and `src/protocol/<scope>.rs` are manifests. A scope
-  manifest declares its fact families and intent handlers in one place.
-- Intent handlers own bounded stateful work and handler checkpoint state.
-- Projectors return needs, offers, time wakes, row mutations, and intents.
-- Intent handlers return facts, purged facts, row mutations, and intents.
-  Purge output remains a bounded core-owned escape hatch for exact fact
-  removal, not a broad storage API.
-- No fact module, intent handler, command, schema, or wire layout reaches
-  around core to call another stage directly.
-- Runtime coordination is explicit and durable where it needs to survive
-  restart: pending facts, time wakes, durable intents, and ephemeral intents are
-  named queue surfaces rather than hidden callbacks.
-- Schema declarations are explicit SQL DDL in the owning Rust modules:
+- **Scope manifests.** `src/protocol.rs` and `src/protocol/<scope>.rs` are
+  manifests. A scope manifest declares its fact families and intent handlers in
+  one place.
+- **Handler work.** Intent handlers own bounded stateful work and handler
+  checkpoint state.
+- **Projector output.** Projectors return needs, offers, time wakes, row
+  mutations, and intents.
+- **Handler output.** Intent handlers return facts, purged facts, row
+  mutations, and intents. Purge output remains a bounded core-owned escape
+  hatch for exact fact removal, not a broad storage API.
+- **Pipeline isolation.** No fact module, intent handler, command, schema, or
+  wire layout reaches around core to call another stage directly.
+- **Durable queues.** Runtime coordination is explicit and durable where it
+  needs to survive restart: pending facts, time wakes, durable intents, and
+  ephemeral intents are named queue surfaces rather than hidden callbacks.
+- **Explicit schemas.** Schema declarations are explicit SQL DDL in the owning
+  Rust modules:
   `src/core/schema.rs`, `src/core/network.rs`, and
   `src/protocol/registry.rs`.
-- Wire layouts are declarative and fixed length. There are no variable payload
-  slots except bounded, canonical slots explicitly modeled by a fact layout.
-
-## Rules
-
-These repository rules keep the architecture mechanically visible:
-
-- There is no event-bus layer. The runtime coordinates explicit SQL-backed
-  queues: pending facts, time wakes, durable intents, and ephemeral intents.
-- There is no product `demo` or `smoke` command. Smoke coverage belongs in
-  black-box CLI tests against the real `con` binary.
-- There is no root `src/commands` module. The command context lives in
-  `src/core/command_context.rs`.
-- There is no `mod.rs` anywhere in the repository.
-- Boundary tests fail if dumping-ground files, ad hoc SQL, ad hoc codecs,
-  broad projector reads, direct handler calls, or direct network/store side
-  effects appear.
+- **Fixed layouts.** Wire layouts are declarative and fixed length. There are
+  no variable payload slots except bounded, canonical slots explicitly modeled
+  by a fact layout.
 
 ## Runtime Shape
 
-`src/main.rs` delegates to the product app boundary. The app supplies a
-`ProtocolDescription`; core opens the declared runtime, runs the declared daemon
-tick, and dispatches registered protocol commands without knowing their names
-or behavior.
+`src/main.rs` delegates to the product app boundary. Protocol manifests declare
+their commands, fact families, intent handlers, schemas, and daemon hooks; the
+app assembles those declarations into a `ProtocolDescription` and passes it to
+core. Core uses that description to build the `con` CLI, open the declared
+runtime, run the declared daemon tick, and dispatch registered protocol commands
+without hard-coding their names or behavior.
 
-Runtime turns are serialized per database. A daemon tick and a normal protocol
-CLI command both acquire `<db>.runtime.lock` before entering the runtime, so they
-cannot consume projection or intent queues concurrently. The daemon releases the
-turn after each bounded tick; CLI commands wait for the next turn, and `reset`
-removes the runtime lock file along with the database and daemon lock files.
+Runtime turns are serialized per database to avoid races between
+command-created facts and ongoing projection or intent activity. A daemon tick
+and a normal protocol CLI command both acquire `<db>.runtime.lock` before
+entering the runtime, so a command cannot admit facts while another turn is
+draining pending facts, matching context, committing projector output, or
+running handlers. The daemon releases the turn after each bounded tick; CLI
+commands wait for the next turn, and `reset` removes the runtime lock file
+along with the database and daemon lock files.
 
 Runtime work moves through these core-owned queues:
 
