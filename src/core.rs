@@ -32,6 +32,7 @@ pub mod facts;
 pub mod intents;
 pub mod network;
 pub mod pipeline;
+pub mod profile;
 pub mod projectors;
 pub mod runtime;
 pub mod schema;

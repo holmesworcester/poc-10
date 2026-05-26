@@ -43,6 +43,41 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
 }
 
 #[test]
+fn generate_cli_can_profile_pipeline_phases_to_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "profiled-generate.db");
+    let workspace_id = create_workspace(&db);
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+
+    let output = con_cli_with_env(
+        &["--db", &db, "generate", &workspace_id, "2", "64"],
+        &[("TOPO_PROFILE_GENERATE", "1")],
+    );
+    assert!(
+        output.status.success(),
+        "command failed\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(out.contains("generated_facts: 2"), "{out}");
+    let err = stderr(&output);
+    assert!(err.contains("generate_profile status=ok"), "{err}");
+    assert!(err.contains("command_build_ms="), "{err}");
+    assert!(err.contains("commit_ms="), "{err}");
+    assert!(err.contains("projection_ms="), "{err}");
+    assert!(err.contains("projection_load_pending_fact_ms="), "{err}");
+    assert!(err.contains("projection_prepare_effects_ms="), "{err}");
+    assert!(err.contains("projection_projector_cpu_ms="), "{err}");
+    assert!(err.contains("projection_commit_effects_ms="), "{err}");
+    assert!(err.contains("projection_replace_context_ms="), "{err}");
+    assert!(err.contains("projection_wake_context_matches_ms="), "{err}");
+    assert!(err.contains("intent_dispatch_ms="), "{err}");
+    assert!(err.contains("share_record_sync_contribution_ms="), "{err}");
+    assert!(err.contains("negentropy_update_path_ms="), "{err}");
+}
+
+#[test]
 fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "clocked-generate.db");
