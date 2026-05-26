@@ -300,6 +300,30 @@ fn sync_readme_contains_integrated_projector_owned_negentropy_model() {
     }
 }
 
+#[test]
+fn auth_readme_distinguishes_sync_exact_fact_from_auth_key_wrap_context() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme_path = root.join("src/protocol/auth/README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+    let normalized = normalize_whitespace(&readme);
+
+    for required in [
+        "Auth can consume sync-owned `sync_exact_fact` context",
+        "Auth publishes `sync_key_wrap` from accepted concrete `key_wrap` facts",
+        "key-wrap availability for auth wraps is an auth offer, not a sync-owned offer",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "auth README should distinguish sync-owned exact facts from auth-owned key-wrap context: missing {required:?}"
+        );
+    }
+    assert!(
+        !normalized.contains("sync-owned exact-fact or key-wrap availability context"),
+        "auth README should not describe key-wrap availability as sync-owned context"
+    );
+}
+
 fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

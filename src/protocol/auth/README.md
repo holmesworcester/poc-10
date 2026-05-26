@@ -60,9 +60,11 @@ continue projection. Connection consumes `auth_daemon_endpoint`,
 bootstrap frames open locally and let request/response projection validate
 invite signatures.
 
-Auth can consume sync-owned exact-fact or key-wrap availability context when an
-auth projector is waiting for a named fact that arrived through replication.
-That context is only a wake/proof locator: auth still decodes and validates the
+Auth can consume sync-owned `sync_exact_fact` context when an auth projector is
+waiting for a named fact that arrived through replication. Auth publishes
+`sync_key_wrap` from accepted concrete `key_wrap` facts, so key-wrap
+availability for auth wraps is an auth offer, not a sync-owned offer. These
+contexts are only wake/proof locators: auth still decodes and validates the
 matched payload before trusting it.
 
 ### Other Interfaces
