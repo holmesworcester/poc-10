@@ -6,6 +6,53 @@ runs projectors, dispatches queued intents, commits effect batches, hosts CLI
 and daemon loops, and moves opaque network bytes. It must not know what a
 workspace, message, invite, key wrap, sync range, or connection fact means.
 
+## How Core Works
+
+Core is the reusable runtime loop around a protocol declaration. At startup the
+app hands core a `ProtocolDescription`; core opens the selected SQLite store,
+applies core, network, and protocol schemas, builds the command registry, and
+constructs a `Runtime` from the declared projector, handler registry, row
+allowlist, schema sources, and daemon hooks. From that point on, core does not
+ask what a protocol fact means. It only moves facts, context, rows, intents,
+time wakes, and opaque network bytes through the declared pipeline.
+
+A normal command is a serialized runtime turn. Core opens the store, builds a
+`CommandContext`, calls the protocol command, and commits the command's
+`PipelineEffects`. If the command emitted facts, core stores their immutable
+bytes, records local admission metadata, and marks them pending for projection.
+The command can return human-readable `CliOutput`, but durable protocol state
+must enter through facts, row mutations, or intents.
+
+Projection is core's deterministic reaction step. Core drains
+`pending_projection`, loads one fact and its matched context, calls the
+protocol projector, and commits the settled output. That commit replaces the
+fact's owned needs, offers, and time wakes; applies allowed row mutations;
+admits emitted facts; queues follow-up intents; and wakes other fact owners
+whose standing needs now overlap newly added offers. Core performs the overlap
+query mechanically, but projectors decide what the matched payload proves.
+
+Intents are core's bounded stateful work step. A projector or command emits an
+intent when the next action should not happen inside deterministic projection:
+sending bytes, building a response fact, creating a key wrap, seeding sync, or
+performing any other retryable action. Core claims one durable or local intent,
+loads only the fact inputs declared by that handler, calls the registered
+handler, and commits the handler's output atomically with queue consumption.
+Retry leaves the row queued; success deletes the row with its effects.
+
+The daemon runs the same mechanics without a user command on the stack. Each
+tick stages accepted network bytes as local protocol intents, admits due
+time-wake ranges as pending projection, drains projection, dispatches intents,
+and drains projection again for handler-emitted facts. The runtime lock ensures
+this daemon work cannot race with a CLI command that is admitting new facts into
+the same store.
+
+Core's job is therefore coordination, persistence, and mechanical validation.
+It owns the serialized turn shape, SQLite transaction boundaries, queue
+fairness, idempotent fact and intent admission, protocol-blind context matching,
+network byte pumping, and schema/row allowlist checks. It leaves protocol
+meaning in the protocol scopes: fact layouts, authority checks, sync policy,
+connection-frame opening, read-model rows, commands, and queries.
+
 ## Interface To Protocol
 
 Protocol code enters core through declarations and effect values:
@@ -58,53 +105,6 @@ and written by core's TCP pump without parsing frame payloads.
 Time enters through daemon-owned `DaemonTimeWake` declarations. Core selects
 due `time_wakes`, attaches the due `TimeRange` to projection context, and lets
 the owning projector decide whether that time proves anything.
-
-## How Core Works
-
-Core is the reusable runtime loop around a protocol declaration. At startup the
-app hands core a `ProtocolDescription`; core opens the selected SQLite store,
-applies core, network, and protocol schemas, builds the command registry, and
-constructs a `Runtime` from the declared projector, handler registry, row
-allowlist, schema sources, and daemon hooks. From that point on, core does not
-ask what a protocol fact means. It only moves facts, context, rows, intents,
-time wakes, and opaque network bytes through the declared pipeline.
-
-A normal command is a serialized runtime turn. Core opens the store, builds a
-`CommandContext`, calls the protocol command, and commits the command's
-`PipelineEffects`. If the command emitted facts, core stores their immutable
-bytes, records local admission metadata, and marks them pending for projection.
-The command can return human-readable `CliOutput`, but durable protocol state
-must enter through facts, row mutations, or intents.
-
-Projection is core's deterministic reaction step. Core drains
-`pending_projection`, loads one fact and its matched context, calls the
-protocol projector, and commits the settled output. That commit replaces the
-fact's owned needs, offers, and time wakes; applies allowed row mutations;
-admits emitted facts; queues follow-up intents; and wakes other fact owners
-whose standing needs now overlap newly added offers. Core performs the overlap
-query mechanically, but projectors decide what the matched payload proves.
-
-Intents are core's bounded stateful work step. A projector or command emits an
-intent when the next action should not happen inside deterministic projection:
-sending bytes, building a response fact, creating a key wrap, seeding sync, or
-performing any other retryable action. Core claims one durable or local intent,
-loads only the fact inputs declared by that handler, calls the registered
-handler, and commits the handler's output atomically with queue consumption.
-Retry leaves the row queued; success deletes the row with its effects.
-
-The daemon runs the same mechanics without a user command on the stack. Each
-tick stages accepted network bytes as local protocol intents, admits due
-time-wake ranges as pending projection, drains projection, dispatches intents,
-and drains projection again for handler-emitted facts. The runtime lock ensures
-this daemon work cannot race with a CLI command that is admitting new facts into
-the same store.
-
-Core's job is therefore coordination, persistence, and mechanical validation.
-It owns the serialized turn shape, SQLite transaction boundaries, queue
-fairness, idempotent fact and intent admission, protocol-blind context matching,
-network byte pumping, and schema/row allowlist checks. It leaves protocol
-meaning in the protocol scopes: fact layouts, authority checks, sync policy,
-connection-frame opening, read-model rows, commands, and queries.
 
 ## Invariants
 

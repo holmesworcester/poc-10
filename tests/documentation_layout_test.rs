@@ -278,6 +278,19 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
     let pipeline = source_text(&root.join("src/core/pipeline/README.md"));
     let normalized_core = normalize_whitespace(&core);
     let normalized_pipeline = normalize_whitespace(&pipeline);
+    let how_core_works = core
+        .find("## How Core Works")
+        .expect("src/core/README.md documents how core works");
+    let interface_to_protocol = core
+        .find("## Interface To Protocol")
+        .expect("src/core/README.md documents interface to protocol");
+    let data_flow = core
+        .find("## Data Flow")
+        .expect("src/core/README.md documents data flow");
+    assert!(
+        how_core_works < interface_to_protocol && how_core_works < data_flow,
+        "src/core/README.md should explain how core works before interface and data-flow details"
+    );
 
     for required in [
         "## Interface To Protocol",
