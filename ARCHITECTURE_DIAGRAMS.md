@@ -210,15 +210,26 @@ flowchart TD
 
 ## 4) Sync Seed, Live Tail, And Catch-Up
 
-Sync plans replication over established connection facts. The first compare is
-seeded when a connection response becomes durable. Later share contributions
-live-tail to established authorized connections. Periodic daemon ticks drain
-queued compare, have, need, send, and time-wake work when catch-up remains.
+Sync plans replication over established connection facts. A connection response
+becomes durable only after its projector validates request, invite, receipt,
+and ephemeral-secret context. That projection emits `seed_connection_sync`,
+which creates the first compare. Later share contributions live-tail to
+established authorized connections. Periodic daemon ticks drain queued compare,
+have, need, send, and time-wake work when catch-up remains.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 340}} }%%
 flowchart TD
-    RESPONSE["connection response durable"] --> SEED["seed_connection_sync"]
+    BOOT_RESP["bootstrap_response opens sealed bytes"] --> RESP_FACT["response fact"]
+    RESPONDER["create_connection_response handler"] --> RESP_FACT
+    REQUEST_CTX["connection_request context"] --> RESP_PROJECTOR["response projector"]
+    INVITE_CTX["connection_invite_secret context"] --> RESP_PROJECTOR
+    RECEIPT_CTX["connection_fact_receipt context"] --> RESP_PROJECTOR
+    EPHEMERAL_CTX["connection_ephemeral_secret context"] --> RESP_PROJECTOR
+    RESP_FACT --> RESP_PROJECTOR
+    RESP_PROJECTOR --> RESPONSE_ROWS["connection_response rows"]
+    RESP_PROJECTOR --> RESPONSE_CTX["connection_response context"]
+    RESP_PROJECTOR --> SEED["seed_connection_sync"]
     SEED --> ROOT_COMPARE["root compare fact"]
     ROOT_COMPARE --> SEND_COMPARE["send_facts_on_connection"]
     SEND_COMPARE --> PEER["remote node"]
