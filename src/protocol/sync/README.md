@@ -2,11 +2,15 @@
 
 Sync is the replication planning scope. We use it to make shared facts
 converge between endpoints so other scopes can rely on eventual consistency for
-admitted shared facts. A secondary goal is fast wall-clock display of fact
-state in a requested range, such as latest messages; that requires syncing the
-range's dependency closure, not only the owner facts in the range. The scope
-owns shareability rows, projector-owned range summaries, compare/have/need
-facts, and sync handler work.
+admitted shared facts. Sync starts once per established connection with an
+initial seed compare, continues with live-tail sends for newly indexed facts on
+established authorized connections, and, where catch-up work remains, uses
+periodic daemon tick catch-up (`--sync-ms`/`--tick-ms`) to drain queued
+compare/have/need/fact-send work and due time wakes. A secondary goal is fast
+wall-clock display of fact state in a requested range, such as latest messages;
+that requires syncing the range's dependency closure, not only the owner facts
+in the range. The scope owns shareability rows, projector-owned range
+summaries, compare/have/need facts, and sync handler work.
 
 ## Interface To Core
 
@@ -100,6 +104,24 @@ that no longer have sendable rows. Live-tail sends also use connection receipts
 to skip the origin connection that supplied a fact while still advertising the
 fact to other authorized connections.
 
+## Live Tail
+
+Live tail is the latency path after initial connection seeding. When
+`share_fact_with_sync` records a changed upsert, sync asks the connection
+visibility index which established connections may see that owner fact. It
+removes any origin connection recorded by `connection_fact_receipt`,
+recursively expands the owner through stored `context_have` edges for each
+remaining connection, and queues `send_facts_on_connection`.
+
+Live tail does not create authority and does not bypass projection. Connection
+still rejects unsendable local/private facts and carries sealed frames; the
+receiver admits the opened bytes as ordinary facts and runs the owning
+projectors. Its purpose is wall-clock latency: peers that are already
+connected see new shareable facts without waiting for another compare round.
+Compare/have/need rounds and periodic daemon tick catch-up still repair peers
+that were disconnected, missed a send, or learned a dependency after the first
+live-tail send.
+
 ## Visibility And Dependency Closure
 
 Range sync exists so a peer can make a bounded user-visible slice useful
@@ -132,8 +154,9 @@ connections:
 2. The `share_fact_with_sync` handler records that contribution in sync rows.
    It rejects local/private bytes, stores the owner as shareable, stores the
    direct `context_have` edges, and refreshes the affected range-summary path.
-   Sync does not infer dependencies by parsing fact bytes or scanning protocol
-   rows.
+   If this is a changed upsert, the same handler starts the live-tail path for
+   already-established authorized connections. Sync does not infer dependencies
+   by parsing fact bytes or scanning protocol rows.
 3. When a connection is seeded or a range is compared, sync sends a `compare`
    fact that summarizes the visible range for that connection. The peer
    projects the `compare` and runs `send_sync_compare_response`.
@@ -195,14 +218,11 @@ erase richer context learned by a later projection. If a dependency must stop
 travelling with an owner, the owner projector must emit an explicit prune or
 retraction path.
 
-Live-tail egress and removal use the same contribution path. When a new or
-changed contribution is stored, sync advertises it to established authorized
-connections and skips the origin connection recorded by connection receipts.
-When the owner projector observes deletion, expiry, supersession, or
-retirement context for its own fact, it emits a `share_fact_with_sync`
-retraction along with ordinary row deletion or self-purge effects. Sync removes
-that owner's contribution and refreshes ancestor summaries; it does not
-rediscover purged ids from broad fact scans.
+Removal uses the same ownership boundary. When the owner projector observes
+deletion, expiry, supersession, or retirement context for its own fact, it
+emits a `share_fact_with_sync` retraction along with ordinary row deletion or
+self-purge effects. Sync removes that owner's contribution and refreshes
+ancestor summaries; it does not rediscover purged ids from broad fact scans.
 
 ## Invariants And Responsibility
 
