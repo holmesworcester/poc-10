@@ -79,7 +79,7 @@ pub fn generate_messages(
         .checked_add((count - 1) as u64)
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
     let message_text_bytes = requested_message_text_bytes.min(MAX_TEXT_BYTES);
-    let authoring = crate::core::profile::measure_result("authoring_snapshot", || {
+    let authoring = crate::core::perf_profile::measure_result("authoring_snapshot", || {
         MessageAuthoringSnapshot::prepare(ctx, workspace_id)
     })?;
 
@@ -89,10 +89,10 @@ pub fn generate_messages(
         let timestamp = first_timestamp
             .checked_add(index as u64)
             .ok_or_else(|| "generate timestamp overflows u64".to_string())?;
-        let text = crate::core::profile::measure("generated_text", || {
+        let text = crate::core::perf_profile::measure("generated_text", || {
             deterministic_generated_text(&workspace_id, timestamp, index, message_text_bytes)
         });
-        let fact = crate::core::profile::measure_result("message_fact_build", || {
+        let fact = crate::core::perf_profile::measure_result("message_fact_build", || {
             authoring.build_message_fact(&text, timestamp)
         })?;
         fact_ids.push(fact.id);
@@ -185,7 +185,7 @@ impl MessageAuthoringSnapshot {
 
         let nonce = deterministic_nonce(self.workspace_id, self.signing.signer_id, created_at_ms);
         let plaintext = pad_plaintext(text.as_bytes())?;
-        let ciphertext = crate::core::profile::measure_result("message_encrypt", || {
+        let ciphertext = crate::core::perf_profile::measure_result("message_encrypt", || {
             crypto::xchacha20poly1305_encrypt(
                 &self.encryption.key_secret,
                 &associated_data(self.workspace_id, self.encryption.frontier_id, minute),
@@ -216,7 +216,7 @@ impl MessageAuthoringSnapshot {
                 .map_err(|err| format!("content message ciphertext: {err}"))?,
             signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        let (_, signature) = crate::core::profile::measure_result("message_sign", || {
+        let (_, signature) = crate::core::perf_profile::measure_result("message_sign", || {
             Ok::<_, String>(crypto::ed25519_sign_canonical(
                 &self.signing.private_key,
                 &layout::signing_bytes(&message)?,
@@ -224,7 +224,7 @@ impl MessageAuthoringSnapshot {
         })?;
         message.signature = signature;
 
-        let fact = crate::core::profile::measure_result("message_encode", || {
+        let fact = crate::core::perf_profile::measure_result("message_encode", || {
             Ok::<_, String>(Fact::new(
                 FactScope::Scoped {
                     kind: ScopeKind::new("workspace").expect("valid workspace scope"),

@@ -176,12 +176,13 @@ impl IntentHandler for ShareFactWithSyncHandler {
     }
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
-        crate::core::profile::measure_result("share_handler", || {
+        crate::core::perf_profile::measure_result("share_handler", || {
             let input = decode_share_fact_with_sync(raw)?;
             match input.state {
                 SyncShareState::Upsert => {
-                    let owner =
-                        crate::core::profile::measure_result("share_context_validate", || {
+                    let owner = crate::core::perf_profile::measure_result(
+                        "share_context_validate",
+                        || {
                             let owner = context.require_fact(&input.owner_fact_id)?;
                             context.require_non_local_fact_bytes(&input.owner_fact_id)?;
                             // Context links came from projector-validated offers. A context fact may
@@ -194,8 +195,9 @@ impl IntentHandler for ShareFactWithSyncHandler {
                                     .require_non_local_fact_bytes(fact_id)?;
                             }
                             Ok::<_, HandlerError>(owner)
-                        })?;
-                    let changed = crate::core::profile::measure_result(
+                        },
+                    )?;
+                    let changed = crate::core::perf_profile::measure_result(
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
                             Ok(shared_fact::record_sync_contribution(
@@ -206,7 +208,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                         },
                     )?;
                     if changed {
-                        crate::core::profile::measure_result("share_live_tail", || {
+                        crate::core::perf_profile::measure_result("share_live_tail", || {
                             let excluded = crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
                                 context.store()?,
                                 input.owner_fact_id,
@@ -224,7 +226,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                     }
                 }
                 SyncShareState::Retract => {
-                    crate::core::profile::measure_result(
+                    crate::core::perf_profile::measure_result(
                         "share_record_sync_contribution",
                         || -> Result<bool, HandlerError> {
                             Ok(shared_fact::record_sync_contribution(

@@ -108,6 +108,8 @@ use core syntax and contracts, but core must not import their semantic rules.
 - `intents.rs`: intent identity, row mutation types, and handler contracts.
 - `network.rs`: opaque inbound/outbound network queues and TCP frame pump.
 - `pipeline.rs`: facade for SQL-backed queue workers.
+- `perf_profile.rs`: env-gated phase timing helpers for command and pipeline
+  performance profiling.
 - `projectors.rs`: projection contract, projection context, output, time wakes,
   and typed fact adapters.
 - `runtime.rs`: executable core engine for one protocol description.

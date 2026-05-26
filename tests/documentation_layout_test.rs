@@ -217,6 +217,7 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "intents.rs",
         "network.rs",
         "pipeline.rs",
+        "perf_profile.rs",
         "projectors.rs",
         "runtime.rs",
         "schema.rs",

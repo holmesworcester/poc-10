@@ -396,17 +396,19 @@ impl Runtime {
     ) -> Result<WorkStatus, String> {
         let mut total = WorkStatus::idle();
         for _ in 0..max_rounds {
-            total.merge(crate::core::profile::measure_result("projection", || {
-                self.process_projection_until_idle(8, limit_per_round)
-            })?);
-            let dispatched = crate::core::profile::measure_result("intent_dispatch", || {
+            total.merge(crate::core::perf_profile::measure_result(
+                "projection",
+                || self.process_projection_until_idle(8, limit_per_round),
+            )?);
+            let dispatched = crate::core::perf_profile::measure_result("intent_dispatch", || {
                 self.dispatch_with_handlers(handlers.unwrap_or(&self.handlers), limit_per_round)
             })?;
             total.merge(dispatched);
             if dispatched.is_idle() {
-                total.merge(crate::core::profile::measure_result("projection", || {
-                    self.process_projection_until_idle(8, limit_per_round)
-                })?);
+                total.merge(crate::core::perf_profile::measure_result(
+                    "projection",
+                    || self.process_projection_until_idle(8, limit_per_round),
+                )?);
                 return Ok(total);
             }
         }

@@ -588,24 +588,27 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     let requested_count = args.parse_positive_usize(1, content::message::cli::GENERATE_USAGE)?;
     let requested_message_text_bytes =
         args.parse_positive_usize(2, content::message::cli::GENERATE_USAGE)?;
-    let mut profile =
-        crate::core::profile::GenerateProfile::start(requested_count, requested_message_text_bytes);
-    crate::core::profile::add_duration("parse", parse_started.elapsed());
+    let mut profile = crate::core::perf_profile::GenerateProfile::start(
+        requested_count,
+        requested_message_text_bytes,
+    );
+    crate::core::perf_profile::add_duration("parse", parse_started.elapsed());
 
-    let timestamp =
-        crate::core::profile::measure_result("timestamp", || next_cli_timestamp(ctx.runtime()))?;
+    let timestamp = crate::core::perf_profile::measure_result("timestamp", || {
+        next_cli_timestamp(ctx.runtime())
+    })?;
     let clock = FixedClock(timestamp);
-    let vault = crate::core::profile::measure_result("context_setup", || {
+    let vault = crate::core::perf_profile::measure_result("context_setup", || {
         content::message::create::ContentMessageVault::for_workspace(&ctx.runtime, workspace_id)
     })?;
     let command_context = ctx.runtime.command_context(&clock, &vault);
-    let output = crate::core::profile::measure_result("command_build", || {
+    let output = crate::core::perf_profile::measure_result("command_build", || {
         content::message::cli::generate(&command_context, args)
     })?;
-    let receipt = crate::core::profile::measure_result("commit", || {
+    let receipt = crate::core::perf_profile::measure_result("commit", || {
         ctx.runtime_mut().submit_command_output(output)
     })?;
-    crate::core::profile::measure_result("settle", || ctx.settle_local_command_work())?;
+    crate::core::perf_profile::measure_result("settle", || ctx.settle_local_command_work())?;
     profile.finish_success(receipt.generated_facts, receipt.message_text_bytes);
     Ok(content::message::cli::generated_output(
         &receipt,
