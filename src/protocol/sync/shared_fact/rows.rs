@@ -344,13 +344,15 @@ fn upsert_sync_contribution(
                 vec![negentropy_leaf_key(input.workspace_id, input.owner_fact_id)],
             )?;
             tx.delete_table_rows_in_tx(NEGENTROPY_CONTEXT_HAVE_ROWS, old_context_keys)?;
-            update_node_path_in_tx(
-                tx,
-                input.workspace_id,
-                input.timestamp_ms,
-                old_summary,
-                Some(new_summary),
-            )?;
+            crate::core::profile::measure_result("negentropy_update_path", || {
+                update_node_path_in_tx(
+                    tx,
+                    input.workspace_id,
+                    input.timestamp_ms,
+                    old_summary,
+                    Some(new_summary),
+                )
+            })?;
             let mut rows = Vec::with_capacity(2 + context_rows.len());
             rows.push(shareable_row);
             rows.push(leaf_row);
@@ -398,13 +400,15 @@ fn retract_sync_contribution(
                 vec![negentropy_leaf_key(input.workspace_id, input.owner_fact_id)],
             )?;
             tx.delete_table_rows_in_tx(NEGENTROPY_CONTEXT_HAVE_ROWS, old_context_keys)?;
-            update_node_path_in_tx(
-                tx,
-                input.workspace_id,
-                old_leaf.timestamp_ms,
-                Some(old_summary),
-                None,
-            )?;
+            crate::core::profile::measure_result("negentropy_update_path", || {
+                update_node_path_in_tx(
+                    tx,
+                    input.workspace_id,
+                    old_leaf.timestamp_ms,
+                    Some(old_summary),
+                    None,
+                )
+            })?;
             Ok(true)
         })
         .map_err(|err| format!("retract sync contribution rows: {err}"))

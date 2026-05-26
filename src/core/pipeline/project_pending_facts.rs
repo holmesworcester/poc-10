@@ -293,11 +293,18 @@ fn process_pending_projection_batch(
 ) -> Result<ProjectionProgress, String> {
     let mut progress = ProjectionProgress::default();
 
-    for fact_id in pending_owner_batch(store, limit)? {
+    let durable_fact_ids =
+        crate::core::profile::measure_result("projection_pending_batch_load", || {
+            pending_owner_batch(store, limit)
+        })?;
+    for fact_id in durable_fact_ids {
         if progress.projected >= limit {
             break;
         }
-        let Some(pending_fact) = load_pending_fact(store, ProjectionSource::Durable, fact_id)?
+        let Some(pending_fact) =
+            crate::core::profile::measure_result("projection_load_pending_fact", || {
+                load_pending_fact(store, ProjectionSource::Durable, fact_id)
+            })?
         else {
             store
                 .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
@@ -314,12 +321,18 @@ fn process_pending_projection_batch(
     }
 
     if progress.projected < limit {
-        for fact_id in ephemeral_pending_fact_ids(store, limit - progress.projected)? {
+        let ephemeral_fact_ids =
+            crate::core::profile::measure_result("projection_ephemeral_batch_load", || {
+                ephemeral_pending_fact_ids(store, limit - progress.projected)
+            })?;
+        for fact_id in ephemeral_fact_ids {
             if progress.projected >= limit {
                 break;
             }
             let Some(pending_fact) =
-                load_pending_fact(store, ProjectionSource::Ephemeral, fact_id)?
+                crate::core::profile::measure_result("projection_load_pending_fact", || {
+                    load_pending_fact(store, ProjectionSource::Ephemeral, fact_id)
+                })?
             else {
                 store
                     .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
@@ -351,8 +364,12 @@ fn process_pending_fact(
     allowed_tables: &[TableName],
     progress: &mut ProjectionProgress,
 ) -> Result<(), String> {
-    let effects = prepare_projection_effects(projector, pending_fact, store, allowed_tables)?;
-    commit_projection_effects(store, &effects, projector, allowed_tables)?;
+    let effects = crate::core::profile::measure_result("projection_prepare_effects", || {
+        prepare_projection_effects(projector, pending_fact, store, allowed_tables)
+    })?;
+    crate::core::profile::measure_result("projection_commit_effects", || {
+        commit_projection_effects(store, &effects, projector, allowed_tables)
+    })?;
     progress.projected += 1;
     progress.status.progressed = true;
     Ok(())
@@ -411,15 +428,22 @@ fn run_projection_to_context_fixed_point(
     allowed_tables: &[TableName],
 ) -> Result<ProjectionRun, String> {
     for _ in 0..PROJECTION_CONTEXT_FIXPOINT_LIMIT {
-        let run = run_projection_with_context(
-            projector,
-            fact,
-            previous_context,
-            projection_context.clone(),
-        )?;
-        validate_pipeline_effects(&run.pipeline, allowed_tables)?;
+        let run = crate::core::profile::measure_result("projection_projector_cpu", || {
+            run_projection_with_context(
+                projector,
+                fact,
+                previous_context,
+                projection_context.clone(),
+            )
+        })?;
+        crate::core::profile::measure_result("projection_validate_effects", || {
+            validate_pipeline_effects(&run.pipeline, allowed_tables)
+        })?;
 
-        let matched_context = stored_matching_context(store, &run.context)?;
+        let matched_context =
+            crate::core::profile::measure_result("projection_fixedpoint_context_match", || {
+                stored_matching_context(store, &run.context)
+            })?;
         if !projection_context.extend_with_matches(matched_context) {
             return Ok(run);
         }
@@ -483,7 +507,9 @@ fn commit_projection_effects(
 ) -> Result<(), String> {
     store
         .write_transaction(|tx| {
-            commit_projection_effects_in_tx(tx, effects, projector, allowed_tables, 0)?;
+            crate::core::profile::measure_result("projection_commit_tx_body", || {
+                commit_projection_effects_in_tx(tx, effects, projector, allowed_tables, 0)
+            })?;
             Ok(())
         })
         .map_err(|err| format!("commit projection effects: {err}"))
@@ -500,23 +526,45 @@ fn commit_projection_effects_in_tx(
 ) -> rusqlite::Result<()> {
     match effects.source {
         ProjectionSource::Durable => {
-            tx.conn().execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                params![effects.fact_id.as_slice()],
-            )?;
-            delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
-            replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
-            replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
-            wake_context_matches_in_tx(tx, &effects.context_delta).map_err(sqlite_string_error)?;
+            crate::core::profile::measure_result("projection_clear_pending", || {
+                tx.conn().execute(
+                    "DELETE FROM pending_projection WHERE owner = ?1",
+                    params![effects.fact_id.as_slice()],
+                )
+            })?;
+            crate::core::profile::measure_result("projection_delete_pending_time_ranges", || {
+                delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)
+            })?;
+            crate::core::profile::measure_result("projection_replace_context", || {
+                replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)
+            })?;
+            crate::core::profile::measure_result("projection_replace_time_wakes", || {
+                replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)
+            })?;
+            crate::core::profile::measure_result("projection_wake_context_matches", || {
+                wake_context_matches_in_tx(tx, &effects.context_delta).map_err(sqlite_string_error)
+            })?;
         }
         ProjectionSource::Ephemeral => {
             validate_ephemeral_projection(effects).map_err(sqlite_string_error)?;
-            replace_stored_context_owner_rows(tx, effects.fact_id, &ContextSet::new())?;
-            delete_ephemeral_fact_in_tx(tx, effects.fact_id)?;
+            crate::core::profile::measure_result("projection_replace_context", || {
+                replace_stored_context_owner_rows(tx, effects.fact_id, &ContextSet::new())
+            })?;
+            crate::core::profile::measure_result("projection_delete_ephemeral_fact", || {
+                delete_ephemeral_fact_in_tx(tx, effects.fact_id)
+            })?;
         }
     }
 
-    commit_projector_pipeline_effects_in_tx(tx, projector, allowed_tables, &effects.pipeline, depth)
+    crate::core::profile::measure_result("projection_commit_pipeline_effects", || {
+        commit_projector_pipeline_effects_in_tx(
+            tx,
+            projector,
+            allowed_tables,
+            &effects.pipeline,
+            depth,
+        )
+    })
 }
 
 fn validate_ephemeral_projection(effects: &ProjectionEffects) -> Result<(), String> {
@@ -702,20 +750,33 @@ fn load_pending_fact(
     source: ProjectionSource,
     fact_id: FactId,
 ) -> Result<Option<PendingFact>, String> {
-    let fact = match source {
-        ProjectionSource::Durable => persisted_fact(store, &fact_id)?,
-        ProjectionSource::Ephemeral => ephemeral_fact_by_id(store, &fact_id)?,
-    };
+    let fact = crate::core::profile::measure_result("projection_load_fact", || match source {
+        ProjectionSource::Durable => persisted_fact(store, &fact_id),
+        ProjectionSource::Ephemeral => ephemeral_fact_by_id(store, &fact_id),
+    })?;
     let Some(fact) = fact else {
         return Ok(None);
     };
-    let previous_context = stored_context_for_owner(store, &fact_id)?;
+    let previous_context =
+        crate::core::profile::measure_result("projection_load_previous_context", || {
+            stored_context_for_owner(store, &fact_id)
+        })?;
     let projection_context = match source {
         ProjectionSource::Durable => {
-            let time_ranges = pending_time_ranges_for_owner(store, &fact_id)?;
-            stored_matching_context(store, &previous_context)?.with_time_ranges(time_ranges)
+            let time_ranges = crate::core::profile::measure_result(
+                "projection_load_pending_time_ranges",
+                || pending_time_ranges_for_owner(store, &fact_id),
+            )?;
+            crate::core::profile::measure_result("projection_initial_context_match", || {
+                stored_matching_context(store, &previous_context)
+            })?
+            .with_time_ranges(time_ranges)
         }
-        ProjectionSource::Ephemeral => stored_matching_context(store, &previous_context)?,
+        ProjectionSource::Ephemeral => {
+            crate::core::profile::measure_result("projection_initial_context_match", || {
+                stored_matching_context(store, &previous_context)
+            })?
+        }
     };
     Ok(Some(PendingFact {
         source,

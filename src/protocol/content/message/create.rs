@@ -79,6 +79,9 @@ pub fn generate_messages(
         .checked_add((count - 1) as u64)
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
     let message_text_bytes = requested_message_text_bytes.min(MAX_TEXT_BYTES);
+    let authoring = crate::core::profile::measure_result("authoring_snapshot", || {
+        MessageAuthoringSnapshot::prepare(ctx, workspace_id)
+    })?;
 
     let mut facts = Vec::with_capacity(count);
     let mut fact_ids = Vec::with_capacity(count);
@@ -86,9 +89,12 @@ pub fn generate_messages(
         let timestamp = first_timestamp
             .checked_add(index as u64)
             .ok_or_else(|| "generate timestamp overflows u64".to_string())?;
-        let text =
-            deterministic_generated_text(&workspace_id, timestamp, index, message_text_bytes);
-        let fact = build_message_fact(ctx, workspace_id, &text, timestamp)?;
+        let text = crate::core::profile::measure("generated_text", || {
+            deterministic_generated_text(&workspace_id, timestamp, index, message_text_bytes)
+        });
+        let fact = crate::core::profile::measure_result("message_fact_build", || {
+            authoring.build_message_fact(&text, timestamp)
+        })?;
         fact_ids.push(fact.id);
         facts.push(fact);
     }
@@ -110,6 +116,130 @@ fn build_message_fact(
     text: &str,
     created_at_ms: u64,
 ) -> Result<Fact, String> {
+    validate_message_text(text)?;
+    MessageAuthoringSnapshot::prepare(ctx, workspace_id)?.build_message_fact(text, created_at_ms)
+}
+
+struct MessageAuthoringSnapshot {
+    workspace_id: WorkspaceId,
+    signing: LocalSigningCapability,
+    encryption: LocalEncryptionCapability,
+    signer_public_key: crypto::Ed25519PublicKey,
+    author_user_id: FactId,
+    active_policy: Option<retention_policy::rows::RetentionPolicyRow>,
+    retained_floor_minute: u64,
+}
+
+impl MessageAuthoringSnapshot {
+    fn prepare(ctx: &CommandContext<'_>, workspace_id: WorkspaceId) -> Result<Self, String> {
+        let signing = ctx.local_signing_capability(workspace_id)?;
+        let encryption = ctx.local_encryption_capability(workspace_id)?;
+        if signing.workspace_id != workspace_id {
+            return Err("signing capability is not bound to this workspace".to_string());
+        }
+        if encryption.workspace_id != workspace_id {
+            return Err("encryption capability is not bound to this workspace".to_string());
+        }
+
+        let signer_public_key = crypto::ed25519_public_key(&signing.private_key);
+        let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
+        let active_policy =
+            retention_policy::queries::active_for_workspace(ctx.store(), workspace_id)?;
+        let retained_floor_minute = retained_floor_from_tombstones(ctx, workspace_id)?;
+
+        Ok(Self {
+            workspace_id,
+            signing,
+            encryption,
+            signer_public_key,
+            author_user_id,
+            active_policy,
+            retained_floor_minute,
+        })
+    }
+
+    fn build_message_fact(&self, text: &str, created_at_ms: u64) -> Result<Fact, String> {
+        validate_message_text(text)?;
+
+        let minute = created_at_ms / UNIX_MINUTE_MS;
+        if let Some(policy) = &self.active_policy {
+            if minute < policy.retire_minute {
+                return Err(
+                    "send_message minute is below the active disappearing floor".to_string()
+                );
+            }
+        }
+        if minute < self.retained_floor_minute {
+            return Err("no retained ancestor covers message minute".to_string());
+        }
+        let expires_at_minute = self
+            .active_policy
+            .as_ref()
+            .map(|policy| minute.saturating_add(u64::from(policy.ttl_minutes)))
+            .unwrap_or(u64::MAX);
+        let retention_policy_id = self
+            .active_policy
+            .as_ref()
+            .map(|policy| policy.policy_id)
+            .unwrap_or([0; 32]);
+
+        let nonce = deterministic_nonce(self.workspace_id, self.signing.signer_id, created_at_ms);
+        let plaintext = pad_plaintext(text.as_bytes())?;
+        let ciphertext = crate::core::profile::measure_result("message_encrypt", || {
+            crypto::xchacha20poly1305_encrypt(
+                &self.encryption.key_secret,
+                &associated_data(self.workspace_id, self.encryption.frontier_id, minute),
+                &nonce,
+                &plaintext,
+            )
+        })?;
+        if ciphertext.len() != CIPHERTEXT_BYTES {
+            return Err(format!(
+                "content message ciphertext is {} bytes, expected {CIPHERTEXT_BYTES}",
+                ciphertext.len()
+            ));
+        }
+
+        let mut message = ContentMessageFact {
+            workspace_id: self.workspace_id,
+            created_at_ms,
+            author_user_id: self.author_user_id,
+            signer_id: self.signing.signer_id,
+            signer_public_key: self.signer_public_key,
+            frontier_id: self.encryption.frontier_id,
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute,
+            retention_policy_id,
+            minute,
+            nonce,
+            ciphertext: MessageCiphertext::new(&ciphertext)
+                .map_err(|err| format!("content message ciphertext: {err}"))?,
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        };
+        let (_, signature) = crate::core::profile::measure_result("message_sign", || {
+            Ok::<_, String>(crypto::ed25519_sign_canonical(
+                &self.signing.private_key,
+                &layout::signing_bytes(&message)?,
+            ))
+        })?;
+        message.signature = signature;
+
+        let fact = crate::core::profile::measure_result("message_encode", || {
+            Ok::<_, String>(Fact::new(
+                FactScope::Scoped {
+                    kind: ScopeKind::new("workspace").expect("valid workspace scope"),
+                    id: self.workspace_id,
+                },
+                created_at_ms,
+                layout::encode_fact(&message)?,
+            ))
+        })?;
+
+        Ok(fact)
+    }
+}
+
+fn validate_message_text(text: &str) -> Result<(), String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err("send_message text must not be blank".to_string());
@@ -119,82 +249,7 @@ fn build_message_fact(
             "send_message text exceeds {MAX_TEXT_BYTES} byte encrypted slot"
         ));
     }
-
-    let signing = ctx.local_signing_capability(workspace_id)?;
-    let encryption = ctx.local_encryption_capability(workspace_id)?;
-    if signing.workspace_id != workspace_id {
-        return Err("signing capability is not bound to this workspace".to_string());
-    }
-    if encryption.workspace_id != workspace_id {
-        return Err("encryption capability is not bound to this workspace".to_string());
-    }
-
-    let minute = created_at_ms / UNIX_MINUTE_MS;
-    let active_policy = retention_policy::queries::active_for_workspace(ctx.store(), workspace_id)?;
-    if let Some(policy) = &active_policy {
-        if minute < policy.retire_minute {
-            return Err("send_message minute is below the active disappearing floor".to_string());
-        }
-    }
-    if minute < retained_floor_from_tombstones(ctx, workspace_id)? {
-        return Err("no retained ancestor covers message minute".to_string());
-    }
-    let expires_at_minute = active_policy
-        .as_ref()
-        .map(|policy| minute.saturating_add(u64::from(policy.ttl_minutes)))
-        .unwrap_or(u64::MAX);
-    let retention_policy_id = active_policy
-        .as_ref()
-        .map(|policy| policy.policy_id)
-        .unwrap_or([0; 32]);
-
-    let nonce = deterministic_nonce(workspace_id, signing.signer_id, created_at_ms);
-    let plaintext = pad_plaintext(text.as_bytes())?;
-    let ciphertext = crypto::xchacha20poly1305_encrypt(
-        &encryption.key_secret,
-        &associated_data(workspace_id, encryption.frontier_id, minute),
-        &nonce,
-        &plaintext,
-    )?;
-    if ciphertext.len() != CIPHERTEXT_BYTES {
-        return Err(format!(
-            "content message ciphertext is {} bytes, expected {CIPHERTEXT_BYTES}",
-            ciphertext.len()
-        ));
-    }
-
-    let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
-    let signer_public_key = crypto::ed25519_public_key(&signing.private_key);
-    let mut message = ContentMessageFact {
-        workspace_id,
-        created_at_ms,
-        author_user_id,
-        signer_id: signing.signer_id,
-        signer_public_key,
-        frontier_id: encryption.frontier_id,
-        local_history_node_secret_id: [0; 32],
-        expires_at_minute,
-        retention_policy_id,
-        minute,
-        nonce,
-        ciphertext: MessageCiphertext::new(&ciphertext)
-            .map_err(|err| format!("content message ciphertext: {err}"))?,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let (_, signature) =
-        crypto::ed25519_sign_canonical(&signing.private_key, &layout::signing_bytes(&message)?);
-    message.signature = signature;
-
-    let fact = Fact::new(
-        FactScope::Scoped {
-            kind: ScopeKind::new("workspace").expect("valid workspace scope"),
-            id: workspace_id,
-        },
-        created_at_ms,
-        layout::encode_fact(&message)?,
-    );
-
-    Ok(fact)
+    Ok(())
 }
 
 fn deterministic_generated_text(
@@ -471,4 +526,89 @@ fn content_message_retention(
         minute: message.minute,
         expires_at_minute: message.expires_at_minute,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::command_context::FnClock;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use crate::core::store::Store;
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+    use std::cell::Cell;
+
+    struct CountingVault {
+        signer_id: FactId,
+        private_key: crypto::Ed25519PrivateKey,
+        encryption_key: crypto::XChaCha20Poly1305Key,
+        signing_calls: Cell<usize>,
+        encryption_calls: Cell<usize>,
+    }
+
+    impl CountingVault {
+        fn new() -> Self {
+            Self {
+                signer_id: [2; 32],
+                private_key: [7; 32],
+                encryption_key: [9; 32],
+                signing_calls: Cell::new(0),
+                encryption_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl IdentityVault for CountingVault {
+        fn local_signing_capability(
+            &self,
+            workspace_id: WorkspaceId,
+        ) -> Result<LocalSigningCapability, String> {
+            self.signing_calls.set(self.signing_calls.get() + 1);
+            Ok(LocalSigningCapability {
+                workspace_id,
+                signer_id: self.signer_id,
+                public_key: crypto::ed25519_public_key(&self.private_key),
+                private_key: self.private_key,
+            })
+        }
+
+        fn local_encryption_capability(
+            &self,
+            workspace_id: WorkspaceId,
+        ) -> Result<LocalEncryptionCapability, String> {
+            self.encryption_calls.set(self.encryption_calls.get() + 1);
+            Ok(LocalEncryptionCapability {
+                workspace_id,
+                frontier_id: [3; 32],
+                owner_endpoint_id: [4; 32],
+                created_at_ms: 1,
+                key_secret: self.encryption_key,
+            })
+        }
+    }
+
+    #[test]
+    fn generate_messages_reuses_command_local_authoring_snapshot() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        let workspace_id = [1; 32];
+        let clock = FnClock(|| 10_000);
+        let vault = CountingVault::new();
+        let ctx = CommandContext::new(&store, &clock, &vault);
+
+        let output = generate_messages(&ctx, workspace_id, 4, 32).expect("generate messages");
+
+        assert_eq!(vault.signing_calls.get(), 1);
+        assert_eq!(vault.encryption_calls.get(), 1);
+        assert_eq!(output.effects.facts.len(), 4);
+        for (index, fact) in output.effects.facts.iter().enumerate() {
+            assert_eq!(fact.timestamp, 10_000 + index as u64);
+            let message = layout::decode_fact(fact.body()).expect("decode message");
+            layout::verify_signature(&message).expect("valid signature");
+            assert_eq!(message.workspace_id, workspace_id);
+            assert_eq!(message.author_user_id, vault.signer_id);
+            assert_eq!(message.signer_id, vault.signer_id);
+            assert_eq!(message.frontier_id, [3; 32]);
+        }
+    }
 }

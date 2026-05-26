@@ -9,8 +9,10 @@
 
 use crate::core::{
     fact_store::persisted_fact,
-    facts::FactId,
-    intents::{HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind},
+    intents::{
+        HandlerContext, HandlerError, HandlerFactId, HandlerFactId as FactId, HandlerResult,
+        Intent, IntentHandler, IntentKind,
+    },
 };
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::sync::{seed_connection, shared_fact};
@@ -174,43 +176,68 @@ impl IntentHandler for ShareFactWithSyncHandler {
     }
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
-        let input = decode_share_fact_with_sync(raw)?;
-        match input.state {
-            SyncShareState::Upsert => {
-                let owner = context.require_fact(&input.owner_fact_id)?;
-                context.require_non_local_fact_bytes(&input.owner_fact_id)?;
-                // Context links came from projector-validated offers. A context fact may
-                // already be purged by the time this queued handler runs.
-                for fact_id in &input.context_have {
-                    let Some(fact) = persisted_fact(context.store()?, fact_id)? else {
-                        continue;
-                    };
-                    HandlerContext::with_facts([fact]).require_non_local_fact_bytes(fact_id)?;
+        crate::core::profile::measure_result("share_handler", || {
+            let input = decode_share_fact_with_sync(raw)?;
+            match input.state {
+                SyncShareState::Upsert => {
+                    let owner =
+                        crate::core::profile::measure_result("share_context_validate", || {
+                            let owner = context.require_fact(&input.owner_fact_id)?;
+                            context.require_non_local_fact_bytes(&input.owner_fact_id)?;
+                            // Context links came from projector-validated offers. A context fact may
+                            // already be purged by the time this queued handler runs.
+                            for fact_id in &input.context_have {
+                                let Some(fact) = persisted_fact(context.store()?, fact_id)? else {
+                                    continue;
+                                };
+                                HandlerContext::with_facts([fact])
+                                    .require_non_local_fact_bytes(fact_id)?;
+                            }
+                            Ok::<_, HandlerError>(owner)
+                        })?;
+                    let changed = crate::core::profile::measure_result(
+                        "share_record_sync_contribution",
+                        || -> Result<bool, HandlerError> {
+                            Ok(shared_fact::record_sync_contribution(
+                                context.store()?,
+                                &input,
+                                Some(owner),
+                            )?)
+                        },
+                    )?;
+                    if changed {
+                        crate::core::profile::measure_result("share_live_tail", || {
+                            let excluded = crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
+                                context.store()?,
+                                input.owner_fact_id,
+                            )?
+                            .into_iter()
+                            .collect::<std::collections::BTreeSet<_>>();
+                            seed_connection::advertise_indexed_fact_to_connections_except(
+                                context.store()?,
+                                owner,
+                                &excluded,
+                            )
+                        })
+                    } else {
+                        Ok(crate::core::effects::PipelineEffects::new())
+                    }
                 }
-                let changed =
-                    shared_fact::record_sync_contribution(context.store()?, &input, Some(owner))?;
-                if changed {
-                    let excluded =
-                        crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
-                            context.store()?,
-                            input.owner_fact_id,
-                        )?
-                        .into_iter()
-                        .collect::<std::collections::BTreeSet<_>>();
-                    seed_connection::advertise_indexed_fact_to_connections_except(
-                        context.store()?,
-                        owner,
-                        &excluded,
-                    )
-                } else {
+                SyncShareState::Retract => {
+                    crate::core::profile::measure_result(
+                        "share_record_sync_contribution",
+                        || -> Result<bool, HandlerError> {
+                            Ok(shared_fact::record_sync_contribution(
+                                context.store()?,
+                                &input,
+                                None,
+                            )?)
+                        },
+                    )?;
                     Ok(crate::core::effects::PipelineEffects::new())
                 }
             }
-            SyncShareState::Retract => {
-                shared_fact::record_sync_contribution(context.store()?, &input, None)?;
-                Ok(crate::core::effects::PipelineEffects::new())
-            }
-        }
+        })
     }
 }
 
