@@ -17,6 +17,7 @@ cargo fuzz run connection_frame_header
 cargo fuzz run receive_network_frame
 cargo fuzz run project_connection_request
 cargo fuzz run project_pending_facts
+cargo fuzz run cli_command_sequence
 ```
 
 Build-check every target without installing `cargo-fuzz`:
@@ -38,3 +39,7 @@ The first targets are intentionally split by failure surface:
 - `project_pending_facts`: generated projector behavior through the runtime
   projection loop, including fixed-point context and ephemeral transient-need
   guards.
+- `cli_command_sequence`: generated command/query chains through the real
+  command registry, reopening a disk runtime between commands like black-box
+  CLI invocations and checking immediate visibility after successful local
+  content writes.

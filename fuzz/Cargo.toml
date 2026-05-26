@@ -45,3 +45,10 @@ path = "fuzz_targets/project_pending_facts.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cli_command_sequence"
+path = "fuzz_targets/cli_command_sequence.rs"
+test = false
+doc = false
+bench = false
