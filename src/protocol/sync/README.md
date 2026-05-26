@@ -68,6 +68,38 @@ No other protocol scope should read sync-owned rows directly. Sync handlers and
 queries own those rows. Other scopes interact with sync by emitting facts,
 publishing context, or queuing sync-owned intents such as `share_fact_with_sync`.
 
+## Connection Boundary
+
+Sync is scoped by established connections. A connection response identifies the
+local endpoint, the remote endpoint, the workspace routes learned during the
+handshake, and the connection secret used to seal frames. Sync uses that
+connection id as the security and transport domain for every compare,
+have/need, and fact-byte send.
+
+The split is deliberate. Sync chooses ids; connection carries bytes. Sync asks
+"which admitted facts and dependency facts are visible on this connection?"
+Connection answers the transport questions: how to batch the chosen ids, which
+facts are sendable, how to seal the frame, where to write it, and how to record
+the receipt. Once a frame is opened, the recovered bytes enter core as ordinary
+facts and the owning auth, content, connection, or sync projector validates
+their meaning.
+
+Connection-specific visibility combines three pieces of state:
+
+- sync shareable rows, which say a fact may participate in workspace sync;
+- connection request/response rows, which name the established peer session
+  and workspace routes for that connection;
+- auth endpoint membership rows, which say whether the remote endpoint is a
+  member of a workspace.
+
+A fact is considered for sending only when the connection authorizes the
+workspace directly or the remote endpoint is a workspace member. Dependency
+closure uses the same connection filter, so recursive `context_have` expansion
+cannot cross into local/private facts, unauthorized workspaces, or purged facts
+that no longer have sendable rows. Live-tail sends also use connection receipts
+to skip the origin connection that supplied a fact while still advertising the
+fact to other authorized connections.
+
 ## Visibility And Dependency Closure
 
 Range sync exists so a peer can make a bounded user-visible slice useful
