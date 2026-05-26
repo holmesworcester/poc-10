@@ -19,8 +19,6 @@ Data enters core from three places:
 
 Projection and handlers return:
 
-- local row mutations for connection requests, responses, ephemeral secrets,
-  receive receipts, and close cleanup;
 - child facts opened from bootstrap or established frames;
 - context offers such as `connection_ephemeral_secret`, `connection_request`,
   `connection_response`, `connection_response_for_request`,
@@ -33,6 +31,18 @@ Core owns queueing, fact storage, local-intent retry/removal, socket table
 mechanics, and transaction boundaries. Connection owns packet classification,
 handshake transcript checks, connection secret use, frame sealing/opening, and
 which child facts may be emitted from received bytes.
+
+## Managed Row State
+
+Connection owns rows for connection requests, connection responses,
+ephemeral handshake secrets, fact receipts, and close cleanup. These rows let
+connection handlers find routes, derive send context, avoid resending to an
+origin connection, and answer local CLI/status queries.
+
+Connection rows are not the cross-scope transport contract. The reusable
+interfaces are connection context roles, queued connection intents, and facts
+carried inside sealed frames. Direct row reads by another scope are listed
+below.
 
 ## Interfaces To Other Scopes
 
@@ -55,6 +65,14 @@ Connection does not decide sync visibility. Content, auth, and sync facts can
 travel inside established frames only if they are non-local and not tagged as
 private/local. Once opened, they are admitted as ordinary child facts and
 validated by their owning projectors.
+
+## Cross-Scope Row Reads
+
+Sync reads connection response and request rows when it computes
+connection-specific visibility and asks connection to send fact ids. Auth
+workspace status/reporting code may read connection request and response rows
+for local diagnostics. Other scopes should use connection context or
+connection-owned intents rather than interpreting connection rows.
 
 ## Invariants And Responsibility
 

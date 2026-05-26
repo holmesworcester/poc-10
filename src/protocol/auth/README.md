@@ -16,7 +16,6 @@ in `protocol::registry`.
 
 Data leaves auth projection as:
 
-- row mutations for auth read models and private local material rows;
 - context offers such as `auth_workspace`, `auth_user`, `auth_admin`,
   `auth_user_invite`, `auth_device_invite`, `auth_invite_server`,
   `auth_endpoint_shared`, `content_signer`, `auth_local_endpoint`,
@@ -31,9 +30,23 @@ Data leaves auth projection as:
 
 Core preserves atomicity and replacement. Each projector emits the complete
 current needs/offers for its fact; core replaces the previous set and commits
-rows, facts, and intents in the same transaction. Auth projectors own all
-semantic checks: core never decides whether a user is an admin, whether a
-signer may author content, or whether a key wrap is decryptable.
+the emitted effects in one transaction. Auth projectors own all semantic
+checks: core never decides whether a user is an admin, whether a signer may
+author content, or whether a key wrap is decryptable.
+
+## Managed Row State
+
+Auth owns rows that describe workspace authority, membership, invites,
+endpoint membership, recipient keys, removal frontiers, key wraps, and local
+private material. Shared rows such as workspace, user, admin, invite,
+endpoint-shared, recipient-key, removal-frontier, and key-wrap rows support
+auth queries and command output. Local rows such as endpoint secret, local
+signer, local recipient key, local key secret, local history node, invite
+secret, and secret-retirement rows are private store state.
+
+These rows are materialized outputs owned by auth. They are not cross-scope
+egress by themselves; cross-scope admission should use facts and context unless
+the explicit row-read boundary below names the read.
 
 ## Interfaces To Other Scopes
 
@@ -62,6 +75,16 @@ ordinary fact bytes, but auth admission still happens only when the owning auth
 projector runs. The auth-owned `create_key_wrap` and `unwrap_key_wrap` routes
 are handler registrations with core; other scopes do not call those handlers
 directly.
+
+## Cross-Scope Row Reads
+
+Content command and CLI code reads auth workspace, user, admin,
+endpoint-shared, and local endpoint rows for user-facing preflight and display.
+Those reads do not replace projector admission; received or shared content
+still validates auth context. Connection response creation reads the local
+endpoint row when building a responder-side response. Sync visibility code reads
+auth endpoint-shared rows to decide which shareable facts are visible to a
+connection peer.
 
 ## Invariants And Responsibility
 

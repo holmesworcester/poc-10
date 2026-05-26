@@ -15,8 +15,6 @@ fact bytes and invokes the registered projector for each type tag.
 
 Data leaves content projection as:
 
-- typed-table rows for messages, opened messages, message tombstones, files,
-  file slices, reactions, deletion rows, and retention policies;
 - context offers such as `content_message_meta`, `content_message`,
   `content_file`, `content_purged`, `content_retention_floor`, and
   `sync_exact_fact`;
@@ -31,6 +29,18 @@ Core owns idempotent storage, replacement context, time-wake scheduling, and
 transactional commit. Content owns all semantic admission: scope checks,
 signature checks, parent/deletion validation, encryption-key matching, BAO proof
 validation, and read-model row shape.
+
+## Managed Row State
+
+Content owns typed rows for message metadata, opened messages, message
+tombstones, reactions, file descriptors, file slices, file/message deletion
+records, and retention policies. These rows are read models and local materialized
+state for content commands, CLI output, and content-owned follow-up work.
+
+Rows do not leave the content scope as an interface. Content shares facts
+through sync-owned work and publishes context offers for dependency/admission
+proofs; owned rows stay content state unless the explicit row-read boundary
+below names the read.
 
 ## Interfaces To Other Scopes
 
@@ -52,6 +62,14 @@ its own proof. Sync does not decide whether a message, reaction, file, or
 deletion is valid. Connection is only a carrier for content fact bytes.
 Received connection frames produce ordinary content facts plus receipts; the
 content projector then runs the same validation path as local command output.
+
+## Cross-Scope Row Reads
+
+Auth key-maintenance commands read content message, tombstone, and file rows to
+decide which frontier material is still needed and which retained path keys can
+be wrapped without resurrecting purged roots. Sync and connection should not
+infer content validity from content rows; they move fact ids or bytes and let
+content projectors validate facts through context.
 
 ## Invariants And Responsibility
 

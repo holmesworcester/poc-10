@@ -15,18 +15,28 @@ follow-up work, but core treats those payloads as opaque queued work.
 
 Data leaves sync as:
 
-- row mutations in `sync_shareable_fact_rows`, negentropy leaf/context/node
-  rows, compare rows, have-id rows, and need-id rows;
 - context offers such as `sync_exact_fact` and `sync_key_wrap`;
 - control facts such as `compare`, `have_id`, and `need_id`;
 - intents to send compare responses, request missing ids, answer requested ids,
   seed a connection, and batch facts onto a connection.
 
-Core owns queueing, fact identity, row commit, handler retry, and context range
-matching. Sync owns shareability, connection-specific visibility, range summary
-planning, and exact-id request/response mechanics. Sync never parses content,
-auth, or connection payload semantics beyond checking fact scope and tag
-sendability through the owning helpers.
+Core owns queueing, fact identity, handler retry, context range matching, and
+transaction boundaries. Sync owns shareability, connection-specific visibility,
+range summary planning, and exact-id request/response mechanics. Sync never
+parses content, auth, or connection payload semantics beyond checking fact
+scope and tag sendability through the owning helpers.
+
+## Managed Row State
+
+Sync owns shareable-fact rows, negentropy leaf rows, negentropy context-have
+rows, negentropy node rows, compare rows, have-id rows, need-id rows, and
+cascade-test staging rows. These rows are the durable sync index: they record
+which facts are eligible to send, which validated dependencies should travel
+with them, and how range summaries differ.
+
+Sync rows are internal planning state. Other scopes enqueue sync work or
+consume sync context; they should not treat sync rows as their admission
+interface.
 
 ## Interfaces To Other Scopes
 
@@ -48,6 +58,12 @@ send fact ids; connection decides frame size, sealing, and socket IO. Auth
 endpoint rows are used when building connection-specific visibility:
 shareable-fact queries check workspace membership and connection peer identity
 before returning facts to send.
+
+## Cross-Scope Row Reads
+
+No other protocol scope should read sync-owned rows directly. Sync handlers and
+queries own those rows. Other scopes interact with sync by emitting facts,
+publishing context, or queuing sync-owned intents such as `share_fact_with_sync`.
 
 ## Invariants And Responsibility
 

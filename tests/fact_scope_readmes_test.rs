@@ -106,6 +106,16 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
             scope.scope
         );
         assert!(
+            readme.contains("Managed Row State"),
+            "{} README should document owned row state separately",
+            scope.scope
+        );
+        assert!(
+            readme.contains("Cross-Scope Row Reads"),
+            "{} README should document direct row reads separately",
+            scope.scope
+        );
+        assert!(
             readme.contains("Example Fact Graph"),
             "{} README should include an example graph",
             scope.scope
@@ -171,6 +181,27 @@ fn readme_core_interface_sections_do_not_name_scope_owned_intent_routes() {
             assert!(
                 !core_interface.contains(intent),
                 "{scope} README should describe {intent} outside Interface To Core"
+            );
+        }
+    }
+}
+
+#[test]
+fn readme_core_interface_sections_do_not_treat_owned_rows_as_egress() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for scope in ["auth", "content", "connection", "sync"] {
+        let readme_path = root
+            .join("src")
+            .join("protocol")
+            .join(scope)
+            .join("README.md");
+        let readme = fs::read_to_string(&readme_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+        let core_interface = section(&readme, "## Interface To Core");
+        for row_phrase in ["row mutations", "typed-table rows", "read models"] {
+            assert!(
+                !core_interface.contains(row_phrase),
+                "{scope} README should describe owned row state outside Interface To Core"
             );
         }
     }
