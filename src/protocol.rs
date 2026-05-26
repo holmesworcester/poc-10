@@ -25,6 +25,8 @@
 
 pub mod app;
 pub(crate) mod cli;
+#[cfg(any(test, fuzzing))]
+pub mod fuzzing;
 pub mod payload;
 pub mod registry;
 

@@ -1,0 +1,47 @@
+[package]
+name = "topo-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+topo = { path = ".." }
+
+[[bin]]
+name = "decode_any_fact_bytes"
+path = "fuzz_targets/decode_any_fact_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection_frame_header"
+path = "fuzz_targets/connection_frame_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receive_network_frame"
+path = "fuzz_targets/receive_network_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "project_connection_request"
+path = "fuzz_targets/project_connection_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "project_pending_facts"
+path = "fuzz_targets/project_pending_facts.rs"
+test = false
+doc = false
+bench = false

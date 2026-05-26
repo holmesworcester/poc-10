@@ -726,4 +726,21 @@ mod tests {
             "fact tags must be globally unique so runtime dispatch never guesses between fact types: {duplicates:?}"
         );
     }
+
+    #[test]
+    fn registered_fuzz_decoders_cover_fact_routes() {
+        let route_tags = FACT_ROUTES
+            .iter()
+            .map(|route| route.tag)
+            .collect::<BTreeSet<_>>();
+        let decoder_tags = crate::protocol::fuzzing::REGISTERED_FACT_DECODERS
+            .iter()
+            .map(|decoder| decoder.tag)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            decoder_tags, route_tags,
+            "every registered projector route should have decode_any_fact_bytes fuzz coverage"
+        );
+    }
 }
