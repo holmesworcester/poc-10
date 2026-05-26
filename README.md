@@ -1,10 +1,17 @@
 # Context Architecture
 
-This repository is the poc-10 implementation of Context. Context is a
-fact-based protocol runtime for building networked workspaces from immutable
-facts, deterministic projection, and bounded side effects.
+Context is a lightweight p2p engine for building local-first, end-to-end
+encrypted collaboration apps. It is a fact-based protocol runtime meant to be
+small enough to reason about and complete enough to be the backend for a p2p
+Slack: team chat, invites, membership, reactions, files, message history, sync,
+and frontend-friendly queries without a custom middle layer.
 
-## Aim
+The runtime keeps the p2p stack behind a boring local API. A client should be
+able to ask for paginated message views with users, reactions, attachments, and
+download progress while Context handles networking, auth, sync, projection, and
+durable retry in one model.
+
+## Approach
 
 It is called Context because the central idea is that facts offer context to
 other facts. Context is a more general relationship than blocking: a context

@@ -153,7 +153,14 @@ fn root_readme_describes_context_project_aims() {
     let normalized = normalize_whitespace(&readme);
 
     for required in [
+        "lightweight p2p engine",
         "fact-based protocol runtime",
+        "backend for a p2p Slack",
+        "team chat, invites, membership, reactions, files, message history, sync",
+        "frontend-friendly queries without a custom middle layer",
+        "boring local API",
+        "paginated message views with users, reactions, attachments, and download progress",
+        "## Approach",
         "It is called Context because the central idea is that facts offer context to other facts",
         "Context is a more general relationship than blocking",
         "context offers can be projected before the facts they refer to exist",
