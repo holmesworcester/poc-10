@@ -111,9 +111,7 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "create_connection_response handler",
         "response projector",
         "connection_response rows",
-        "## 5) Range Sync Dependency Closure",
-        "## 6) Example Workspace Fact Graph",
-        "## 7) Responsibility Summary",
+        "## 5) Responsibility Summary",
         "```mermaid",
         "flowchart TD",
         "flowchart LR",
@@ -129,9 +127,21 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
     }
 
     assert!(
-        diagrams.matches("```mermaid").count() >= 8,
+        diagrams.matches("```mermaid").count() >= 6,
         "ARCHITECTURE_DIAGRAMS.md should contain one Mermaid block per diagram"
     );
+
+    for removed in [
+        "## 5) Range Sync Dependency Closure",
+        "## 6) Example Workspace Fact Graph",
+        "message_hello",
+        "workspace_acme",
+    ] {
+        assert!(
+            !diagrams.contains(removed),
+            "ARCHITECTURE_DIAGRAMS.md should not include removed graph {removed:?}"
+        );
+    }
 }
 
 #[test]
