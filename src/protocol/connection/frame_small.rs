@@ -1,8 +1,9 @@
-//! Small connection-frame receive fact family.
+//! Small connection-frame wire fact family.
 //!
-//! A `connection_frame_small` fact is local ephemeral input for one received
-//! small encrypted connection frame. Projection opens the frame with local
-//! connection context and emits durable child facts plus receipts.
+//! A `connection_frame_small` fact is the canonical local fact for one small
+//! encrypted connection frame. Receive projection pairs it with local
+//! `connection_frame_observation` context before opening the frame and emitting
+//! durable child facts plus receipts.
 
 pub mod create;
 pub mod fact;

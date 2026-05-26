@@ -2,8 +2,9 @@
 //!
 //! POLICY. A `connection_frame_small` fact is admitted iff:
 //!   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
-//!      exactly one small encrypted connection frame with receive metadata.
-//!   2. CONTEXT. The frame header names an exact local `connection_response`
+//!      exactly one small encrypted connection frame.
+//!   2. CONTEXT. The frame fact has exact local `connection_frame_observation`
+//!      context, and its header names an exact local `connection_response`
 //!      context. Missing context emits only a transient need for the fixed-point
 //!      pass; malformed and undecryptable frames produce no durable output.
 //!   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
@@ -46,6 +47,6 @@ impl TypedProjector<super::Codec> for ConnectionFrameSmallProjector {
         // 1. Structural.
         // 2. Context.
         // 3. Materialize.
-        create::project_received_frame(fact, input, context)
+        create::project_observed_frame(fact, input, context)
     }
 }

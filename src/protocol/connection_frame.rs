@@ -5,15 +5,16 @@
 //! frame bytes.
 //! Inbound receive handling uses this module only to classify established
 //! connection frame bytes. The `connection::frame_*` fact families construct
-//! the actual local facts, then call back here to open a frame and turn each
-//! inner payload into a durable child fact plus receipt.
+//! local wire-frame facts, and `connection::frame_observation` records receive
+//! metadata for those facts. Projection then calls back here to open a frame and
+//! turn each inner payload into a durable child fact plus receipt.
 //!
 //! The invariants are deliberately split: socket metadata enters only through
 //! receive-network handler, connection secrets come only from matched local
 //! `connection::response` context, and child facts are admitted through their
 //! owning typed codecs. Keep cryptographic frame mechanics in
 //! `connection_frame_wire`, keep socket IO in core/network handlers, and keep
-//! received-frame fact construction in the frame fact families.
+//! observed metadata in `connection::frame_observation`.
 
 use crate::core::context::ContextNeed;
 use crate::core::effects::PipelineEffects;
@@ -75,6 +76,7 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::frame_small::layout::TYPE_CONNECTION_FRAME_SMALL
             | connection::frame_file_slice::layout::TYPE_CONNECTION_FRAME_FILE_SLICE
             | connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE
+            | connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION
             | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
     )
 }
@@ -84,20 +86,18 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReceivedConnectionFrameKind {
+pub(crate) enum ConnectionFrameKind {
     Small,
     FileSlice,
     Bundle,
 }
 
-pub(crate) fn classify_received_frame(frame: &[u8]) -> Option<ReceivedConnectionFrameKind> {
+pub(crate) fn classify_frame(frame: &[u8]) -> Option<ConnectionFrameKind> {
     let parts = wire::decode_frame_parts(frame).ok()?;
     match parts.header.size_class {
-        wire::CONNECTION_FRAME_SIZE_CLASS_SMALL => Some(ReceivedConnectionFrameKind::Small),
-        wire::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => {
-            Some(ReceivedConnectionFrameKind::FileSlice)
-        }
-        wire::CONNECTION_FRAME_SIZE_CLASS_BUNDLE => Some(ReceivedConnectionFrameKind::Bundle),
+        wire::CONNECTION_FRAME_SIZE_CLASS_SMALL => Some(ConnectionFrameKind::Small),
+        wire::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE => Some(ConnectionFrameKind::FileSlice),
+        wire::CONNECTION_FRAME_SIZE_CLASS_BUNDLE => Some(ConnectionFrameKind::Bundle),
         _ => None,
     }
 }
@@ -167,14 +167,6 @@ pub fn received_connection_response_fact_effect(
     Ok(PipelineEffects::new().fact(response_fact).fact(receipt))
 }
 
-pub(crate) fn origin_addr_slot(
-    origin_addr: &[u8],
-) -> Result<connection::fact_receipt::fact::OriginAddr, String> {
-    let normalized = connection::fact_receipt::create::normalize_origin_addr_bytes(origin_addr)?;
-    connection::fact_receipt::fact::OriginAddr::new(&normalized)
-        .map_err(|err| format!("connection frame origin addr: {err}"))
-}
-
 pub(crate) fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot<N>, String> {
     if frame.len() != N {
         return Err(format!("connection frame must be exactly {N} bytes"));
@@ -182,10 +174,59 @@ pub(crate) fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot
     FixedSlot::new(frame).map_err(|err| format!("connection frame bytes: {err}"))
 }
 
-pub fn project_received_frame(
-    fact: &Fact,
-    origin_addr: connection::fact_receipt::fact::OriginAddr,
+pub fn frame_fact_from_wire(frame: &[u8], local_timestamp_ms: u64) -> Result<Fact, String> {
+    match classify_frame(frame) {
+        Some(ConnectionFrameKind::Small) => {
+            connection::frame_small::create::fact_from_wire(frame, local_timestamp_ms)
+        }
+        Some(ConnectionFrameKind::FileSlice) => {
+            connection::frame_file_slice::create::fact_from_wire(frame, local_timestamp_ms)
+        }
+        Some(ConnectionFrameKind::Bundle) => {
+            connection::frame_bundle::create::fact_from_wire(frame, local_timestamp_ms)
+        }
+        None => Err("connection frame has unknown size class".to_string()),
+    }
+}
+
+pub fn observed_frame_effect(
+    frame_fact: Fact,
+    origin_addr: &[u8],
     received_at_local_ms: u64,
+) -> Result<PipelineEffects, String> {
+    let observation = connection::frame_observation::create::fact_from_observation(
+        frame_fact.id,
+        origin_addr,
+        received_at_local_ms,
+    )?;
+    Ok(PipelineEffects::new()
+        .fact(observation)
+        .ephemeral_fact(frame_fact))
+}
+
+pub fn wire_from_frame_fact(fact: &Fact) -> Result<Vec<u8>, String> {
+    if fact.scope != FactScope::Local {
+        return Err("connection frame fact must have local scope".to_string());
+    }
+    match fact.body().first().copied() {
+        Some(connection::frame_small::layout::TYPE_CONNECTION_FRAME_SMALL) => {
+            connection::frame_small::Codec::decode_fact(fact)
+                .map(|input| input.frame.bytes().to_vec())
+        }
+        Some(connection::frame_file_slice::layout::TYPE_CONNECTION_FRAME_FILE_SLICE) => {
+            connection::frame_file_slice::Codec::decode_fact(fact)
+                .map(|input| input.frame.bytes().to_vec())
+        }
+        Some(connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE) => {
+            connection::frame_bundle::Codec::decode_fact(fact)
+                .map(|input| input.frame.bytes().to_vec())
+        }
+        _ => Err("expected connection frame fact".to_string()),
+    }
+}
+
+pub fn project_observed_frame(
+    fact: &Fact,
     frame: &[u8],
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
@@ -196,6 +237,24 @@ pub fn project_received_frame(
     let Ok(connection_id) = wire::received_connection_fact_id(frame) else {
         return Ok(ProjectionOutput::new());
     };
+
+    let observation_need = exact_need(
+        fact.id,
+        "connection_frame_observation",
+        FactScope::Local,
+        fact.id,
+    );
+    let Some(observation_fact) = context.payload_for(&observation_need) else {
+        return Ok(ProjectionOutput::new().need(observation_need));
+    };
+    if observation_fact.scope != FactScope::Local {
+        return Err("connection frame observation context must be local".to_string());
+    }
+    let observation = connection::frame_observation::Codec::decode_fact(observation_fact)?;
+    if observation.frame_fact_id != fact.id {
+        return Err("connection frame observation does not name frame fact".to_string());
+    }
+
     let connection_need = exact_need(
         fact.id,
         "connection_response",
@@ -215,8 +274,8 @@ pub fn project_received_frame(
     match open_received_frame(OpenReceivedFrame {
         frame,
         connection_fact,
-        origin_addr: origin_addr.bytes(),
-        received_at_local_ms,
+        origin_addr: observation.origin_addr.bytes(),
+        received_at_local_ms: observation.received_at_local_ms,
     }) {
         Ok(facts) => Ok(facts_output(facts)),
         Err(_) => Ok(ProjectionOutput::new()),

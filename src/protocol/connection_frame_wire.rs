@@ -21,8 +21,6 @@ use crate::core::wire::{
     self, fixed_tag, Ciphertext, FixedBytes, FixedLayout, Id32, Nonce24, Tag, WireError,
 };
 
-use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
-use crate::protocol::connection::fact_receipt::fact::{OriginAddr, ORIGIN_ADDR_BYTES};
 use crate::protocol::content::{file, file_slice};
 
 /// Public tag prefix shared by all connection::frame frame variants.
@@ -107,15 +105,13 @@ const CONNECTION_OFFSET: usize = SIZE_CLASS_OFFSET + wire::U8_BYTES;
 const NONCE_OFFSET: usize = CONNECTION_OFFSET + Id32::LEN;
 const CIPHERTEXT_OFFSET: usize = NONCE_OFFSET + Nonce24::LEN;
 
-pub const fn received_frame_fact_bytes<const FRAME_BYTES: usize>() -> usize {
-    1 + wire::FixedSlot::<ORIGIN_ADDR_BYTES>::LEN + 8 + wire::FixedSlot::<FRAME_BYTES>::LEN
+pub const fn frame_fact_bytes<const FRAME_BYTES: usize>() -> usize {
+    1 + wire::FixedSlot::<FRAME_BYTES>::LEN
 }
 
-pub fn encode_received_frame_fact<const FRAME_BYTES: usize>(
+pub fn encode_frame_fact<const FRAME_BYTES: usize>(
     tag: u8,
     expected_size_class: u8,
-    origin_addr: &OriginAddr,
-    received_at_local_ms: u64,
     frame: &wire::FixedSlot<FRAME_BYTES>,
 ) -> Result<Vec<u8>, String> {
     if frame.len() != FRAME_BYTES {
@@ -124,42 +120,30 @@ pub fn encode_received_frame_fact<const FRAME_BYTES: usize>(
         ));
     }
     require_frame_size_class(frame.bytes(), expected_size_class)?;
-    let origin_addr = normalize_origin_addr_bytes(origin_addr.bytes())?;
-    let origin_addr = OriginAddr::new(&origin_addr).map_err(wire_err)?;
-    let mut out = wire::Writer::with_capacity(received_frame_fact_bytes::<FRAME_BYTES>());
+    let mut out = wire::Writer::with_capacity(frame_fact_bytes::<FRAME_BYTES>());
     out.u8(tag);
-    out.fixed_slot_value(&origin_addr).map_err(wire_err)?;
-    out.u64be(received_at_local_ms);
     out.fixed_slot_value(frame).map_err(wire_err)?;
-    out.finish_exact(received_frame_fact_bytes::<FRAME_BYTES>())
+    out.finish_exact(frame_fact_bytes::<FRAME_BYTES>())
         .map_err(wire_err)
 }
 
-pub fn decode_received_frame_fact<const FRAME_BYTES: usize>(
+pub fn decode_frame_fact<const FRAME_BYTES: usize>(
     bytes: &[u8],
     tag: u8,
     expected_size_class: u8,
-) -> Result<(OriginAddr, u64, wire::FixedSlot<FRAME_BYTES>), String> {
+) -> Result<wire::FixedSlot<FRAME_BYTES>, String> {
     let mut reader = wire::Reader::new(bytes);
     reader
-        .expect_len(received_frame_fact_bytes::<FRAME_BYTES>())
+        .expect_len(frame_fact_bytes::<FRAME_BYTES>())
         .map_err(wire_err)?;
     reader.expect_u8(tag).map_err(wire_err)?;
-    let origin_addr = reader
-        .fixed_slot_value::<ORIGIN_ADDR_BYTES>()
-        .map_err(wire_err)?;
-    let canonical_origin_addr = normalize_origin_addr_bytes(origin_addr.bytes())?;
-    if canonical_origin_addr != origin_addr.bytes() {
-        return Err("connection frame origin addr is not canonical".to_string());
-    }
-    let received_at_local_ms = reader.u64be().map_err(wire_err)?;
     let frame = reader.fixed_slot_value::<FRAME_BYTES>().map_err(wire_err)?;
     reader.finish().map_err(wire_err)?;
     require_frame_size_class(frame.bytes(), expected_size_class)?;
     if frame.len() != FRAME_BYTES {
         return Err("connection frame fact slot must be full".to_string());
     }
-    Ok((origin_addr, received_at_local_ms, frame))
+    Ok(frame)
 }
 
 fn require_frame_size_class(frame: &[u8], expected_size_class: u8) -> Result<(), String> {

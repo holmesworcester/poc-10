@@ -1,9 +1,9 @@
-//! File-slice connection-frame receive fact family.
+//! File-slice connection-frame wire fact family.
 //!
 //! A `connection_frame_file_slice` fact is local ephemeral input for one
-//! received encrypted connection frame sized for a content file slice.
-//! Projection opens the frame with local connection context and emits durable
-//! child facts plus receipts.
+//! encrypted connection frame sized for a content file slice. Receive
+//! projection pairs it with local `connection_frame_observation` context before
+//! opening the frame and emitting durable child facts plus receipts.
 
 pub mod create;
 pub mod fact;

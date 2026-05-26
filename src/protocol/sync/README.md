@@ -157,8 +157,8 @@ semantic admission remains in the fact family that owns the payload.
 ## Intent Handlers
 
 `share_fact_with_sync` implements the contribution path described above. It
-upserts or retracts one owner fact's durable sync visibility, applies the
-incremental range-summary update, and triggers live-tail advertisement while
+upserts or retracts one owner fact's durable sync visibility, refreshes the
+affected range-summary rows, and triggers live-tail advertisement while
 skipping the origin connection that supplied the fact.
 
 `seed_connection_sync` runs after a connection response becomes durable. It

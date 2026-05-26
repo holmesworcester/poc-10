@@ -630,6 +630,7 @@ projector_routes! {
     project_connection_frame_small => connection::frame_small::layout::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector;
     project_connection_frame_file_slice => connection::frame_file_slice::layout::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector;
     project_connection_frame_bundle => connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector;
+    project_connection_frame_observation => connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector;
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
     project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;

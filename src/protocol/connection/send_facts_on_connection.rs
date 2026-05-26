@@ -300,17 +300,21 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             for fact in &batch {
                 bundle.push(frame_policy::require_sendable_fact(fact)?.to_vec());
             }
+            let sealed_frame = frame_policy::seal_connection_send_frame(
+                connection_id,
+                sender_endpoint,
+                receiver_endpoint,
+                connection.connection_secret,
+                &fact_ids,
+                bundle,
+            )?;
+            let frame_fact =
+                frame_policy::frame_fact_from_wire(&sealed_frame, connection_fact.timestamp)?;
+            let frame = frame_policy::wire_from_frame_fact(&frame_fact)?;
             output = output.local_intent(send_network_frame::send_network_frame_intent(
                 SendNetworkFrame {
                     routing_key: connection_id,
-                    frame: frame_policy::seal_connection_send_frame(
-                        connection_id,
-                        sender_endpoint,
-                        receiver_endpoint,
-                        connection.connection_secret,
-                        &fact_ids,
-                        bundle,
-                    )?,
+                    frame,
                 },
             ));
         }
