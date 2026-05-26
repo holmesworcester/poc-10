@@ -78,73 +78,94 @@ retained key-node wraps, deletion facts, or retention policy context. If sync
 sent only the owner facts in the requested range, the receiver could store the
 bytes but many projectors would park, leaving the user-visible data incomplete.
 
-Dependency closure is the compromise: when a peer compares or requests a range,
-the response includes the owner facts in that range plus the out-of-range
-context facts needed to project them quickly. This keeps catch-up bounded by
-the requested view and its validated dependency graph rather than by the whole
-workspace history. The server remains untrusted: it may relay range summaries
-and bytes, but authority, key access, and key healing are still ordinary facts,
-context, projectors, and bounded handlers.
+Dependency closure is the solution: the response for a range carries the owner
+facts in that range plus the out-of-range context facts needed to project them
+quickly. This keeps catch-up bounded by the requested view and its validated
+dependency graph rather than by the whole workspace history. The server remains
+untrusted: it may relay range summaries and bytes, but authority, key access,
+and key healing are still ordinary facts, context, projectors, and bounded
+handlers.
 
-Projectors own sync membership. A projector that can decode a fact and
-determine its sync scope emits `share_fact_with_sync` in the same projection
-pass that emits its rows, offers, needs, wakes, or purge effects. This applies
-even when the fact is parked for missing context. Parking means the read model
-is not materialized yet; it does not hide the owner fact from sync if the
-projector already knows the sync scope and any validated context facts that
-should travel with it.
+## Convergence Process
 
-A `share_fact_with_sync` payload is the complete projector view for one owner
-fact in one sync scope:
+Sync converges by turning projector output into a durable range index, then
+exchanging summaries and exact ids over established connections:
+
+1. The owner projector admits or partially understands a shared fact. In the
+   same projection pass it emits `share_fact_with_sync` with the fact id,
+   timestamp, workspace, and any validated context facts that should travel
+   with it. Projectors own this step because only the owning fact family knows
+   which context has actually been validated.
+2. The `share_fact_with_sync` handler records that contribution in sync rows.
+   It rejects local/private bytes, stores the owner as shareable, stores the
+   direct `context_have` edges, and refreshes the affected range-summary path.
+   Sync does not infer dependencies by parsing fact bytes or scanning protocol
+   rows.
+3. When a connection is seeded or a range is compared, sync sends a `compare`
+   fact that summarizes the visible range for that connection. The peer
+   projects the `compare` and runs `send_sync_compare_response`.
+4. The response handler compares the peer summary with the local durable index.
+   If a range is too broad to answer exactly, it creates child `compare` facts.
+   If exact ids are useful, it sends `have_id` facts or selected fact ids.
+5. A peer that receives `have_id` checks whether it already has the named fact.
+   If not, it creates and sends a `need_id` fact on the same connection.
+6. A peer that receives `need_id` checks the shareable index for that
+   connection, rejects unsendable payloads, and asks connection to send the
+   requested fact bytes.
+7. Received bytes enter core as ordinary facts. Their owning projectors decide
+   whether the bytes are valid, materialize local rows, publish context, and
+   emit more sync contributions. Convergence is the repeated application of
+   this loop until summaries match.
+
+For dependency-aware sends, step 4 expands selected owner ids before handing
+them to connection. It includes each in-range owner, then walks that owner's
+projector-supplied `context_have` facts, then each dependency's own
+`context_have` facts until the authorized shareable graph is exhausted. The
+walk stops at missing, purged, unauthorized, or local-only facts because those
+facts have no sendable shareable row for the connection.
+
+## Share Contributions
+
+A `share_fact_with_sync` payload is not a command to send bytes immediately.
+It is the owner projector's durable visibility statement for one fact in one
+workspace:
 
 ```text
-sync_scope
+workspace_id
 owner_fact_id
 owner_timestamp_ms
-leaf_range
 state: upsert | retract
 context_have: [fact:direct_validated_dependency, ...]
 ```
 
-`context_have` contains direct sync-eligible context facts that the projector
-validated or consumed in this pass. It should name exact input parents, matched
-update/about facts, authority facts, key wraps, retained key nodes, and other
-out-of-range witnesses that help a receiver project the owner fact. It should
-not name local-only secrets. Raw `ContextNeed` selectors are not stored in
-negentropy state, hashed into summaries, or sent as dependency closure; needs
-are local wake hints until they are satisfied by validated offers.
+`workspace_id` is the sync namespace and authorization boundary.
+`owner_fact_id` is the fact whose bytes may be sent. `owner_timestamp_ms` is
+copied from the owner fact and places that owner in the range-summary tree; the
+handler rejects a later contribution that tries to move the same owner to a
+different timestamp. `state` either inserts/refreshes the contribution or
+removes it. `context_have` is the direct dependency list that the projector has
+validated or consumed in this pass.
 
-The `share_fact_with_sync` handler is the only durable visibility path. It
-loads the owner fact, rejects local/private payloads, validates that listed
-context facts are sendable if they still exist, stores the contribution, and
-refreshes the shareable rows, leaf rows, context-have rows, and range summaries.
-The update is incremental: changing one leaf touches that stored contribution
-and its ancestor path, not the whole namespace. Replaying the same contribution
-is a no-op, and older queued snapshots cannot remove richer context learned by
-a later projection; context rows are inserted idempotently and kept as a union
-unless the owner projector emits an explicit prune or retraction.
+`context_have` should name exact input parents, matched subject facts,
+authority facts, key wraps, retained key nodes, and other out-of-range
+witnesses that help a receiver project the owner fact. It should not name
+local-only secrets. Raw `ContextNeed` selectors are not stored in negentropy
+state, hashed into summaries, or sent as dependency closure; needs are local
+wake hints until they are satisfied by validated offers.
 
-Compare and response handlers read only the durable sync index for the
-connection-authorized scope. For dependency-aware sends, they include each
-in-range owner, then walk that owner's projector-supplied `context_have` facts,
-then each dependency's own `context_have` facts until the authorized shareable
-graph is exhausted. The walk stops at missing, purged, unauthorized, or
-local-only facts because those facts have no sendable shareable row for the
-connection. A range send without dependencies sends only the owner leaves; that
-mode is useful for proving tests are not passing because a full-range sync
-happened accidentally.
+The handler stores direct dependency edges as a union for that owner. Replaying
+the same contribution is a no-op, and an older queued contribution cannot
+erase richer context learned by a later projection. If a dependency must stop
+travelling with an owner, the owner projector must emit an explicit prune or
+retraction path.
 
-Live-tail egress is the same contribution path. When a new or changed
-contribution is stored, sync can advertise it to established authorized
-connections. If the fact arrived from a connection and has a projected receipt
-for that connection, live-tail advertisement skips that origin connection while
-still advertising the fact to other authorized connections.
-
-Removal uses the same ownership boundary. When a target projector observes
-deletion, expiry, supersession, or retirement context for its own fact, it emits
-ordinary row deletions or self-purge plus a `share_fact_with_sync` retraction
-for that owner id. The handler removes the stored contribution and refreshes
-ancestor summaries before or with physical fact-byte purge. Sync does not
+Live-tail egress and removal use the same contribution path. When a new or
+changed contribution is stored, sync advertises it to established authorized
+connections and skips the origin connection recorded by connection receipts.
+When the owner projector observes deletion, expiry, supersession, or
+retirement context for its own fact, it emits a `share_fact_with_sync`
+retraction along with ordinary row deletion or self-purge effects. Sync removes
+that owner's contribution and refreshes ancestor summaries; it does not
 rediscover purged ids from broad fact scans.
 
 ## Invariants And Responsibility
@@ -187,12 +208,18 @@ unsendable local/private payloads, and queues `send_facts_on_connection`.
 
 ## Facts
 
+Sync facts are the durable messages in the convergence loop. They are created,
+sent, projected, and handled as ordinary facts; each one moves the loop one
+step closer to equal range summaries.
+
 ### `cascade_test_fact` (tag 2)
 
-Synthetic fixed-width test fact used to exercise dependency replay. Projection
-requires the outer timestamp to match the payload timestamp and waits for each
-dependency as `sync_exact_fact` in the same scope. When all dependencies are
-present it offers `sync_exact_fact`.
+Test-only process step for dependency replay. A test creates a chain of these
+facts with explicit dependency ids, then replays them out of order. Projection
+waits for each dependency as `sync_exact_fact` in the same scope. When all
+dependencies are present it offers its own `sync_exact_fact`, waking downstream
+facts and proving that dependency closure can unblock a graph without a
+separate dependency executor.
 
 ```text
 cascade_test_fact {
@@ -204,9 +231,12 @@ cascade_test_fact {
 
 ### `range_request` (tag 160)
 
-Workspace-scoped control fact requesting a timestamp interval on one
-connection. Current projection validates that the outer scope matches the
-workspace and records no rows; transfer is driven by compare and send handlers.
+Optional process step for a bounded range request. A command can create this
+workspace-scoped fact to name a connection and timestamp interval that should
+become useful locally. Current projection validates that the outer scope
+matches the workspace and records no rows; compare/send handlers perform the
+transfer using the same range index and dependency closure used by ordinary
+connection sync.
 
 ```text
 range_request {
@@ -219,10 +249,11 @@ range_request {
 
 ### `shared_fact` (tag 162)
 
-Declares that one fact id is shared in a workspace. Projection requires
-workspace scope and offers `sync_exact_fact` for the named fact id. Most live
-sharing is recorded by the `share_fact_with_sync` handler rather than by
-creating this fact manually.
+Manual or test process step for naming one exact shared id. Projection requires
+workspace scope and offers `sync_exact_fact` for the named fact id, allowing a
+waiting projector to receive a concrete payload for that id. Normal live
+sharing is recorded by the `share_fact_with_sync` handler; this fact is the
+fact-level form of the same "this exact id is available" signal.
 
 ```text
 shared_fact {
@@ -233,9 +264,12 @@ shared_fact {
 
 ### `compare` (tag 165)
 
-Negentropy range summary for one connection. Projection writes
-`sync_compare_rows` and emits `send_sync_compare_response`. The handler decides
-whether to answer, split, or send exact ids.
+Process step for comparing one range on one connection. Seeding a connection or
+answering a broad mismatch creates `compare` facts. Projection writes
+`sync_compare_rows` and emits `send_sync_compare_response`. The handler compares
+the peer summary with the local connection-visible summary and decides whether
+to answer with narrower compares, exact `have_id` facts, or selected fact ids
+expanded with dependency closure.
 
 ```text
 compare {
@@ -248,9 +282,11 @@ compare {
 
 ### `have_id` (tag 166)
 
-Advertises that a peer has one fact id at the timestamp used by compare
-planning. Projection writes `sync_have_id_rows` and emits
-`send_needed_fact_id`.
+Process step for exact-id advertisement. A peer sends `have_id` when summary
+comparison has narrowed a difference to specific ids. Projection writes
+`sync_have_id_rows` and emits `send_needed_fact_id`; the handler checks whether
+this store already has the id and creates a `need_id` only when the id is
+missing.
 
 ```text
 have_id {
@@ -262,8 +298,10 @@ have_id {
 
 ### `need_id` (tag 167)
 
-Requests bytes for exactly one fact id on one connection. Projection writes
-`sync_need_id_rows` and emits `send_requested_fact`.
+Process step for exact-id request. A peer sends `need_id` after receiving a
+`have_id` for a fact it lacks. Projection writes `sync_need_id_rows` and emits
+`send_requested_fact`; the handler verifies that the requested id is shareable
+on that connection and asks connection to send the bytes.
 
 ```text
 need_id {
