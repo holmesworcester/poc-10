@@ -57,10 +57,6 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
         timeline: connection::request::peer_retry_timeline,
         end_inclusive: current_wall_clock_ms,
     },
-    DaemonTimeWake {
-        timeline: connection::response::seed_sync_timeline,
-        end_inclusive: current_wall_clock_ms,
-    },
 ];
 
 fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {

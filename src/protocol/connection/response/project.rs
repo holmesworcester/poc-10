@@ -14,8 +14,9 @@
 //!      initiator secret; local responses require responder secret. Close
 //!      context removes the response row and purges this response fact.
 //!   3. MATERIALIZE. Valid responses write the connection_response row, publish
-//!      local connection context, and schedule the initial one-shot sync seed
-//!      for the materialized connection.
+//!      local connection context. Only received responses emit the initial
+//!      one-shot sync seed, because the peer that receives the response owns the
+//!      single bidirectional bootstrap sync.
 //!
 //! Change this projector for response admission, context waits, connection
 //! context offers, or sync seeding. Response byte compatibility belongs in
@@ -24,7 +25,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
 use crate::protocol::auth::invite;
@@ -36,8 +37,6 @@ use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedCo
 use super::create;
 use super::fact::ConnectionResponseFact;
 use super::rows::{connection_response_key, connection_response_row, CONNECTION_RESPONSE_ROWS};
-
-const SEED_SYNC_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionResponseProjector;
@@ -222,7 +221,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
                 return Err("connection response secret does not match handshake".to_string());
             }
             // 3. Materialize received response.
-            return materialized_output(fact, &response, projection_context);
+            return materialized_output(fact, &response, SeedSync::Immediate);
         }
 
         // 2b. Local response path.
@@ -262,8 +261,14 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
             );
         }
         // 3. Materialize local response.
-        materialized_output(fact, &response, projection_context)
+        materialized_output(fact, &response, SeedSync::None)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeedSync {
+    None,
+    Immediate,
 }
 
 fn validate_response_fields(response: &ConnectionResponseFact) -> Result<(), String> {
@@ -353,7 +358,7 @@ fn validate_fact_receipt(
 fn materialized_output(
     fact: &Fact,
     response: &ConnectionResponseFact,
-    projection_context: &ProjectionContext,
+    seed_sync: SeedSync,
 ) -> Result<ProjectionOutput, String> {
     let response_id = fact.id;
     let mut output = ProjectionOutput::new()
@@ -373,21 +378,10 @@ fn materialized_output(
             response_id,
             response,
         )?));
-    let seed_timeline = super::seed_sync_timeline();
-    let seed_at = fact.timestamp.saturating_add(SEED_SYNC_DELAY_MS);
-    if projection_context
-        .time_reached(&seed_timeline, seed_at)
-        .is_some()
-    {
+    if seed_sync == SeedSync::Immediate {
         output = output.intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: response_id,
         }));
-    } else {
-        output = output.time_wake(TimeWake {
-            owner: response_id,
-            timeline: seed_timeline,
-            at: seed_at,
-        });
     }
     Ok(output)
 }
@@ -418,7 +412,7 @@ mod projector_tests {
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth::endpoint::fact::EndpointFact;
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::connection::ephemeral_secret::{
@@ -624,14 +618,6 @@ mod projector_tests {
         }
     }
 
-    fn seed_due_context(context: ProjectionContext, response_fact: &Fact) -> ProjectionContext {
-        context.with_time_ranges(vec![TimeRange {
-            timeline: topo::protocol::connection::response::seed_sync_timeline(),
-            start_exclusive: None,
-            end_inclusive: response_fact.timestamp + super::SEED_SYNC_DELAY_MS,
-        }])
-    }
-
     #[test]
     fn response_missing_request_waits_without_row() {
         let scenario = scenario();
@@ -668,15 +654,7 @@ mod projector_tests {
             .expect("project response");
 
         assert!(output.effects.intents.is_empty());
-        assert_eq!(output.time_wakes.len(), 1);
-        assert_eq!(
-            output.time_wakes[0].timeline,
-            topo::protocol::connection::response::seed_sync_timeline()
-        );
-        assert_eq!(
-            output.time_wakes[0].at,
-            scenario.response_fact.timestamp + super::SEED_SYNC_DELAY_MS
-        );
+        assert!(output.time_wakes.is_empty());
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
@@ -703,29 +681,22 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_response_due_seed_sync_emits_seed_intent() {
+    fn local_response_does_not_seed_bootstrap_sync() {
         let scenario = scenario();
-        let context = seed_due_context(
-            ProjectionContext::from_matches(vec![
-                request_match(scenario.response_fact.id, scenario.request_fact.clone()),
-                invite_match(scenario.response_fact.id, scenario.invite_fact.clone()),
-                ephemeral_match(
-                    scenario.response_fact.id,
-                    scenario.responder_ephemeral_fact.clone(),
-                ),
-            ]),
-            &scenario.response_fact,
-        );
+        let context = ProjectionContext::from_matches(vec![
+            request_match(scenario.response_fact.id, scenario.request_fact.clone()),
+            invite_match(scenario.response_fact.id, scenario.invite_fact.clone()),
+            ephemeral_match(
+                scenario.response_fact.id,
+                scenario.responder_ephemeral_fact.clone(),
+            ),
+        ]);
 
         let output = project::ConnectionResponseProjector::new()
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
-        assert_eq!(output.effects.intents.len(), 1);
-        assert_eq!(
-            output.effects.intents[0].kind.as_str(),
-            SEED_CONNECTION_SYNC
-        );
+        assert!(output.effects.intents.is_empty());
         assert!(output.time_wakes.is_empty());
     }
 
@@ -752,8 +723,12 @@ mod projector_tests {
             .project(&scenario.response_fact, &context)
             .expect("project received response");
 
-        assert!(output.effects.intents.is_empty());
-        assert_eq!(output.time_wakes.len(), 1);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            SEED_CONNECTION_SYNC
+        );
+        assert!(output.time_wakes.is_empty());
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
