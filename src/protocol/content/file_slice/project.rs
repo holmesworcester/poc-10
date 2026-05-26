@@ -2,14 +2,17 @@
 //!
 //! POLICY. A content_file_slice is admitted iff:
 //!   1. STRUCTURAL. The fact is workspace-scoped and its parent file selector
-//!      and slice index decode from the canonical payload.
-//!   2. CONTEXT. Projection waits for the parent file, rejects out-of-range
-//!      indexes, and watches parent file/message deletion context.
-//!   3. MATERIALIZE. Live slices write one row and share the fact; deleted
-//!      parents delete the slice row and purge this slice fact. AEAD opening
-//!      stays in auth key-material code.
+//!      and slice index decode from the canonical payload, and the slice
+//!      signature verifies.
+//!   2. CONTEXT. Projection waits for the parent file, verifies the BAO proof
+//!      against that file's encrypted root hash, rejects out-of-range indexes,
+//!      and watches parent file/message deletion context.
+//!   3. MATERIALIZE. Live slices write one row containing the verified
+//!      ciphertext and share the fact; deleted parents delete the slice row and
+//!      purge this slice fact. AEAD opening stays in auth key-material code.
 
 use crate::core::context::ContextNeed;
+use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
@@ -95,6 +98,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         if slice.slice_index >= file.total_slices {
             return Err("file slice index is out of range for parent file".to_string());
         }
+        let verified_ciphertext = verified_slice_ciphertext(&slice, &file)?;
         let message_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_message",
@@ -190,13 +194,55 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
                 .need(file_deletion_need)
                 .need(parent_deletion_need)
                 .row_mutation(RowMutation::InsertValues(content_file_slice_row(
-                    fact.id, &slice,
+                    fact.id,
+                    &slice,
+                    verified_ciphertext,
                 ))),
             slice.workspace_id,
             fact,
             context_have,
         ))
     }
+}
+
+fn verified_slice_ciphertext(
+    slice: &super::fact::ContentFileSliceFact,
+    file: &file::fact::ContentFileFact,
+) -> Result<Vec<u8>, String> {
+    let (slice_start, slice_len) = encrypted_slice_range(file, slice.slice_index)?;
+    let verified =
+        crypto::bao_verify_slice(&file.root_hash, slice.proof.bytes(), slice_start, slice_len)
+            .map_err(|err| format!("file slice bao proof verification failed: {err}"))?;
+    if verified.len() != slice_len as usize {
+        return Err("file slice bao proof length mismatch".to_string());
+    }
+    Ok(verified)
+}
+
+fn encrypted_slice_range(
+    file: &file::fact::ContentFileFact,
+    slice_index: u32,
+) -> Result<(u64, u64), String> {
+    let plaintext_start = u64::from(slice_index)
+        .checked_mul(u64::from(file.slice_bytes))
+        .ok_or_else(|| "file slice byte offset overflow".to_string())?;
+    if plaintext_start >= file.blob_bytes {
+        return Err("file slice byte offset is outside parent file".to_string());
+    }
+    let plaintext_len = file
+        .blob_bytes
+        .saturating_sub(plaintext_start)
+        .min(u64::from(file.slice_bytes));
+    let encrypted_len = plaintext_len
+        .checked_add(crypto::XCHACHA20_POLY1305_TAG_BYTES as u64)
+        .ok_or_else(|| "file slice encrypted length overflow".to_string())?;
+    let encrypted_stride = u64::from(file.slice_bytes)
+        .checked_add(crypto::XCHACHA20_POLY1305_TAG_BYTES as u64)
+        .ok_or_else(|| "file slice encrypted stride overflow".to_string())?;
+    let encrypted_start = u64::from(slice_index)
+        .checked_mul(encrypted_stride)
+        .ok_or_else(|| "file slice encrypted offset overflow".to_string())?;
+    Ok((encrypted_start, encrypted_len))
 }
 
 fn context_payload<'a>(
@@ -285,5 +331,75 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
         Ok(())
     } else {
         Err("content file slice fact scope does not match body workspace".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
+    use crate::protocol::content::file_slice::fact::{ContentFileSliceFact, FileSliceProof};
+
+    fn file(root_hash: [u8; 32]) -> ContentFileFact {
+        ContentFileFact {
+            workspace_id: [1; 32],
+            created_at_ms: 100,
+            message_id: [2; 32],
+            author_user_id: [3; 32],
+            signer_id: [4; 32],
+            signer_public_key: [5; 32],
+            file_id: [6; 32],
+            blob_bytes: 10,
+            total_slices: 2,
+            slice_bytes: 5,
+            root_hash,
+            sealed_metadata: SealedMetadata::new(b"sealed").expect("metadata"),
+            signature: [7; crypto::ED25519_SIGNATURE_BYTES],
+        }
+    }
+
+    #[test]
+    fn bao_proof_extracts_verified_ciphertext_for_slice_row() {
+        let encrypted_blob: Vec<u8> = (0..42u8).collect();
+        let (root_hash, outboard) = crypto::bao_outboard(&encrypted_blob).expect("outboard");
+        let slice_start = 21;
+        let slice_len = 21;
+        let proof = crypto::bao_extract_slice(&encrypted_blob, &outboard, slice_start, slice_len)
+            .expect("proof");
+        let slice = ContentFileSliceFact {
+            workspace_id: [1; 32],
+            created_at_ms: 101,
+            file_id: [6; 32],
+            slice_index: 1,
+            signer_id: [4; 32],
+            signer_public_key: [5; 32],
+            proof: FileSliceProof::new(&proof).expect("proof slot"),
+            signature: [8; crypto::ED25519_SIGNATURE_BYTES],
+        };
+
+        let verified = verified_slice_ciphertext(&slice, &file(root_hash)).expect("verify");
+
+        assert_eq!(verified, encrypted_blob[slice_start as usize..].to_vec());
+    }
+
+    #[test]
+    fn bao_proof_rejects_wrong_root() {
+        let encrypted_blob: Vec<u8> = (0..42u8).collect();
+        let (_root_hash, outboard) = crypto::bao_outboard(&encrypted_blob).expect("outboard");
+        let proof = crypto::bao_extract_slice(&encrypted_blob, &outboard, 0, 21).expect("proof");
+        let slice = ContentFileSliceFact {
+            workspace_id: [1; 32],
+            created_at_ms: 101,
+            file_id: [6; 32],
+            slice_index: 0,
+            signer_id: [4; 32],
+            signer_public_key: [5; 32],
+            proof: FileSliceProof::new(&proof).expect("proof slot"),
+            signature: [8; crypto::ED25519_SIGNATURE_BYTES],
+        };
+
+        let err = verified_slice_ciphertext(&slice, &file([0xff; 32])).expect_err("reject");
+
+        assert!(err.contains("bao proof verification failed"), "{err}");
     }
 }

@@ -10,8 +10,8 @@
 //!
 //! Descriptor secrecy is limited to the opaque sealed metadata slot here; CLI
 //! display resolves the parent message key before opening it. Signature
-//! authority belongs to the content-file projector, and slice integrity is
-//! checked by the file-slice admit pipeline.
+//! authority belongs to the content-file projector, and per-slice BAO
+//! verification belongs to the content-file-slice projector.
 
 use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;

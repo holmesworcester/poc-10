@@ -199,14 +199,13 @@ pub fn send_file(
             .len()
             .div_ceil(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES) as u32
     };
-    let encrypted_slices = encrypted_file_slices(
+    let (encrypted_slices, root_hash) = encrypted_file_slices(
         &payload,
         &encryption.key_secret,
         parsed.workspace_id,
         message_receipt.message_fact_id,
         created_at_ms,
     )?;
-    let root_hash = encrypted_blob_root_hash(&encrypted_slices);
     let file_id = file_id_for(
         parsed.workspace_id,
         message_receipt.message_fact_id,
@@ -251,8 +250,8 @@ pub fn send_file(
             slice_index: encrypted.slice_index,
             signer_id: [0; 32],
             signer_public_key: [0; 32],
-            ciphertext: file_slice::fact::FileSliceCiphertext::new(&encrypted.ciphertext)
-                .map_err(|err| format!("file slice ciphertext: {err}"))?,
+            proof: file_slice::fact::FileSliceProof::new(&encrypted.proof)
+                .map_err(|err| format!("file slice bao proof: {err}"))?,
             signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
         facts.push(signed_file_slice_fact(
@@ -999,6 +998,7 @@ struct EncryptedFileSlice {
     created_at_ms: u64,
     slice_index: u32,
     ciphertext: Vec<u8>,
+    proof: Vec<u8>,
 }
 
 fn encrypted_file_slices(
@@ -1007,7 +1007,7 @@ fn encrypted_file_slices(
     workspace_id: FactId,
     message_id: FactId,
     file_created_at_ms: u64,
-) -> Result<Vec<EncryptedFileSlice>, String> {
+) -> Result<(Vec<EncryptedFileSlice>, [u8; 32]), String> {
     let mut slices = Vec::new();
     for (slice_index, chunk) in payload
         .chunks(file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES)
@@ -1019,18 +1019,23 @@ fn encrypted_file_slices(
             created_at_ms: file_created_at_ms.saturating_add(1 + u64::from(slice_index)),
             slice_index,
             ciphertext: seal_bytes(key, &nonce, chunk, "file slice")?,
+            proof: Vec::new(),
         });
     }
-    Ok(slices)
-}
-
-fn encrypted_blob_root_hash(slices: &[EncryptedFileSlice]) -> [u8; 32] {
     let len = slices.iter().map(|slice| slice.ciphertext.len()).sum();
     let mut encrypted_blob = Vec::with_capacity(len);
-    for slice in slices {
+    for slice in &slices {
         encrypted_blob.extend_from_slice(&slice.ciphertext);
     }
-    crypto::hash(&encrypted_blob)
+    let (root_hash, outboard) = crypto::bao_outboard(&encrypted_blob)?;
+    let mut slice_start = 0u64;
+    for slice in &mut slices {
+        let slice_len = slice.ciphertext.len() as u64;
+        slice.proof =
+            crypto::bao_extract_slice(&encrypted_blob, &outboard, slice_start, slice_len)?;
+        slice_start = slice_start.saturating_add(slice_len);
+    }
+    Ok((slices, root_hash))
 }
 
 fn seal_bytes(

@@ -280,16 +280,16 @@ fn x25519_hkdf_sha256_key(
     Ok(key)
 }
 
-/// BLAKE3 verified streaming root hash + outboard for the given plaintext.
+/// BLAKE3 verified streaming root hash + outboard for the given byte stream.
 ///
 /// The outboard carries the BLAKE3 tree nodes that prove any slice of the
-/// plaintext belongs to the returned root hash. Senders compute this once;
+/// stream belongs to the returned root hash. Senders compute this once;
 /// receivers verify each slice independently against the root.
-pub fn bao_outboard(plaintext: &[u8]) -> Result<(Hash, Vec<u8>), String> {
+pub fn bao_outboard(bytes: &[u8]) -> Result<(Hash, Vec<u8>), String> {
     let mut outboard = Vec::new();
     let mut encoder = bao::encode::Encoder::new_outboard(Cursor::new(&mut outboard));
     encoder
-        .write_all(plaintext)
+        .write_all(bytes)
         .map_err(|err| format!("bao encode: {err}"))?;
     let hash = encoder
         .finalize()
@@ -299,17 +299,17 @@ pub fn bao_outboard(plaintext: &[u8]) -> Result<(Hash, Vec<u8>), String> {
 
 /// Extract a self-contained BAO slice proof for `[slice_start, slice_start + slice_len)`.
 ///
-/// The returned bytes contain both the verified plaintext and the tree nodes
+/// The returned bytes contain both the verified slice bytes and the tree nodes
 /// needed to verify it against `root_hash`. They are what file-slice facts should
 /// carry on the wire.
 pub fn bao_extract_slice(
-    plaintext: &[u8],
+    bytes: &[u8],
     outboard: &[u8],
     slice_start: u64,
     slice_len: u64,
 ) -> Result<Vec<u8>, String> {
     let mut extractor = bao::encode::SliceExtractor::new_outboard(
-        Cursor::new(plaintext),
+        Cursor::new(bytes),
         Cursor::new(outboard),
         slice_start,
         slice_len,

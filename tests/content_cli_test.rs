@@ -680,7 +680,6 @@ fn wait_for_partial_listing(db: &str, workspace_id: &str) -> String {
 }
 
 #[test]
-#[ignore = "partial download progress is intentionally deferred for this migration slice"]
 fn cli_files_listing_shows_partial_progress_during_sync() {
     // Send a multi-MiB file so the descriptor lands well before all slices.
     // FILE_SLICE_DATA_BYTES is 256 KiB; 4 MiB -> 16 slices.
@@ -735,7 +734,6 @@ fn cli_files_listing_shows_partial_progress_during_sync() {
 }
 
 #[test]
-#[ignore = "partial download progress is intentionally deferred for this migration slice"]
 fn cli_save_file_rejects_incomplete_download() {
     // Same partial setup as above; once we observe partial state, kill bob's
     // daemon so no further slices arrive, and assert save-file rejects with
@@ -875,7 +873,6 @@ fn cli_out_of_order_slice_arrival_eventually_completes() {
 }
 
 #[test]
-#[ignore = "partial download progress is intentionally deferred for this migration slice"]
 fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
     // Try to capture the moment bob has the file descriptor but no slices.
     // This relies on poll timing; with a 4 MiB file and a 50 ms tick, the
@@ -894,8 +891,8 @@ fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
     join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
     grant_content_key_to_peer(&alice, &bob, &workspace_id);
 
-    // 2 MiB == 8 slices is the largest the slot capacity reliably
-    // accommodates with the current BAO proof slop (FILE_SLICE_PROOF_BYTES).
+    // 2 MiB == 8 slices is large enough to observe partial, BAO-verified
+    // progress without making this black-box sync test too slow.
     let payload: Vec<u8> = (0..(2 * 1024 * 1024u32)).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("very_big.bin");
     fs::write(&in_path, &payload).expect("write input");

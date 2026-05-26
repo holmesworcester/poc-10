@@ -1,4 +1,4 @@
-//! Fixed-width layout for content-file-slice facts with one padded ciphertext
+//! Fixed-width layout for content-file-slice facts with one padded BAO proof
 //! slot.
 //!
 //! Body shape:
@@ -7,18 +7,18 @@
 //!   created_at_ms (u64be)
 //!   file_id (32)
 //!   slice_index (u32be)
-//!   ciphertext (FixedSlot<FILE_SLICE_CIPHERTEXT_BYTES>)
+//!   proof (FixedSlot<FILE_SLICE_BAO_PROOF_BYTES>)
 
 use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 use crate::core::wire::FixedLayout;
 
-use super::fact::{ContentFileSliceFact, FILE_SLICE_CIPHERTEXT_BYTES};
+use super::fact::{ContentFileSliceFact, FILE_SLICE_BAO_PROOF_BYTES};
 
 pub const TYPE_CONTENT_FILE_SLICE: u8 = 55;
 pub const FACT_PREFIX_BYTES: usize = 1 + 32 + 8 + 32 + 4 + 32 + 32;
 pub const CONTENT_FILE_SLICE_BYTES: usize = FACT_PREFIX_BYTES
-    + wire::FixedSlot::<FILE_SLICE_CIPHERTEXT_BYTES>::LEN
+    + wire::FixedSlot::<FILE_SLICE_BAO_PROOF_BYTES>::LEN
     + ED25519_SIGNATURE_BYTES;
 const SIGNATURE_OFFSET: usize = CONTENT_FILE_SLICE_BYTES - ED25519_SIGNATURE_BYTES;
 
@@ -31,7 +31,7 @@ pub fn encode_fact(fact: &ContentFileSliceFact) -> Result<Vec<u8>, String> {
     out.u32be(fact.slice_index);
     out.fixed(&fact.signer_id);
     out.fixed(&fact.signer_public_key);
-    out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
+    out.fixed_slot_value(&fact.proof).map_err(wire_err)?;
     out.fixed(&fact.signature);
     out.finish_exact(CONTENT_FILE_SLICE_BYTES).map_err(wire_err)
 }
@@ -51,8 +51,8 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
     let slice_index = reader.u32be().map_err(wire_err)?;
     let signer_id = reader.array().map_err(wire_err)?;
     let signer_public_key = reader.array().map_err(wire_err)?;
-    let ciphertext = reader
-        .fixed_slot_value::<FILE_SLICE_CIPHERTEXT_BYTES>()
+    let proof = reader
+        .fixed_slot_value::<FILE_SLICE_BAO_PROOF_BYTES>()
         .map_err(wire_err)?;
     let signature = reader.array().map_err(wire_err)?;
     reader.finish().map_err(wire_err)?;
@@ -63,7 +63,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
         slice_index,
         signer_id,
         signer_public_key,
-        ciphertext,
+        proof,
         signature,
     })
 }
@@ -113,10 +113,8 @@ mod tests {
             slice_index: 3,
             signer_id: [9; 32],
             signer_public_key: [10; 32],
-            ciphertext: crate::protocol::content::file_slice::fact::FileSliceCiphertext::new(
-                &[0xaa; 128],
-            )
-            .expect("ciphertext"),
+            proof: crate::protocol::content::file_slice::fact::FileSliceProof::new(&[0xaa; 128])
+                .expect("proof"),
             signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }

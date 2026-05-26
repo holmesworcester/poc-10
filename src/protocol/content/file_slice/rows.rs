@@ -2,7 +2,9 @@
 //!
 //! Rows are keyed by `workspace_id || file_id || slice_index_be` so callers can
 //! range-scan a file's slices in order without secondary indices. The value
-//! stores the opaque ciphertext alongside the slice's fact id and timestamp.
+//! stores the BAO-verified ciphertext alongside the slice's fact id and
+//! timestamp. A row means the parent file descriptor's encrypted root hash has
+//! already accepted this slice proof.
 
 use crate::core::facts::FactId;
 use crate::core::intents::TableInsert;
@@ -28,14 +30,18 @@ pub struct ContentFileSliceRow {
     pub ciphertext: Vec<u8>,
 }
 
-pub fn content_file_slice_row(slice_fact_id: FactId, fact: &ContentFileSliceFact) -> TableInsert {
+pub fn content_file_slice_row(
+    slice_fact_id: FactId,
+    fact: &ContentFileSliceFact,
+    ciphertext: Vec<u8>,
+) -> TableInsert {
     read_models::FILE_SLICES.insert(vec![
         Value::Bytes(fact.workspace_id.to_vec()),
         Value::Bytes(fact.file_id.to_vec()),
         Value::U64(u64::from(fact.slice_index)),
         Value::Bytes(slice_fact_id.to_vec()),
         Value::U64(fact.created_at_ms),
-        Value::Bytes(fact.ciphertext.bytes().to_vec()),
+        Value::Bytes(ciphertext),
     ])
 }
 
@@ -83,13 +89,11 @@ mod tests {
             slice_index: 5,
             signer_id: [6; 32],
             signer_public_key: [7; 32],
-            ciphertext: crate::protocol::content::file_slice::fact::FileSliceCiphertext::new(
-                &[0xcc; 16],
-            )
-            .expect("ciphertext"),
+            proof: crate::protocol::content::file_slice::fact::FileSliceProof::new(&[0xdd; 16])
+                .expect("proof"),
             signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         };
-        let row = content_file_slice_row([9; 32], &fact);
+        let row = content_file_slice_row([9; 32], &fact, vec![0xcc; 16]);
         assert_eq!(row.table, FILE_SLICE_ROWS);
         assert_eq!(row.columns, FILE_SLICE_COLUMNS);
         assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));

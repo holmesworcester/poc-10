@@ -1,9 +1,9 @@
 //! Content-file-slice fact shape for the poc-10 target tree.
 //!
-//! Each slice carries one chunk of an encrypted file blob, identified by its
-//! parent `file_id` and `slice_index`. The slice ciphertext is treated as an
-//! opaque length-prefixed blob; send-file/save-file own the AEAD framing and
-//! deterministic per-slice nonce derivation.
+//! Each slice carries a self-contained BAO proof for one encrypted file-blob
+//! range, identified by its parent `file_id` and `slice_index`. Projection
+//! verifies the proof against the parent file root hash, extracts the encrypted
+//! slice bytes, and only then counts the slice as received.
 //!
 //! Signature authority belongs to the content-file-slice projector. Slice proof
 //! material is handled by the file-send/admit path, and parent-descriptor
@@ -18,7 +18,13 @@ pub type SignerId = FactId;
 pub const FILE_SLICE_PLAINTEXT_BYTES: usize = 256 * 1024;
 pub const FILE_SLICE_CIPHERTEXT_BYTES: usize =
     FILE_SLICE_PLAINTEXT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
-pub type FileSliceCiphertext = FixedSlot<FILE_SLICE_CIPHERTEXT_BYTES>;
+/// poc-7 measured a 17 KiB BAO encoding budget for 256 KiB slices under the
+/// 10 GiB file cap. Poc-10 proves encrypted slices, so keep a larger fixed
+/// margin while preserving predictable frame sizing.
+pub const FILE_SLICE_BAO_PROOF_OVERHEAD_BYTES: usize = 64 * 1024;
+pub const FILE_SLICE_BAO_PROOF_BYTES: usize =
+    FILE_SLICE_CIPHERTEXT_BYTES + FILE_SLICE_BAO_PROOF_OVERHEAD_BYTES;
+pub type FileSliceProof = FixedSlot<FILE_SLICE_BAO_PROOF_BYTES>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFileSliceFact {
@@ -28,7 +34,7 @@ pub struct ContentFileSliceFact {
     pub slice_index: u32,
     pub signer_id: SignerId,
     pub signer_public_key: Ed25519PublicKey,
-    /// Opaque per-slice ciphertext.
-    pub ciphertext: FileSliceCiphertext,
+    /// BAO slice proof whose verified payload is the encrypted slice bytes.
+    pub proof: FileSliceProof,
     pub signature: Ed25519Signature,
 }
