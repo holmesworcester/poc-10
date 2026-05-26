@@ -89,7 +89,8 @@ handlers.
 ## Convergence Process
 
 Sync converges by turning projector output into a durable range index, then
-exchanging summaries and exact ids over established connections:
+exchanging summaries, exact ids, and the requested fact bytes over established
+connections:
 
 1. The owner projector admits or partially understands a shared fact. In the
    same projection pass it emits `share_fact_with_sync` with the fact id,
@@ -106,7 +107,8 @@ exchanging summaries and exact ids over established connections:
    projects the `compare` and runs `send_sync_compare_response`.
 4. The response handler compares the peer summary with the local durable index.
    If a range is too broad to answer exactly, it creates child `compare` facts.
-   If exact ids are useful, it sends `have_id` facts or selected fact ids.
+   If exact ids are useful, it sends `have_id` facts or asks connection to send
+   selected fact bytes.
 5. A peer that receives `have_id` checks whether it already has the named fact.
    If not, it creates and sends a `need_id` fact on the same connection.
 6. A peer that receives `need_id` checks the shareable index for that
