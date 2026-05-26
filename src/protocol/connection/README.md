@@ -269,29 +269,63 @@ frame_bundle {
 ## Example Fact Graph
 
 ```text
-invite_secret + endpoint + ephemeral_secret
-  -> local request
-  -> send_bootstrap_connection_request
+outbound initiator dependency graph:
+  invite_secret + initiator ephemeral_secret
+    -> local request
+       needs connection_response_for_request until answered
+       time wake -> send_bootstrap_connection_request
+       network output: sealed bootstrap request bytes (not a fact)
 
-remote sealed request
-  -> bootstrap_request
-  -> request + fact_receipt
-  -> create_connection_response
-  -> responder ephemeral_secret + response
-  -> sealed bootstrap_response
+inbound responder transport observation:
+  remote sealed bootstrap request bytes (not a fact)
+    -> receive_network_frame local intent
+    -> bootstrap_request local wrapper
+       needs auth_daemon_endpoint
+       opens to request + fact_receipt
 
-remote sealed response
-  -> bootstrap_response
-  -> response + fact_receipt
-  -> seed_connection_sync
+inbound responder dependency graph:
+  request
+    needs connection_invite_secret(invite_secret)
+    needs auth_local_endpoint(to_endpoint)
+    needs connection_fact_receipt(request)
+    -> materializes connection_request
+    -> create_connection_response(request, invite_secret, receipt)
 
-sync selected facts
-  -> send_facts_on_connection
-  -> send_network_frame
-  -> remote frame_small/frame_bundle/frame_file_slice
-  -> child facts + fact_receipts
+  create_connection_response
+    loads request + invite_secret + fact_receipt
+    reads local endpoint state
+    -> responder ephemeral_secret + local response
+    -> network output: sealed bootstrap response bytes (not a fact)
+
+inbound initiator transport observation:
+  remote sealed bootstrap response bytes (not a fact)
+    -> receive_network_frame local intent
+    -> bootstrap_response local wrapper
+       needs auth_daemon_endpoint
+       opens to response + fact_receipt
+
+inbound initiator dependency graph:
+  response
+    needs connection_request(request_id)
+    needs connection_invite_secret(invite_secret)
+    needs connection_fact_receipt(response)
+    needs initiator ephemeral_secret
+    -> materializes connection_response
+    -> seed_connection_sync
+
+established connection transfer:
+  sync selected facts
+    -> send_facts_on_connection
+    -> send_network_frame
+    -> remote frame_small/frame_bundle/frame_file_slice wrappers
+       need connection_response
+       open to child facts + fact_receipts
 ```
 
-The connection response fact is the connection id. Sync and network send
-handlers treat that id as the routing key, while semantic child validation stays
-with auth, content, and sync projectors.
+The sealed bootstrap request/response bytes are transport observations, not
+facts in the dependency graph. The local bootstrap wrapper facts preserve those
+bytes until endpoint context can open them. After opening, the semantic
+`request`, `response`, and `fact_receipt` facts carry the dependency edges used
+by request and response projection. The connection response fact is the
+connection id; sync and network send handlers treat that id as the routing key,
+while semantic child validation stays with auth, content, and sync projectors.

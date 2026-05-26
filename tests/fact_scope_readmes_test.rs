@@ -132,6 +132,29 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
     }
 }
 
+#[test]
+fn connection_readme_separates_sealed_transport_from_fact_dependencies() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme_path = root.join("src/protocol/connection/README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+
+    for required in [
+        "sealed bootstrap request bytes (not a fact)",
+        "sealed bootstrap response bytes (not a fact)",
+        "inbound responder transport observation",
+        "inbound responder dependency graph",
+        "needs connection_fact_receipt(request)",
+        "create_connection_response(request, invite_secret, receipt)",
+        "The sealed bootstrap request/response bytes are transport observations",
+    ] {
+        assert!(
+            readme.contains(required),
+            "connection README should distinguish transport wrappers from dependency graph: missing {required:?}"
+        );
+    }
+}
+
 struct ScopeDocs {
     scope: &'static str,
     fact_modules: &'static [&'static str],
