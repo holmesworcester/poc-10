@@ -6,10 +6,10 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
-use topo::protocol::connection::frame::frame::{
+use topo::protocol::connection::frame::wire::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
-use topo::protocol::connection::frame::layout::{
+use topo::protocol::connection::frame::wire::{
     decode_frame_parts, peek_frame_header, ConnectionFrameBundleV1, ConnectionFrameFileSliceV1,
     ConnectionFrameHeader, ConnectionFrameSmallV1, CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES,
     CONNECTION_FRAME_BUNDLE_FACT_SLOTS, CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES,
@@ -497,7 +497,7 @@ fn sealed_file_slice_connection_frame_fills_fixed_ciphertext_slot() {
 
 #[test]
 fn opening_rejects_variable_length_ciphertext_slot() {
-    let frame = topo::protocol::connection::frame::layout::encode_frame_bytes(
+    let frame = topo::protocol::connection::frame::wire::encode_frame_bytes(
         CONNECTION_FRAME_SIZE_CLASS_SMALL,
         FixedBytes(CONNECTION),
         FixedBytes(NONCE),

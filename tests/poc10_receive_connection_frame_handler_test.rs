@@ -18,17 +18,19 @@ use topo::protocol::connection;
 use topo::protocol::connection::bootstrap_request;
 use topo::protocol::connection::bootstrap_response;
 use topo::protocol::connection::fact_receipt::fact::OriginAddr;
-use topo::protocol::connection::frame::fact::{
-    ConnectionFrameBundleFact, ConnectionFrameSmallFact,
-};
-use topo::protocol::connection::frame::frame::{
+use topo::protocol::connection::frame::wire::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
-use topo::protocol::connection::frame::layout::{
-    self as frame_layout, CONNECTION_FRAME_BUNDLE_WIRE_BYTES, CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+use topo::protocol::connection::frame::wire::{
+    self as frame_wire, CONNECTION_FRAME_BUNDLE_WIRE_BYTES, CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
     CONNECTION_FRAME_SMALL_WIRE_BYTES,
 };
-use topo::protocol::connection::frame::project::ConnectionFrameProjector;
+use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
+use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
+use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
+use topo::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
+use topo::protocol::connection::frame_small::layout as frame_small_layout;
+use topo::protocol::connection::frame_small::project::ConnectionFrameSmallProjector;
 use topo::protocol::connection::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
@@ -77,7 +79,7 @@ fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
     Fact::new(
         FactScope::Local,
         RECEIVED_AT,
-        frame_layout::encode_small_fact(&input).expect("small connection frame"),
+        frame_small_layout::encode_fact(&input).expect("small connection frame"),
     )
 }
 
@@ -90,7 +92,7 @@ fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
     Fact::new(
         FactScope::Local,
         RECEIVED_AT,
-        frame_layout::encode_bundle_fact(&input).expect("bundle connection frame"),
+        frame_bundle_layout::encode_fact(&input).expect("bundle connection frame"),
     )
 }
 
@@ -98,9 +100,19 @@ fn project_connection_frame_fact(
     fact: &Fact,
     context: ProjectionContext,
 ) -> topo::core::projectors::ProjectionOutput {
-    ConnectionFrameProjector::new()
-        .project(fact, &context)
-        .expect("project connection frame")
+    match fact.body().first().copied() {
+        Some(frame_small_layout::TYPE_CONNECTION_FRAME_SMALL) => {
+            ConnectionFrameSmallProjector::new()
+                .project(fact, &context)
+                .expect("project small connection frame")
+        }
+        Some(frame_bundle_layout::TYPE_CONNECTION_FRAME_BUNDLE) => {
+            ConnectionFrameBundleProjector::new()
+                .project(fact, &context)
+                .expect("project bundle connection frame")
+        }
+        other => panic!("unexpected connection frame fact tag {other:?}"),
+    }
 }
 
 fn exact_match(
@@ -200,7 +212,7 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
 
     assert!(output.facts.is_empty());
     assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = frame_layout::decode_small_fact(output.ephemeral_facts[0].body())
+    let input = frame_small_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode small connection frame");
     assert_eq!(input.frame, frame);
     assert_eq!(input.origin_addr, ORIGIN);
@@ -381,7 +393,7 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
         .handle(&intent, &HandlerContext::new())
         .expect("receive connection::frame stages input");
 
-    let input = frame_layout::decode_small_fact(output.ephemeral_facts[0].body())
+    let input = frame_small_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode small connection frame");
     assert_eq!(input.origin_addr, ORIGIN);
 }
@@ -436,7 +448,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only() {
     on_big_stack(|| {
         let (connection_fact, _) = connection_fact();
-        let frame = frame_layout::encode_frame_bytes(
+        let frame = frame_wire::encode_frame_bytes(
             CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
             FixedBytes(connection_fact.id),
             FixedBytes([19; 24]),

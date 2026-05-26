@@ -5,9 +5,7 @@
 //! many padded fixed fact slots. They share a public header containing tag,
 //! version, size class, connection id, and nonce; only the encrypted payload
 //! slot capacity differs. Sender/receiver endpoint ids are carried inside the
-//! encrypted inner bundle. Received-frame fact encoding stores fixed origin
-//! metadata around the raw frame bytes for ephemeral
-//! projection.
+//! encrypted inner bundle.
 //!
 //! This file owns byte compatibility, size-class constants, AEAD associated
 //! data, nonce derivation, and inner-bundle packing. It does not decide which
@@ -22,21 +20,9 @@ use crate::core::wire::{
     self, fixed_tag, Ciphertext, FixedBytes, FixedLayout, Id32, Nonce24, Tag, WireError,
 };
 
-use super::fact::{
-    ConnectionFrameBundleFact, ConnectionFrameFileSliceFact, ConnectionFrameSmallFact,
-};
 use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
 use crate::protocol::connection::fact_receipt::fact::{OriginAddr, ORIGIN_ADDR_BYTES};
 use crate::protocol::content::{file, file_slice};
-
-/// Ephemeral projection-input tag for one received small connection frame.
-pub const TYPE_CONNECTION_FRAME_SMALL: u8 = 168;
-
-/// Ephemeral projection-input tag for one received file-slice connection frame.
-pub const TYPE_CONNECTION_FRAME_FILE_SLICE: u8 = 169;
-
-/// Ephemeral projection-input tag for one received bundled connection frame.
-pub const TYPE_CONNECTION_FRAME_BUNDLE: u8 = 170;
 
 /// Public tag prefix shared by all connection::frame frame variants.
 pub const CONNECTION_FRAME_TAG: Tag<4> = fixed_tag(b"TRNS");
@@ -120,79 +106,11 @@ const CONNECTION_OFFSET: usize = SIZE_CLASS_OFFSET + wire::U8_BYTES;
 const NONCE_OFFSET: usize = CONNECTION_OFFSET + Id32::LEN;
 const CIPHERTEXT_OFFSET: usize = NONCE_OFFSET + Nonce24::LEN;
 
-pub fn encode_small_fact(fact: &ConnectionFrameSmallFact) -> Result<Vec<u8>, String> {
-    encode_received_frame_fact(
-        TYPE_CONNECTION_FRAME_SMALL,
-        CONNECTION_FRAME_SIZE_CLASS_SMALL,
-        &fact.origin_addr,
-        fact.received_at_local_ms,
-        &fact.frame,
-    )
+pub const fn received_frame_fact_bytes<const FRAME_BYTES: usize>() -> usize {
+    1 + wire::FixedSlot::<ORIGIN_ADDR_BYTES>::LEN + 8 + wire::FixedSlot::<FRAME_BYTES>::LEN
 }
 
-pub fn decode_small_fact(bytes: &[u8]) -> Result<ConnectionFrameSmallFact, String> {
-    let (origin_addr, received_at_local_ms, frame) =
-        decode_received_frame_fact::<CONNECTION_FRAME_SMALL_WIRE_BYTES>(
-            bytes,
-            TYPE_CONNECTION_FRAME_SMALL,
-            CONNECTION_FRAME_SIZE_CLASS_SMALL,
-        )?;
-    Ok(ConnectionFrameSmallFact {
-        origin_addr,
-        received_at_local_ms,
-        frame,
-    })
-}
-
-pub fn encode_file_slice_fact(fact: &ConnectionFrameFileSliceFact) -> Result<Vec<u8>, String> {
-    encode_received_frame_fact(
-        TYPE_CONNECTION_FRAME_FILE_SLICE,
-        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
-        &fact.origin_addr,
-        fact.received_at_local_ms,
-        &fact.frame,
-    )
-}
-
-pub fn decode_file_slice_fact(bytes: &[u8]) -> Result<ConnectionFrameFileSliceFact, String> {
-    let (origin_addr, received_at_local_ms, frame) =
-        decode_received_frame_fact::<CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES>(
-            bytes,
-            TYPE_CONNECTION_FRAME_FILE_SLICE,
-            CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
-        )?;
-    Ok(ConnectionFrameFileSliceFact {
-        origin_addr,
-        received_at_local_ms,
-        frame,
-    })
-}
-
-pub fn encode_bundle_fact(fact: &ConnectionFrameBundleFact) -> Result<Vec<u8>, String> {
-    encode_received_frame_fact(
-        TYPE_CONNECTION_FRAME_BUNDLE,
-        CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-        &fact.origin_addr,
-        fact.received_at_local_ms,
-        &fact.frame,
-    )
-}
-
-pub fn decode_bundle_fact(bytes: &[u8]) -> Result<ConnectionFrameBundleFact, String> {
-    let (origin_addr, received_at_local_ms, frame) =
-        decode_received_frame_fact::<CONNECTION_FRAME_BUNDLE_WIRE_BYTES>(
-            bytes,
-            TYPE_CONNECTION_FRAME_BUNDLE,
-            CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-        )?;
-    Ok(ConnectionFrameBundleFact {
-        origin_addr,
-        received_at_local_ms,
-        frame,
-    })
-}
-
-fn encode_received_frame_fact<const FRAME_BYTES: usize>(
+pub fn encode_received_frame_fact<const FRAME_BYTES: usize>(
     tag: u8,
     expected_size_class: u8,
     origin_addr: &OriginAddr,
@@ -207,22 +125,24 @@ fn encode_received_frame_fact<const FRAME_BYTES: usize>(
     require_frame_size_class(frame.bytes(), expected_size_class)?;
     let origin_addr = normalize_origin_addr_bytes(origin_addr.bytes())?;
     let origin_addr = OriginAddr::new(&origin_addr).map_err(wire_err)?;
-    let mut out = wire::Writer::with_capacity(
-        1 + wire::FixedSlot::<ORIGIN_ADDR_BYTES>::LEN + 8 + wire::FixedSlot::<FRAME_BYTES>::LEN,
-    );
+    let mut out = wire::Writer::with_capacity(received_frame_fact_bytes::<FRAME_BYTES>());
     out.u8(tag);
     out.fixed_slot_value(&origin_addr).map_err(wire_err)?;
     out.u64be(received_at_local_ms);
     out.fixed_slot_value(frame).map_err(wire_err)?;
-    Ok(out.finish())
+    out.finish_exact(received_frame_fact_bytes::<FRAME_BYTES>())
+        .map_err(wire_err)
 }
 
-fn decode_received_frame_fact<const FRAME_BYTES: usize>(
+pub fn decode_received_frame_fact<const FRAME_BYTES: usize>(
     bytes: &[u8],
     tag: u8,
     expected_size_class: u8,
 ) -> Result<(OriginAddr, u64, wire::FixedSlot<FRAME_BYTES>), String> {
     let mut reader = wire::Reader::new(bytes);
+    reader
+        .expect_len(received_frame_fact_bytes::<FRAME_BYTES>())
+        .map_err(wire_err)?;
     reader.expect_u8(tag).map_err(wire_err)?;
     let origin_addr = reader
         .fixed_slot_value::<ORIGIN_ADDR_BYTES>()

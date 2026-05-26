@@ -22,10 +22,9 @@ use crate::protocol::{
     auth::endpoint,
     connection::frame::{
         create,
-        frame::{self, ConnectionFrameFactBundle},
-        layout::{
-            CONNECTION_FRAME_BUNDLE_FACT_SLOTS, CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES,
-            CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
+        frame::{
+            self, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
+            CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
         },
     },
     connection::response,

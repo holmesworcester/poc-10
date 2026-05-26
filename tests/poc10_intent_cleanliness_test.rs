@@ -1109,7 +1109,7 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 8] = [
+const STANDARD_FAMILY_FILES: [&str; 9] = [
     "fact.rs",
     "layout.rs",
     "project.rs",
@@ -1118,6 +1118,7 @@ const STANDARD_FAMILY_FILES: [&str; 8] = [
     "create.rs",
     "commands.rs",
     "cli.rs",
+    "wire.rs",
 ];
 
 /// Fact families that do not yet meet the standard-role-file rule.
@@ -1479,6 +1480,58 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
     assert!(
         offenders.is_empty(),
         "fact-like protocol directories must be normal registered fact modules:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn fact_like_family_directories_are_single_flat_fact_shapes() {
+    // A registered fact family should introduce one flat fact shape and one
+    // projector route. Multiple fact structs or multiple routes through the
+    // same family are a sign that a discriminated family should be split into
+    // separate noun-named fact families.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let registry = source_text(&root.join("src/protocol/registry.rs"));
+    let mut offenders = Vec::new();
+
+    for scope_dir in scope_dirs(root) {
+        let scope = scope_dir.file_name().unwrap().to_str().unwrap();
+        for family_dir in immediate_subdirs(&scope_dir) {
+            let family = family_dir.file_name().unwrap().to_str().unwrap();
+            let fact_path = family_dir.join("fact.rs");
+            let layout_path = family_dir.join("layout.rs");
+            if !fact_path.is_file() && !layout_path.is_file() {
+                continue;
+            }
+
+            let relative = family_dir.strip_prefix(root).unwrap().display();
+            if fact_path.is_file() {
+                let fact_text = source_text(&fact_path);
+                let fact_structs = fact_text
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("pub struct "))
+                    .filter(|line| line.contains("Fact"))
+                    .count();
+                if fact_structs != 1 {
+                    offenders.push(format!(
+                        "{relative} declares {fact_structs} public fact structs"
+                    ));
+                }
+            }
+
+            let route_marker = format!("=> {scope}::{family}::layout::");
+            let route_count = registry.matches(&route_marker).count();
+            if route_count != 1 {
+                offenders.push(format!(
+                    "{relative} has {route_count} projector routes through its layout"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "fact-like protocol directories must stay flat: one fact shape and one route per family:\n{}",
         offenders.join("\n")
     );
 }
