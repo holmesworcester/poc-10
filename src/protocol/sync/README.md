@@ -108,7 +108,10 @@ connections:
 4. The response handler compares the peer summary with the local durable index.
    If a range is too broad to answer exactly, it creates child `compare` facts.
    If exact ids are useful, it sends `have_id` facts or asks connection to send
-   selected fact bytes.
+   selected fact bytes. Before selected bytes are handed to connection, sync
+   recursively expands the selected owner ids through stored `context_have`
+   edges, so the send set includes authorized dependencies of dependencies as
+   well as the in-range owners.
 5. A peer that receives `have_id` checks whether it already has the named fact.
    If not, it creates and sends a `need_id` fact on the same connection.
 6. A peer that receives `need_id` checks the shareable index for that
@@ -119,8 +122,7 @@ connections:
    emit more sync contributions. Convergence is the repeated application of
    this loop until summaries match.
 
-For dependency-aware sends, step 4 expands selected owner ids before handing
-them to connection. It includes each in-range owner, then walks that owner's
+The recursive walk includes each in-range owner, then that owner's
 projector-supplied `context_have` facts, then each dependency's own
 `context_have` facts until the authorized shareable graph is exhausted. The
 walk stops at missing, purged, unauthorized, or local-only facts because those
