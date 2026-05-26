@@ -18,6 +18,7 @@ use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use crate::protocol::{connection, sync};
+use std::collections::BTreeSet;
 
 pub const SEED_CONNECTION_SYNC: &str = "seed_connection_sync";
 
@@ -94,8 +95,12 @@ impl IntentHandler for SeedConnectionSyncHandler {
 }
 
 pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId) -> HandlerResult {
-    let facts = sync::shared_fact::shareable_facts_for_connection(store, connection_id)?;
-    let compare = sync::compare::create::start_compare_fact(connection_id, facts.iter())?;
+    let summary = sync::shared_fact::range_summary_for_connection(
+        store,
+        connection_id,
+        sync::compare::fact::TimestampRange::ROOT,
+    )?;
+    let compare = sync::compare::create::start_compare_fact_with_summary(connection_id, summary)?;
     Ok(PipelineEffects::new()
         .fact(compare.clone())
         .intent(send_facts_on_connection_intent(SendFactsOnConnection {
@@ -105,22 +110,39 @@ pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId
 }
 
 pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> HandlerResult {
+    advertise_indexed_fact_to_connections_except(store, fact, &BTreeSet::new())
+}
+
+pub fn advertise_indexed_fact_to_connections_except(
+    store: &Store,
+    fact: &Fact,
+    excluded_connection_ids: &BTreeSet<FactId>,
+) -> HandlerResult {
     let mut output = PipelineEffects::new();
     for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact)? {
-        output = append_live_tail_send(output, connection_id, fact)?;
+        if excluded_connection_ids.contains(&connection_id) {
+            continue;
+        }
+        output = append_live_tail_send(output, store, connection_id, fact)?;
     }
     Ok(output)
 }
 
 fn append_live_tail_send(
     output: PipelineEffects,
+    store: &Store,
     connection_id: FactId,
     fact: &Fact,
 ) -> HandlerResult {
+    let fact_ids = sync::shared_fact::expand_fact_ids_with_context_for_connection(
+        store,
+        connection_id,
+        &[fact.id],
+    )?;
     Ok(
         output.intent(send_facts_on_connection_intent(SendFactsOnConnection {
             connection_id,
-            fact_ids: vec![fact.id],
+            fact_ids,
         })),
     )
 }
@@ -128,10 +150,17 @@ fn append_live_tail_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::crypto;
     use crate::core::facts::{FactScope, ScopeKind};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
+    use crate::protocol::auth::endpoint::{fact::EndpointFact, rows as endpoint_rows};
+    use crate::protocol::auth::endpoint_shared::{
+        fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
+        rows as endpoint_shared_rows,
+    };
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+    use crate::protocol::sync::share_fact_with_sync::{ShareFactWithSync, SyncShareState};
     use crate::protocol::sync::shared_fact;
 
     #[test]
@@ -196,12 +225,73 @@ mod tests {
     }
 
     #[test]
-    fn live_tail_send_names_only_the_trigger_fact() {
+    fn live_tail_send_expands_projector_context_for_trigger_fact() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        let workspace_id = [9; 32];
         let connection_id = [8; 32];
-        let fact = Fact::new(FactScope::Global, 42, vec![1, 2, 3]);
+        let local_secret = [11; 32];
+        let local_endpoint = crypto::x25519_public_key(&local_secret);
+        let remote_endpoint = [2; 32];
+        let context_fact = Fact::new(workspace_scope(workspace_id), 10, vec![99, 1]);
+        let owner_fact = Fact::new(workspace_scope(workspace_id), 20, vec![99, 2]);
+
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &context_fact)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &owner_fact)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        let mut rows = endpoint_rows::endpoint_rows(&EndpointFact {
+            endpoint: local_endpoint,
+            secret: local_secret,
+            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
+            signing_secret: [13; 32],
+        });
+        rows.push(
+            connection::response::rows::connection_response_row(
+                connection_id,
+                &connection::response::fact::ConnectionResponseFact {
+                    from_endpoint: local_endpoint,
+                    to_endpoint: remote_endpoint,
+                    request_id: [3; 32],
+                    invite_secret_fact_id: [4; 32],
+                    initiator_ephemeral_secret_fact_id: [5; 32],
+                    responder_ephemeral_secret_fact_id: [6; 32],
+                    responder_ephemeral_public_key: [7; 32],
+                    handshake_hash: [8; 32],
+                    connection_secret: [9; 32],
+                },
+            )
+            .expect("connection row"),
+        );
+        rows.push(
+            endpoint_shared_rows::endpoint_shared_row(
+                [5; 32],
+                &EndpointSharedFact {
+                    created_at_ms: 1,
+                    workspace_id,
+                    user_authority_fact_id: [6; 32],
+                    endpoint_id: remote_endpoint,
+                    signing_public_key: [7; 32],
+                    endpoint_role: EndpointRole::Device,
+                    device_name: EndpointDeviceName::new("remote").expect("device name"),
+                    signer_id: [6; 32],
+                    signer_public_key: crypto::ed25519_public_key(&[17; 32]),
+                    signature: [18; crypto::ED25519_SIGNATURE_BYTES],
+                },
+            )
+            .expect("endpoint shared row"),
+        );
+        store.insert_table_rows(rows).expect("seed rows");
+        record_share(&store, workspace_id, &context_fact, Vec::new());
+        record_share(&store, workspace_id, &owner_fact, vec![context_fact.id]);
 
         let output =
-            append_live_tail_send(PipelineEffects::new(), connection_id, &fact).expect("tail");
+            append_live_tail_send(PipelineEffects::new(), &store, connection_id, &owner_fact)
+                .expect("tail");
 
         assert_eq!(output.intents.len(), 1);
         let send =
@@ -210,6 +300,28 @@ mod tests {
             )
             .expect("decode send");
         assert_eq!(send.connection_id, connection_id);
-        assert_eq!(send.fact_ids, vec![fact.id]);
+        assert_eq!(send.fact_ids, vec![context_fact.id, owner_fact.id]);
+    }
+
+    fn workspace_scope(workspace_id: FactId) -> FactScope {
+        FactScope::Scoped {
+            kind: ScopeKind::new("workspace").expect("scope kind"),
+            id: workspace_id,
+        }
+    }
+
+    fn record_share(store: &Store, workspace_id: FactId, fact: &Fact, context_have: Vec<FactId>) {
+        shared_fact::record_sync_contribution(
+            store,
+            &ShareFactWithSync {
+                workspace_id,
+                owner_fact_id: fact.id,
+                timestamp_ms: fact.timestamp,
+                state: SyncShareState::Upsert,
+                context_have,
+            },
+            Some(fact),
+        )
+        .expect("record share");
     }
 }

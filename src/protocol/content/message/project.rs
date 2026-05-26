@@ -25,7 +25,7 @@ use crate::protocol::content::{
     message_deletion, purge::project as content_purge, retention_policy,
 };
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
+    context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::rows::{
@@ -96,6 +96,16 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             fact.id,
         );
 
+        if expiry_minute_reached(context, &message).is_some() {
+            return Ok(expired_output(fact.id, &message));
+        }
+        if let Some(floor) = cover_horizon_reached(context, &message) {
+            return Ok(retired_output(fact.id, &message, floor));
+        }
+        if let Some(floor) = retention_floor_reached(context, &retention_floor_need, &message)? {
+            return Ok(retired_output(fact.id, &message, floor));
+        }
+
         let base_output = base_wait_output(
             fact,
             &message,
@@ -160,15 +170,6 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
         .row_mutation(RowMutation::InsertValues(content_message_row(
             fact.id, &message,
         )));
-        if expiry_minute_reached(context, &message).is_some() {
-            return Ok(expired_output(fact.id, &message));
-        }
-        if let Some(floor) = cover_horizon_reached(context, &message) {
-            return Ok(retired_output(fact.id, &message, floor));
-        }
-        if let Some(floor) = retention_floor_reached(context, &retention_floor_need, &message)? {
-            return Ok(retired_output(fact.id, &message, floor));
-        }
         if let Some(deletion) = context_payload(context, &deletion_need, "message deletion")? {
             validate_message_deletion(
                 deletion,
@@ -213,7 +214,7 @@ fn base_wait_output(
     needs: impl IntoIterator<Item = ContextNeed>,
     context_have: Vec<FactId>,
 ) -> ProjectionOutput {
-    share_fact_with_negentropy(
+    share_fact_with_sync(
         with_retention_wakes(
             needs
                 .into_iter()
@@ -434,24 +435,29 @@ fn expired_output(
     message_id: FactId,
     message: &super::fact::ContentMessageFact,
 ) -> ProjectionOutput {
-    ProjectionOutput::new()
-        .row_mutation(RowMutation::InsertValues(message_tombstone_row(
-            message.workspace_id,
-            message_id,
-            message.author_user_id,
-            message.created_at_ms,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            CONTENT_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            OPENED_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .purge_self(message_id)
+    retract_fact_from_sync(
+        ProjectionOutput::new()
+            .row_mutation(RowMutation::InsertValues(message_tombstone_row(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                message.created_at_ms,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                CONTENT_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                OPENED_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .purge_self(message_id),
+        message.workspace_id,
+        message_id,
+        message.created_at_ms,
+    )
 }
 
 fn retired_output(
@@ -459,48 +465,58 @@ fn retired_output(
     message: &super::fact::ContentMessageFact,
     floor_minute: u64,
 ) -> ProjectionOutput {
-    ProjectionOutput::new()
-        .row_mutation(RowMutation::InsertValues(message_tombstone_row_at_minute(
-            message.workspace_id,
-            message_id,
-            message.author_user_id,
-            floor_minute.saturating_sub(1),
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            CONTENT_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            OPENED_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .purge_self(message_id)
+    retract_fact_from_sync(
+        ProjectionOutput::new()
+            .row_mutation(RowMutation::InsertValues(message_tombstone_row_at_minute(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                floor_minute.saturating_sub(1),
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                CONTENT_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                OPENED_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .purge_self(message_id),
+        message.workspace_id,
+        message_id,
+        message.created_at_ms,
+    )
 }
 
 fn author_deletion_output(
     message_id: FactId,
     message: &super::fact::ContentMessageFact,
 ) -> ProjectionOutput {
-    ProjectionOutput::new()
-        .row_mutation(RowMutation::InsertValues(message_tombstone_row(
-            message.workspace_id,
-            message_id,
-            message.author_user_id,
-            message.created_at_ms,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            CONTENT_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            OPENED_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .purge_self(message_id)
+    retract_fact_from_sync(
+        ProjectionOutput::new()
+            .row_mutation(RowMutation::InsertValues(message_tombstone_row(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                message.created_at_ms,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                CONTENT_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                OPENED_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .purge_self(message_id),
+        message.workspace_id,
+        message_id,
+        message.created_at_ms,
+    )
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
@@ -598,7 +614,7 @@ mod projector_tests {
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint_shared::{
         fact::{EndpointRole, EndpointSharedFact},
         layout as endpoint_shared_layout,
@@ -672,7 +688,11 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == "content_message"));
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         assert_eq!(output.effects.row_mutations.len(), 2);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
@@ -719,7 +739,11 @@ mod projector_tests {
 
         assert_eq!(output.offers.len(), 0);
         assert_eq!(output.needs.len(), 5);
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
         assert!(output
@@ -741,6 +765,44 @@ mod projector_tests {
     }
 
     #[test]
+    fn expired_content_message_retracts_before_context_wait() {
+        let author_fact = user_fact([9; 32]);
+        let (mut message, _fact, _key) = message_fact(author_fact.id, "already expired");
+        message.expires_at_minute = message.minute + 1;
+        message.signature = crypto::ed25519_sign(
+            &CONTENT_SIGNING_KEY,
+            &layout::signing_bytes(&message).expect("message signing bytes"),
+        );
+        let fact = Fact::new(
+            crate::protocol::auth::workspace::scope(message.workspace_id),
+            message.created_at_ms,
+            layout::encode_fact(&message).expect("encode content message"),
+        );
+        let context = ProjectionContext::default().with_time_ranges(vec![TimeRange {
+            timeline: topo::protocol::content::message::expiration_timeline(),
+            start_exclusive: None,
+            end_inclusive: message.expires_at_minute,
+        }]);
+
+        let output = project::ContentMessageProjector::new()
+            .project(&fact, &context)
+            .expect("project expired content message");
+
+        assert!(output.needs.is_empty());
+        assert!(output.offers.is_empty());
+        assert_eq!(output.effects.intents.len(), 1);
+        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &output.effects.intents[0],
+        )
+        .expect("decode sync retraction");
+        assert_eq!(
+            share.state,
+            topo::protocol::sync::share_fact_with_sync::SyncShareState::Retract
+        );
+        assert_eq!(output.effects.purged_facts, vec![fact.id]);
+    }
+
+    #[test]
     fn content_message_projector_publishes_metadata_before_secret_context() {
         let author_fact = user_fact([9; 32]);
         let (message, fact, _key) = message_fact(author_fact.id, "hidden until key context");
@@ -759,7 +821,11 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 5);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content metadata row");
         assert_eq!(
             row.values[0],

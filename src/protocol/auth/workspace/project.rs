@@ -12,7 +12,7 @@ use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
-use crate::protocol::sync::shared_fact::project::share_fact_with_negentropy;
+use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
 use super::rows::workspace_row;
 
@@ -48,7 +48,7 @@ impl TypedProjector<super::Codec> for WorkspaceProjector {
         }
         super::layout::verify_signature(&workspace)?;
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             ProjectionOutput::new()
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
@@ -72,7 +72,7 @@ mod projector_tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn workspace_projector_marks_fact_shareable_and_updates_negentropy_tree() {
+    fn workspace_projector_emits_sync_share_contribution() {
         let fact = create::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
         let projected = WorkspaceProjector::new()
             .project(&fact, &ProjectionContext::default())
@@ -84,9 +84,6 @@ mod projector_tests {
             .iter()
             .map(|intent| intent.kind.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(
-            intent_kinds,
-            BTreeSet::from(["share_fact_with_workspace", "update_negentropy_tree"])
-        );
+        assert_eq!(intent_kinds, BTreeSet::from(["share_fact_with_sync"]));
     }
 }

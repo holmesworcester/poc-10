@@ -179,8 +179,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "send_compare_response",
                 "send_needed_fact_id",
                 "send_requested_fact",
-                "share_fact_with_workspace",
-                "update_negentropy_tree",
+                "share_fact_with_sync",
             ],
         ),
     ];

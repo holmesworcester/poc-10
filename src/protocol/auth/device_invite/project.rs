@@ -17,9 +17,7 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, user, user_invite, workspace};
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::rows::device_invite_row;
 
@@ -268,7 +266,7 @@ fn materialized_output(
     context_have: Vec<FactId>,
 ) -> Result<ProjectionOutput, String> {
     let device_invite_key = device_invite_key(invite.user_authority_fact_id, invite.public_key);
-    Ok(share_fact_with_negentropy(
+    Ok(share_fact_with_sync(
         output
             .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
             .offer(crate::core::context::ContextOffer::range(

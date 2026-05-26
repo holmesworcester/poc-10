@@ -17,9 +17,7 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::EndpointRole;
 use super::rows::endpoint_shared_row;
@@ -76,7 +74,7 @@ impl TypedProjector<super::Codec> for EndpointSharedProjector {
         let context_have = context_have_from_needs(context, [&authority_need]);
 
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             ProjectionOutput::new()
                 .need(authority_need)
                 .offer(crate::core::context::ContextOffer::range(

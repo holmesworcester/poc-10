@@ -145,7 +145,7 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         file_id: [33; 32],
         blob_bytes: 1_024,
         total_slices: 1,
-        slice_bytes: 1_024,
+        slice_bytes: content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES as u32,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
@@ -190,7 +190,7 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
         file_id: [33; 32],
         blob_bytes: 1_024,
         total_slices: 1,
-        slice_bytes: 1_024,
+        slice_bytes: content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES as u32,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
@@ -443,7 +443,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         file_id: [33; 32],
         blob_bytes: 1_024,
         total_slices: 1,
-        slice_bytes: 1_024,
+        slice_bytes: content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES as u32,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
@@ -471,7 +471,7 @@ fn unsigned_file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         file_id: [33; 32],
         blob_bytes: 1_024,
         total_slices: 1,
-        slice_bytes: 1_024,
+        slice_bytes: content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES as u32,
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),

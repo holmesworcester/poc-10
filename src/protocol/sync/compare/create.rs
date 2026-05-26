@@ -28,10 +28,18 @@ pub fn start_compare_fact<'a>(
 ) -> Result<Fact, String> {
     let range = TimestampRange::ROOT;
     let facts = local_range_facts(available_facts, [0; 32], range);
+    start_compare_fact_with_summary(connection_id, summarize_range(&facts))
+}
+
+pub fn start_compare_fact_with_summary(
+    connection_id: FactId,
+    summary: RangeSummary,
+) -> Result<Fact, String> {
+    let range = TimestampRange::ROOT;
     let compare = SyncCompareFact {
         connection_id,
         range,
-        summary: summarize_range(&facts),
+        summary,
         response_requested: true,
     };
     Ok(Fact::new(
@@ -52,9 +60,29 @@ pub fn response_plan<'a>(
     compare_fact: &Fact,
     available_facts: impl IntoIterator<Item = &'a Fact>,
 ) -> Result<CompareResponsePlan, String> {
+    let available = available_facts.into_iter().collect::<Vec<_>>();
+    response_plan_inner(compare_fact, available, &mut |_, facts| {
+        Ok(summarize_range(facts))
+    })
+}
+
+pub fn response_plan_with_summaries<'a>(
+    compare_fact: &Fact,
+    available_facts: impl IntoIterator<Item = &'a Fact>,
+    mut summarize: impl FnMut(TimestampRange) -> Result<RangeSummary, String>,
+) -> Result<CompareResponsePlan, String> {
+    let available = available_facts.into_iter().collect::<Vec<_>>();
+    response_plan_inner(compare_fact, available, &mut |range, _| summarize(range))
+}
+
+fn response_plan_inner(
+    compare_fact: &Fact,
+    available_facts: Vec<&Fact>,
+    summarize: &mut dyn FnMut(TimestampRange, &[&Fact]) -> Result<RangeSummary, String>,
+) -> Result<CompareResponsePlan, String> {
     let compare = super::layout::decode_fact(&compare_fact.bytes)?;
     let range_facts = local_range_facts(available_facts, compare_fact.id, compare.range);
-    let local_summary = summarize_range(&range_facts);
+    let local_summary = summarize(compare.range, &range_facts)?;
 
     if local_summary == compare.summary {
         return Ok(CompareResponsePlan::default());
@@ -126,11 +154,12 @@ pub fn response_plan<'a>(
         for range in [left, right] {
             let child_facts =
                 local_range_facts(range_facts.iter().copied(), compare_fact.id, range);
+            let child_summary = summarize(range, &child_facts)?;
             facts.push(child_compare_fact(
                 compare_fact,
                 compare.connection_id,
                 range,
-                summarize_range(&child_facts),
+                child_summary,
             )?);
         }
     }

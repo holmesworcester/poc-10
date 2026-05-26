@@ -18,7 +18,7 @@ use crate::core::projectors::{
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, message_deletion, purge::project as content_purge};
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_optional_needs, share_fact_with_negentropy,
+    context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::rows::{reaction_row, ReactionRow, REACTION_KEY_COLUMNS, REACTION_ROWS};
@@ -121,10 +121,15 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
                 reaction.target_message_id,
                 target_context.message.author_user_id,
             )?;
-            return Ok(delete_reaction_projection(reaction.workspace_id, fact.id)
-                .need(target_need)
-                .need(target_deletion_need)
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                delete_reaction_projection(reaction.workspace_id, fact.id)
+                    .need(target_need)
+                    .need(target_deletion_need)
+                    .purge_self(fact.id),
+                reaction.workspace_id,
+                fact.id,
+                reaction.created_at_ms,
+            ));
         }
         let Some(author) = context_payload(context, &author_need, "reaction author")? else {
             return Ok(output_with_needs([
@@ -155,7 +160,7 @@ impl TypedProjector<super::Codec> for ContentReactionProjector {
             nonce: reaction.nonce,
             ciphertext: reaction.ciphertext.bytes().to_vec(),
         })?;
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             output_with_needs([
                 Some(signer_need),
                 Some(target_need),

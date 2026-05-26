@@ -20,7 +20,7 @@ use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, purge::project as content_purge};
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_optional_needs, share_fact_with_negentropy,
+    context_have_from_optional_needs, share_fact_with_sync,
 };
 
 use super::rows::{message_deletion_row, MessageDeletionRow};
@@ -120,7 +120,7 @@ impl TypedProjector<super::Codec> for ContentMessageDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         });
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             output_with_needs([Some(signer_need), Some(target_need), Some(author_need)])
                 .offer(content_purge::target_purged_offer(
                     fact.id,
@@ -251,7 +251,11 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 3);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_purged");
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
             panic!("expected insert values mutation");

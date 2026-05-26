@@ -16,7 +16,7 @@ use crate::core::projectors::{
 use std::collections::BTreeSet;
 
 use crate::protocol::sync::encrypted_root::project::require_fact_scope;
-use crate::protocol::sync::{share_fact_with_workspace, update_negentropy_tree};
+use crate::protocol::sync::share_fact_with_sync as share_sync;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;
@@ -60,27 +60,31 @@ impl TypedProjector<super::Codec> for SyncSharedFactProjector {
     }
 }
 
-pub fn share_fact_with_negentropy(
+pub fn share_fact_with_sync(
     output: ProjectionOutput,
     workspace_id: FactId,
     fact: &Fact,
     context_have: Vec<FactId>,
 ) -> ProjectionOutput {
-    output
-        .intent(
-            share_fact_with_workspace::share_fact_with_workspace_intent_for_fact(
-                workspace_id,
-                fact,
-            ),
-        )
-        .intent(
-            update_negentropy_tree::update_negentropy_tree_intent_for_fact(
-                workspace_id,
-                fact.id,
-                fact.timestamp,
-                context_have,
-            ),
-        )
+    output.intent(share_sync::share_fact_with_sync_intent_for_fact(
+        workspace_id,
+        fact.id,
+        fact.timestamp,
+        context_have,
+    ))
+}
+
+pub fn retract_fact_from_sync(
+    output: ProjectionOutput,
+    workspace_id: FactId,
+    fact_id: FactId,
+    timestamp_ms: u64,
+) -> ProjectionOutput {
+    output.intent(share_sync::retract_fact_from_sync_intent(
+        workspace_id,
+        fact_id,
+        timestamp_ms,
+    ))
 }
 
 pub fn context_have_from_needs<'a>(

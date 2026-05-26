@@ -19,9 +19,7 @@ use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::user;
 use crate::protocol::auth::workspace;
 use crate::protocol::auth::workspace::fact::WorkspaceFact;
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::layout;
 use super::rows::admin_row;
@@ -248,7 +246,7 @@ fn materialized_output(
     output: ProjectionOutput,
     context_have: Vec<FactId>,
 ) -> Result<ProjectionOutput, String> {
-    Ok(share_fact_with_negentropy(
+    Ok(share_fact_with_sync(
         output
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,

@@ -291,6 +291,8 @@ CREATE TABLE IF NOT EXISTS sync_need_id_rows (row_key BLOB PRIMARY KEY NOT NULL,
 CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_negentropy_node_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_fact_receipt_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
 CREATE TABLE IF NOT EXISTS message_deletion_rows (
     workspace_id BLOB NOT NULL,
@@ -328,6 +330,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
         auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
+        connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
         connection::request::rows::CONNECTION_REQUEST_ROWS,
         connection::response::rows::CONNECTION_RESPONSE_ROWS,
         auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
@@ -341,6 +344,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
         sync::shared_fact::rows::NEGENTROPY_LEAF_ROWS,
         sync::shared_fact::rows::NEGENTROPY_CONTEXT_HAVE_ROWS,
+        sync::shared_fact::rows::NEGENTROPY_NODE_ROWS,
         content::retention_policy::rows::RETENTION_POLICY_ROWS,
     ],
 };
@@ -517,6 +521,7 @@ pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FAC
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
+    connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,
     connection::response::rows::CONNECTION_RESPONSE_ROWS,
     read_models::FILE_ROWS,
@@ -667,14 +672,9 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         sync::send_requested_fact::SendRequestedFactHandler
     ),
     handler_route!(
-        "share_fact_with_workspace",
-        sync::share_fact_with_workspace::SHARE_FACT_WITH_WORKSPACE,
-        sync::share_fact_with_workspace::ShareFactWithWorkspaceHandler
-    ),
-    handler_route!(
-        "update_negentropy_tree",
-        sync::update_negentropy_tree::UPDATE_NEGENTROPY_TREE,
-        sync::update_negentropy_tree::UpdateNegentropyTreeHandler
+        "share_fact_with_sync",
+        sync::share_fact_with_sync::SHARE_FACT_WITH_SYNC,
+        sync::share_fact_with_sync::ShareFactWithSyncHandler
     ),
     handler_route!(
         "seed_connection_sync",

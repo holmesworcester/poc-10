@@ -14,9 +14,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::user_invite;
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::rows::user_row;
 
@@ -88,7 +86,7 @@ impl TypedProjector<super::Codec> for UserProjector {
         let context_have = context_have_from_needs(context, [&invite_need]);
 
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             ProjectionOutput::new()
                 .need(invite_need)
                 .offer(crate::core::context::ContextOffer::range(

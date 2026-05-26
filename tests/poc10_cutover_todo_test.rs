@@ -128,7 +128,7 @@ const INTENT_HANDLER_FILES: [&str; 12] = [
     "src/protocol/sync/send_compare_response.rs",
     "src/protocol/sync/send_needed_fact_id.rs",
     "src/protocol/sync/send_requested_fact.rs",
-    "src/protocol/sync/share_fact_with_workspace.rs",
+    "src/protocol/sync/share_fact_with_sync.rs",
 ];
 
 /// Absolute paths of every verb-named intent handler file in the new

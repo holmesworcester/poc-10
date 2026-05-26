@@ -28,7 +28,7 @@ use crate::protocol::content::message::project as message_project;
 use crate::protocol::content::message_deletion;
 use crate::protocol::content::purge::project as content_purge;
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
+    context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
@@ -148,33 +148,43 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
                 file.message_id,
                 parent_message.author_user_id,
             )?;
-            return Ok(ProjectionOutput::new()
-                .need(file_need)
-                .need(message_need)
-                .need(file_deletion_need)
-                .need(parent_deletion_need)
-                .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
-                    slice.workspace_id,
-                    slice.file_id,
-                    slice.slice_index,
-                )))
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                ProjectionOutput::new()
+                    .need(file_need)
+                    .need(message_need)
+                    .need(file_deletion_need)
+                    .need(parent_deletion_need)
+                    .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
+                        slice.workspace_id,
+                        slice.file_id,
+                        slice.slice_index,
+                    )))
+                    .purge_self(fact.id),
+                slice.workspace_id,
+                fact.id,
+                slice.created_at_ms,
+            ));
         }
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
-            return Ok(ProjectionOutput::new()
-                .need(file_need)
-                .need(message_need)
-                .need(file_deletion_need)
-                .need(parent_deletion_need)
-                .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
-                    slice.workspace_id,
-                    slice.file_id,
-                    slice.slice_index,
-                )))
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                ProjectionOutput::new()
+                    .need(file_need)
+                    .need(message_need)
+                    .need(file_deletion_need)
+                    .need(parent_deletion_need)
+                    .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
+                        slice.workspace_id,
+                        slice.file_id,
+                        slice.slice_index,
+                    )))
+                    .purge_self(fact.id),
+                slice.workspace_id,
+                fact.id,
+                slice.created_at_ms,
+            ));
         }
         let context_have = context_have_from_needs(
             context,
@@ -187,7 +197,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         );
 
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             ProjectionOutput::new()
                 .need(file_need)
                 .need(message_need)
@@ -338,7 +348,10 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 mod tests {
     use super::*;
     use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
-    use crate::protocol::content::file_slice::fact::{ContentFileSliceFact, FileSliceProof};
+    use crate::protocol::content::file_slice::fact::{
+        ContentFileSliceFact, FileSliceProof, FILE_SLICE_BAO_PROOF_BYTES,
+        FILE_SLICE_CIPHERTEXT_BYTES,
+    };
 
     fn file(root_hash: [u8; 32]) -> ContentFileFact {
         ContentFileFact {
@@ -401,5 +414,25 @@ mod tests {
         let err = verified_slice_ciphertext(&slice, &file([0xff; 32])).expect_err("reject");
 
         assert!(err.contains("bao proof verification failed"), "{err}");
+    }
+
+    #[test]
+    fn proof_slot_fits_encrypted_slice_ranges() {
+        let encrypted_blob = vec![0x42; FILE_SLICE_CIPHERTEXT_BYTES * 8];
+        let (_root_hash, outboard) = crypto::bao_outboard(&encrypted_blob).expect("outboard");
+        let proof = crypto::bao_extract_slice(
+            &encrypted_blob,
+            &outboard,
+            FILE_SLICE_CIPHERTEXT_BYTES as u64,
+            FILE_SLICE_CIPHERTEXT_BYTES as u64,
+        )
+        .expect("proof");
+
+        assert!(
+            proof.len() <= FILE_SLICE_BAO_PROOF_BYTES,
+            "proof len {} exceeds fixed slot {}",
+            proof.len(),
+            FILE_SLICE_BAO_PROOF_BYTES
+        );
     }
 }

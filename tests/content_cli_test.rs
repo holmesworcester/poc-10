@@ -663,54 +663,39 @@ fn parse_first_progress_row(listing: &str) -> Option<(u32, u32, bool)> {
     None
 }
 
-/// Spin until bob's `files` listing reports the file with `STATUS` matching
-/// the hourglass, then return that listing. Used to land a deterministic
-/// partial-progress observation across sync.
-fn wait_for_partial_listing(db: &str, workspace_id: &str) -> String {
-    let mut last = String::new();
-    for _ in 0..600 {
-        let out = assert_success(topo(&["--db", db, "files", workspace_id]));
-        if files_total(&out) == "1" && out.contains("\u{23f3}") {
-            return out;
-        }
-        last = out;
-        thread::sleep(Duration::from_millis(20));
-    }
-    panic!("never observed a partial listing for workspace; last output:\n{last}");
+fn delete_verified_file_slices_from(db: &str, first_deleted_slice_index: u32) {
+    let conn = Connection::open(db).expect("open db");
+    conn.execute(
+        "DELETE FROM file_slice_rows WHERE slice_index >= ?1",
+        params![i64::from(first_deleted_slice_index)],
+    )
+    .expect("delete verified slice rows");
 }
 
 #[test]
-fn cli_files_listing_shows_partial_progress_during_sync() {
-    // Send a multi-MiB file so the descriptor lands well before all slices.
-    // FILE_SLICE_DATA_BYTES is 256 KiB; 4 MiB -> 16 slices.
+fn cli_files_listing_counts_verified_slice_rows_as_progress() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let workspace_id = create_workspace(&alice, "Progress", "alice", "alice-laptop");
-    let alice_port = free_port();
-    let bob_port = free_port();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Progress", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-    grant_content_key_to_peer(&alice, &bob, &workspace_id);
-
-    let payload: Vec<u8> = (0..(2 * 1024 * 1024u32)).map(|byte| byte as u8).collect();
+    // Four fixed 256 KiB slices. Delete two verified rows after projection so
+    // the listing has a deterministic 50% partial state without racing sync.
+    let payload: Vec<u8> = (0..(1024 * 1024u32)).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("big.bin");
     fs::write(&in_path, &payload).expect("write input");
     assert_success(topo(&[
         "--db",
-        &alice,
+        &db,
         "send-file",
         &workspace_id,
         "see attached big",
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    delete_verified_file_slices_from(&db, 2);
 
-    // Capture a partial-progress observation. The hourglass character and the
-    // `, NN%)` suffix mean the descriptor exists on bob but not all slices.
-    let partial = wait_for_partial_listing(&bob, &workspace_id);
+    let partial = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     let progress = parse_first_progress_row(&partial)
         .unwrap_or_else(|| panic!("no progress row recognized in:\n{partial}"));
     let (pct, _denom, complete) = progress;
@@ -718,15 +703,9 @@ fn cli_files_listing_shows_partial_progress_during_sync() {
         !complete,
         "partial listing reported as complete:\n{partial}"
     );
-    assert!(
-        pct < 100,
-        "partial listing percentage must be <100, was {pct}: {partial}"
-    );
-    // The listing format must use poc-7's hourglass status and the `, NN%)`
-    // percentage suffix.
+    assert_eq!(pct, 50, "{partial}");
     assert!(partial.contains("\u{23f3}"), "{partial}");
     assert!(partial.contains("%)"), "{partial}");
-    // poc-7 listing also shows `FILES (1 total):` header.
     assert!(
         partial.lines().any(|l| l == "FILES (1 total):"),
         "{partial}"
@@ -735,55 +714,29 @@ fn cli_files_listing_shows_partial_progress_during_sync() {
 
 #[test]
 fn cli_save_file_rejects_incomplete_download() {
-    // Same partial setup as above; once we observe partial state, kill bob's
-    // daemon so no further slices arrive, and assert save-file rejects with
-    // poc-7's incomplete error wording.
     let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let workspace_id = create_workspace(&alice, "Reject", "alice", "alice-laptop");
-    let alice_port = free_port();
-    let bob_port = free_port();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Reject", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
-    let alice_daemon = spawn_daemon(&alice, alice_port);
-    let bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-    grant_content_key_to_peer(&alice, &bob, &workspace_id);
-
-    let payload: Vec<u8> = (0..(2 * 1024 * 1024u32)).map(|byte| byte as u8).collect();
+    let payload: Vec<u8> = (0..(512 * 1024u32)).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("big.bin");
     fs::write(&in_path, &payload).expect("write input");
     assert_success(topo(&[
         "--db",
-        &alice,
+        &db,
         "send-file",
         &workspace_id,
         "see attached big",
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    delete_verified_file_slices_from(&db, 1);
 
-    // Wait for bob to observe a partial state, then kill both daemons. With
-    // both peers stopped no further slices will arrive, so any save-file run
-    // before any new sync is guaranteed to be against incomplete bytes.
-    let _partial_listing = wait_for_partial_listing(&bob, &workspace_id);
-    drop(bob_daemon);
-    drop(alice_daemon);
-
-    // Re-confirm partial state via a fresh CLI read after stopping sync.
-    let listing = assert_success(topo(&["--db", &bob, "files", &workspace_id]));
-    let progress = parse_first_progress_row(&listing).expect("progress row");
-    if progress.2 {
-        // Sync was already complete at observation time. Try with a smaller
-        // file? No — instead skip the assertion: the brief acknowledges some
-        // setups will not reliably land in partial. We still assert the
-        // happy-path completeness path.
-        return;
-    }
     let out_path = tmp.path().join("out.bin");
     let output = topo(&[
         "--db",
-        &bob,
+        &db,
         "save-file",
         &workspace_id,
         "#1",
@@ -797,45 +750,22 @@ fn cli_save_file_rejects_incomplete_download() {
     );
     let err = stderr(&output);
     assert!(
-        err.contains("file incomplete: have "),
+        err.contains("file incomplete: have 1/2 slices"),
         "save-file did not report incomplete; stderr was:\n{err}"
-    );
-    assert!(
-        err.contains("/"),
-        "incomplete error must include `have N/M slices` shape; stderr:\n{err}"
-    );
-    assert!(
-        err.contains(" slices"),
-        "incomplete error must end with ` slices`; stderr:\n{err}"
     );
 }
 
 #[test]
-fn cli_out_of_order_slice_arrival_eventually_completes() {
-    // File slices depend on the file descriptor id, but slices among
-    // themselves have no inter-slice dependency: sync may deliver them
-    // in any order. This test sends a multi-slice file and asserts that
-    // regardless of arrival order the assembled bytes round-trip exactly.
-    //
-    // The `list_for_file` query in the file_slice schema sorts slices by
-    // `slice_number` before assembly, so admission order does not affect the
-    // final saved bytes.
+fn cli_save_file_assembles_slices_by_index() {
     let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let workspace_id = create_workspace(&alice, "Order", "alice", "alice-laptop");
-    let alice_port = free_port();
-    let bob_port = free_port();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Order", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-    grant_content_key_to_peer(&alice, &bob, &workspace_id);
-
-    // 4 slices @ 256 KiB = 1 MiB. Vary the byte pattern by slice index so a
+    // 2 slices @ 256 KiB = 512 KiB. Vary the byte pattern by slice index so a
     // wrong-order assembly would fail the equality check, not just length.
     const SLICE_BYTES: usize = 256 * 1024;
-    const NUM_SLICES: usize = 4;
+    const NUM_SLICES: usize = 2;
     let mut payload = Vec::with_capacity(NUM_SLICES * SLICE_BYTES);
     for slice_idx in 0..NUM_SLICES as u8 {
         for offset in 0..SLICE_BYTES {
@@ -849,18 +779,24 @@ fn cli_out_of_order_slice_arrival_eventually_completes() {
 
     assert_success(topo(&[
         "--db",
-        &alice,
+        &db,
         "send-file",
         &workspace_id,
         "see attached ordered",
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    rewrite_verified_file_slices_in_reverse(&db);
 
-    // Wait for the file to fully appear on bob.
-    wait_for_files_count(&bob, &workspace_id, "1");
     let out_path = tmp.path().join("out.bin");
-    let saved = wait_for_save_file(&bob, &workspace_id, "#1", out_path.to_str().expect("path"));
+    let saved = assert_success(topo(&[
+        "--db",
+        &db,
+        "save-file",
+        &workspace_id,
+        "#1",
+        out_path.to_str().expect("path"),
+    ]));
     assert_eq!(line_value(&saved, "filename"), "ordered.bin");
     assert_eq!(
         line_value(&saved, "bytes_written"),
@@ -872,43 +808,72 @@ fn cli_out_of_order_slice_arrival_eventually_completes() {
     assert_eq!(read_back, payload, "saved bytes do not round-trip");
 }
 
+fn rewrite_verified_file_slices_in_reverse(db: &str) {
+    let conn = Connection::open(db).expect("open db");
+    let rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT workspace_id, file_id, slice_index, slice_fact_id, created_at_ms, ciphertext
+                 FROM file_slice_rows
+                 ORDER BY slice_index DESC",
+            )
+            .expect("select file slice rows");
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        })
+        .expect("query slice rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect slice rows")
+    };
+    conn.execute("DELETE FROM file_slice_rows", [])
+        .expect("delete slice rows");
+    for (workspace_id, file_id, slice_index, slice_fact_id, created_at_ms, ciphertext) in rows {
+        conn.execute(
+            "INSERT INTO file_slice_rows
+             (workspace_id, file_id, slice_index, slice_fact_id, created_at_ms, ciphertext)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                workspace_id,
+                file_id,
+                slice_index,
+                slice_fact_id,
+                created_at_ms,
+                ciphertext
+            ],
+        )
+        .expect("insert reversed slice row");
+    }
+}
+
 #[test]
 fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
-    // Try to capture the moment bob has the file descriptor but no slices.
-    // This relies on poll timing; with a 4 MiB file and a 50 ms tick, the
-    // descriptor lands at least one tick before all slices. If we miss the
-    // exact `0%` window we accept any observation where slices_received <
-    // total_slices and the percentage is below the all-arrived threshold.
     let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let workspace_id = create_workspace(&alice, "Zero", "alice", "alice-laptop");
-    let alice_port = free_port();
-    let bob_port = free_port();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Zero", "alice", "alice-laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
 
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-    grant_content_key_to_peer(&alice, &bob, &workspace_id);
-
-    // 2 MiB == 8 slices is large enough to observe partial, BAO-verified
-    // progress without making this black-box sync test too slow.
-    let payload: Vec<u8> = (0..(2 * 1024 * 1024u32)).map(|byte| byte as u8).collect();
+    let payload: Vec<u8> = (0..(512 * 1024u32)).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("very_big.bin");
     fs::write(&in_path, &payload).expect("write input");
     assert_success(topo(&[
         "--db",
-        &alice,
+        &db,
         "send-file",
         &workspace_id,
         "see attached very big",
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    delete_verified_file_slices_from(&db, 0);
 
-    let partial = wait_for_partial_listing(&bob, &workspace_id);
-    // The listing must include the file with the hourglass status; the
-    // command must not panic and must emit a recognizable progress row.
+    let partial = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert!(
         partial.contains("\u{23f3}"),
         "expected hourglass status in:\n{partial}"
@@ -918,32 +883,28 @@ fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
         !progress.2,
         "partial listing reported as complete:\n{partial}"
     );
-    assert!(
-        progress.0 < 100,
-        "partial listing percentage must be <100, was {}: {partial}",
-        progress.0
-    );
-    // save-file at this point must reject with poc-7's wording.
+    assert_eq!(progress.0, 0, "{partial}");
+
     let out_path = tmp.path().join("out.bin");
     let output = topo(&[
         "--db",
-        &bob,
+        &db,
         "save-file",
         &workspace_id,
         "#1",
         out_path.to_str().expect("path"),
     ]);
-    if !output.status.success() {
-        let err = stderr(&output);
-        assert!(
-            err.contains("file incomplete: have "),
-            "save-file did not report incomplete; stderr was:\n{err}"
-        );
-    } else {
-        // The file finished arriving between our polled observation and the
-        // save-file call. That still proves the listing produced a valid
-        // partial state earlier in the run, so this is not a failure.
-    }
+    assert!(
+        !output.status.success(),
+        "save-file unexpectedly succeeded:\nstdout={}\nstderr={}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("file incomplete: have 0/2 slices"),
+        "save-file did not report incomplete; stderr was:\n{err}"
+    );
 }
 
 #[test]

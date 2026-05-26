@@ -1,9 +1,10 @@
-//! Durable sync shareable-fact index rows and connection queries.
+//! Durable sync contribution rows and connection queries.
 //!
-//! Shared-fact projection records which workspace a fact may be sent through.
-//! This module turns those rows into connection-specific fact lists by checking
-//! endpoint membership, connection workspace authorization, and whether the
-//! named fact still exists in the core store.
+//! Fact projectors record which workspace a fact may be sent through and which
+//! validated context belongs to that fact's sync leaf. This module turns those
+//! rows into connection-specific fact lists by checking endpoint membership,
+//! connection workspace authorization, and whether the named fact still exists
+//! in the core store.
 //!
 //! Keep sync visibility here. Fact admission belongs to projectors, and
 //! connection framing belongs to `send_facts_on_connection`; callers use this
@@ -12,13 +13,20 @@
 use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::{Store, TableName, TableRow};
-use crate::protocol::{auth, connection, sync::update_negentropy_tree};
+use crate::protocol::{
+    auth, connection,
+    sync::{
+        compare::fact::{RangeSummary, TimestampRange},
+        share_fact_with_sync,
+    },
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const SHAREABLE_FACT_ROWS: TableName = TableName::new("sync_shareable_fact_rows");
 pub const NEGENTROPY_LEAF_ROWS: TableName = TableName::new("sync_negentropy_leaf_rows");
 pub const NEGENTROPY_CONTEXT_HAVE_ROWS: TableName =
     TableName::new("sync_negentropy_context_have_rows");
+pub const NEGENTROPY_NODE_ROWS: TableName = TableName::new("sync_negentropy_node_rows");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareableFactRow {
@@ -32,6 +40,7 @@ pub struct NegentropyLeafRow {
     pub workspace_id: FactId,
     pub owner_fact_id: FactId,
     pub timestamp_ms: u64,
+    pub contribution_fingerprint: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +48,14 @@ pub struct NegentropyContextHaveRow {
     pub workspace_id: FactId,
     pub owner_fact_id: FactId,
     pub context_fact_id: FactId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegentropyNodeRow {
+    pub workspace_id: FactId,
+    pub level: u8,
+    pub start_timestamp_ms: u64,
+    pub summary: RangeSummary,
 }
 
 pub fn shareable_fact_row(row: ShareableFactRow) -> TableRow {
@@ -74,9 +91,10 @@ fn shareable_fact_key(workspace_id: FactId, fact_id: FactId) -> Vec<u8> {
 }
 
 fn negentropy_leaf_row(row: NegentropyLeafRow) -> TableRow {
-    let mut value = Vec::with_capacity(9);
+    let mut value = Vec::with_capacity(41);
     value.push(1);
     value.extend_from_slice(&row.timestamp_ms.to_be_bytes());
+    value.extend_from_slice(&row.contribution_fingerprint);
     TableRow {
         table: NEGENTROPY_LEAF_ROWS,
         key: negentropy_leaf_key(row.workspace_id, row.owner_fact_id),
@@ -88,13 +106,14 @@ fn decode_negentropy_leaf_row(key: &[u8], value: &[u8]) -> Result<NegentropyLeaf
     if key.len() != 64 {
         return Err("negentropy leaf key must be workspace id plus owner fact id".to_string());
     }
-    if value.len() != 9 || value[0] != 1 {
+    if value.len() != 41 || value[0] != 1 {
         return Err("invalid negentropy leaf row value".to_string());
     }
     Ok(NegentropyLeafRow {
         workspace_id: key[..32].try_into().unwrap(),
         owner_fact_id: key[32..64].try_into().unwrap(),
         timestamp_ms: u64::from_be_bytes(value[1..9].try_into().unwrap()),
+        contribution_fingerprint: value[9..41].try_into().unwrap(),
     })
 }
 
@@ -145,6 +164,44 @@ fn negentropy_context_have_key(
     key
 }
 
+fn negentropy_node_row(row: NegentropyNodeRow) -> TableRow {
+    let mut value = Vec::with_capacity(41);
+    value.push(1);
+    value.extend_from_slice(&row.summary.count.to_be_bytes());
+    value.extend_from_slice(&row.summary.fingerprint);
+    TableRow {
+        table: NEGENTROPY_NODE_ROWS,
+        key: negentropy_node_key(row.workspace_id, row.level, row.start_timestamp_ms),
+        value,
+    }
+}
+
+fn decode_negentropy_node_row(key: &[u8], value: &[u8]) -> Result<NegentropyNodeRow, String> {
+    if key.len() != 41 {
+        return Err("negentropy node key must be workspace id, level, and start".to_string());
+    }
+    if value.len() != 41 || value[0] != 1 {
+        return Err("invalid negentropy node row value".to_string());
+    }
+    Ok(NegentropyNodeRow {
+        workspace_id: key[..32].try_into().unwrap(),
+        level: key[32],
+        start_timestamp_ms: u64::from_be_bytes(key[33..41].try_into().unwrap()),
+        summary: RangeSummary {
+            count: u64::from_be_bytes(value[1..9].try_into().unwrap()),
+            fingerprint: value[9..41].try_into().unwrap(),
+        },
+    })
+}
+
+fn negentropy_node_key(workspace_id: FactId, level: u8, start_timestamp_ms: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(41);
+    key.extend_from_slice(&workspace_id);
+    key.push(level);
+    key.extend_from_slice(&start_timestamp_ms.to_be_bytes());
+    key
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncStatus {
     pub indexed_facts: usize,
@@ -153,104 +210,570 @@ pub struct SyncStatus {
     pub pending_purges: usize,
 }
 
-pub fn record_shareable_fact(
+pub fn record_sync_contribution(
     store: &Store,
-    workspace_id: FactId,
-    fact: &Fact,
-    timestamp_ms: u64,
-) -> Result<(), String> {
-    if fact.timestamp != timestamp_ms {
-        return Err("share_fact_with_workspace timestamp does not match fact".to_string());
-    }
-    match &fact.scope {
-        FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => {
-            if id != &workspace_id {
-                return Err("share_fact_with_workspace scope does not match workspace".to_string());
-            }
+    input: &share_fact_with_sync::ShareFactWithSync,
+    owner: Option<&Fact>,
+) -> Result<bool, String> {
+    match input.state {
+        share_fact_with_sync::SyncShareState::Upsert => {
+            let owner = owner
+                .ok_or_else(|| "share_fact_with_sync upsert requires owner fact".to_string())?;
+            validate_sync_owner(
+                input.workspace_id,
+                input.owner_fact_id,
+                input.timestamp_ms,
+                owner,
+            )?;
+            upsert_sync_contribution(store, input, owner)
         }
-        FactScope::Global => {}
-        _ => {
-            return Err(
-                "share_fact_with_workspace requires a workspace-scoped or global fact".to_string(),
-            );
-        }
+        share_fact_with_sync::SyncShareState::Retract => retract_sync_contribution(store, input),
     }
-    store
-        .insert_table_rows(vec![shareable_fact_row(ShareableFactRow {
-            workspace_id,
-            fact_id: fact.id,
-            timestamp_ms,
-        })])
-        .map(|_| ())
-        .map_err(|err| format!("record shareable fact row: {err}"))
 }
 
-pub fn record_negentropy_contribution(
-    store: &Store,
-    input: &update_negentropy_tree::UpdateNegentropyTree,
+fn validate_sync_owner(
+    workspace_id: FactId,
+    owner_fact_id: FactId,
+    timestamp_ms: u64,
     owner: &Fact,
 ) -> Result<(), String> {
-    if owner.id != input.owner_fact_id {
-        return Err("update_negentropy_tree owner fact id mismatch".to_string());
+    if owner.id != owner_fact_id {
+        return Err("share_fact_with_sync owner fact id mismatch".to_string());
     }
-    if owner.timestamp != input.timestamp_ms {
-        return Err("update_negentropy_tree timestamp does not match owner fact".to_string());
+    if owner.timestamp != timestamp_ms {
+        return Err("share_fact_with_sync timestamp does not match owner fact".to_string());
     }
     match &owner.scope {
         FactScope::Scoped { kind, id } if kind.as_str() == "workspace" => {
-            if id != &input.workspace_id {
-                return Err(
-                    "update_negentropy_tree owner scope does not match workspace".to_string(),
-                );
+            if id != &workspace_id {
+                return Err("share_fact_with_sync owner scope does not match workspace".to_string());
             }
         }
         FactScope::Global => {}
         _ => {
             return Err(
-                "update_negentropy_tree requires a workspace-scoped or global owner fact"
-                    .to_string(),
+                "share_fact_with_sync requires a workspace-scoped or global owner fact".to_string(),
             );
         }
     }
+    Ok(())
+}
 
-    let mut rows = Vec::with_capacity(1 + input.context_have.len());
-    rows.push(negentropy_leaf_row(NegentropyLeafRow {
+fn upsert_sync_contribution(
+    store: &Store,
+    input: &share_fact_with_sync::ShareFactWithSync,
+    owner: &Fact,
+) -> Result<bool, String> {
+    let old_leaf = negentropy_leaf_row_for_owner(store, input.workspace_id, input.owner_fact_id)?;
+    if let Some(old_leaf) = &old_leaf {
+        if old_leaf.timestamp_ms != input.timestamp_ms {
+            return Err("share_fact_with_sync timestamp changed for existing owner".to_string());
+        }
+    }
+
+    let mut context_have =
+        negentropy_context_have_for_leaf(store, input.workspace_id, input.owner_fact_id)?;
+    context_have.extend(input.context_have.iter().copied());
+    context_have.sort();
+    context_have.dedup();
+    let new_fingerprint = contribution_fingerprint(
+        input.workspace_id,
+        input.owner_fact_id,
+        input.timestamp_ms,
+        &context_have,
+    );
+    if old_leaf
+        .as_ref()
+        .map(|leaf| leaf.contribution_fingerprint == new_fingerprint)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    let old_summary = old_leaf.as_ref().map(|leaf| RangeSummary {
+        count: 1,
+        fingerprint: leaf.contribution_fingerprint,
+    });
+    let new_summary = RangeSummary {
+        count: 1,
+        fingerprint: new_fingerprint,
+    };
+    let leaf_row = negentropy_leaf_row(NegentropyLeafRow {
         workspace_id: input.workspace_id,
         owner_fact_id: input.owner_fact_id,
         timestamp_ms: input.timestamp_ms,
-    }));
-    rows.extend(input.context_have.iter().map(|context_fact_id| {
-        negentropy_context_have_row(NegentropyContextHaveRow {
-            workspace_id: input.workspace_id,
-            owner_fact_id: input.owner_fact_id,
-            context_fact_id: *context_fact_id,
+        contribution_fingerprint: new_fingerprint,
+    });
+    let shareable_row = shareable_fact_row(ShareableFactRow {
+        workspace_id: input.workspace_id,
+        fact_id: owner.id,
+        timestamp_ms: owner.timestamp,
+    });
+    let context_rows = context_have
+        .iter()
+        .map(|context_fact_id| {
+            negentropy_context_have_row(NegentropyContextHaveRow {
+                workspace_id: input.workspace_id,
+                owner_fact_id: input.owner_fact_id,
+                context_fact_id: *context_fact_id,
+            })
         })
-    }));
+        .collect::<Vec<_>>();
+    let old_context_keys =
+        negentropy_context_have_rows_for_leaf(store, input.workspace_id, input.owner_fact_id)?
+            .into_iter()
+            .map(|row| {
+                negentropy_context_have_key(
+                    row.workspace_id,
+                    row.owner_fact_id,
+                    row.context_fact_id,
+                )
+            })
+            .collect::<Vec<_>>();
+
     store
-        .insert_table_rows(rows)
-        .map(|_| ())
-        .map_err(|err| format!("record negentropy contribution rows: {err}"))
+        .write_transaction(|tx| {
+            tx.delete_table_rows_in_tx(
+                NEGENTROPY_LEAF_ROWS,
+                vec![negentropy_leaf_key(input.workspace_id, input.owner_fact_id)],
+            )?;
+            tx.delete_table_rows_in_tx(NEGENTROPY_CONTEXT_HAVE_ROWS, old_context_keys)?;
+            update_node_path_in_tx(
+                tx,
+                input.workspace_id,
+                input.timestamp_ms,
+                old_summary,
+                Some(new_summary),
+            )?;
+            let mut rows = Vec::with_capacity(2 + context_rows.len());
+            rows.push(shareable_row);
+            rows.push(leaf_row);
+            rows.extend(context_rows);
+            tx.insert_table_rows_in_tx(rows)?;
+            Ok(())
+        })
+        .map_err(|err| format!("record sync contribution rows: {err}"))?;
+    Ok(true)
+}
+
+fn retract_sync_contribution(
+    store: &Store,
+    input: &share_fact_with_sync::ShareFactWithSync,
+) -> Result<bool, String> {
+    let Some(old_leaf) =
+        negentropy_leaf_row_for_owner(store, input.workspace_id, input.owner_fact_id)?
+    else {
+        return Ok(false);
+    };
+    let old_summary = RangeSummary {
+        count: 1,
+        fingerprint: old_leaf.contribution_fingerprint,
+    };
+    let old_context_keys =
+        negentropy_context_have_rows_for_leaf(store, input.workspace_id, input.owner_fact_id)?
+            .into_iter()
+            .map(|row| {
+                negentropy_context_have_key(
+                    row.workspace_id,
+                    row.owner_fact_id,
+                    row.context_fact_id,
+                )
+            })
+            .collect::<Vec<_>>();
+    store
+        .write_transaction(|tx| {
+            tx.delete_table_rows_in_tx(
+                SHAREABLE_FACT_ROWS,
+                vec![shareable_fact_key(input.workspace_id, input.owner_fact_id)],
+            )?;
+            tx.delete_table_rows_in_tx(
+                NEGENTROPY_LEAF_ROWS,
+                vec![negentropy_leaf_key(input.workspace_id, input.owner_fact_id)],
+            )?;
+            tx.delete_table_rows_in_tx(NEGENTROPY_CONTEXT_HAVE_ROWS, old_context_keys)?;
+            update_node_path_in_tx(
+                tx,
+                input.workspace_id,
+                old_leaf.timestamp_ms,
+                Some(old_summary),
+                None,
+            )?;
+            Ok(())
+        })
+        .map_err(|err| format!("retract sync contribution rows: {err}"))?;
+    Ok(true)
+}
+
+fn update_node_path_in_tx(
+    store: &Store,
+    workspace_id: FactId,
+    timestamp_ms: u64,
+    old_summary: Option<RangeSummary>,
+    new_summary: Option<RangeSummary>,
+) -> rusqlite::Result<()> {
+    for (level, start_timestamp_ms) in node_path(timestamp_ms) {
+        let key = negentropy_node_key(workspace_id, level, start_timestamp_ms);
+        let current = store
+            .table_row(NEGENTROPY_NODE_ROWS, &key)?
+            .map(|value| decode_negentropy_node_row(&key, &value))
+            .transpose()
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+        let mut summary = current
+            .map(|row| row.summary)
+            .unwrap_or_else(RangeSummary::default);
+        if let Some(old) = old_summary {
+            summary.count = summary.count.saturating_sub(old.count);
+            xor_fingerprint(&mut summary.fingerprint, old.fingerprint);
+        }
+        if let Some(new) = new_summary {
+            summary.count = summary.count.saturating_add(new.count);
+            xor_fingerprint(&mut summary.fingerprint, new.fingerprint);
+        }
+        store.delete_table_rows_in_tx(NEGENTROPY_NODE_ROWS, vec![key])?;
+        if summary.count != 0 || summary.fingerprint != [0; 32] {
+            store.insert_table_rows_in_tx(vec![negentropy_node_row(NegentropyNodeRow {
+                workspace_id,
+                level,
+                start_timestamp_ms,
+                summary,
+            })])?;
+        }
+    }
+    Ok(())
+}
+
+fn node_path(timestamp_ms: u64) -> impl Iterator<Item = (u8, u64)> {
+    (0u8..=64).map(move |level| {
+        let start = if level == 64 {
+            0
+        } else {
+            let width = 1u64 << level;
+            timestamp_ms & !(width - 1)
+        };
+        (level, start)
+    })
+}
+
+fn covering_nodes(start: u64, end: u64) -> Vec<(u8, u64)> {
+    let mut out = Vec::new();
+    cover_node(64, 0, start, end, &mut out);
+    out
+}
+
+fn cover_node(
+    level: u8,
+    node_start: u64,
+    query_start: u64,
+    query_end: u64,
+    out: &mut Vec<(u8, u64)>,
+) {
+    let node_end = node_end(level, node_start);
+    if query_end < node_start || node_end < query_start {
+        return;
+    }
+    if query_start <= node_start && node_end <= query_end {
+        out.push((level, node_start));
+        return;
+    }
+    if level == 0 {
+        return;
+    }
+    let child_level = level - 1;
+    let right_start = if child_level == 63 {
+        1u64 << 63
+    } else {
+        node_start + (1u64 << child_level)
+    };
+    cover_node(child_level, node_start, query_start, query_end, out);
+    cover_node(child_level, right_start, query_start, query_end, out);
+}
+
+fn node_end(level: u8, start: u64) -> u64 {
+    if level == 64 {
+        u64::MAX
+    } else {
+        start + ((1u64 << level) - 1)
+    }
+}
+
+fn contribution_fingerprint(
+    workspace_id: FactId,
+    owner_fact_id: FactId,
+    timestamp_ms: u64,
+    context_have: &[FactId],
+) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"topo:sync-contribution:v1:");
+    hash.update(&workspace_id);
+    hash.update(&owner_fact_id);
+    hash.update(&timestamp_ms.to_be_bytes());
+    hash.update(&(context_have.len() as u64).to_be_bytes());
+    for fact_id in context_have {
+        hash.update(fact_id);
+    }
+    *hash.finalize().as_bytes()
+}
+
+fn xor_fingerprint(dst: &mut [u8; 32], src: [u8; 32]) {
+    for (dst, src) in dst.iter_mut().zip(src) {
+        *dst ^= src;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::crypto;
+    use crate::core::facts::ScopeKind;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use crate::protocol::auth::endpoint::{fact::EndpointFact, rows as endpoint_rows};
+    use crate::protocol::auth::endpoint_shared::{
+        fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
+        rows as endpoint_shared_rows,
+    };
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+
+    fn store() -> Store {
+        Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .expect("store")
+    }
+
+    fn fact(workspace_id: FactId, timestamp_ms: u64, seed: u8) -> Fact {
+        Fact::new(
+            FactScope::Scoped {
+                kind: ScopeKind::new("workspace").unwrap(),
+                id: workspace_id,
+            },
+            timestamp_ms,
+            vec![seed],
+        )
+    }
+
+    fn upsert(
+        workspace_id: FactId,
+        fact: &Fact,
+        context_have: Vec<FactId>,
+    ) -> share_fact_with_sync::ShareFactWithSync {
+        share_fact_with_sync::ShareFactWithSync {
+            workspace_id,
+            owner_fact_id: fact.id,
+            timestamp_ms: fact.timestamp,
+            state: share_fact_with_sync::SyncShareState::Upsert,
+            context_have,
+        }
+    }
+
+    #[test]
+    fn sync_contribution_upsert_updates_leaf_path_and_range_summary() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+
+        assert!(record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &fact, Vec::new()),
+            Some(&fact)
+        )
+        .expect("upsert contribution"));
+
+        assert_eq!(
+            shareable_fact_rows(&store).expect("shareable rows").len(),
+            1
+        );
+        assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
+        assert_eq!(negentropy_node_rows(&store).expect("node rows").len(), 65);
+        let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("root summary");
+        assert_eq!(root.count, 1);
+        assert_ne!(root.fingerprint, [0; 32]);
+        let exact = range_summary_for_workspace(
+            &store,
+            workspace_id,
+            TimestampRange { start: 42, end: 42 },
+        )
+        .expect("exact summary");
+        assert_eq!(exact, root);
+        let empty = range_summary_for_workspace(
+            &store,
+            workspace_id,
+            TimestampRange { start: 43, end: 43 },
+        )
+        .expect("empty summary");
+        assert_eq!(empty, RangeSummary::default());
+    }
+
+    #[test]
+    fn sync_contribution_is_idempotent_and_monotonically_adds_context() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+        let empty = upsert(workspace_id, &fact, Vec::new());
+
+        assert!(record_sync_contribution(&store, &empty, Some(&fact)).expect("first upsert"));
+        let first_root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("first root");
+        assert!(!record_sync_contribution(&store, &empty, Some(&fact)).expect("repeat upsert"));
+        assert_eq!(
+            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+                .expect("repeat root"),
+            first_root
+        );
+
+        let richer = upsert(workspace_id, &fact, vec![[7; 32]]);
+        assert!(record_sync_contribution(&store, &richer, Some(&fact)).expect("richer upsert"));
+        let richer_root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("richer root");
+        assert_eq!(richer_root.count, 1);
+        assert_ne!(richer_root.fingerprint, first_root.fingerprint);
+
+        assert!(!record_sync_contribution(&store, &empty, Some(&fact)).expect("older upsert"));
+        assert_eq!(
+            negentropy_context_have_for_leaf(&store, workspace_id, fact.id).expect("context rows"),
+            vec![[7; 32]]
+        );
+        assert_eq!(
+            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+                .expect("final root"),
+            richer_root
+        );
+    }
+
+    #[test]
+    fn sync_contribution_retract_removes_leaf_context_shareable_and_tree_path() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+        let input = upsert(workspace_id, &fact, vec![[7; 32]]);
+        record_sync_contribution(&store, &input, Some(&fact)).expect("upsert");
+
+        let retract = share_fact_with_sync::ShareFactWithSync {
+            workspace_id,
+            owner_fact_id: fact.id,
+            timestamp_ms: fact.timestamp,
+            state: share_fact_with_sync::SyncShareState::Retract,
+            context_have: Vec::new(),
+        };
+        assert!(record_sync_contribution(&store, &retract, None).expect("retract"));
+
+        assert!(shareable_fact_rows(&store)
+            .expect("shareable rows")
+            .is_empty());
+        assert!(negentropy_leaf_rows(&store).expect("leaf rows").is_empty());
+        assert!(negentropy_context_have_rows(&store)
+            .expect("context rows")
+            .is_empty());
+        assert!(negentropy_node_rows(&store).expect("node rows").is_empty());
+        assert_eq!(
+            range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT).expect("root"),
+            RangeSummary::default()
+        );
+    }
+
+    #[test]
+    fn range_query_includes_context_only_when_requested() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let connection_id = seed_authorized_connection(&store, workspace_id);
+        let context = fact(workspace_id, 10, 1);
+        let owner = fact(workspace_id, 20, 2);
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &owner)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &context, Vec::new()),
+            Some(&context),
+        )
+        .expect("context contribution");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &owner, vec![context.id]),
+            Some(&owner),
+        )
+        .expect("owner contribution");
+
+        let without = shareable_facts_for_connection_range(&store, connection_id, 20, 20, false)
+            .expect("without deps");
+        let with = shareable_facts_for_connection_range(&store, connection_id, 20, 20, true)
+            .expect("with deps");
+
+        assert_eq!(
+            without.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![owner.id]
+        );
+        assert_eq!(
+            with.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![context.id, owner.id]
+        );
+    }
+
+    fn seed_authorized_connection(store: &Store, workspace_id: FactId) -> FactId {
+        let connection_id = [8; 32];
+        let local_secret = [11; 32];
+        let local_endpoint = crypto::x25519_public_key(&local_secret);
+        let remote_endpoint = [2; 32];
+        let mut rows = endpoint_rows::endpoint_rows(&EndpointFact {
+            endpoint: local_endpoint,
+            secret: local_secret,
+            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
+            signing_secret: [13; 32],
+        });
+        rows.push(
+            connection::response::rows::connection_response_row(
+                connection_id,
+                &connection::response::fact::ConnectionResponseFact {
+                    from_endpoint: local_endpoint,
+                    to_endpoint: remote_endpoint,
+                    request_id: [3; 32],
+                    invite_secret_fact_id: [4; 32],
+                    initiator_ephemeral_secret_fact_id: [5; 32],
+                    responder_ephemeral_secret_fact_id: [6; 32],
+                    responder_ephemeral_public_key: [7; 32],
+                    handshake_hash: [8; 32],
+                    connection_secret: [9; 32],
+                },
+            )
+            .expect("connection row"),
+        );
+        rows.push(
+            endpoint_shared_rows::endpoint_shared_row(
+                [5; 32],
+                &EndpointSharedFact {
+                    created_at_ms: 1,
+                    workspace_id,
+                    user_authority_fact_id: [6; 32],
+                    endpoint_id: remote_endpoint,
+                    signing_public_key: [7; 32],
+                    endpoint_role: EndpointRole::Device,
+                    device_name: EndpointDeviceName::new("remote").expect("device name"),
+                    signer_id: [6; 32],
+                    signer_public_key: crypto::ed25519_public_key(&[17; 32]),
+                    signature: [18; crypto::ED25519_SIGNATURE_BYTES],
+                },
+            )
+            .expect("endpoint shared row"),
+        );
+        store.insert_table_rows(rows).expect("seed rows");
+        connection_id
+    }
 }
 
 pub fn sync_status(store: &Store) -> Result<SyncStatus, String> {
-    let mut facts = Vec::new();
-    for row in shareable_fact_rows(store)? {
-        let Some(fact) = fact_for_shareable_row(store, &row)? else {
-            continue;
-        };
-        facts.push(fact);
-    }
-    facts.sort_by_key(|fact| (fact.timestamp, fact.id));
+    let mut count = 0u64;
     let mut fingerprint = [0u8; 32];
-    for fact in &facts {
-        let digest = sync_fingerprint(fact);
-        for (dst, src) in fingerprint.iter_mut().zip(digest) {
-            *dst ^= src;
+    for row in negentropy_node_rows(store)? {
+        if row.level == 64 {
+            count = count.saturating_add(row.summary.count);
+            xor_fingerprint(&mut fingerprint, row.summary.fingerprint);
         }
     }
     Ok(SyncStatus {
-        indexed_facts: facts.len(),
-        root_count: facts.len() as u64,
+        indexed_facts: count as usize,
+        root_count: count,
         root_fingerprint: fingerprint,
         pending_purges: 0,
     })
@@ -268,6 +791,41 @@ pub fn shareable_facts_for_connection(
     let mut facts = by_id.into_values().collect::<Vec<_>>();
     facts.sort_by_key(|fact| (fact.timestamp, fact.id));
     Ok(facts)
+}
+
+pub fn range_summary_for_connection(
+    store: &Store,
+    connection_id: FactId,
+    range: TimestampRange,
+) -> Result<RangeSummary, String> {
+    let mut summary = RangeSummary::default();
+    for workspace_id in authorized_workspaces_for_connection(store, connection_id)? {
+        let workspace_summary = range_summary_for_workspace(store, workspace_id, range)?;
+        summary.count = summary.count.saturating_add(workspace_summary.count);
+        xor_fingerprint(&mut summary.fingerprint, workspace_summary.fingerprint);
+    }
+    Ok(summary)
+}
+
+pub fn range_summary_for_workspace(
+    store: &Store,
+    workspace_id: FactId,
+    range: TimestampRange,
+) -> Result<RangeSummary, String> {
+    let mut summary = RangeSummary::default();
+    for (level, start_timestamp_ms) in covering_nodes(range.start, range.end) {
+        let key = negentropy_node_key(workspace_id, level, start_timestamp_ms);
+        let Some(value) = store
+            .table_row(NEGENTROPY_NODE_ROWS, &key)
+            .map_err(|err| format!("load negentropy node row: {err}"))?
+        else {
+            continue;
+        };
+        let row = decode_negentropy_node_row(&key, &value)?;
+        summary.count = summary.count.saturating_add(row.summary.count);
+        xor_fingerprint(&mut summary.fingerprint, row.summary.fingerprint);
+    }
+    Ok(summary)
 }
 
 #[derive(Debug, Clone)]
@@ -311,6 +869,29 @@ fn shareable_fact_entries_for_connection(
     }
     facts.sort_by_key(|entry| (entry.fact.timestamp, entry.fact.id, entry.workspace_id));
     Ok(facts)
+}
+
+fn authorized_workspaces_for_connection(
+    store: &Store,
+    connection_id: FactId,
+) -> Result<BTreeSet<FactId>, String> {
+    let Some(connection) = connection_response_row(store, connection_id)? else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
+        return Ok(BTreeSet::new());
+    };
+    let Some(remote_endpoint) =
+        remote_endpoint_for_connection(&connection, local_endpoint.endpoint)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let endpoint_memberships = endpoint_memberships(store)?;
+    let mut workspaces = connection_workspaces(store, &connection)?;
+    workspaces.extend(endpoint_memberships.into_iter().filter_map(
+        |(workspace_id, endpoint_id)| (endpoint_id == remote_endpoint).then_some(workspace_id),
+    ));
+    Ok(workspaces)
 }
 
 pub fn shareable_facts_for_connection_range(
@@ -376,6 +957,35 @@ pub fn shareable_facts_for_connection_range(
         .collect::<Vec<_>>();
     facts.sort_by_key(|fact| (fact.timestamp, fact.id));
     Ok(facts)
+}
+
+pub fn expand_fact_ids_with_context_for_connection(
+    store: &Store,
+    connection_id: FactId,
+    fact_ids: &[FactId],
+) -> Result<Vec<FactId>, String> {
+    if fact_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let available = shareable_facts_for_connection(store, connection_id)?;
+    let selected = fact_ids
+        .iter()
+        .filter_map(|fact_id| available.iter().find(|fact| fact.id == *fact_id))
+        .collect::<Vec<_>>();
+    let Some(start) = selected.iter().map(|fact| fact.timestamp).min() else {
+        return Ok(fact_ids.to_vec());
+    };
+    let Some(end) = selected.iter().map(|fact| fact.timestamp).max() else {
+        return Ok(fact_ids.to_vec());
+    };
+    let mut expanded =
+        shareable_facts_for_connection_range(store, connection_id, start, end, true)?
+            .into_iter()
+            .map(|fact| fact.id)
+            .collect::<Vec<_>>();
+    expanded.sort();
+    expanded.dedup();
+    Ok(expanded)
 }
 
 pub fn shareable_fact_for_connection(
@@ -569,12 +1179,48 @@ pub fn negentropy_leaf_rows(store: &Store) -> Result<Vec<NegentropyLeafRow>, Str
         .collect()
 }
 
+fn negentropy_leaf_row_for_owner(
+    store: &Store,
+    workspace_id: FactId,
+    owner_fact_id: FactId,
+) -> Result<Option<NegentropyLeafRow>, String> {
+    let key = negentropy_leaf_key(workspace_id, owner_fact_id);
+    store
+        .table_row(NEGENTROPY_LEAF_ROWS, &key)
+        .map_err(|err| format!("load negentropy leaf row: {err}"))?
+        .map(|value| decode_negentropy_leaf_row(&key, &value))
+        .transpose()
+}
+
 pub fn negentropy_context_have_rows(
     store: &Store,
 ) -> Result<Vec<NegentropyContextHaveRow>, String> {
     store
         .table_rows(NEGENTROPY_CONTEXT_HAVE_ROWS)
         .map_err(|err| format!("load negentropy context-have rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))
+        .collect()
+}
+
+pub fn negentropy_node_rows(store: &Store) -> Result<Vec<NegentropyNodeRow>, String> {
+    store
+        .table_rows(NEGENTROPY_NODE_ROWS)
+        .map_err(|err| format!("load negentropy node rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_negentropy_node_row(&key, &value))
+        .collect()
+}
+
+fn negentropy_context_have_rows_for_leaf(
+    store: &Store,
+    workspace_id: FactId,
+    owner_fact_id: FactId,
+) -> Result<Vec<NegentropyContextHaveRow>, String> {
+    let prefix = negentropy_leaf_key(workspace_id, owner_fact_id);
+    store
+        .table_rows_with_key_prefix(NEGENTROPY_CONTEXT_HAVE_ROWS, &prefix, usize::MAX)
+        .map_err(|err| format!("load negentropy context-have rows for leaf: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))
         .collect()
@@ -627,12 +1273,4 @@ fn remote_endpoint_for_connection(
     } else {
         None
     }
-}
-
-fn sync_fingerprint(fact: &Fact) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"topo:sync-range-summary:v1:");
-    hash.update(&fact.timestamp.to_be_bytes());
-    hash.update(&fact.id);
-    *hash.finalize().as_bytes()
 }

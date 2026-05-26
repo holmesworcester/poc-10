@@ -17,6 +17,7 @@
 //! offer.
 
 use crate::core::facts::{Fact, FactScope};
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
@@ -52,14 +53,16 @@ impl TypedProjector<super::Codec> for ConnectionFactReceiptProjector {
             return Err("connection fact receipt must have FactScope::Local".to_string());
         }
         // 3. Materialize.
-        Ok(
-            ProjectionOutput::new().offer(crate::core::context::ContextOffer::range(
+        Ok(ProjectionOutput::new()
+            .offer(crate::core::context::ContextOffer::range(
                 fact.id,
                 "connection_fact_receipt",
                 crate::core::facts::FactScope::Local,
                 received.received_fact_id,
                 received.received_fact_id,
-            )),
-        )
+            ))
+            .row_mutation(RowMutation::PutRow(
+                super::rows::connection_fact_receipt_row(fact.id, &received),
+            )))
     }
 }

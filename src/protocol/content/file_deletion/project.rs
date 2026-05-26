@@ -19,7 +19,7 @@ use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{file, message, purge::project as content_purge};
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_optional_needs, share_fact_with_negentropy,
+    context_have_from_optional_needs, share_fact_with_sync,
 };
 
 use super::rows::{file_deletion_row, FileDeletionRow};
@@ -143,7 +143,7 @@ impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
             created_at_ms: deletion.created_at_ms,
             author_user_id: deletion.author_user_id,
         });
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             output_with_needs([
                 Some(signer_need),
                 Some(target_need),

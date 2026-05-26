@@ -21,11 +21,12 @@ use crate::protocol::content::{
     file_deletion, message, message_deletion, purge::project as content_purge,
 };
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_optional_needs, share_fact_with_negentropy,
+    context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::fact::MAX_FILE_BYTES;
 use super::rows::{content_file_row, FILE_KEY_COLUMNS, FILE_ROWS};
+use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileProjector;
@@ -123,11 +124,16 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         );
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
-            return Ok(delete_file_projection(file.workspace_id, fact.id)
-                .need(parent_need)
-                .need(file_deletion_need)
-                .need(parent_deletion_need)
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                delete_file_projection(file.workspace_id, fact.id)
+                    .need(parent_need)
+                    .need(file_deletion_need)
+                    .need(parent_deletion_need)
+                    .purge_self(fact.id),
+                file.workspace_id,
+                fact.id,
+                file.created_at_ms,
+            ));
         }
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?
@@ -140,11 +146,16 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
                 file.message_id,
                 parent.message.author_user_id,
             )?;
-            return Ok(delete_file_projection(file.workspace_id, fact.id)
-                .need(file_deletion_need)
-                .need(parent_need)
-                .need(parent_deletion_need)
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                delete_file_projection(file.workspace_id, fact.id)
+                    .need(file_deletion_need)
+                    .need(parent_need)
+                    .need(parent_deletion_need)
+                    .purge_self(fact.id),
+                file.workspace_id,
+                fact.id,
+                file.created_at_ms,
+            ));
         }
         let Some(author) = context_payload(context, &author_need, "file author")? else {
             return Ok(output_with_needs([
@@ -168,7 +179,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         );
 
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             output_with_needs([
                 Some(signer_need),
                 Some(file_deletion_need),
@@ -252,6 +263,9 @@ fn validate_file_fields(file: &super::fact::ContentFileFact) -> Result<(), Strin
     }
     if file.slice_bytes == 0 {
         return Err("non-empty file must declare a slice budget".to_string());
+    }
+    if file.slice_bytes != FILE_SLICE_PLAINTEXT_BYTES as u32 {
+        return Err("file slice budget must match the fixed file-slice slot".to_string());
     }
     let expected: u32 = file
         .blob_bytes
@@ -397,5 +411,44 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
         Ok(())
     } else {
         Err("content file fact scope does not match body workspace".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::content::file::fact::{
+        ContentFileFact, SealedMetadata, FILE_ROOT_HASH_BYTES,
+    };
+
+    fn valid_file() -> ContentFileFact {
+        ContentFileFact {
+            workspace_id: [1; 32],
+            created_at_ms: 100,
+            message_id: [2; 32],
+            author_user_id: [3; 32],
+            signer_id: [4; 32],
+            signer_public_key: [5; 32],
+            file_id: [6; 32],
+            blob_bytes: 1,
+            total_slices: 1,
+            slice_bytes: FILE_SLICE_PLAINTEXT_BYTES as u32,
+            root_hash: [7; FILE_ROOT_HASH_BYTES],
+            sealed_metadata: SealedMetadata::new(b"sealed").expect("metadata"),
+            signature: [8; crate::core::crypto::ED25519_SIGNATURE_BYTES],
+        }
+    }
+
+    #[test]
+    fn non_empty_files_use_the_fixed_slice_budget() {
+        let mut file = valid_file();
+        file.slice_bytes = 1_024;
+
+        let err = validate_file_fields(&file).expect_err("reject non-standard slice budget");
+
+        assert!(
+            err.contains("fixed file-slice slot"),
+            "unexpected error: {err}"
+        );
     }
 }

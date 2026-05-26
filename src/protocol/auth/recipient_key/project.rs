@@ -16,9 +16,7 @@ use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     proactive_wrap_source_need, require_fact_scope,
 };
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 
@@ -118,7 +116,7 @@ fn recipient_key(
     context_have.extend(context_have_from_needs(projection_context, [&signer_need]));
 
     // 3. Materialize: publish recipient context and proactive key-wrap work.
-    output = share_fact_with_negentropy(
+    output = share_fact_with_sync(
         output.offer(ContextOffer::range(
             fact.id,
             "recipient_key",
