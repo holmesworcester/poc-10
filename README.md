@@ -136,7 +136,12 @@ opaque byte rows and written by the core TCP pump.
 
 ## Scope Layout
 
-Protocol state is organized by scope:
+Fact families are organized by protocol scope. The grouping is mostly arbitrary
+to core: core receives the manifests, type tags, projectors, handlers, schemas,
+and commands that the app declares. For protocol code, scopes act like
+module-like families. They keep related facts, rows, context roles, commands,
+queries, and handlers near each other and give each group a clear realm of
+responsibility.
 
 ```text
 src/protocol.rs
