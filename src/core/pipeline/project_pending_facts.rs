@@ -61,6 +61,7 @@ use rusqlite::params;
 
 const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
 const PROJECTION_CONTEXT_FIXPOINT_LIMIT: usize = 8;
+const DURABLE_PROJECTION_TRANSACTION_CHUNK_LIMIT: usize = 256;
 
 const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
 SELECT owner
@@ -280,11 +281,12 @@ pub(crate) fn drain_pending_projection(
 /// This is the readable entry point for the SQL-backed projection path:
 ///
 /// 1. `pending_owner_batch` chooses pending fact ids from SQLite.
-/// 2. `load_pending_fact` loads each fact's projection inputs.
-/// 3. `process_pending_fact` completes all processing for that one fact.
-/// 4. `prepare_projection_effects` runs protocol projection and groups the outputs.
-/// 5. `commit_projection_effects` commits every durable and ephemeral effect in one
-///    SQLite transaction.
+/// 2. Durable facts are processed sequentially inside a bounded write transaction.
+/// 3. `load_pending_fact` loads each fact's projection inputs.
+/// 4. `process_pending_fact_in_tx` completes all processing for that one fact.
+/// 5. `prepare_projection_effects` runs protocol projection and groups the outputs.
+/// 6. `commit_projection_effects_in_tx` commits that fact's effects before the
+///    next fact is prepared, preserving read-your-writes inside the batch.
 fn process_pending_projection_batch(
     projector: &(impl Projector + ?Sized),
     store: &Store,
@@ -297,27 +299,18 @@ fn process_pending_projection_batch(
         crate::core::profile::measure_result("projection_pending_batch_load", || {
             pending_owner_batch(store, limit)
         })?;
-    for fact_id in durable_fact_ids {
-        if progress.projected >= limit {
-            break;
-        }
-        let Some(pending_fact) =
-            crate::core::profile::measure_result("projection_load_pending_fact", || {
-                load_pending_fact(store, ProjectionSource::Durable, fact_id)
-            })?
-        else {
-            store
-                .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
-                .map_err(|err| format!("purge stale pending fact: {err}"))?;
-            continue;
-        };
-        process_pending_fact(
-            pending_fact,
+    if !durable_fact_ids.is_empty() {
+        let chunk_len = durable_fact_ids
+            .len()
+            .min(limit)
+            .min(DURABLE_PROJECTION_TRANSACTION_CHUNK_LIMIT);
+        let durable_progress = process_durable_projection_chunk(
             projector,
             store,
             allowed_tables,
-            &mut progress,
+            &durable_fact_ids[..chunk_len],
         )?;
+        progress.merge(durable_progress);
     }
 
     if progress.projected < limit {
@@ -352,11 +345,51 @@ fn process_pending_projection_batch(
     Ok(progress)
 }
 
-/// Complete all projection work for one pending fact.
+/// Process a selected durable pending chunk in one SQLite transaction.
 ///
-/// The middle call, `commit_projection_effects`, is the only SQLite
-/// transaction in this per-fact pipeline. Everything before it is uncommitted
-/// calculation. Everything after it refreshes compatibility memory and reporting.
+/// The ordering is still load -> prepare -> commit per fact. The transaction
+/// only removes per-fact fsync overhead and lets later same-batch facts see
+/// rows committed by earlier same-batch facts.
+fn process_durable_projection_chunk(
+    projector: &(impl Projector + ?Sized),
+    store: &Store,
+    allowed_tables: &[TableName],
+    fact_ids: &[FactId],
+) -> Result<ProjectionProgress, String> {
+    crate::core::profile::measure_result("projection_batch_transaction", || {
+        store
+            .write_transaction(|tx| {
+                crate::core::profile::measure_result("projection_commit_tx_body", || {
+                    let mut progress = ProjectionProgress::default();
+                    for fact_id in fact_ids {
+                        let Some(pending_fact) = crate::core::profile::measure_result(
+                            "projection_load_pending_fact",
+                            || load_pending_fact(tx, ProjectionSource::Durable, *fact_id),
+                        )
+                        .map_err(sqlite_string_error)?
+                        else {
+                            purge_fact_in_tx(tx, *fact_id)?;
+                            continue;
+                        };
+                        process_pending_fact_in_tx(
+                            pending_fact,
+                            projector,
+                            tx,
+                            allowed_tables,
+                            &mut progress,
+                        )?;
+                    }
+                    Ok(progress)
+                })
+            })
+            .map_err(|err| format!("commit durable projection batch: {err}"))
+    })
+}
+
+/// Complete all projection work for one non-batched pending fact.
+///
+/// Ephemeral inputs still use this path because they must not persist durable
+/// context, offers, or intents.
 fn process_pending_fact(
     pending_fact: PendingFact,
     projector: &(impl Projector + ?Sized),
@@ -369,6 +402,25 @@ fn process_pending_fact(
     })?;
     crate::core::profile::measure_result("projection_commit_effects", || {
         commit_projection_effects(store, &effects, projector, allowed_tables)
+    })?;
+    progress.projected += 1;
+    progress.status.progressed = true;
+    Ok(())
+}
+
+fn process_pending_fact_in_tx(
+    pending_fact: PendingFact,
+    projector: &(impl Projector + ?Sized),
+    tx: &Store,
+    allowed_tables: &[TableName],
+    progress: &mut ProjectionProgress,
+) -> rusqlite::Result<()> {
+    let effects = crate::core::profile::measure_result("projection_prepare_effects", || {
+        prepare_projection_effects(projector, pending_fact, tx, allowed_tables)
+    })
+    .map_err(sqlite_string_error)?;
+    crate::core::profile::measure_result("projection_commit_effects", || {
+        commit_projection_effects_in_tx(tx, &effects, projector, allowed_tables, 0)
     })?;
     progress.projected += 1;
     progress.status.progressed = true;
@@ -1110,6 +1162,76 @@ mod tests {
     }
 
     #[test]
+    fn durable_batch_projection_reads_context_written_by_earlier_pending_fact() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let offered = Fact::new(FactScope::Global, 1, b"batch-offer".to_vec());
+        let dependent = Fact::new(FactScope::Global, 2, b"batch-dependent".to_vec());
+        assert_eq!(
+            submit_facts_to_store(&store, vec![offered.clone(), dependent.clone()])
+                .expect("submit pending facts"),
+            2
+        );
+
+        let role = Role::new("same_batch_dep").unwrap();
+        let key = ContextKey::from_bytes(b"shared-key");
+        let progress = drain_pending_projection(
+            &SameBatchDependencyProjector {
+                offered_id: offered.id,
+                dependent_id: dependent.id,
+                role: role.clone(),
+                key: key.clone(),
+            },
+            &store,
+            &[],
+            2,
+        )
+        .expect("drain same-batch dependency");
+
+        assert_eq!(progress.projected, 2);
+        let payload = intent_payload_for(&store, "same_batch_ready", &dependent.id);
+        assert_eq!(payload, offered.id.to_vec());
+        let dependent_context =
+            stored_context_for_owner(&store, &dependent.id).expect("dependent context");
+        assert!(dependent_context.needs.is_empty());
+        assert_eq!(pending_projection_count(&store, offered.id), 0);
+        assert_eq!(pending_projection_count(&store, dependent.id), 0);
+    }
+
+    #[test]
+    fn durable_batch_projection_rolls_back_earlier_fact_when_later_fact_fails() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let offered = Fact::new(FactScope::Global, 1, b"rollback-batch-offer".to_vec());
+        let failing = Fact::new(FactScope::Global, 2, b"rollback-batch-fail".to_vec());
+        assert_eq!(
+            submit_facts_to_store(&store, vec![offered.clone(), failing.clone()])
+                .expect("submit pending facts"),
+            2
+        );
+
+        let err = drain_pending_projection(
+            &RollbackBatchProjector {
+                offered_id: offered.id,
+                failing_id: failing.id,
+                role: Role::new("rollback_dep").unwrap(),
+                key: ContextKey::from_bytes(b"rollback-key"),
+            },
+            &store,
+            &[],
+            2,
+        )
+        .expect_err("later projection failure should rollback the batch");
+
+        assert!(err.contains("batch projection failed"), "{err}");
+        assert_eq!(pending_projection_count(&store, offered.id), 1);
+        assert_eq!(pending_projection_count(&store, failing.id), 1);
+        assert_eq!(context_edge_count(&store, offered.id), 0);
+    }
+
+    #[test]
     fn prepare_projection_leaves_watch_need_in_projector_output() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
@@ -1468,6 +1590,39 @@ mod tests {
         )
     }
 
+    fn intent_payload_for(store: &Store, kind: &str, key: &FactId) -> Vec<u8> {
+        store
+            .conn()
+            .query_row(
+                "SELECT payload FROM intents WHERE kind = ?1 AND idempotence_key = ?2",
+                rusqlite::params![kind, key.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("load intent payload")
+    }
+
+    fn pending_projection_count(store: &Store, owner: FactId) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count pending projection")
+    }
+
+    fn context_edge_count(store: &Store, owner: FactId) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM context_edges WHERE owner = ?1",
+                rusqlite::params![owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count context edges")
+    }
+
     struct NeedUntilOffer {
         role: Role,
         key: ContextKey,
@@ -1534,6 +1689,81 @@ mod tests {
                     b"missing".to_vec(),
                 )))
             }
+        }
+    }
+
+    struct SameBatchDependencyProjector {
+        offered_id: FactId,
+        dependent_id: FactId,
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for SameBatchDependencyProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.offered_id {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    start_key: self.key.clone(),
+                    end_key: self.key.clone(),
+                }));
+            }
+
+            if fact.id != self.dependent_id {
+                return Ok(ProjectionOutput::new());
+            }
+
+            let need = ContextNeed {
+                owner: fact.id,
+                role: self.role.clone(),
+                scope: fact.scope.clone(),
+                start_key: self.key.clone(),
+                end_key: self.key.clone(),
+            };
+            if let Some(payload) = context.payload_for(&need) {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("same_batch_ready").unwrap(),
+                    fact.id,
+                    payload.id,
+                )))
+            } else {
+                Ok(ProjectionOutput::new().need(need))
+            }
+        }
+    }
+
+    struct RollbackBatchProjector {
+        offered_id: FactId,
+        failing_id: FactId,
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for RollbackBatchProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.offered_id {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    start_key: self.key.clone(),
+                    end_key: self.key.clone(),
+                }));
+            }
+            if fact.id == self.failing_id {
+                return Err("batch projection failed".to_string());
+            }
+            Ok(ProjectionOutput::new())
         }
     }
 
