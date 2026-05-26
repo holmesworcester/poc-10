@@ -53,10 +53,9 @@ Reviewer instructions:
   their own fact module shape with local `fact.rs`, `layout.rs`, `project.rs`,
   and only the relevant `create.rs`/`commands.rs`/`rows.rs`.
 - [x] Sync follows the same rule. `src/protocol/facts/sync/` must not be a dumping
-  folder for range/key/support facts. Split `sync_range_request`,
-  `sync_encrypted_root`, `sync_shared_event`, and `sync_key_wrap_available`
-  into fact-family modules with their own `fact.rs`, `layout.rs`, and
-  `project.rs`; keep `sync_compare`, `sync_have_id`, and `sync_need_id` as
+  folder for range/key/support facts. Keep sync control and advertisement
+  facts in separate fact-family modules with their own `fact.rs`, `layout.rs`,
+  and `project.rs`; keep `sync_compare`, `sync_have_id`, and `sync_need_id` as
   separate modules.
 - [ ] No hidden `project/` subtrees remain unless explicitly justified; split
   projector families should use clear flat names.
