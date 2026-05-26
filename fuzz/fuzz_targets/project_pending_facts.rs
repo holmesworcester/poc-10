@@ -26,7 +26,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let _ = runtime.process_projection_until_idle(8, 32);
-    runtime.process_due_time_range(fuzz_timeline(), None, timestamp(data), 32);
+    let _ = runtime.process_due_time_range(fuzz_timeline(), None, timestamp(data), 32);
     let _ = runtime.process_projection_until_idle(8, 32);
 });
 
