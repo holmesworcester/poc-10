@@ -215,6 +215,7 @@ fn root_readme_describes_context_project_aims() {
 fn rules_include_projector_style_after_projector_style_doc_was_archived() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let rules = source_text(&root.join("docs/RULES.md"));
+    let normalized = normalize_whitespace(&rules);
 
     for required in [
         "### Projector Style",
@@ -228,10 +229,44 @@ fn rules_include_projector_style_after_projector_style_doc_was_archived() {
         "### Parking And Errors",
         "Missing context parks. Mismatched context rejects.",
         "### Schema And Rows",
+        "## Documentation Style",
+        "purpose, mechanism, invariants, and ownership boundaries",
+        "Write docs in current-code terms",
     ] {
         assert!(
-            rules.contains(required),
+            normalized.contains(required),
             "docs/RULES.md is missing merged projector guidance {required:?}"
+        );
+    }
+}
+
+#[test]
+fn repo_instructions_point_at_live_documentation_style_rules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let agents = source_text(&root.join("AGENTS.md"));
+    let rules = source_text(&root.join("docs/RULES.md"));
+    let normalized_rules = normalize_whitespace(&rules);
+
+    assert!(
+        agents.contains("docs/RULES.md#documentation-style"),
+        "AGENTS.md should point at the live documentation style section"
+    );
+    assert!(
+        !agents.contains("documentation_guide.md"),
+        "AGENTS.md should not point at the removed documentation guide"
+    );
+
+    for required in [
+        "## Documentation Style",
+        "What does this component own?",
+        "What invariants, ordering rules, idempotence rules, replacement rules, or security conditions",
+        "What does this component not know or do?",
+        "Where should a future related change be made?",
+        "Do not refer to branch names, task slices, abandoned plan filenames, or past implementation states",
+    ] {
+        assert!(
+            normalized_rules.contains(required),
+            "docs/RULES.md is missing documentation style guidance {required:?}"
         );
     }
 }

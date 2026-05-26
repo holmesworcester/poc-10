@@ -44,6 +44,38 @@ in `src/core` or `src/protocol`.
   standard fact-family role files. Avoid files or directories named `state`,
   `jobs`, `cli_commands`, or `codec.rs` in target code.
 
+## Documentation Style
+
+Project documentation describes the current system in terms of purpose,
+mechanism, invariants, and ownership boundaries. Open with the model before
+implementation details: say what the component is for, then explain the data
+shape or runtime flow it owns.
+
+Documentation should make maintenance routing obvious. For each subsystem,
+scope, module, public boundary type, or important helper, answer:
+
+1. What does this component own?
+2. How does it work at the important data-flow or commit-boundary level?
+3. What invariants, ordering rules, idempotence rules, replacement rules, or
+   security conditions does it rely on or preserve?
+4. What does this component not know or do?
+5. Where should a future related change be made?
+
+Explain redundant or surprising state instead of merely naming it. Examples
+include `facts` versus `local_fact_admissions`, durable versus local intents,
+network bytes versus connection facts, and scope rows versus cross-scope
+context. The prose should say why both forms exist and what each one owns.
+
+Keep mechanism concrete. Prefer "claims one queued intent, loads declared fact
+inputs, calls the handler, and commits output atomically with queue deletion" to
+"handles dispatch." Inline comments should attach to real invariants,
+non-obvious matching semantics, ownership rules, and security conditions; they
+should not narrate obvious code.
+
+Write docs in current-code terms. Do not refer to branch names, task slices,
+abandoned plan filenames, or past implementation states unless the document is
+explicitly archived or the user asks for history.
+
 ## Projectors
 
 - Projectors do protocol validation, not IO.

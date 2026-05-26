@@ -2,11 +2,11 @@
 
 ## Documentation Style
 
-Before adding or changing module documentation, read
-[`docs/documentation_guide.md`](docs/documentation_guide.md). Project docs should explain
-purpose, mechanism, invariants, and ownership boundaries in current-code terms.
-Do not describe past implementation states unless the user explicitly asks for
-history.
+Before adding or changing module documentation, read the documentation style
+section in [`docs/RULES.md`](docs/RULES.md#documentation-style). Project docs
+should explain purpose, mechanism, invariants, and ownership boundaries in
+current-code terms. Do not describe past implementation states unless the user
+explicitly asks for history.
 
 For projector files, also read the projector rules in
 [`docs/RULES.md`](docs/RULES.md). Projector docs should make admission policy,

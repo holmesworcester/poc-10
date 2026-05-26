@@ -1,7 +1,22 @@
 //! SQL-backed runtime pipeline.
 //!
 //! Core's runtime is a set of SQLite-backed queues. This facade exposes the
-//! queue entry points; concrete modules own their storage dependencies.
+//! queue entry points that `Runtime` is allowed to call while keeping concrete
+//! storage dependencies in worker modules. Callers submit facts and intents,
+//! admit due time ranges, drain pending projection, dispatch queued handlers,
+//! and purge exact facts through this boundary.
+//!
+//! The important invariant is that each worker owns its own atomic commit
+//! boundary. Projection workers do not delete a pending row until replacement
+//! context and effects commit. Dispatch workers do not delete an intent row
+//! until handler output commits. The facade reports only whether a bounded pass
+//! progressed or retried; it does not expose protocol meaning or partial worker
+//! state.
+//!
+//! Change this file when the public runtime pipeline vocabulary changes. Change
+//! the submodules when queue ordering, context fanout, handler dispatch, effect
+//! commits, or checked fanout SQL changes. Protocol policy, fact decoding, row
+//! meaning, and network-frame interpretation belong in protocol scopes.
 //!
 //! - `project_pending_facts`: enqueue facts, admit due time wakes, drain
 //!   pending facts, and commit projection effects.

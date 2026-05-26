@@ -3,6 +3,19 @@
 //! This module is intentionally protocol-neutral. It gives command hosts a
 //! thread-local place to accumulate coarse phase timings while preserving the
 //! normal stdout/stderr contract unless a caller explicitly enables profiling.
+//! The current profile surface is scoped to `generate`, where we need to see
+//! the relative cost of fact creation, projection, handler dispatch, and sync
+//! indexing without adding protocol-visible state.
+//!
+//! Profiling state is process-local and best-effort. It is not stored in
+//! SQLite, not synced, and not part of command semantics. A disabled profile is
+//! a no-op; an enabled profile emits diagnostic timing lines only at the command
+//! edge.
+//!
+//! Add helpers here only for reusable runtime timing mechanics. If a metric
+//! depends on message meaning, sync visibility, key policy, or other protocol
+//! semantics, collect it in the owning protocol module and keep this facade
+//! mechanical.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
