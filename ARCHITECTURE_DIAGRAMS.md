@@ -102,53 +102,61 @@ facts through `ProjectionContext` and still validate them locally.
 
 ```mermaid
 flowchart LR
-    subgraph AUTH["Auth"]
-      WS["workspace"]
-      USER_FACT["user and admin"]
-      ENDPOINT["endpoint_shared"]
-      RECIP["recipient_key"]
-      WRAP["key_wrap"]
-      LOCAL_SECRET["local key material"]
+    subgraph OFFERS["Context offers"]
+      AUTH_WS["auth_workspace"]
+      AUTH_SIGNER["content_signer"]
+      AUTH_ADMIN["auth_admin"]
+      AUTH_ENDPOINT["auth_local_endpoint"]
+      INVITE_SECRET["connection_invite_secret"]
+      RECIPIENT["recipient_key"]
+      COVERAGE["secret_coverage"]
+      CONN_REQUEST["connection_request"]
+      CONN_RESPONSE["connection_response"]
     end
 
-    subgraph CONTENT["Content"]
-      MSG["message"]
-      FILE["file and slice"]
-      DELETE["deletion and retention"]
-      OPENED["opened rows"]
+    CONTEXT[("core context matcher")]
+
+    subgraph NEEDS["Projector needs"]
+      MSG_NEEDS["message needs signer + key coverage"]
+      FILE_NEEDS["file/slice needs message + key coverage"]
+      DELETE_NEEDS["deletion needs target + admin proof"]
+      BOOT_NEEDS["bootstrap needs local endpoint"]
+      REQUEST_NEEDS["request needs invite secret"]
+      RESPONSE_NEEDS["response needs request + invite proof"]
+      FRAME_NEEDS["frame needs connection response"]
     end
 
-    subgraph CONNECTION["Connection"]
-      REQ["request"]
-      RESP["response"]
-      FRAME["established frame"]
-      RECEIPT["fact_receipt"]
+    subgraph OUTPUTS["Validated outputs"]
+      OPENED["opened content rows"]
+      CONNECTION_ROWS["connection rows"]
+      CHILD_FACTS["opened child facts"]
     end
 
-    subgraph SYNC["Sync"]
-      SHARE["share_fact_with_sync"]
-      INDEX["shareable range index"]
-      COMPARE["compare have_id need_id"]
-    end
+    AUTH_WS --> CONTEXT
+    AUTH_SIGNER --> CONTEXT
+    AUTH_ADMIN --> CONTEXT
+    AUTH_ENDPOINT --> CONTEXT
+    INVITE_SECRET --> CONTEXT
+    RECIPIENT --> CONTEXT
+    COVERAGE --> CONTEXT
+    CONN_REQUEST --> CONTEXT
+    CONN_RESPONSE --> CONTEXT
 
-    WS -. auth_workspace .-> CONTENT
-    USER_FACT -. content_signer .-> MSG
-    RECIP -. recipient_key .-> WRAP
-    LOCAL_SECRET -. secret_coverage .-> MSG
-    ENDPOINT -. auth_endpoint_shared .-> SYNC
-    ENDPOINT -. auth_local_endpoint .-> CONNECTION
-    REQ -. connection_request .-> RESP
-    RESP -. connection_response .-> FRAME
-    RECEIPT -. connection_fact_receipt .-> SYNC
-    MSG --> SHARE
-    FILE --> SHARE
-    DELETE --> SHARE
-    SHARE --> INDEX
-    INDEX --> COMPARE
-    FRAME --> MSG
-    FRAME --> FILE
-    FRAME --> WRAP
-    MSG --> OPENED
+    CONTEXT --> MSG_NEEDS
+    CONTEXT --> FILE_NEEDS
+    CONTEXT --> DELETE_NEEDS
+    CONTEXT --> BOOT_NEEDS
+    CONTEXT --> REQUEST_NEEDS
+    CONTEXT --> RESPONSE_NEEDS
+    CONTEXT --> FRAME_NEEDS
+
+    MSG_NEEDS --> OPENED
+    FILE_NEEDS --> OPENED
+    DELETE_NEEDS --> OPENED
+    BOOT_NEEDS --> CHILD_FACTS
+    REQUEST_NEEDS --> CONNECTION_ROWS
+    RESPONSE_NEEDS --> CONNECTION_ROWS
+    FRAME_NEEDS --> CHILD_FACTS
 ```
 
 ## 3) Connection Bootstrap And Established Frames
@@ -180,7 +188,10 @@ flowchart TD
     RESP_LOCAL --> SEED["seed_connection_sync"]
 
     subgraph ESTABLISHED["Established connection"]
-      SEND_IDS["send_facts_on_connection"] --> FRAME_OUT["frame_small or frame_file_slice"]
+      SYNC_IDS["sync-selected fact ids"] --> SEND_IDS["send_facts_on_connection"]
+      RESP_LOCAL --> SEND_IDS
+      FACT_STORE[("fact store payload bytes")] --> SEND_IDS
+      SEND_IDS --> FRAME_OUT["frame_small or frame_file_slice"]
       FRAME_OUT --> NETWORK["send_network_frame"]
       NETWORK --> PEER
       PEER --> FRAME_IN_BYTES["sealed established frame bytes"]
@@ -190,7 +201,7 @@ flowchart TD
       OBS --> FRAME_IN
       RESP_LOCAL --> FRAME_IN
       FRAME_IN --> CHILD["child facts"]
-      FRAME_IN --> REC_CHILD["fact_receipt per child"]
+      FRAME_IN --> REC_CHILD["connection_fact_receipt per child"]
     end
 
     CHILD --> CORE["ordinary core admission"]
