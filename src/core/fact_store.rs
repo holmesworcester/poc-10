@@ -43,17 +43,94 @@ use rusqlite::{params, OptionalExtension};
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
     let inserted = insert_fact_in_tx(store, fact)?;
     if inserted {
-        insert_pending_owner_in_tx(store, fact.id)?;
+        mark_projection_pending_in_tx(store, fact.id)?;
     }
     Ok(inserted)
 }
 
-/// Mark `owner` pending so the next projection pass (re)projects it.
-pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<usize> {
+pub(crate) fn mark_projection_pending_in_tx(
+    store: &Store,
+    owner: FactId,
+) -> rusqlite::Result<usize> {
     store.conn().execute(
-        "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
+        "INSERT INTO pending_projection (owner, status, error, updated_at)
+         VALUES (?1, 'pending', '', CAST(strftime('%s', 'now') AS INTEGER))
+         ON CONFLICT(owner) DO UPDATE SET
+            status = 'pending',
+            error = '',
+            updated_at = excluded.updated_at",
         params![owner.as_slice()],
     )
+}
+
+pub(crate) fn mark_projection_projected_in_tx(
+    store: &Store,
+    owner: FactId,
+) -> rusqlite::Result<usize> {
+    store.conn().execute(
+        "INSERT INTO pending_projection (owner, status, error, updated_at)
+         VALUES (?1, 'projected', '', CAST(strftime('%s', 'now') AS INTEGER))
+         ON CONFLICT(owner) DO UPDATE SET
+            status = 'projected',
+            error = '',
+            updated_at = excluded.updated_at",
+        params![owner.as_slice()],
+    )
+}
+
+pub(crate) fn mark_projection_failed(
+    store: &Store,
+    owner: FactId,
+    error: &str,
+) -> Result<(), String> {
+    store
+        .write_transaction(|tx| mark_projection_failed_in_tx(tx, owner, error).map(|_| ()))
+        .map_err(|err| format!("mark projection failed: {err}"))
+}
+
+pub(crate) fn mark_projection_failed_in_tx(
+    store: &Store,
+    owner: FactId,
+    error: &str,
+) -> rusqlite::Result<usize> {
+    store.conn().execute(
+        "INSERT INTO pending_projection (owner, status, error, updated_at)
+         VALUES (?1, 'failed', ?2, CAST(strftime('%s', 'now') AS INTEGER))
+         ON CONFLICT(owner) DO UPDATE SET
+            status = 'failed',
+            error = excluded.error,
+            updated_at = excluded.updated_at",
+        params![owner.as_slice(), error],
+    )
+}
+
+pub(crate) fn pending_projection_count(store: &Store) -> Result<usize, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM pending_projection WHERE status = 'pending'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|err| format!("count pending projection: {err}"))
+        .and_then(|count| {
+            usize::try_from(count).map_err(|_| "pending projection count exceeds usize".to_string())
+        })
+}
+
+pub(crate) fn projection_status_row(
+    store: &Store,
+    owner: FactId,
+) -> Result<Option<(String, String)>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT status, error FROM pending_projection WHERE owner = ?1",
+            params![owner.as_slice()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|err| format!("load projection status: {err}"))
 }
 
 /// Insert a runtime-local projectable input.

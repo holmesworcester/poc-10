@@ -49,13 +49,14 @@ use crate::core::context::{diff_context_sets, ContextOffer, ContextSet, ContextS
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::{
     delete_ephemeral_fact_in_tx, ephemeral_fact_by_id, ephemeral_pending_fact_ids,
-    insert_fact_and_pending_in_tx, persisted_fact, purge_fact_in_tx,
+    insert_fact_and_pending_in_tx, mark_projection_failed, mark_projection_pending_in_tx,
+    mark_projection_projected_in_tx, persisted_fact, purge_fact_in_tx,
 };
 use crate::core::facts::{Fact, FactId};
 use crate::core::projectors::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
-use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
+use crate::core::schema::{PENDING_TIME_RANGES, TIME_WAKES};
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
@@ -150,10 +151,7 @@ pub(crate) fn commit_projected_context_offers(
             )
             .map_err(sqlite_string_error)?;
             for id in completed_fact_ids {
-                tx.conn().execute(
-                    "DELETE FROM pending_projection WHERE owner = ?1",
-                    params![id.as_slice()],
-                )?;
+                mark_projection_projected_in_tx(tx, *id)?;
             }
             Ok(woken_facts)
         })
@@ -165,6 +163,8 @@ pub(crate) fn commit_projected_context_offers(
 pub(crate) struct ProjectionProgress {
     /// Number of facts that completed projection.
     pub(crate) projected: usize,
+    /// Number of durable facts marked failed before commit.
+    pub(crate) failed: usize,
     /// Whether the pass made progress or hit a retry.
     pub(crate) status: WorkStatus,
 }
@@ -173,6 +173,7 @@ impl ProjectionProgress {
     /// Accumulate another projection progress report.
     pub(super) fn merge(&mut self, other: Self) {
         self.projected += other.projected;
+        self.failed += other.failed;
         self.status.merge(other.status);
     }
 }
@@ -217,12 +218,15 @@ fn enqueue_due_time_wakes_in_tx(
         insert_select::Param::u64(":limit", limit as u64),
     ];
 
-    let inserted = insert_select::insert_select_in_tx(
+    let owner_rows = insert_select::select_first_column_bytes_in_tx(
         store,
-        PENDING_PROJECTION,
-        &["owner"],
         &insert_select::Select::new(DUE_TIME_WAKE_OWNER_SQL, TIME_WAKE_TABLES, params.clone()),
     )?;
+    let mut inserted = 0usize;
+    for owner in owner_rows {
+        inserted +=
+            mark_projection_pending_in_tx(store, fact_id_column(owner, "time wake owner")?)?;
+    }
 
     insert_select::insert_select_in_tx(
         store,
@@ -351,7 +355,18 @@ fn process_pending_fact(
     allowed_tables: &[TableName],
     progress: &mut ProjectionProgress,
 ) -> Result<(), String> {
-    let effects = prepare_projection_effects(projector, pending_fact, store, allowed_tables)?;
+    let source = pending_fact.source;
+    let fact_id = pending_fact.fact_id;
+    let effects = match prepare_projection_effects(projector, pending_fact, store, allowed_tables) {
+        Ok(effects) => effects,
+        Err(err) if source == ProjectionSource::Durable => {
+            mark_projection_failed(store, fact_id, &err)?;
+            progress.failed += 1;
+            progress.status.progressed = true;
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
     commit_projection_effects(store, &effects, projector, allowed_tables)?;
     progress.projected += 1;
     progress.status.progressed = true;
@@ -463,7 +478,7 @@ enum ProjectionSource {
 ///
 /// Transaction contents:
 ///
-/// - Clear this fact's pending row.
+/// - Mark this fact's projection status as projected.
 /// - Replace this fact's standing context.
 /// - Replace this fact's time wakes.
 /// - Wake context matches directly.
@@ -500,10 +515,7 @@ fn commit_projection_effects_in_tx(
 ) -> rusqlite::Result<()> {
     match effects.source {
         ProjectionSource::Durable => {
-            tx.conn().execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                params![effects.fact_id.as_slice()],
-            )?;
+            mark_projection_projected_in_tx(tx, effects.fact_id)?;
             delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id)?;
             replace_stored_context_owner_rows(tx, effects.fact_id, &effects.next_context)?;
             replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)?;
@@ -678,6 +690,7 @@ fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, Strin
             SELECT p.owner
             FROM pending_projection p
             LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
+            WHERE p.status = 'pending'
             ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
             LIMIT ?1
             "#,

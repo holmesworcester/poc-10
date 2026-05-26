@@ -30,10 +30,10 @@
 use crate::core::context::{
     scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role,
 };
-use crate::core::fact_store::persisted_fact;
+use crate::core::fact_store::{mark_projection_pending_in_tx, persisted_fact};
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use crate::core::projectors::{MatchedContext, ProjectionContext};
-use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
+use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS};
 use crate::core::store::Store;
 use crate::core::wire::{Reader, WireError};
 use rusqlite::params;
@@ -461,6 +461,14 @@ fn insert_pending_projection_from_select_in_tx(
     select: &insert_select::Select,
     edge_kind: &str,
 ) -> Result<usize, String> {
-    insert_select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
-        .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
+    let owner_rows = insert_select::select_first_column_bytes_in_tx(store, select)
+        .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))?;
+    let mut changed = 0usize;
+    for owner in owner_rows {
+        let owner = fact_id_column(owner, "owner")
+            .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))?;
+        changed += mark_projection_pending_in_tx(store, owner)
+            .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))?;
+    }
+    Ok(changed)
 }

@@ -117,6 +117,29 @@ pub(super) fn insert_select_in_tx(
     stmt.raw_execute()
 }
 
+pub(super) fn select_first_column_bytes_in_tx(
+    store: &Store,
+    select: &Select,
+) -> rusqlite::Result<Vec<Vec<u8>>> {
+    validate_select_sql(select.sql, select.allowed_tables)?;
+    let mut stmt = store.conn().prepare(select.sql)?;
+    for param in &select.params {
+        let index = stmt.parameter_index(param.name)?.ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(format!(
+                "select SQL does not bind parameter {}",
+                param.name
+            ))
+        })?;
+        stmt.raw_bind_parameter(index, param.as_sqlite_value()?)?;
+    }
+    let mut rows = stmt.raw_query();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get::<_, Vec<u8>>(0)?);
+    }
+    Ok(out)
+}
+
 /// Check the deliberately small SQL surface accepted by `insert_select_in_tx`.
 fn validate_select_sql(sql: &str, allowed_tables: &[TableName]) -> rusqlite::Result<()> {
     let trimmed = sql.trim_start();

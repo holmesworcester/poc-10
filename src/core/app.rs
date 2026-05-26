@@ -224,6 +224,7 @@ fn run_protocol_command<C: 'static>(
         .db
         .clone()
         .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
+    let _turn = daemon::RuntimeTurnLock::acquire(&db)?;
     let runtime = Runtime::open_disk(&description.runtime, &db)?;
     let mut context = (description.context)(runtime, parsed.db);
     cli::run(

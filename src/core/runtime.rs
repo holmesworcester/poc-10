@@ -23,19 +23,29 @@
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
 use crate::core::context::ContextOffer;
-use crate::core::fact_store::persisted_facts;
+use crate::core::fact_store::{pending_projection_count, persisted_facts, projection_status_row};
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{
-    CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
+    migrate_core_schema, CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS,
 };
 use crate::core::store::{SchemaSource, Store, TableName};
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 pub use crate::core::pipeline::WorkStatus;
+
+/// Durable projection state for one fact id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionStatus {
+    Pending,
+    Projected,
+    Failed(String),
+    Unknown,
+}
 
 /// Factory for the protocol's projector implementation.
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
@@ -206,6 +216,7 @@ impl Runtime {
     }
 
     fn from_store(description: &'static RuntimeDescription, store: Store) -> Result<Self, String> {
+        migrate_core_schema(&store)?;
         Ok(Self {
             description,
             store,
@@ -233,8 +244,7 @@ impl Runtime {
 
     /// Count facts currently queued for projection.
     pub fn pending_fact_count(&self) -> usize {
-        self.store
-            .table_row_count(PENDING_PROJECTION)
+        pending_projection_count(&self.store)
             .expect("runtime pending fact count should load from store")
             + self
                 .store
@@ -316,6 +326,65 @@ impl Runtime {
             "submit command output",
         )?;
         Ok(receipt)
+    }
+
+    pub fn projection_status(&self, fact_id: FactId) -> Result<ProjectionStatus, String> {
+        let Some((status, error)) = projection_status_row(&self.store, fact_id)? else {
+            return Ok(ProjectionStatus::Unknown);
+        };
+        match status.as_str() {
+            "pending" => Ok(ProjectionStatus::Pending),
+            "projected" => Ok(ProjectionStatus::Projected),
+            "failed" => Ok(ProjectionStatus::Failed(error)),
+            other => Err(format!("unknown projection status `{other}`")),
+        }
+    }
+
+    pub fn require_projected(&self, fact_ids: &[FactId]) -> Result<(), String> {
+        for fact_id in fact_ids {
+            match self.projection_status(*fact_id)? {
+                ProjectionStatus::Projected => {}
+                ProjectionStatus::Failed(err) => {
+                    return Err(format!("projection failed for {:x?}: {err}", fact_id));
+                }
+                ProjectionStatus::Pending => {
+                    return Err(format!("projection still pending for {:x?}", fact_id));
+                }
+                ProjectionStatus::Unknown => {
+                    return Err(format!("projection status missing for {:x?}", fact_id));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn wait_until_projected(
+        &self,
+        fact_ids: &[FactId],
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut pending = 0usize;
+            for fact_id in fact_ids {
+                match self.projection_status(*fact_id)? {
+                    ProjectionStatus::Projected => {}
+                    ProjectionStatus::Failed(err) => {
+                        return Err(format!("projection failed for {:x?}: {err}", fact_id));
+                    }
+                    ProjectionStatus::Pending | ProjectionStatus::Unknown => pending += 1,
+                }
+            }
+            if pending == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for {pending} projection status row(s)"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn process_projection_work(

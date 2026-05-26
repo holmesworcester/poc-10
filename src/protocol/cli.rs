@@ -103,8 +103,15 @@ impl MatchCliContext {
     // immediately. Runtime owns the actual projection/intent schedule; the
     // protocol host only chooses where command-visible settling is required.
     fn submit_and_settle<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
+        let projected_fact_ids = output
+            .effects
+            .facts
+            .iter()
+            .map(|fact| fact.id)
+            .collect::<Vec<_>>();
         let receipt = self.runtime.submit_command_output(output)?;
         self.settle_local_command_work()?;
+        self.runtime.require_projected(&projected_fact_ids)?;
         Ok(receipt)
     }
 }
@@ -573,8 +580,15 @@ pub(crate) fn grant_admin(
     let output = ctx.with_command_context(|command_context| {
         auth::admin::cli::grant_admin(command_context, args)
     })?;
+    let projected_fact_ids = output
+        .effects
+        .facts
+        .iter()
+        .map(|fact| fact.id)
+        .collect::<Vec<_>>();
     let receipt = ctx.runtime_mut().submit_command_output(output)?;
     ctx.runtime_mut().process_projection_until_idle(8, 64)?;
+    ctx.runtime().require_projected(&projected_fact_ids)?;
     Ok(auth::admin::cli::grant_admin_output(&receipt))
 }
 

@@ -23,7 +23,9 @@
 //! in a protocol module when it stores protocol meaning, even if core commits
 //! the row mutation.
 
-use crate::core::store::{SchemaSource, TableName};
+use std::collections::BTreeSet;
+
+use crate::core::store::{SchemaSource, Store, TableName};
 
 /// The core SQLite schema source applied to every runtime store.
 ///
@@ -78,7 +80,10 @@ CREATE INDEX IF NOT EXISTS time_wakes_by_owner
     ON time_wakes (owner);
 
 CREATE TABLE IF NOT EXISTS pending_projection (
-    owner BLOB PRIMARY KEY NOT NULL
+    owner BLOB PRIMARY KEY NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS pending_time_ranges (
@@ -140,3 +145,61 @@ pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
 /// Ephemeral projectable-input queue table.
 pub(crate) const EPHEMERAL_PROJECTION_INPUTS: TableName =
     TableName::new("ephemeral_projection_inputs");
+
+/// Apply idempotent core schema migrations that cannot safely live in the
+/// static DDL batch because old databases may already have the table.
+pub(crate) fn migrate_core_schema(store: &Store) -> Result<(), String> {
+    let table = PENDING_PROJECTION.as_str();
+    let columns = table_columns(store, table)?;
+    if !columns.contains("status") {
+        store
+            .conn()
+            .execute(
+                "ALTER TABLE pending_projection
+                 ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'",
+                [],
+            )
+            .map_err(|err| format!("migrate pending_projection.status: {err}"))?;
+    }
+    if !columns.contains("error") {
+        store
+            .conn()
+            .execute(
+                "ALTER TABLE pending_projection
+                 ADD COLUMN error TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|err| format!("migrate pending_projection.error: {err}"))?;
+    }
+    if !columns.contains("updated_at") {
+        store
+            .conn()
+            .execute(
+                "ALTER TABLE pending_projection
+                 ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|err| format!("migrate pending_projection.updated_at: {err}"))?;
+    }
+    store
+        .conn()
+        .execute(
+            "CREATE INDEX IF NOT EXISTS pending_projection_by_status_owner
+             ON pending_projection (status, owner)",
+            [],
+        )
+        .map_err(|err| format!("migrate pending_projection status index: {err}"))?;
+    Ok(())
+}
+
+fn table_columns(store: &Store, table: &str) -> Result<BTreeSet<String>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| format!("inspect {table} columns: {err}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| format!("inspect {table} columns: {err}"))?;
+    rows.collect::<rusqlite::Result<BTreeSet<_>>>()
+        .map_err(|err| format!("inspect {table} columns: {err}"))
+}
