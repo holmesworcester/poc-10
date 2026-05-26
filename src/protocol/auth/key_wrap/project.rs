@@ -21,9 +21,7 @@ use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
 use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWrapIntent};
 use crate::protocol::auth::{self, signed_fact};
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyWrapFact;
 use super::rows::{key_wrap_row, KeyWrapRow};
@@ -647,7 +645,7 @@ fn signed_key_wrap(
     );
 
     // 3. Materialize: write the accepted wrap row and emit unwrap work.
-    output = share_fact_with_negentropy(
+    output = share_fact_with_sync(
         output
             .row_mutation(RowMutation::PutRow(key_wrap_row(KeyWrapRow {
                 key_wrap_id: fact.id,

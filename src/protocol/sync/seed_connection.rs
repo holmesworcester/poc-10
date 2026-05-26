@@ -18,6 +18,7 @@ use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use crate::protocol::{connection, sync};
+use std::collections::BTreeSet;
 
 pub const SEED_CONNECTION_SYNC: &str = "seed_connection_sync";
 
@@ -94,8 +95,12 @@ impl IntentHandler for SeedConnectionSyncHandler {
 }
 
 pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId) -> HandlerResult {
-    let facts = sync::shared_fact::shareable_facts_for_connection(store, connection_id)?;
-    let compare = sync::compare::create::start_compare_fact(connection_id, facts.iter())?;
+    let summary = sync::shared_fact::range_summary_for_connection(
+        store,
+        connection_id,
+        sync::compare::fact::TimestampRange::ROOT,
+    )?;
+    let compare = sync::compare::create::start_compare_fact_with_summary(connection_id, summary)?;
     Ok(PipelineEffects::new()
         .fact(compare.clone())
         .intent(send_facts_on_connection_intent(SendFactsOnConnection {
@@ -105,8 +110,19 @@ pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId
 }
 
 pub fn advertise_indexed_fact_to_connections(store: &Store, fact: &Fact) -> HandlerResult {
+    advertise_indexed_fact_to_connections_except(store, fact, &BTreeSet::new())
+}
+
+pub fn advertise_indexed_fact_to_connections_except(
+    store: &Store,
+    fact: &Fact,
+    excluded_connection_ids: &BTreeSet<FactId>,
+) -> HandlerResult {
     let mut output = PipelineEffects::new();
     for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact)? {
+        if excluded_connection_ids.contains(&connection_id) {
+            continue;
+        }
         output = append_live_tail_send(output, connection_id, fact)?;
     }
     Ok(output)

@@ -17,7 +17,7 @@ use crate::core::projectors::{
 use crate::protocol::auth;
 use crate::protocol::content::message;
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_optional_needs, share_fact_with_negentropy,
+    context_have_from_optional_needs, share_fact_with_sync,
 };
 
 use super::fact::RetentionPolicyFact;
@@ -119,7 +119,7 @@ impl TypedProjector<super::Codec> for RetentionPolicyProjector {
 
         // 3. Materialize.
         let row = policy_row(fact.id, &policy)?;
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             waiting
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
@@ -206,7 +206,7 @@ mod projector_tests {
         RetentionPolicyFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
     };
     use topo::protocol::content::retention_policy::{layout, project, rows};
-    use topo::protocol::sync::share_fact_with_workspace;
+    use topo::protocol::sync::share_fact_with_sync;
 
     fn workspace_policy() -> RetentionPolicyFact {
         RetentionPolicyFact {
@@ -242,7 +242,7 @@ mod projector_tests {
                 )]),
             )
             .expect("project policy");
-        assert_eq!(projected.effects.intents.len(), 2);
+        assert_eq!(projected.effects.intents.len(), 1);
         assert_eq!(projected.effects.row_mutations.len(), 1);
         assert!(projected
             .offers
@@ -454,15 +454,14 @@ mod projector_tests {
         fact_id: [u8; 32],
     ) {
         let found = intents.iter().any(|intent| {
-            if intent.kind.as_str() != "share_fact_with_workspace" {
+            if intent.kind.as_str() != "share_fact_with_sync" {
                 return false;
             }
-            let Ok(input) = share_fact_with_workspace::decode_share_fact_with_workspace(intent)
-            else {
+            let Ok(input) = share_fact_with_sync::decode_share_fact_with_sync(intent) else {
                 return false;
             };
-            input.workspace_id == workspace_id && input.fact_id == fact_id
+            input.workspace_id == workspace_id && input.owner_fact_id == fact_id
         });
-        assert!(found, "missing share_fact_with_workspace intent");
+        assert!(found, "missing share_fact_with_sync intent");
     }
 }

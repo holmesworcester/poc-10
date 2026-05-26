@@ -25,7 +25,7 @@ use crate::protocol::content::message::project as message_project;
 use crate::protocol::content::message_deletion;
 use crate::protocol::content::purge::project as content_purge;
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
+    context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
@@ -140,33 +140,43 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
                 file.message_id,
                 parent_message.author_user_id,
             )?;
-            return Ok(ProjectionOutput::new()
-                .need(file_need)
-                .need(message_need)
-                .need(file_deletion_need)
-                .need(parent_deletion_need)
-                .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
-                    slice.workspace_id,
-                    slice.file_id,
-                    slice.slice_index,
-                )))
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                ProjectionOutput::new()
+                    .need(file_need)
+                    .need(message_need)
+                    .need(file_deletion_need)
+                    .need(parent_deletion_need)
+                    .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
+                        slice.workspace_id,
+                        slice.file_id,
+                        slice.slice_index,
+                    )))
+                    .purge_self(fact.id),
+                slice.workspace_id,
+                fact.id,
+                slice.created_at_ms,
+            ));
         }
         if let Some(deletion) =
             context_payload(context, &file_deletion_need, "file slice parent deletion")?
         {
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
-            return Ok(ProjectionOutput::new()
-                .need(file_need)
-                .need(message_need)
-                .need(file_deletion_need)
-                .need(parent_deletion_need)
-                .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
-                    slice.workspace_id,
-                    slice.file_id,
-                    slice.slice_index,
-                )))
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                ProjectionOutput::new()
+                    .need(file_need)
+                    .need(message_need)
+                    .need(file_deletion_need)
+                    .need(parent_deletion_need)
+                    .row_mutation(RowMutation::DeleteWhere(content_file_slice_delete(
+                        slice.workspace_id,
+                        slice.file_id,
+                        slice.slice_index,
+                    )))
+                    .purge_self(fact.id),
+                slice.workspace_id,
+                fact.id,
+                slice.created_at_ms,
+            ));
         }
         let context_have = context_have_from_needs(
             context,
@@ -179,7 +189,7 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
         );
 
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             ProjectionOutput::new()
                 .need(file_need)
                 .need(message_need)

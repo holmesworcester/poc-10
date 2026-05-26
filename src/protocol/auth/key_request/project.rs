@@ -17,9 +17,7 @@ use crate::protocol::auth::key_wrap::project::{
 };
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyRequestFact;
 
@@ -127,7 +125,7 @@ fn key_request(
             ));
         }
     }
-    Ok(share_fact_with_negentropy(
+    Ok(share_fact_with_sync(
         output,
         request.workspace_id,
         fact,

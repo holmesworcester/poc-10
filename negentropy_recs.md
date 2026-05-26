@@ -1,9 +1,9 @@
 # Projector-Owned Dep-Aware Negentropy
 
-This note describes the target dep-aware negentropy model for poc-10. The
+This note describes the dep-aware negentropy model for poc-10. The
 negentropy tree is durable sync state, but dependency knowledge does not belong
 to sync handlers. Each fact projector decides the sync leaf view for the fact it
-is projecting and emits `update_negentropy_tree` work with the shareable context it
+is projecting and emits `share_fact_with_sync` work with the shareable context it
 already has.
 
 ## Goal
@@ -21,7 +21,7 @@ represented by facts, context needs/offers, and bounded intent handlers.
 
 Projectors own negentropy membership. A projector that can decode a fact and
 determine the workspace or handler namespace should emit an
-`update_negentropy_tree` intent for that namespace on the same projection pass that
+`share_fact_with_sync` intent for that namespace on the same projection pass that
 emits its ordinary rows, offers, needs, wakes, or self-purge intent.
 
 This applies even when the fact is parked for missing context. Parking means
@@ -31,10 +31,11 @@ sync". A parked projector can still say:
 - this fact belongs in this sync leaf range.
 - these matched context facts are already available.
 
-The `update_negentropy_tree` handler owns only durable index mechanics. It persists
-the projector-supplied leaf contribution, updates ancestor summaries, and
-advertises changed ranges to live connections. It must not infer dependencies by
-scanning protocol rows, `context_edges`, or fact bytes.
+The `share_fact_with_sync` handler is the single durable sync-visibility path.
+It persists the projector-supplied leaf contribution, records shareability,
+updates ancestor summaries, and advertises changed leaves to live connections.
+It must not infer dependencies by scanning protocol rows, `context_edges`, or
+fact bytes.
 
 Unresolved needs are deliberately not part of durable negentropy state. A need
 is emitted before its payload fact has been loaded and, for many signed facts,
@@ -46,18 +47,16 @@ their shareable owner facts become negentropy context.
 
 ## Leaf Contribution
 
-An `update_negentropy_tree` payload is a complete projector view for one owner fact
-in one handler namespace:
+A `share_fact_with_sync` payload is a complete projector view for one owner fact
+in one sync scope:
 
 ```text
-handler_namespace
 workspace_id or other sync scope
 owner_fact_id
 owner_timestamp_ms
 leaf_range
-state: admitted | materialized | retracted
+state: upsert | retract
 context_have[]
-context_offer[]
 ```
 
 `context_have` contains direct sync-eligible context facts that the projector has
@@ -73,13 +72,11 @@ Local-only secrets must not be listed as sendable facts; projectors should
 represent their shared coverage through the public facts or selectors that
 peers are allowed to learn.
 
-`context_offer` contains the public offer metadata associated with the included
-context facts. It is useful when the receiver can match the transferred facts
-without re-running unrelated range discovery. Offer metadata may be indexed
-only after the projector that emitted it has decoded and validated enough input
-to publish that offer. Missing selectors are not encoded here; a receiver that
-still lacks context discovers that by projecting the received facts and emitting
-its own local needs or signed request facts.
+Offer metadata is not stored as a separate sync payload today. Receivers recreate
+the relevant offers by projecting the transferred context facts. Missing
+selectors are not encoded here; a receiver that still lacks context discovers
+that by projecting the received facts and emitting its own local needs or signed
+request facts.
 
 The leaf range is the owner's sync range, not the context fact's timestamp
 range. This is what makes a message inside day N carry key and authority
@@ -89,20 +86,20 @@ runs.
 
 ## Incremental Handler
 
-`update_negentropy_tree` is an upsert into protocol-owned negentropy tables keyed by:
+`share_fact_with_sync` upserts or retracts protocol-owned sync contribution
+tables keyed by:
 
 ```text
-(handler_namespace, sync_scope, owner_fact_id, leaf_range)
+(sync_scope, owner_fact_id, leaf_range)
 ```
 
 The handler stores the canonical contribution and updates the persisted range
-tree in the same transaction. The range hash should be a deterministic digest of
-the owner fact identity plus sorted `context_have` and `context_offer` entries,
-with counts stored beside fingerprints. When a contribution changes, the
-handler subtracts the old contribution hash from affected ancestors and adds the
-new one. The handler must be idempotent: replaying the same contribution is a
-no-op, and replaying a richer later contribution cannot lose context learned by
-an earlier pass.
+tree. The contribution fingerprint is a deterministic digest of the owner fact
+identity plus sorted `context_have`, with counts stored beside fingerprints.
+When a contribution changes, the handler subtracts the old contribution
+fingerprint from affected ancestors and adds the new one. The handler is
+idempotent: replaying the same contribution is a no-op, and replaying an older
+sparser contribution cannot lose context learned by a richer pass.
 
 Incrementality is load-bearing. Updating one leaf must touch only the stored
 leaf contribution and the ancestor path from that leaf to the root. It must not
@@ -115,20 +112,16 @@ conflicting with an already queued older view. The safest shape is a
 content-addressed intent key:
 
 ```text
-hash("update_negentropy_tree", handler_namespace, sync_scope, owner_fact_id,
-     leaf_range, contribution_hash)
+hash("share_fact_with_sync", state, sync_scope, owner_fact_id,
+     owner_timestamp_ms, context_have[])
 ```
 
 The durable row key remains owner-based, so many queued snapshots converge to
 one stored contribution. To avoid depending on queue order, handler state should
 be a monotonic join:
 
-- owner membership moves from `admitted` to `materialized` to `retracted`, and
-  never moves backward.
+- owner membership is either upserted or explicitly retracted.
 - `context_have` rows are inserted idempotently and kept as a union.
-- `context_offer` rows are inserted idempotently and kept as a union, but only
-  when they are backed by a shareable owner fact or authenticated protocol state
-  the receiver is allowed to learn.
 
 This keeps older queued snapshots from overwriting richer later context. If a
 module has optional branches where an old context fact would become harmful
@@ -140,12 +133,12 @@ its own owner id.
 Projection still follows the normal poc-10 replacement model. A fact emits its
 standing context needs and offers, core matches already stored offers, and core
 may rerun the projector before committing the settled output. The settled
-output may include `update_negentropy_tree` with:
+output may include `share_fact_with_sync` with:
 
 - no context, for a dependency-free fact.
-- some `context_have` and `context_offer`, for a parked fact whose already
+- some `context_have`, for a parked fact whose already
   validated context should travel with the owner fact.
-- all required `context_have` and associated offers, for a fully materialized
+- all required `context_have`, for a fully materialized
   fact.
 
 When new context later wakes the owner fact, the projector emits a new
@@ -167,8 +160,8 @@ range, the response can include:
 - owner fact ids in the leaf range.
 - `context_have` fact ids attached to those owners, subject to the same
   connection authorization as ordinary shared facts.
-- associated context offer metadata needed to match those context facts locally,
-  also subject to authorization.
+- each dependency's own projected offers after the receiver admits and projects
+  the transferred context facts.
 
 This keeps dep-aware sync bounded. The expensive semantic choice of what counts
 as context was already made by projectors during projection. Sync handlers only
@@ -206,7 +199,7 @@ network handlers perform framing and socket egress. It should not build frames
 or write to the network directly from the command path.
 
 The current poc-10 implementation stores owner leaves and `context_have` rows
-as projector-supplied `update_negentropy_tree` contributions. Range sends walk
+as projector-supplied `share_fact_with_sync` contributions. Range sends walk
 those rows for transitive dependency closure and never rediscover dependencies
 by parsing fact bytes in the sync handler. Raw needs remain excluded from the
 persisted rows. That exclusion is a security boundary, not just a space
@@ -214,11 +207,17 @@ optimization: a projector may emit needs before the related signature or
 authority context has validated, so only validated offers/context may become
 advertised negentropy state.
 
+Live-tail egress is a consequence of the same contribution handler, not a
+separate shareability intent. If a fact has a projected connection receipt that
+names the established connection it arrived on, live-tail advertisement skips
+that origin connection while still advertising the fact to other authorized
+connections.
+
 ## Purge And Retraction
 
 Removal must use the same ownership boundary. When a target projector observes
 deletion, expiry, supersession, or retirement context for its own fact, it emits
-the ordinary row deletions/self-purge and an `update_negentropy_tree` retraction
+the ordinary row deletions/self-purge and a `share_fact_with_sync` retraction
 for its own owner id. The same handler removes the stored contribution and
 updates ancestor hashes transactionally before or with physical fact-byte purge.
 
@@ -241,7 +240,7 @@ retention policy.
 - Projectors decide which facts enter negentropy and which offer-backed context
   facts are attached to each leaf.
 - Parked facts waiting on missing context can enter negentropy on first pass.
-- `update_negentropy_tree` handlers persist and hash supplied contributions; they do
+- `share_fact_with_sync` handlers persist and hash supplied contributions; they do
   not infer dependency closure.
 - Raw `ContextNeed` selectors are never persisted in negentropy state, hashed
   into range summaries, or sent as leaf closure; they are pre-auth projector
@@ -261,7 +260,7 @@ retention policy.
 Add focused tests with the implementation:
 
 - projector tests proving a parked encrypted/message fact emits
-  `update_negentropy_tree` with its current validated `context_have` and without raw
+  `share_fact_with_sync` with its current validated `context_have` and without raw
   `ContextNeed` selectors.
 - guardrail tests proving unresolved needs do not affect negentropy hashes,
   persisted contribution rows, or range response payloads.

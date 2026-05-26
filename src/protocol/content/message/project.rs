@@ -26,7 +26,7 @@ use crate::protocol::content::{
     message_deletion, purge::project as content_purge, retention_policy,
 };
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
+    context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::rows::{
@@ -225,7 +225,7 @@ fn base_wait_output(
     needs: impl IntoIterator<Item = ContextNeed>,
     context_have: Vec<FactId>,
 ) -> ProjectionOutput {
-    share_fact_with_negentropy(
+    share_fact_with_sync(
         with_retention_wakes(
             needs
                 .into_iter()
@@ -461,24 +461,29 @@ fn expired_output(
     message_id: FactId,
     message: &super::fact::ContentMessageFact,
 ) -> ProjectionOutput {
-    ProjectionOutput::new()
-        .row_mutation(RowMutation::InsertValues(message_tombstone_row(
-            message.workspace_id,
-            message_id,
-            message.author_user_id,
-            message.created_at_ms,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            CONTENT_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            OPENED_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .purge_self(message_id)
+    retract_fact_from_sync(
+        ProjectionOutput::new()
+            .row_mutation(RowMutation::InsertValues(message_tombstone_row(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                message.created_at_ms,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                CONTENT_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                OPENED_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .purge_self(message_id),
+        message.workspace_id,
+        message_id,
+        message.created_at_ms,
+    )
 }
 
 fn retired_output(
@@ -486,48 +491,58 @@ fn retired_output(
     message: &super::fact::ContentMessageFact,
     floor_minute: u64,
 ) -> ProjectionOutput {
-    ProjectionOutput::new()
-        .row_mutation(RowMutation::InsertValues(message_tombstone_row_at_minute(
-            message.workspace_id,
-            message_id,
-            message.author_user_id,
-            floor_minute.saturating_sub(1),
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            CONTENT_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            OPENED_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .purge_self(message_id)
+    retract_fact_from_sync(
+        ProjectionOutput::new()
+            .row_mutation(RowMutation::InsertValues(message_tombstone_row_at_minute(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                floor_minute.saturating_sub(1),
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                CONTENT_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                OPENED_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .purge_self(message_id),
+        message.workspace_id,
+        message_id,
+        message.created_at_ms,
+    )
 }
 
 fn author_deletion_output(
     message_id: FactId,
     message: &super::fact::ContentMessageFact,
 ) -> ProjectionOutput {
-    ProjectionOutput::new()
-        .row_mutation(RowMutation::InsertValues(message_tombstone_row(
-            message.workspace_id,
-            message_id,
-            message.author_user_id,
-            message.created_at_ms,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            CONTENT_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-            OPENED_MESSAGE_ROWS,
-            message.workspace_id,
-            message_id,
-        )))
-        .purge_self(message_id)
+    retract_fact_from_sync(
+        ProjectionOutput::new()
+            .row_mutation(RowMutation::InsertValues(message_tombstone_row(
+                message.workspace_id,
+                message_id,
+                message.author_user_id,
+                message.created_at_ms,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                CONTENT_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+                OPENED_MESSAGE_ROWS,
+                message.workspace_id,
+                message_id,
+            )))
+            .purge_self(message_id),
+        message.workspace_id,
+        message_id,
+        message.created_at_ms,
+    )
 }
 
 fn decode_context_payload(
@@ -789,7 +804,11 @@ mod projector_tests {
             .offers
             .iter()
             .any(|offer| offer.role == "content_message"));
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         assert_eq!(output.effects.row_mutations.len(), 2);
 
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
@@ -836,7 +855,11 @@ mod projector_tests {
 
         assert_eq!(output.offers.len(), 0);
         assert_eq!(output.needs.len(), 5);
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
         assert!(output
@@ -876,7 +899,11 @@ mod projector_tests {
         assert_eq!(output.needs.len(), 5);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
-        assert_eq!(output.effects.intents.len(), 2);
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            "share_fact_with_sync"
+        );
         let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content metadata row");
         assert_eq!(
             row.values[0],

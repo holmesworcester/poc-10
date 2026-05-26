@@ -12,9 +12,7 @@ use crate::core::projectors::{
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
-use crate::protocol::sync::shared_fact::project::{
-    context_have_from_needs, share_fact_with_negentropy,
-};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::RemovalFrontierFact;
 
@@ -91,7 +89,7 @@ fn removal_frontier(
     };
 
     // 3. Materialize.
-    Ok(share_fact_with_negentropy(
+    Ok(share_fact_with_sync(
         waiting.offer(ContextOffer::range(
             fact.id,
             "auth_removal_frontier",

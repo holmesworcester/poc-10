@@ -137,7 +137,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "send_compare_response.rs",
                 "send_needed_fact_id.rs",
                 "send_requested_fact.rs",
-                "share_fact_with_workspace.rs",
+                "share_fact_with_sync.rs",
             ],
         ),
     ];
@@ -695,15 +695,15 @@ fn poc10_runtime_does_not_synthesize_shareable_facts() {
         vec![app],
         &[
             "shareable_workspace_id",
-            "share_fact_with_workspace_intent_for_fact",
-            "share_fact_with_workspace_intent(",
-            "ShareFactWithWorkspace {",
+            "share_fact_with_sync_intent_for_fact",
+            "share_fact_with_sync_intent(",
+            "ShareFactWithSync {",
         ],
     );
 
     assert!(
         offenders.is_empty(),
-        "runtime routing must not decide which facts are workspace-shareable; projectors emit share_fact_with_workspace intents at the fact boundary:\n{}",
+        "runtime routing must not decide which facts are workspace-shareable; projectors emit share_fact_with_sync intents at the fact boundary:\n{}",
         offenders.join("\n")
     );
 }
@@ -730,7 +730,7 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 
     assert!(
         offenders.is_empty(),
-        "sync advertisement and response paths must use sync_shareable_fact_rows, not persisted fact scans or runtime shareability filters:\n{}",
+        "sync advertisement and response paths must use sync contribution rows, not persisted fact scans or runtime shareability filters:\n{}",
         offenders.join("\n")
     );
 }

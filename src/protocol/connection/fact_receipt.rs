@@ -14,6 +14,9 @@ pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod rows;
+
+pub use rows::origin_connection_ids_for_fact;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionFactReceipt, String> {
     layout::decode_fact(bytes)

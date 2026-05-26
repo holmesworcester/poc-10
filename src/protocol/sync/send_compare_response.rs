@@ -76,20 +76,44 @@ impl IntentHandler for SendSyncCompareResponseHandler {
         let input = decode_send_sync_compare_response(raw)?;
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
         let compare = crate::protocol::sync::compare::layout::decode_fact(&compare_fact.bytes)?;
-        let available_facts = match context.store() {
-            Ok(store) => crate::protocol::sync::shared_fact::shareable_facts_for_connection(
-                store,
-                compare.connection_id,
-            )?,
-            Err(_) => context.facts().cloned().collect(),
-        };
         let mut output = PipelineEffects::new();
-        let plan = crate::protocol::sync::compare::create::response_plan(
-            compare_fact,
-            available_facts.iter(),
-        )?;
+        let (plan, expanded_send_fact_ids) = if let Ok(store) = context.store() {
+            let available_facts =
+                crate::protocol::sync::shared_fact::shareable_facts_for_connection(
+                    store,
+                    compare.connection_id,
+                )?;
+            let plan = crate::protocol::sync::compare::create::response_plan_with_summaries(
+                compare_fact,
+                available_facts.iter(),
+                |range| {
+                    crate::protocol::sync::shared_fact::range_summary_for_connection(
+                        store,
+                        compare.connection_id,
+                        range,
+                    )
+                },
+            )?;
+            let expanded =
+                crate::protocol::sync::shared_fact::expand_fact_ids_with_context_for_connection(
+                    store,
+                    compare.connection_id,
+                    &plan.send_fact_ids,
+                )?;
+            (plan, expanded)
+        } else {
+            let available_facts = context.facts().cloned().collect::<Vec<_>>();
+            let plan = crate::protocol::sync::compare::create::response_plan(
+                compare_fact,
+                available_facts.iter(),
+            )?;
+            let expanded = plan.send_fact_ids.clone();
+            (plan, expanded)
+        };
         let mut fact_ids = plan.facts.iter().map(|fact| fact.id).collect::<Vec<_>>();
-        fact_ids.extend(plan.send_fact_ids);
+        fact_ids.extend(expanded_send_fact_ids);
+        fact_ids.sort();
+        fact_ids.dedup();
         for fact in plan.facts {
             output = output.fact(fact);
         }

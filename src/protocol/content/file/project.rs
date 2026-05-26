@@ -23,7 +23,7 @@ use crate::protocol::content::{
     file_deletion, message, message_deletion, purge::project as content_purge,
 };
 use crate::protocol::sync::shared_fact::project::{
-    context_have_from_optional_needs, share_fact_with_negentropy,
+    context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
 use super::fact::MAX_FILE_BYTES;
@@ -129,11 +129,16 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;
             project::verify_envelope(envelope.as_ref(), "file")?;
-            return Ok(delete_file_projection(file.workspace_id, fact.id)
-                .need(parent_need)
-                .need(file_deletion_need)
-                .need(parent_deletion_need)
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                delete_file_projection(file.workspace_id, fact.id)
+                    .need(parent_need)
+                    .need(file_deletion_need)
+                    .need(parent_deletion_need)
+                    .purge_self(fact.id),
+                file.workspace_id,
+                fact.id,
+                file.created_at_ms,
+            ));
         }
         if let Some(deletion) =
             context_payload(context, &parent_deletion_need, "file parent deletion")?
@@ -147,11 +152,16 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
                 parent.message.author_user_id,
             )?;
             project::verify_envelope(envelope.as_ref(), "file")?;
-            return Ok(delete_file_projection(file.workspace_id, fact.id)
-                .need(file_deletion_need)
-                .need(parent_need)
-                .need(parent_deletion_need)
-                .purge_self(fact.id));
+            return Ok(retract_fact_from_sync(
+                delete_file_projection(file.workspace_id, fact.id)
+                    .need(file_deletion_need)
+                    .need(parent_need)
+                    .need(parent_deletion_need)
+                    .purge_self(fact.id),
+                file.workspace_id,
+                fact.id,
+                file.created_at_ms,
+            ));
         }
         let Some(author) = context_payload(context, &author_need, "file author")? else {
             return Ok(output_with_needs([
@@ -176,7 +186,7 @@ impl TypedProjector<super::Codec> for ContentFileProjector {
         );
 
         // 3. Materialize.
-        Ok(share_fact_with_negentropy(
+        Ok(share_fact_with_sync(
             output_with_needs([
                 signer_need,
                 Some(file_deletion_need),
