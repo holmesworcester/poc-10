@@ -14,9 +14,10 @@
 //!      initiator secret; local responses require responder secret. Close
 //!      context removes the response row and purges this response fact.
 //!   3. MATERIALIZE. Valid responses write the connection_response row, publish
-//!      local connection context. Only received responses emit the initial
-//!      one-shot sync seed, because the peer that receives the response owns the
-//!      single bidirectional bootstrap sync.
+//!      local connection context. Received responses emit the initial one-shot
+//!      sync seed, and every materialized connection schedules a daemon time
+//!      wake that periodically reseeds compare sync. That keeps live-tail sends
+//!      as an optimization rather than the only recovery path for missed frames.
 //!
 //! Change this projector for response admission, context waits, connection
 //! context offers, or sync seeding. Response byte compatibility belongs in
@@ -32,7 +33,10 @@ use crate::protocol::auth::invite;
 use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
 use crate::protocol::connection::request;
 use crate::protocol::connection::{close, ephemeral_secret};
-use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
+use crate::protocol::sync::seed_connection::{
+    seed_connection_sync_intent, sync_reseed_timeline, SeedConnectionSync,
+    SYNC_RESEED_IMMEDIATE_AT_MS, SYNC_RESEED_INTERVAL_MS,
+};
 
 use super::create;
 use super::fact::ConnectionResponseFact;
@@ -221,7 +225,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
                 return Err("connection response secret does not match handshake".to_string());
             }
             // 3. Materialize received response.
-            return materialized_output(fact, &response, SeedSync::Immediate);
+            return materialized_output(fact, &response, SeedSync::Immediate, projection_context);
         }
 
         // 2b. Local response path.
@@ -261,7 +265,7 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
             );
         }
         // 3. Materialize local response.
-        materialized_output(fact, &response, SeedSync::None)
+        materialized_output(fact, &response, SeedSync::None, projection_context)
     }
 }
 
@@ -359,10 +363,21 @@ fn materialized_output(
     fact: &Fact,
     response: &ConnectionResponseFact,
     seed_sync: SeedSync,
+    projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let response_id = fact.id;
+    let reseed_timeline = sync_reseed_timeline();
+    let due_reseed_at =
+        projection_context.time_reached(&reseed_timeline, SYNC_RESEED_IMMEDIATE_AT_MS);
     let mut output = ProjectionOutput::new()
         .need(close::connection_closed_need(response_id, response_id))
+        .time_wake(crate::core::projectors::TimeWake {
+            owner: response_id,
+            timeline: reseed_timeline,
+            at: due_reseed_at
+                .map(|now_ms| now_ms.saturating_add(SYNC_RESEED_INTERVAL_MS))
+                .unwrap_or(SYNC_RESEED_IMMEDIATE_AT_MS),
+        })
         .offer(crate::core::context::ContextOffer::range(
             response_id,
             "connection_response",
@@ -378,7 +393,7 @@ fn materialized_output(
             response_id,
             response,
         )?));
-    if seed_sync == SeedSync::Immediate {
+    if seed_sync == SeedSync::Immediate || due_reseed_at.is_some() {
         output = output.intent(seed_connection_sync_intent(SeedConnectionSync {
             connection_id: response_id,
         }));
@@ -412,7 +427,7 @@ mod projector_tests {
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint::fact::EndpointFact;
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::connection::ephemeral_secret::{
@@ -427,7 +442,10 @@ mod projector_tests {
         fact::ConnectionRequestFact, layout as request_layout,
     };
     use topo::protocol::connection::response::{create, layout, project, rows};
-    use topo::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
+    use topo::protocol::sync::seed_connection::{
+        sync_reseed_timeline, SEED_CONNECTION_SYNC, SYNC_RESEED_IMMEDIATE_AT_MS,
+        SYNC_RESEED_INTERVAL_MS,
+    };
 
     struct Scenario {
         request_fact: Fact,
@@ -657,7 +675,11 @@ mod projector_tests {
             .expect("project response");
 
         assert!(output.effects.intents.is_empty());
-        assert!(output.time_wakes.is_empty());
+        assert_reseed_wake(
+            &output,
+            scenario.response_fact.id,
+            SYNC_RESEED_IMMEDIATE_AT_MS,
+        );
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
@@ -700,7 +722,45 @@ mod projector_tests {
             .expect("project response");
 
         assert!(output.effects.intents.is_empty());
-        assert!(output.time_wakes.is_empty());
+        assert_reseed_wake(
+            &output,
+            scenario.response_fact.id,
+            SYNC_RESEED_IMMEDIATE_AT_MS,
+        );
+    }
+
+    #[test]
+    fn due_sync_reseed_emits_seed_and_schedules_next_wake() {
+        let scenario = scenario();
+        let now_ms = 12_345;
+        let context = ProjectionContext::from_matches(vec![
+            request_match(scenario.response_fact.id, scenario.request_fact.clone()),
+            invite_match(scenario.response_fact.id, scenario.invite_fact.clone()),
+            ephemeral_match(
+                scenario.response_fact.id,
+                scenario.responder_ephemeral_fact.clone(),
+            ),
+        ])
+        .with_time_ranges(vec![TimeRange {
+            timeline: sync_reseed_timeline(),
+            start_exclusive: None,
+            end_inclusive: now_ms,
+        }]);
+
+        let output = project::ConnectionResponseProjector::new()
+            .project(&scenario.response_fact, &context)
+            .expect("project response");
+
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            SEED_CONNECTION_SYNC
+        );
+        assert_reseed_wake(
+            &output,
+            scenario.response_fact.id,
+            now_ms + SYNC_RESEED_INTERVAL_MS,
+        );
     }
 
     #[test]
@@ -731,7 +791,11 @@ mod projector_tests {
             output.effects.intents[0].kind.as_str(),
             SEED_CONNECTION_SYNC
         );
-        assert!(output.time_wakes.is_empty());
+        assert_reseed_wake(
+            &output,
+            scenario.response_fact.id,
+            SYNC_RESEED_IMMEDIATE_AT_MS,
+        );
         assert_eq!(output.effects.row_mutations.len(), 1);
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
@@ -789,5 +853,16 @@ mod projector_tests {
         out.extend_from_slice(&encode_optional_addr(request.from_listen_addr)?);
         out.extend_from_slice(&encode_optional_addr(request.to_listen_addr)?);
         Ok(out)
+    }
+
+    fn assert_reseed_wake(
+        output: &topo::core::projectors::ProjectionOutput,
+        owner: [u8; 32],
+        at: u64,
+    ) {
+        assert_eq!(output.time_wakes.len(), 1);
+        assert_eq!(output.time_wakes[0].owner, owner);
+        assert_eq!(output.time_wakes[0].timeline, sync_reseed_timeline());
+        assert_eq!(output.time_wakes[0].at, at);
     }
 }

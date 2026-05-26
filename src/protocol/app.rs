@@ -26,7 +26,7 @@ use crate::protocol::registry::{
     SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
-use crate::protocol::{connection, content};
+use crate::protocol::{connection, content, sync};
 
 pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
@@ -55,6 +55,10 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
     },
     DaemonTimeWake {
         timeline: connection::request::peer_retry_timeline,
+        end_inclusive: current_wall_clock_ms,
+    },
+    DaemonTimeWake {
+        timeline: sync::seed_connection::sync_reseed_timeline,
         end_inclusive: current_wall_clock_ms,
     },
 ];

@@ -21,6 +21,13 @@ use crate::protocol::{connection, sync};
 use std::collections::BTreeSet;
 
 pub const SEED_CONNECTION_SYNC: &str = "seed_connection_sync";
+pub const SYNC_RESEED_IMMEDIATE_AT_MS: u64 = 0;
+pub const SYNC_RESEED_INTERVAL_MS: u64 = 2_000;
+
+pub fn sync_reseed_timeline() -> crate::core::projectors::Timeline {
+    crate::core::projectors::Timeline::new("connection_sync_reseed")
+        .expect("valid connection sync reseed timeline")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedConnectionSync {
