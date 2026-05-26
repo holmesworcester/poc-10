@@ -302,6 +302,26 @@ fn sync_readme_contains_integrated_projector_owned_negentropy_model() {
     }
 }
 
+#[test]
+fn sync_readme_clarifies_sync_key_wrap_publishers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme_path = root.join("src/protocol/sync/README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+    let normalized = normalize_whitespace(&readme);
+
+    for required in [
+        "`key_wrap_available` publishes both `sync_exact_fact` and `sync_key_wrap`",
+        "Auth's concrete `key_wrap` fact also publishes `sync_key_wrap`",
+        "this key-wrap id is available",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "sync README should distinguish sync_key_wrap publishers: missing {required:?}"
+        );
+    }
+}
+
 fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

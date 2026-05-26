@@ -46,11 +46,13 @@ interface.
 
 ### Context Interface
 
-Sync publishes context such as `sync_exact_fact` and `sync_key_wrap` so
-projectors in auth, content, connection, or sync can wait for exact dependency
-or key-wrap availability without asking sync to interpret their payloads. The
-matched projector still validates the payload fact after core supplies the
-context match.
+Sync-owned facts publish context for replication planning. `shared_fact`,
+`encrypted_root`, and `cascade_test_fact` publish `sync_exact_fact`;
+`key_wrap_available` publishes both `sync_exact_fact` and `sync_key_wrap`.
+Auth's concrete `key_wrap` fact also publishes `sync_key_wrap`, so consumers
+should read the role as "this key-wrap id is available" rather than as a claim
+that sync owns every offer with that role. The matched projector still
+validates the payload fact after core supplies the context match.
 
 ### Other Interfaces
 
