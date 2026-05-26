@@ -179,6 +179,12 @@ mod tests {
             )
             .expect("project bootstrap request");
 
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.local_intents.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.needs.is_empty());
+        assert!(output.offers.is_empty());
+        assert!(output.time_wakes.is_empty());
         assert_eq!(output.effects.facts.len(), 2);
         assert!(output
             .effects

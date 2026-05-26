@@ -1,10 +1,11 @@
 //! Connection-request projector.
 //!
-//! Request projection validates the two handshake entry paths. Local requests
-//! prove invite-secret and initiator ephemeral-secret context before
-//! materializing and emitting bootstrap send work. Received requests prove
-//! invite-secret, local endpoint, and fact-receipt context before materializing
-//! and emitting deferred response work.
+//! Request projection validates the durable semantic handshake request. Local
+//! requests prove invite-secret and initiator ephemeral-secret context before
+//! materializing and emitting the network-send intent for the sealed bootstrap
+//! request bytes. Received requests prove invite-secret, local endpoint, and
+//! fact-receipt context after the bootstrap wrapper has already opened those
+//! bytes into this canonical `connection_request` fact.
 //!
 //! POLICY. A connection_request is admitted iff:
 //!   1. STRUCTURAL. The fact is local or global, the request fields are
@@ -15,12 +16,13 @@
 //!      that endpoint.
 //!   3. MATERIALIZE. Valid requests write the request row and offer request
 //!      context; local requests schedule peer-retry wakes until a response
-//!      appears, and received bootstrap requests emit deferred response work.
+//!      appears, and received requests emit deferred response work.
 //!
 //! Change this projector for request admission, branch-specific context proofs,
-//! peer-retry behavior, or materialized request rows. Request byte layout
-//! belongs in `layout.rs`, and response construction belongs in
-//! `create_response.rs` plus `response::create`.
+//! peer-retry behavior, or materialized request rows. Bootstrap wrapper opening
+//! belongs in `bootstrap_request::project`, request byte layout belongs in
+//! `layout.rs`, and response construction belongs in `create_response.rs` plus
+//! `response::create`.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
@@ -159,7 +161,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
             return local_retrying_output(fact, &request, response_need, projection_context);
         }
 
-        // 2b. Received bootstrap path.
+        // 2b. Received semantic request path.
         let endpoint_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_local_endpoint",
@@ -790,6 +792,7 @@ mod projector_tests {
 
         assert_eq!(output.effects.intents.len(), 1);
         assert!(output.effects.local_intents.is_empty());
+        assert!(output.time_wakes.is_empty());
         assert_eq!(output.effects.row_mutations.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let response_intent = output
@@ -802,6 +805,35 @@ mod projector_tests {
             decode_create_connection_response_intent(response_intent).expect("decode intent");
         assert_eq!(decoded.request_id, request_fact.id);
         assert_eq!(decoded.invite_secret_id, request.invite_secret_fact_id);
+    }
+
+    #[test]
+    fn received_request_never_schedules_bootstrap_send_retry() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = due_peer_retry_context(
+            ProjectionContext::from_matches(vec![
+                invite_match(request_fact.id, invite_fact),
+                endpoint_match(request_fact.id, request.to_endpoint),
+                receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+            ]),
+            10_000,
+        );
+
+        let output = project::ConnectionRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project received request");
+
+        assert!(output.effects.local_intents.is_empty());
+        assert!(output.time_wakes.is_empty());
+        assert_eq!(
+            output
+                .effects
+                .intents
+                .iter()
+                .filter(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
+                .count(),
+            1
+        );
     }
 
     #[test]

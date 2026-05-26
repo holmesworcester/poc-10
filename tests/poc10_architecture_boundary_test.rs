@@ -640,6 +640,49 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
 }
 
 #[test]
+fn poc10_connection_request_and_bootstrap_request_projectors_stay_separate() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let request_projector = root.join("src/protocol/connection/request/project.rs");
+    let bootstrap_request_projector =
+        root.join("src/protocol/connection/bootstrap_request/project.rs");
+
+    let request_wrapper_offenders = source_code_matches_in_paths(
+        root,
+        vec![request_projector],
+        &[
+            "ConnectionBootstrapRequestFact",
+            "open_connection_request",
+            "sealed_request_frame",
+            "received_connection_request_fact_effect",
+            "TYPE_CONNECTION_BOOTSTRAP_REQUEST",
+            "TYPE_SEALED_CONNECTION_REQUEST",
+        ],
+    );
+    assert!(
+        request_wrapper_offenders.is_empty(),
+        "connection_request projection must stay on the canonical request fact; bootstrap wrapper opening belongs to connection/bootstrap_request/project.rs:\n{}",
+        request_wrapper_offenders.join("\n")
+    );
+
+    let bootstrap_admission_offenders = source_code_matches_in_paths(
+        root,
+        vec![bootstrap_request_projector],
+        &[
+            "send_bootstrap_connection_request_intent",
+            "create_connection_response_intent",
+            "connection_request_row",
+            "peer_retry_timeline",
+            "connection_response_for_request_need",
+        ],
+    );
+    assert!(
+        bootstrap_admission_offenders.is_empty(),
+        "connection_bootstrap_request projection must only open transport wrapper bytes into request/receipt facts; request admission, retries, and response scheduling belong to connection/request/project.rs:\n{}",
+        bootstrap_admission_offenders.join("\n")
+    );
+}
+
+#[test]
 fn poc10_protocol_cli_hosts_use_core_opened_runtime_and_return_output() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let protocol_cli = root.join("src/protocol/cli.rs");

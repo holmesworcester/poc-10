@@ -62,7 +62,7 @@ Semantic admission remains in the fact family that owns the payload.
 
 `share_fact_with_sync` records or retracts one fact's sync contribution. On
 upsert it loads the owner fact, rejects local/private owner bytes, validates
-context dependencies if present, updates shareable and negentropy rows, and
+context dependencies if present, refreshes shareable and negentropy rows, and
 live-tail advertises the fact to established connections except the origin
 connection that supplied it.
 
