@@ -2,10 +2,9 @@
 //!
 //! The daemon turns each accepted TCP frame into this local intent with the raw
 //! bytes, observed origin address, and local receive time. The handler decodes
-//! and validates that boundary metadata, opens sealed bootstrap wrappers with
-//! local endpoint material, then delegates durable fact admission to
-//! `connection::frame::create`; it does not open established frames or validate
-//! child facts itself.
+//! and validates that boundary metadata, stages sealed bootstrap request or
+//! response facts, then delegates durable fact admission to fact projectors; it
+//! does not open established frames or validate child facts itself.
 //!
 //! The intent key is deterministic over origin, receive time, and frame bytes
 //! so duplicate local submissions collapse while distinct observations remain
@@ -21,7 +20,8 @@ pub const RECEIVE_NETWORK_FRAME: &str = "receive_network_frame";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiveNetworkFrame {
     /// Raw bytes as received from the network. These are sealed bootstrap
-    /// request/response wrappers or encrypted established-connection frames.
+    /// request frames, sealed bootstrap response frames, or encrypted
+    /// established-connection frames.
     pub frame: Vec<u8>,
     /// Observed local origin string, usually the peer socket address. Accepted
     /// boundary input is normalized before the intent is queued or handled.
@@ -94,8 +94,11 @@ fn payload_error(err: PayloadError) -> String {
 // raw network bytes are not authorized by durable context until projection.
 
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
-use crate::protocol::connection::bootstrap::create::{
-    is_bootstrap_frame, received_bootstrap_frame_effect,
+use crate::protocol::connection::bootstrap_request::create::{
+    is_bootstrap_request_frame, received_bootstrap_request_frame_effect,
+};
+use crate::protocol::connection::bootstrap_response::create::{
+    is_bootstrap_response_frame, received_bootstrap_response_frame_effect,
 };
 use crate::protocol::connection::frame::create::{
     received_network_frame_effect, ReceivedNetworkFrame as ClassifiedNetworkFrame,
@@ -118,8 +121,17 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
 
     fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
-        if is_bootstrap_frame(&input.frame) {
-            if let Some(effects) = received_bootstrap_frame_effect(
+        if is_bootstrap_request_frame(&input.frame) {
+            if let Some(effects) = received_bootstrap_request_frame_effect(
+                &input.frame,
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )? {
+                return Ok(effects);
+            }
+        }
+        if is_bootstrap_response_frame(&input.frame) {
+            if let Some(effects) = received_bootstrap_response_frame_effect(
                 &input.frame,
                 &input.origin_addr,
                 input.received_at_local_ms,

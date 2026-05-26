@@ -3,10 +3,9 @@
 //! Outbound connection sends call this module to reject private/local payloads
 //! and seal an ordered fact bundle into fixed small, file-slice, or bundle
 //! frame bytes.
-//! Inbound receive handling calls the same module to classify raw network bytes
-//! into bootstrap request/response facts or ephemeral frame facts. Frame
-//! projection calls it again to open a frame and turn each inner payload into a
-//! durable child fact plus receipt.
+//! Inbound receive handling calls this module for established-connection frame
+//! facts. Frame projection calls it again to open a frame and turn each inner
+//! payload into a durable child fact plus receipt.
 //!
 //! The invariants are deliberately split: socket metadata enters only through
 //! `ReceivedNetworkFrame`, connection secrets come only from matched local
@@ -57,8 +56,10 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
         connection::close::layout::TYPE_CONNECTION_CLOSE
-            | connection::bootstrap::layout::TYPE_SEALED_CONNECTION_REQUEST
-            | connection::bootstrap::layout::TYPE_SEALED_CONNECTION_RESPONSE
+            | connection::bootstrap_request::layout::TYPE_CONNECTION_BOOTSTRAP_REQUEST
+            | connection::bootstrap_request::layout::TYPE_SEALED_CONNECTION_REQUEST
+            | connection::bootstrap_response::layout::TYPE_CONNECTION_BOOTSTRAP_RESPONSE
+            | connection::bootstrap_response::layout::TYPE_SEALED_CONNECTION_RESPONSE
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::request::layout::TYPE_CONNECTION_REQUEST
             | connection::response::layout::TYPE_CONNECTION_RESPONSE

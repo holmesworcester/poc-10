@@ -15,7 +15,8 @@ use topo::protocol::auth::key_wrap::fact::{
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
-use topo::protocol::connection::bootstrap;
+use topo::protocol::connection::bootstrap_request;
+use topo::protocol::connection::bootstrap_response;
 use topo::protocol::connection::fact_receipt::fact::OriginAddr;
 use topo::protocol::connection::frame::fact::{
     ConnectionFrameBundleFact, ConnectionFrameSmallFact,
@@ -234,8 +235,8 @@ fn receive_handler_emits_ephemeral_bootstrap_request_fact() {
             .expect("request transcript"),
     );
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
-    let frame =
-        bootstrap::seal_connection_request(&request_bytes, &[59; 32]).expect("seal request");
+    let frame = bootstrap_request::seal_connection_request(&request_bytes, &[59; 32])
+        .expect("seal request");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
@@ -244,9 +245,9 @@ fn receive_handler_emits_ephemeral_bootstrap_request_fact() {
     assert!(output.facts.is_empty());
     assert_eq!(output.ephemeral_facts.len(), 1);
     assert!(output.intents.is_empty());
-    let bootstrap_input =
-        bootstrap::layout::decode_fact(output.ephemeral_facts[0].body()).expect("bootstrap fact");
-    assert_eq!(bootstrap_input.frame.bytes(), frame.as_slice());
+    let bootstrap_input = bootstrap_request::layout::decode_fact(output.ephemeral_facts[0].body())
+        .expect("bootstrap request fact");
+    assert_eq!(&bootstrap_input.sealed_request_frame[..], frame.as_slice());
     assert_eq!(bootstrap_input.origin_addr, ORIGIN);
     assert_eq!(bootstrap_input.received_at_local_ms, RECEIVED_AT);
 }
@@ -317,8 +318,9 @@ fn receive_handler_emits_ephemeral_bootstrap_response_fact() {
         connection_secret: [78; 32],
     };
     let response_bytes = connection_response_layout::encode_fact(&response).expect("response");
-    let frame = bootstrap::seal_connection_response(&response_bytes, &responder_ephemeral_private)
-        .expect("seal response");
+    let frame =
+        bootstrap_response::seal_connection_response(&response_bytes, &responder_ephemeral_private)
+            .expect("seal response");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
@@ -326,9 +328,9 @@ fn receive_handler_emits_ephemeral_bootstrap_response_fact() {
 
     assert!(output.facts.is_empty());
     assert_eq!(output.ephemeral_facts.len(), 1);
-    let bootstrap_input =
-        bootstrap::layout::decode_fact(output.ephemeral_facts[0].body()).expect("bootstrap fact");
-    assert_eq!(bootstrap_input.frame.bytes(), frame.as_slice());
+    let bootstrap_input = bootstrap_response::layout::decode_fact(output.ephemeral_facts[0].body())
+        .expect("bootstrap response fact");
+    assert_eq!(&bootstrap_input.sealed_response_frame[..], frame.as_slice());
     assert_eq!(bootstrap_input.origin_addr, ORIGIN);
     assert_eq!(bootstrap_input.received_at_local_ms, RECEIVED_AT);
 }

@@ -1,21 +1,20 @@
-//! Connection-bootstrap projector.
+//! Bootstrap-request projector.
 //!
-//! Bootstrap projection is the receive-side bridge from sealed pre-connection
-//! network bytes to durable semantic handshake facts. It does not decide
-//! request or response validity; it opens the carrier with the daemon endpoint
-//! secret context and emits the canonical `connection_request` or
-//! `connection_response` fact plus its receipt. Those child projectors own the
-//! invite, endpoint, receipt, and handshake validation.
+//! Bootstrap-request projection is the receive-side bridge from one sealed
+//! pre-connection request frame to the durable semantic handshake request. It
+//! does not decide request validity; it opens the flat receive fact with the
+//! daemon endpoint secret context and emits the canonical `connection_request`
+//! fact plus its receipt. The request projector owns invite, endpoint, receipt,
+//! and handshake validation.
 //!
-//! POLICY. A `connection_bootstrap` fact is admitted iff:
-//!   1. STRUCTURAL. The fact is local ephemeral input and its layout contains a
-//!      valid sealed request or response frame with receive metadata.
+//! POLICY. A `connection_bootstrap_request` fact is admitted iff:
+//!   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
+//!      exactly one sealed request frame with receive metadata.
 //!   2. CONTEXT. The projector needs the singleton local daemon endpoint
 //!      context. If it is not already available in the fixed-point pass, the
 //!      ephemeral input is discarded with no durable output.
 //!   3. MATERIALIZE. Opened request bytes become a durable global
-//!      `connection_request` plus request receipt. Opened response bytes become
-//!      a durable local `connection_response` plus response receipt.
+//!      `connection_request` plus request receipt.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
@@ -23,22 +22,20 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::endpoint;
-use crate::protocol::connection::frame::create::{
-    received_connection_request_fact_effect, received_connection_response_fact_effect,
-};
+use crate::protocol::connection::frame::create::received_connection_request_fact_effect;
 
-use super::fact::ConnectionBootstrapFact;
+use super::fact::ConnectionBootstrapRequestFact;
 
 #[derive(Debug, Clone, Default)]
-pub struct ConnectionBootstrapProjector;
+pub struct ConnectionBootstrapRequestProjector;
 
-impl ConnectionBootstrapProjector {
+impl ConnectionBootstrapRequestProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for ConnectionBootstrapProjector {
+impl Projector for ConnectionBootstrapRequestProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -48,16 +45,16 @@ impl Projector for ConnectionBootstrapProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionBootstrapProjector {
+impl TypedProjector<super::Codec> for ConnectionBootstrapRequestProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        bootstrap: ConnectionBootstrapFact,
+        bootstrap: ConnectionBootstrapRequestFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
         if fact.scope != FactScope::Local {
-            return Err("connection bootstrap fact must have local scope".to_string());
+            return Err("connection bootstrap request fact must have local scope".to_string());
         }
 
         // 2. Context.
@@ -66,44 +63,25 @@ impl TypedProjector<super::Codec> for ConnectionBootstrapProjector {
             return Ok(ProjectionOutput::new().need(endpoint_need));
         };
         if endpoint_fact.scope != FactScope::Local {
-            return Err("connection bootstrap endpoint context must be local".to_string());
+            return Err("connection bootstrap request endpoint context must be local".to_string());
         }
         let local_endpoint = endpoint::decode_fact_payload(endpoint_fact.body()).map_err(|_| {
-            "connection bootstrap endpoint context is not a local endpoint".to_string()
+            "connection bootstrap request endpoint context is not a local endpoint".to_string()
         })?;
 
         // 3. Materialize.
-        let frame = bootstrap.frame.bytes();
+        let frame = &bootstrap.sealed_request_frame;
         let frame_hash = crypto::hash(frame);
-        let effects = match frame.first().copied() {
-            Some(super::layout::TYPE_SEALED_CONNECTION_REQUEST) => {
-                let Ok(request_bytes) =
-                    super::layout::open_connection_request(frame, &local_endpoint)
-                else {
-                    return Ok(ProjectionOutput::new());
-                };
-                received_connection_request_fact_effect(
-                    &request_bytes,
-                    bootstrap.origin_addr.bytes(),
-                    bootstrap.received_at_local_ms,
-                    frame_hash,
-                )?
-            }
-            Some(super::layout::TYPE_SEALED_CONNECTION_RESPONSE) => {
-                let Ok(response_bytes) =
-                    super::layout::open_connection_response(frame, &local_endpoint)
-                else {
-                    return Ok(ProjectionOutput::new());
-                };
-                received_connection_response_fact_effect(
-                    &response_bytes,
-                    bootstrap.origin_addr.bytes(),
-                    bootstrap.received_at_local_ms,
-                    frame_hash,
-                )?
-            }
-            _ => return Ok(ProjectionOutput::new()),
+        let Ok(request_bytes) = super::layout::open_connection_request(frame, &local_endpoint)
+        else {
+            return Ok(ProjectionOutput::new());
         };
+        let effects = received_connection_request_fact_effect(
+            &request_bytes,
+            bootstrap.origin_addr.bytes(),
+            bootstrap.received_at_local_ms,
+            frame_hash,
+        )?;
         let mut output = ProjectionOutput::new();
         for fact in effects.facts {
             output = output.fact(fact);
@@ -174,13 +152,16 @@ mod tests {
             &initiator_ephemeral_secret,
         )
         .expect("sealed request");
-        let bootstrap = ConnectionBootstrapFact {
+        let bootstrap = ConnectionBootstrapRequestFact {
             origin_addr: crate::protocol::connection::fact_receipt::fact::OriginAddr::new(
                 b"127.0.0.1:41002",
             )
             .expect("origin"),
             received_at_local_ms: 100,
-            frame: crate::core::wire::FixedSlot::new(&sealed).expect("frame"),
+            sealed_request_frame: super::super::layout::copy_sealed_connection_request_frame(
+                &sealed,
+            )
+            .expect("copy frame"),
         };
         let bootstrap_fact = Fact::new(
             FactScope::Local,
@@ -188,7 +169,7 @@ mod tests {
             super::super::layout::encode_fact(&bootstrap).expect("bootstrap"),
         );
 
-        let output = ConnectionBootstrapProjector::new()
+        let output = ConnectionBootstrapRequestProjector::new()
             .project(
                 &bootstrap_fact,
                 &ProjectionContext::from_matches(vec![endpoint_match(
@@ -196,7 +177,7 @@ mod tests {
                     endpoint_fact,
                 )]),
             )
-            .expect("project bootstrap");
+            .expect("project bootstrap request");
 
         assert_eq!(output.effects.facts.len(), 2);
         assert!(output
@@ -204,12 +185,6 @@ mod tests {
             .facts
             .iter()
             .any(|fact| fact.bytes == request_bytes));
-        assert!(output.effects.facts.iter().any(|fact| {
-            fact.body().first().copied()
-                == Some(
-                    crate::protocol::connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT,
-                )
-        }));
         let receipt = output
             .effects
             .facts

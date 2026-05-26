@@ -19,7 +19,8 @@
 //! which fact ids should move, and the receiving fact families own the meaning
 //! of child facts opened from a frame.
 
-pub mod bootstrap;
+pub mod bootstrap_request;
+pub mod bootstrap_response;
 pub mod close;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
