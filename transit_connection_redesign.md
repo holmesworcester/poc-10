@@ -28,12 +28,12 @@ the same `Fact` container for id, scope, timestamp, and bytes, but the bytes do
 not enter durable `facts` or `local_fact_admissions`. Projection drains durable
 pending facts first, then ephemeral facts.
 
-Ephemeral facts may read durable context and may emit one-shot needs during the
-projection fixed point so core can match existing durable offers and rerun the
-projector before commit. Those needs are never stored. If the final ephemeral
-output still has needs and no effects, core deletes the ephemeral input and
-commits no context. If the final output has effects, it must have no unresolved
-needs.
+Ephemeral facts may read durable context and may emit transient one-shot needs
+during the projection fixed point so core can match existing durable offers and
+rerun the projector before commit. Those needs are never stored or parked. If
+the final ephemeral output still has needs and no effects, core deletes the
+ephemeral input and commits no context. If the final output has effects, it must
+have no unresolved needs.
 
 Ephemeral facts cannot emit durable offers or time wakes. Durable context must
 not point at an owner whose payload disappears on restart.
@@ -64,6 +64,12 @@ public wire shape. Semantic validation remains in projectors.
 the invite secret, the addressed local endpoint, and a connection-request fact
 receipt. This keeps the durable request path safe even though receive
 classification admitted the raw request bytes before semantic validation.
+Local requests also own bootstrap retry while they are waiting for the exact
+connection response. The projector emits the standing response need plus a
+`peer_retry` time wake. When daemon time reaches that wake and response context
+is still absent, projection emits the bootstrap send intent and schedules the
+next wake. When the response offer appears, the same projector stops emitting
+retry work.
 
 `connection_response` owns bootstrap response validity. Received responses
 require request, invite, initiator ephemeral-secret, and connection-response
@@ -73,9 +79,10 @@ fact-receipt context before they materialize a local connection.
 Its projector accepts only local ephemeral small/large frame facts, reads the
 connection id from the public header, and needs the exact local
 `connection_response` fact for that connection. If that context is not already
-available, the one-shot ephemeral need fails and the input is dropped. If the
-context is present, the projector opens the frame and emits durable child facts
-plus durable fact receipts.
+available during the fixed-point pass, the transient need remains unresolved
+and the input is dropped rather than parked. If the context is present, the
+projector opens the frame and emits durable child facts plus durable fact
+receipts.
 
 ## Child Facts
 
@@ -98,7 +105,8 @@ child projection path skips it.
 
 Core owns queue lifetime, projection fixed points, transactional child
 projection, durable fact storage, and validation that ephemeral owners do not
-publish durable standing context.
+publish durable standing context or effectful output with unresolved transient
+needs.
 
 `connection::receive_network_frame` owns network receive intent decoding and
 delegates fact creation to protocol modules.
@@ -121,10 +129,12 @@ candidates and receipts.
 ## Coverage
 
 Core tests cover ephemeral projection, one-shot durable context use, discard
-without standing needs, rejection of ephemeral offers, immediate child
+without standing needs, rejection of ephemeral offers and time wakes, rejection
+of effectful ephemeral output with unresolved transient needs, immediate child
 projection, child parking as success, and rollback on child projection failure.
 
 Connection tests cover receive-handler classification, durable bootstrap
 request admission, connection-frame opening, origin normalization, sync control
-payload admission, large-frame parking before ciphertext materialization, and
-discard of malformed raw network bytes.
+payload admission, transient context probing before ciphertext materialization,
+peer retry until response context appears, and discard of malformed raw network
+bytes.
