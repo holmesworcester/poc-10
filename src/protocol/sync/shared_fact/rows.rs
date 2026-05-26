@@ -264,75 +264,81 @@ fn upsert_sync_contribution(
     input: &share_fact_with_sync::ShareFactWithSync,
     owner: &Fact,
 ) -> Result<bool, String> {
-    let old_leaf = negentropy_leaf_row_for_owner(store, input.workspace_id, input.owner_fact_id)?;
-    if let Some(old_leaf) = &old_leaf {
-        if old_leaf.timestamp_ms != input.timestamp_ms {
-            return Err("share_fact_with_sync timestamp changed for existing owner".to_string());
-        }
-    }
-
-    let mut context_have =
-        negentropy_context_have_for_leaf(store, input.workspace_id, input.owner_fact_id)?;
-    context_have.extend(input.context_have.iter().copied());
-    context_have.sort();
-    context_have.dedup();
-    let new_fingerprint = contribution_fingerprint(
-        input.workspace_id,
-        input.owner_fact_id,
-        input.timestamp_ms,
-        &context_have,
-    );
-    if old_leaf
-        .as_ref()
-        .map(|leaf| leaf.contribution_fingerprint == new_fingerprint)
-        .unwrap_or(false)
-    {
-        return Ok(false);
-    }
-
-    let old_summary = old_leaf.as_ref().map(|leaf| RangeSummary {
-        count: 1,
-        fingerprint: leaf.contribution_fingerprint,
-    });
-    let new_summary = RangeSummary {
-        count: 1,
-        fingerprint: new_fingerprint,
-    };
-    let leaf_row = negentropy_leaf_row(NegentropyLeafRow {
-        workspace_id: input.workspace_id,
-        owner_fact_id: input.owner_fact_id,
-        timestamp_ms: input.timestamp_ms,
-        contribution_fingerprint: new_fingerprint,
-    });
-    let shareable_row = shareable_fact_row(ShareableFactRow {
-        workspace_id: input.workspace_id,
-        fact_id: owner.id,
-        timestamp_ms: owner.timestamp,
-    });
-    let context_rows = context_have
-        .iter()
-        .map(|context_fact_id| {
-            negentropy_context_have_row(NegentropyContextHaveRow {
-                workspace_id: input.workspace_id,
-                owner_fact_id: input.owner_fact_id,
-                context_fact_id: *context_fact_id,
-            })
-        })
-        .collect::<Vec<_>>();
-    let old_context_keys =
-        negentropy_context_have_rows_for_leaf(store, input.workspace_id, input.owner_fact_id)?
-            .into_iter()
-            .map(|row| {
-                negentropy_context_have_key(
-                    row.workspace_id,
-                    row.owner_fact_id,
-                    row.context_fact_id,
-                )
-            })
-            .collect::<Vec<_>>();
-
     store
         .write_transaction(|tx| {
+            let old_leaf =
+                negentropy_leaf_row_for_owner(tx, input.workspace_id, input.owner_fact_id)
+                    .map_err(rusqlite::Error::InvalidParameterName)?;
+            if let Some(old_leaf) = &old_leaf {
+                if old_leaf.timestamp_ms != input.timestamp_ms {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "share_fact_with_sync timestamp changed for existing owner".to_string(),
+                    ));
+                }
+            }
+
+            let mut context_have =
+                negentropy_context_have_for_leaf(tx, input.workspace_id, input.owner_fact_id)
+                    .map_err(rusqlite::Error::InvalidParameterName)?;
+            context_have.extend(input.context_have.iter().copied());
+            context_have.sort();
+            context_have.dedup();
+            let new_fingerprint = contribution_fingerprint(
+                input.workspace_id,
+                input.owner_fact_id,
+                input.timestamp_ms,
+                &context_have,
+            );
+            if old_leaf
+                .as_ref()
+                .map(|leaf| leaf.contribution_fingerprint == new_fingerprint)
+                .unwrap_or(false)
+            {
+                return Ok(false);
+            }
+
+            let old_summary = old_leaf.as_ref().map(|leaf| RangeSummary {
+                count: 1,
+                fingerprint: leaf.contribution_fingerprint,
+            });
+            let new_summary = RangeSummary {
+                count: 1,
+                fingerprint: new_fingerprint,
+            };
+            let leaf_row = negentropy_leaf_row(NegentropyLeafRow {
+                workspace_id: input.workspace_id,
+                owner_fact_id: input.owner_fact_id,
+                timestamp_ms: input.timestamp_ms,
+                contribution_fingerprint: new_fingerprint,
+            });
+            let shareable_row = shareable_fact_row(ShareableFactRow {
+                workspace_id: input.workspace_id,
+                fact_id: owner.id,
+                timestamp_ms: owner.timestamp,
+            });
+            let context_rows = context_have
+                .iter()
+                .map(|context_fact_id| {
+                    negentropy_context_have_row(NegentropyContextHaveRow {
+                        workspace_id: input.workspace_id,
+                        owner_fact_id: input.owner_fact_id,
+                        context_fact_id: *context_fact_id,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let old_context_keys =
+                negentropy_context_have_rows_for_leaf(tx, input.workspace_id, input.owner_fact_id)
+                    .map_err(rusqlite::Error::InvalidParameterName)?
+                    .into_iter()
+                    .map(|row| {
+                        negentropy_context_have_key(
+                            row.workspace_id,
+                            row.owner_fact_id,
+                            row.context_fact_id,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
             tx.delete_table_rows_in_tx(
                 NEGENTROPY_LEAF_ROWS,
                 vec![negentropy_leaf_key(input.workspace_id, input.owner_fact_id)],
@@ -350,38 +356,39 @@ fn upsert_sync_contribution(
             rows.push(leaf_row);
             rows.extend(context_rows);
             tx.insert_table_rows_in_tx(rows)?;
-            Ok(())
+            Ok(true)
         })
-        .map_err(|err| format!("record sync contribution rows: {err}"))?;
-    Ok(true)
+        .map_err(|err| format!("record sync contribution rows: {err}"))
 }
 
 fn retract_sync_contribution(
     store: &Store,
     input: &share_fact_with_sync::ShareFactWithSync,
 ) -> Result<bool, String> {
-    let Some(old_leaf) =
-        negentropy_leaf_row_for_owner(store, input.workspace_id, input.owner_fact_id)?
-    else {
-        return Ok(false);
-    };
-    let old_summary = RangeSummary {
-        count: 1,
-        fingerprint: old_leaf.contribution_fingerprint,
-    };
-    let old_context_keys =
-        negentropy_context_have_rows_for_leaf(store, input.workspace_id, input.owner_fact_id)?
-            .into_iter()
-            .map(|row| {
-                negentropy_context_have_key(
-                    row.workspace_id,
-                    row.owner_fact_id,
-                    row.context_fact_id,
-                )
-            })
-            .collect::<Vec<_>>();
     store
         .write_transaction(|tx| {
+            let Some(old_leaf) =
+                negentropy_leaf_row_for_owner(tx, input.workspace_id, input.owner_fact_id)
+                    .map_err(rusqlite::Error::InvalidParameterName)?
+            else {
+                return Ok(false);
+            };
+            let old_summary = RangeSummary {
+                count: 1,
+                fingerprint: old_leaf.contribution_fingerprint,
+            };
+            let old_context_keys =
+                negentropy_context_have_rows_for_leaf(tx, input.workspace_id, input.owner_fact_id)
+                    .map_err(rusqlite::Error::InvalidParameterName)?
+                    .into_iter()
+                    .map(|row| {
+                        negentropy_context_have_key(
+                            row.workspace_id,
+                            row.owner_fact_id,
+                            row.context_fact_id,
+                        )
+                    })
+                    .collect::<Vec<_>>();
             tx.delete_table_rows_in_tx(
                 SHAREABLE_FACT_ROWS,
                 vec![shareable_fact_key(input.workspace_id, input.owner_fact_id)],
@@ -398,10 +405,9 @@ fn retract_sync_contribution(
                 Some(old_summary),
                 None,
             )?;
-            Ok(())
+            Ok(true)
         })
-        .map_err(|err| format!("retract sync contribution rows: {err}"))?;
-    Ok(true)
+        .map_err(|err| format!("retract sync contribution rows: {err}"))
 }
 
 fn update_node_path_in_tx(
@@ -532,6 +538,8 @@ mod tests {
         rows as endpoint_shared_rows,
     };
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn store() -> Store {
         Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
@@ -636,6 +644,50 @@ mod tests {
                 .expect("final root"),
             richer_root
         );
+    }
+
+    #[test]
+    fn concurrent_duplicate_upserts_do_not_double_count_tree_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("sync.db");
+        let workspace_id = [9; 32];
+        let fact = fact(workspace_id, 42, 1);
+        let input = upsert(workspace_id, &fact, Vec::new());
+        let barrier = Arc::new(Barrier::new(2));
+
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let fact = fact.clone();
+                let input = input.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let store = Store::open_disk_with_schema_sources(
+                        &path,
+                        &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
+                    )
+                    .expect("open store");
+                    barrier.wait();
+                    record_sync_contribution(&store, &input, Some(&fact))
+                        .expect("record contribution")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let changed = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join"))
+            .filter(|changed| *changed)
+            .count();
+        assert_eq!(changed, 1);
+
+        let store =
+            Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("reopen store");
+        assert_eq!(negentropy_leaf_rows(&store).expect("leaf rows").len(), 1);
+        let root = range_summary_for_workspace(&store, workspace_id, TimestampRange::ROOT)
+            .expect("root summary");
+        assert_eq!(root.count, 1);
     }
 
     #[test]

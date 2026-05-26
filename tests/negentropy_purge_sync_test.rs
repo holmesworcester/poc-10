@@ -116,18 +116,14 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    let _ = wait_for_key_derive(&bob, "1");
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Pin both clocks to the same minute and have alice author messages
     // that bob will receive via sync.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     for body in ["secret-a", "secret-b", "secret-c"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
-    }
-    for body in ["secret-a", "secret-b", "secret-c"] {
-        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
-        wait_for_message_text(&bob, &workspace_id, &format!("alice: {body}"));
+        send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
     assert_eq!(message_lines(&bob, &workspace_id).len(), 3);
@@ -236,7 +232,7 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    let _ = wait_for_key_derive(&bob, "1");
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Alice authors at minute 100. Bob's clock stays at minute 100 too so
     // bob has the same TTL view at admission time. Both peers receive the
@@ -244,11 +240,7 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     for body in ["x-1", "x-2"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
-    }
-    for body in ["x-1", "x-2"] {
-        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
-        wait_for_message_text(&bob, &workspace_id, &format!("alice: {body}"));
+        send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
     }
 
     // Capture the converged baseline so we can prove alice's fingerprint
@@ -433,7 +425,7 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    let _ = wait_for_key_derive(&bob, "1");
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Five messages, authored alternating between alice and bob so each
     // peer sees a distinct authoring order. Both
@@ -442,14 +434,11 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     let bodies = ["m-a", "m-b", "m-c", "m-d", "m-e"];
     for (i, body) in bodies.iter().enumerate() {
-        let db = if i.is_multiple_of(2) { &alice } else { &bob };
-        assert_success(topo(&["--db", db, "send", &workspace_id, body]));
-    }
-    let expected_author = |i: usize| if i.is_multiple_of(2) { "alice" } else { "bob" };
-    for (i, body) in bodies.iter().enumerate() {
-        let suffix = format!("{}: {body}", expected_author(i));
-        wait_for_message_text(&alice, &workspace_id, &suffix);
-        wait_for_message_text(&bob, &workspace_id, &suffix);
+        if i.is_multiple_of(2) {
+            send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
+        } else {
+            send_message_and_sync_to_peer(&bob, &alice, &workspace_id, "bob", body);
+        }
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), bodies.len());
     assert_eq!(message_lines(&bob, &workspace_id).len(), bodies.len());
@@ -613,16 +602,12 @@ fn cli_negentropy_two_peers_same_id_independent_triggers_converge() {
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    let _ = wait_for_key_derive(&bob, "1");
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     for body in ["dual-1", "dual-2", "dual-3"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
-    }
-    for body in ["dual-1", "dual-2", "dual-3"] {
-        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
-        wait_for_message_text(&bob, &workspace_id, &format!("alice: {body}"));
+        send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
     }
     let pre = wait_for_root_fingerprint_to_match(&alice, &bob);
     let pre_fp = line_value(&pre, "root_fingerprint");
@@ -791,67 +776,6 @@ fn wait_for_root_fingerprint_to_change(db: &str, previous: &str) -> String {
     sync_status(db)
 }
 
-fn wait_for_key_derive(db: &str, expected: &str) -> String {
-    let want: usize = expected
-        .parse()
-        .unwrap_or_else(|_| panic!("invalid expected count for wait_for_key_derive: {expected}"));
-    let mut last = String::new();
-    let mut last_total = 0;
-    for _ in 0..300 {
-        let output = topo(&["--db", db, "key-derive"]);
-        if output.status.success() {
-            let out = stdout(&output);
-            if line_value(&out, "derived_key_secrets") == expected {
-                return out;
-            }
-            // Background processing may have already handled the key wraps
-            // before this CLI invocation, in which case `derived_key_secrets`
-            // stays at 0. Treat "key already present in db" as success by
-            // inspecting `keys` for every workspace.
-            let total = local_key_secrets_total(db);
-            last_total = total;
-            if total >= want {
-                return out;
-            }
-            last = out;
-        } else {
-            last = stderr(&output);
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("key derive did not reach {expected} (last total {last_total}):\n{last}");
-}
-
-/// Sum `local_key_secrets` across every workspace bob/alice has joined.
-/// Used by `wait_for_key_derive` so a daemon that already processed key
-/// unwraps does not appear as "no derivation happened".
-fn local_key_secrets_total(db: &str) -> usize {
-    let workspaces = topo(&["--db", db, "workspaces"]);
-    if !workspaces.status.success() {
-        return 0;
-    }
-    let mut total = 0;
-    for line in stdout(&workspaces).lines() {
-        let Some(workspace_id) = line.split_whitespace().next() else {
-            continue;
-        };
-        let keys = topo(&["--db", db, "keys", workspace_id]);
-        if !keys.status.success() {
-            continue;
-        }
-        let out = stdout(&keys);
-        if let Some(value) = out
-            .lines()
-            .find_map(|line| line.strip_prefix("local_key_secrets: "))
-        {
-            if let Ok(count) = value.parse::<usize>() {
-                total += count;
-            }
-        }
-    }
-    total
-}
-
 fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
     let mut last = String::new();
     for _ in 0..300 {
@@ -876,17 +800,84 @@ fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
     );
 }
 
-/// Poll until `db` and `other` agree on `root_fingerprint`. Returns
-/// the final `db` sync-status output. Convergence requires both
-/// daemons to have caught up on each other's facts; the wait is
-/// bounded by the same 300-tick budget as the rest of the harness.
+fn send_message_and_sync_to_peer(
+    sender: &str,
+    receiver: &str,
+    workspace_id: &str,
+    author: &str,
+    body: &str,
+) {
+    assert_success(topo(&["--db", sender, "send", workspace_id, body]));
+    let receiver_endpoint = endpoint_id(receiver);
+    sync_range_until_queued(sender, &receiver_endpoint, workspace_id);
+    let suffix = format!("{author}: {body}");
+    wait_for_message_text(sender, workspace_id, &suffix);
+    wait_for_message_text(receiver, workspace_id, &suffix);
+}
+
+fn endpoint_id(db: &str) -> String {
+    let identity = assert_success(topo(&["--db", db, "identity"]));
+    line_value(&identity, "endpoint_id")
+}
+
+fn sync_range_until_queued(sender: &str, peer_endpoint: &str, workspace_id: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&[
+            "--db",
+            sender,
+            "sync-range",
+            peer_endpoint,
+            "--workspace",
+            workspace_id,
+            "--start-ms",
+            "0",
+            "--end-ms",
+            "18446744073709551615",
+            "--with-deps",
+        ]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "queued") == "yes" {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("sync-range never queued from {sender} to {peer_endpoint}:\n{last}");
+}
+
+/// Poll until `db` and `other` agree on a stable `root_count` and
+/// `root_fingerprint`. A single equal sample can be a transient during
+/// daemon setup, before a late live-tail fact lands on one side.
 fn wait_for_root_fingerprint_to_match(db: &str, other: &str) -> String {
     let mut last = String::new();
+    let mut stable_samples = 0usize;
+    let mut last_match: Option<(String, String)> = None;
     for _ in 0..300 {
         let a = sync_status(db);
         let b = sync_status(other);
-        if line_value(&a, "root_fingerprint") == line_value(&b, "root_fingerprint") {
-            return a;
+        let a_count = line_value(&a, "root_count");
+        let b_count = line_value(&b, "root_count");
+        let a_fingerprint = line_value(&a, "root_fingerprint");
+        let b_fingerprint = line_value(&b, "root_fingerprint");
+        if a_count == b_count && a_fingerprint == b_fingerprint {
+            let matched = (a_count, a_fingerprint);
+            if last_match.as_ref() == Some(&matched) {
+                stable_samples += 1;
+            } else {
+                last_match = Some(matched);
+                stable_samples = 1;
+            }
+            if stable_samples >= 10 {
+                return a;
+            }
+        } else {
+            stable_samples = 0;
+            last_match = None;
         }
         last = format!("db={a}\nother={b}");
         thread::sleep(Duration::from_millis(100));
@@ -922,6 +913,26 @@ fn key_wrap_with_retry(
     panic!("key-wrap never succeeded: {last}");
 }
 
+fn wait_for_key_access(db: &str, workspace_id: &str, removal_frontier_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "key-access", workspace_id, removal_frontier_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "access") == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "key-access did not reach {expected} for frontier {removal_frontier_id} in {db}:\n{last}"
+    );
+}
+
 // --- two-peer setup helpers (mirrored from tests/disappearing_messages_cli_test.rs) ---
 
 /// Join `joiner` to `host`'s workspace through the daemon-served invite flow.
@@ -945,6 +956,8 @@ fn join_workspace(
         Err(err) => panic!("workspace invite accept failed: {err}"),
     };
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
+    wait_for_connection_count(host, 1);
+    wait_for_connection_count(joiner, 1);
     wait_for_local_workspace_join(joiner, workspace_id, username);
     wait_for_users_contains(
         host,
@@ -952,6 +965,24 @@ fn join_workspace(
         username,
         &[("host", host), ("joiner", joiner)],
     );
+}
+
+fn wait_for_connection_count(db: &str, expected: usize) {
+    for _ in 0..300 {
+        if count_value(db, "connections") == expected {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "connection count never reached {expected} for {db}; current {}",
+        count_value(db, "connections")
+    );
+}
+
+fn count_value(db: &str, key: &str) -> usize {
+    let out = assert_success(topo(&["--db", db, "count"]));
+    line_value(&out, key).parse().expect("parse count value")
 }
 
 fn workspace_invite_for_addr(db: &str, workspace_id: &str, port: u16) -> String {

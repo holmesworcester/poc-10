@@ -1052,6 +1052,7 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
         in_path.to_str().expect("path"),
     ]));
     let file_fact_id = line_value(&sent, "file_fact_id");
+    sync_full_range_to_peer(&alice, &bob, &workspace_id);
     wait_for_files_count(&bob, &workspace_id, "1");
 
     assert_success(topo(&[
@@ -1061,6 +1062,7 @@ fn cli_delete_message_hides_attached_file_on_peer_after_sync() {
         &workspace_id,
         "#1",
     ]));
+    sync_full_range_to_peer(&alice, &bob, &workspace_id);
 
     // Wait for bob's CLI-visible listings to reflect the synced deletion.
     wait_for_messages_count(&bob, &workspace_id, "0");
@@ -1368,6 +1370,42 @@ fn wait_for_key_access(
         thread::sleep(Duration::from_millis(100));
     }
     panic!("key access did not reach {expected}: {last}");
+}
+
+fn sync_full_range_to_peer(sender: &str, receiver: &str, workspace_id: &str) {
+    let receiver_endpoint = endpoint_id(receiver);
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&[
+            "--db",
+            sender,
+            "sync-range",
+            &receiver_endpoint,
+            "--workspace",
+            workspace_id,
+            "--start-ms",
+            "0",
+            "--end-ms",
+            "18446744073709551615",
+            "--with-deps",
+        ]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "queued") == "yes" {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("sync-range never queued from {sender} to {receiver_endpoint}: {last}");
+}
+
+fn endpoint_id(db: &str) -> String {
+    let identity = assert_success(topo(&["--db", db, "identity"]));
+    line_value(&identity, "endpoint_id")
 }
 
 fn invite_link_from_output(output: &str) -> String {

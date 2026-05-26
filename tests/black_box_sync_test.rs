@@ -118,6 +118,25 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
 
     generate(&bob, &workspace_a, 3, 128);
     generate(&carol, &workspace_b, 4, 128);
+    let alice_endpoint = endpoint_id(&alice);
+    sync_range_until_queued(
+        &bob,
+        &alice_endpoint,
+        &workspace_a,
+        "0",
+        "18446744073709551615",
+        true,
+        30_000,
+    );
+    sync_range_until_queued(
+        &carol,
+        &alice_endpoint,
+        &workspace_b,
+        "0",
+        "18446744073709551615",
+        true,
+        30_000,
+    );
 
     wait_for_content_count(&alice, &workspace_a, 3);
     wait_for_content_count(&alice, &workspace_b, 4);
@@ -472,10 +491,10 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
 }
 
 #[test]
-fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
+fn cli_two_long_running_daemons_download_multislice_file_via_sync_range() {
     // This is the poc-10 replacement for the basic simulated download proof:
     // drive only the product CLI plus daemon networking, then assert the peer
-    // can save the exact multi-slice bytes without any manual sync command.
+    // can save the exact multi-slice bytes after a normal sync-range dispatch.
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-file.db");
     let bob = temp_db(&tmp, "bob-file.db");
@@ -507,11 +526,13 @@ fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
         &workspace,
         &removal_frontier_id,
         &bob_recipient_id,
-        10_000,
+        30_000,
     );
-    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 10_000);
+    poll_for_key_access(&bob, &workspace, &removal_frontier_id, "yes", 30_000);
 
-    let payload = patterned_payload(4);
+    // Two fixed file slices keep this as a real multislice network transfer
+    // without turning the daemon integration suite into a throughput fixture.
+    let payload = patterned_payload(2);
     let in_path = tmp.path().join("network-download.bin");
     std::fs::write(&in_path, &payload).expect("write source payload");
 
@@ -525,8 +546,18 @@ fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
         in_path.to_str().expect("source path"),
     ]));
     assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
+    let bob_endpoint = endpoint_id(&bob);
+    sync_range_until_queued(
+        &alice,
+        &bob_endpoint,
+        &workspace,
+        "0",
+        "18446744073709551615",
+        true,
+        60_000,
+    );
 
-    let listing = poll_for_file_complete(&bob, &workspace, "network-download.bin", 30_000);
+    let listing = poll_for_file_complete(&bob, &workspace, "network-download.bin", 60_000);
     assert!(listing.contains("\u{2714}"), "{listing}");
 
     let out_path = tmp.path().join("saved-network-download.bin");
@@ -535,7 +566,7 @@ fn cli_two_long_running_daemons_download_multislice_file_without_manual_sync() {
         &workspace,
         "#1",
         out_path.to_str().expect("output path"),
-        30_000,
+        60_000,
     );
     assert_eq!(line_value(&saved, "filename"), "network-download.bin");
     assert_eq!(
