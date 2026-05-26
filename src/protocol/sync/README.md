@@ -17,7 +17,7 @@ follow-up work, but core treats those payloads as opaque queued work.
 
 Data leaves sync as:
 
-- context offers such as `sync_exact_fact` and `sync_key_wrap`;
+- context offers such as `sync_exact_fact`;
 - control facts such as `compare`, `have_id`, and `need_id`;
 - intents to send compare responses, request missing ids, answer requested ids,
   seed a connection, and batch facts onto a connection.
@@ -46,12 +46,8 @@ interface.
 
 ### Context Interface
 
-Sync-owned facts publish context for replication planning. `shared_fact`,
-`encrypted_root`, and `cascade_test_fact` publish `sync_exact_fact`;
-`key_wrap_available` publishes both `sync_exact_fact` and `sync_key_wrap`.
-Auth's concrete `key_wrap` fact also publishes `sync_key_wrap`, so consumers
-should read the role as "this key-wrap id is available" rather than as a claim
-that sync owns every offer with that role. The matched projector still
+Sync-owned facts publish context for replication planning. `shared_fact` and
+`cascade_test_fact` publish `sync_exact_fact`. The matched projector still
 validates the payload fact after core supplies the context match.
 
 ### Other Interfaces
@@ -214,21 +210,6 @@ range_request {
 }
 ```
 
-### `encrypted_root` (tag 161)
-
-Advertises that opening one encrypted root fact requires a dependency and key
-wrap. Projection requires workspace scope and offers `sync_exact_fact` for the
-named root id.
-
-```text
-encrypted_root {
-  workspace_id: fact:workspace_acme
-  fact_id: fact:encrypted_message_root
-  dependency_id: fact:retention_workspace
-  key_wrap_id: fact:key_wrap_for_phone
-}
-```
-
 ### `shared_fact` (tag 162)
 
 Declares that one fact id is shared in a workspace. Projection requires
@@ -240,19 +221,6 @@ creating this fact manually.
 shared_fact {
   workspace_id: fact:workspace_acme
   fact_id: fact:message_hello
-}
-```
-
-### `key_wrap_available` (tag 163)
-
-Compact advertisement that a key-wrap fact can be requested in a workspace.
-Projection requires workspace scope and offers both `sync_exact_fact` and
-`sync_key_wrap` for the key-wrap id.
-
-```text
-key_wrap_available {
-  workspace_id: fact:workspace_acme
-  key_wrap_id: fact:key_wrap_for_phone
 }
 ```
 

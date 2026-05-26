@@ -741,7 +741,7 @@ fn cutover_sync_is_not_a_multi_fact_project_bundle() {
 
     assert!(
         offenders.is_empty(),
-        "sync must not be a dumping folder for range/key/support facts. Split sync::range_request, sync::encrypted_root, sync::shared_fact, and sync::key_wrap_available into fact-family modules with their own fact/layout/project files; sync/project/* subtrees are not allowed:\n{}",
+        "sync must not be a dumping folder for range/key/support facts. Keep sync::range_request and sync::shared_fact as fact-family modules with their own fact/layout/project files; sync/project/* subtrees are not allowed:\n{}",
         offenders.join("\n")
     );
 }

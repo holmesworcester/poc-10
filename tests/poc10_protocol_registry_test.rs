@@ -105,6 +105,32 @@ fn protocol_context_ranges_are_core_owned_and_domain_encoded() {
 }
 
 #[test]
+fn sync_advertisement_fact_families_stay_retired() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let registry = std::fs::read_to_string(root.join("src/protocol/registry.rs"))
+        .expect("read protocol registry");
+    let sync_manifest =
+        std::fs::read_to_string(root.join("src/protocol/sync.rs")).expect("read sync manifest");
+
+    for family in ["encrypted_root", "key_wrap_available"] {
+        let module_path = root.join("src/protocol/sync").join(family);
+        let manifest_path = root.join("src/protocol/sync").join(format!("{family}.rs"));
+        assert!(
+            !module_path.exists() && !manifest_path.exists(),
+            "retired sync advertisement family still exists: {family}"
+        );
+        assert!(
+            !registry.contains(&format!("sync::{family}::")),
+            "retired sync advertisement family is still registered: {family}"
+        );
+        assert!(
+            !sync_manifest.contains(&format!("pub mod {family};")),
+            "retired sync advertisement family is still exposed: {family}"
+        );
+    }
+}
+
+#[test]
 fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit() {
     let names = MATCH_RUNTIME
         .handlers
