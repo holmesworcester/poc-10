@@ -5,10 +5,6 @@ reactions, file descriptors, file slices, deletion facts, and retention
 policies. The scope owns authoring constructors, encrypted payload envelopes,
 deletion/retention coordinates, and the read models used by CLI queries.
 
-The examples below are decoded plaintext shapes. Encrypted fields are shown as
-opaque nonce/ciphertext slots because the fact body carries encrypted bytes, not
-opened message text or file metadata.
-
 ## Interface To Core
 
 Data enters core through content commands (`send`, `react`, `send-file`,

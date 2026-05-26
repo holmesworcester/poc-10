@@ -4,10 +4,6 @@ Sync facts describe convergence, not domain validity. The scope records which
 facts are shareable in a workspace, summarizes shareable fact ranges, advertises
 exact ids, requests missing ids, and asks connection to move selected facts.
 
-The examples below are decoded plaintext shapes. Actual facts are fixed binary
-layouts with one-byte type tags; shareable rows and negentropy summaries are
-derived rows, not copies of the fact bytes.
-
 ## Interface To Core
 
 Data enters sync from projectors in other scopes through

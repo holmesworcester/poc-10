@@ -6,10 +6,6 @@ wrappers, semantic request/response facts, local handshake secrets, receive
 receipts, established encrypted frame wrappers, close signals, and the network
 intent handlers that bridge core networking to protocol facts.
 
-The examples below are decoded plaintext shapes. Sealed request/response frames
-and established frames are shown as opaque byte slots because their contents are
-opened by connection projectors using local endpoint or connection secrets.
-
 ## Interface To Core
 
 Data enters core from three places:

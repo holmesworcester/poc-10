@@ -5,11 +5,6 @@ material this store may use. The scope owns workspace identity, user identity,
 admin grants, invite paths, endpoint membership, recipient keys, removal
 frontiers, key-wrap production, key-wrap recovery, and local-only secrets.
 
-The examples below are decoded plaintext shapes. On disk and on the wire each
-fact is a fixed binary layout beginning with its type tag; `FactScope` and the
-local admission timestamp live in core metadata and are not part of the fact
-body.
-
 ## Interface To Core
 
 Data enters core as immutable facts returned by auth commands, by auth intent
