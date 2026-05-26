@@ -166,7 +166,7 @@ fn root_readme_describes_context_project_aims() {
         "boring local API",
         "paginated message views with users, reactions, attachments, and download progress",
         "## Approach",
-        "It is called Context because the central idea is that facts offer context to other facts",
+        "In Context, a central idea is that facts offer context to other facts",
         "Context is a more general relationship than blocking",
         "context offers can be projected before the facts they refer to exist",
         "standing relationship surface",

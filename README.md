@@ -21,8 +21,8 @@ durable retry in one model.
 
 ## Approach
 
-It is called Context because the central idea is that facts offer context to
-other facts. Context is a more general relationship than blocking: a context
+In Context, a central idea is that facts offer context to other facts. Context
+is a more general relationship than blocking: a context
 need can name an exact fact, but it can also name a range of facts, and context
 offers can be projected before the facts they refer to exist. That gives the
 runtime a standing relationship surface. Later facts can wake when relevant
