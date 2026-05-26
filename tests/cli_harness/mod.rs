@@ -20,6 +20,15 @@ pub fn con_cli(args: &[&str]) -> Output {
         .expect("run con")
 }
 
+pub fn con_cli_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(con_bin());
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("run con")
+}
+
 pub fn spawn_topo(args: &[&str]) -> Child {
     spawn_con(args)
 }
