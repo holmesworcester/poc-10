@@ -154,6 +154,11 @@ fn root_readme_describes_context_project_aims() {
 
     for required in [
         "lightweight p2p engine",
+        "storage and wire protocol are made of facts in the Datalog/database sense",
+        "asserted ground records that can be stored, matched, and projected",
+        "Context facts are immutable, fixed-layout records admitted locally and exchanged between peers",
+        "A fact can be a message, invite, membership change, sync request, receipt, key wrap, or connection handshake",
+        "deterministic projectors validate facts against context and turn them into SQLite rows or bounded retryable work",
         "fact-based protocol runtime",
         "backend for a p2p Slack",
         "team chat, invites, membership, reactions, files, message history, sync",

@@ -1,10 +1,18 @@
 # Context Architecture
 
 Context is a lightweight p2p engine for building local-first, end-to-end
-encrypted collaboration apps. It is a fact-based protocol runtime meant to be
-small enough to reason about and complete enough to be the backend for a p2p
-Slack: team chat, invites, membership, reactions, files, message history, sync,
-and frontend-friendly queries without a custom middle layer.
+encrypted collaboration apps. Its storage and wire protocol are made of facts
+in the Datalog/database sense: asserted ground records that can be stored,
+matched, and projected. Context facts are immutable, fixed-layout records
+admitted locally and exchanged between peers. A fact can be a message, invite,
+membership change, sync request, receipt, key wrap, or connection handshake;
+deterministic projectors validate facts against context and turn them into
+SQLite rows or bounded retryable work.
+
+The result is a fact-based protocol runtime meant to be small enough to reason
+about and complete enough to be the backend for a p2p Slack: team chat, invites,
+membership, reactions, files, message history, sync, and frontend-friendly
+queries without a custom middle layer.
 
 The runtime keeps the p2p stack behind a boring local API. A client should be
 able to ask for paginated message views with users, reactions, attachments, and
