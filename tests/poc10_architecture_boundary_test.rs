@@ -192,7 +192,8 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc = source_text(&root.join("README.md"));
     let required = [
-        "## Architecture Criteria",
+        "## Architecture Principles",
+        "## Rules",
         "There is no `mod.rs` anywhere in the repository.",
         "There is no root `src/commands` module",
         "src/core/command_context.rs",

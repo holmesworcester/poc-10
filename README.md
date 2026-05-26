@@ -18,11 +18,12 @@ The system has one fact store, one context matching surface, one projection
 scheduler, one intent scheduling surface, and one product-facing binary:
 `con`.
 
-## Architecture Criteria
+## Architecture Principles
 
-The architecture holds when:
+The current architecture is described by these boundaries:
 
-- Core owns facts, context, command context, byte-range context matching,
+- Core owns protocol-neutral mechanics: facts, context, command context,
+  byte-range context matching,
   generic runtime/app mechanics, pending fact processing, context wake fanout,
   intent dispatch, storage mechanics, wire field primitives, network queues,
   TCP, clock, and crypto helpers.
@@ -38,6 +39,19 @@ The architecture holds when:
   removal, not a broad storage API.
 - No fact module, intent handler, command, schema, or wire layout reaches
   around core to call another stage directly.
+- Runtime coordination is explicit and durable where it needs to survive
+  restart: pending facts, time wakes, durable intents, and ephemeral intents are
+  named queue surfaces rather than hidden callbacks.
+- Schema declarations are explicit SQL DDL in the owning Rust modules:
+  `src/core/schema.rs`, `src/core/network.rs`, and
+  `src/protocol/registry.rs`.
+- Wire layouts are declarative and fixed length. There are no variable payload
+  slots except bounded, canonical slots explicitly modeled by a fact layout.
+
+## Rules
+
+These repository rules keep the architecture mechanically visible:
+
 - There is no event-bus layer. The runtime coordinates explicit SQL-backed
   queues: pending facts, time wakes, durable intents, and ephemeral intents.
 - There is no product `demo` or `smoke` command. Smoke coverage belongs in
@@ -45,11 +59,6 @@ The architecture holds when:
 - There is no root `src/commands` module. The command context lives in
   `src/core/command_context.rs`.
 - There is no `mod.rs` anywhere in the repository.
-- Schema declarations are explicit SQL DDL in the owning Rust modules:
-  `src/core/schema.rs`, `src/core/network.rs`, and
-  `src/protocol/registry.rs`.
-- Wire layouts are declarative and fixed length. There are no variable payload
-  slots except bounded, canonical slots explicitly modeled by a fact layout.
 - Boundary tests fail if dumping-ground files, ad hoc SQL, ad hoc codecs,
   broad projector reads, direct handler calls, or direct network/store side
   effects appear.
