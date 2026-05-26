@@ -23,7 +23,8 @@ Data leaves auth projection as:
   `wrap_source`, `local_recipient_key`, `local_secret_source`,
   `secret_coverage`, and `local_secret_source_retired`;
 - context needs for the same authority graph;
-- `share_fact_with_sync`, `create_key_wrap`, and `unwrap_key_wrap` intents;
+- durable/local intent effects routed by the intent kinds registered for this
+  protocol;
 - derived local facts, especially key-wrap output and unwrapped local secrets.
 
 Core preserves atomicity and replacement. Each projector emits the complete
@@ -43,8 +44,9 @@ daemon endpoint offer lets sealed bootstrap frames open locally, and
 `connection_invite_secret` authorizes bootstrap request signatures.
 
 Sync consumes auth share contributions and auth-owned exact/key-wrap offers.
-Auth projectors call the sync helper after a fact is admitted so connection
-sync can advertise only facts whose own authority proof has already passed.
+Auth projectors enqueue sync-owned `share_fact_with_sync` intents after a fact
+is admitted so connection sync can advertise only facts whose own authority
+proof has already passed.
 
 Auth also depends on sync for exact-fact dependency context in a few places,
 for example retention/key-wrap dependency matching, but auth still validates the
@@ -83,6 +85,8 @@ resulting local secret id against the wrap coordinate, and returns either a
 
 Both handlers use the intent payload as the idempotence key source. If any input
 fact is missing, core retries through the normal handler contract.
+These are auth-owned handler routes registered with core; other scopes do not
+call them directly.
 
 ## Facts
 

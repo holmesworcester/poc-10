@@ -6,9 +6,10 @@ exact ids, requests missing ids, and asks connection to move selected facts.
 
 ## Interface To Core
 
-Data enters sync from projectors in other scopes through
-`share_fact_with_sync` intents, from connection receive paths as ordinary sync
-facts, and from CLI/test commands that create range or cascade facts.
+Data enters sync as ordinary sync facts from connection receive paths, as
+sync-owned intents dispatched by core, and from CLI/test commands that create
+range or cascade facts. Other scopes may enqueue sync-owned intents as
+follow-up work, but core treats those payloads as opaque queued work.
 
 Data leaves sync as:
 
@@ -27,9 +28,9 @@ sendability through the owning helpers.
 
 ## Interfaces To Other Scopes
 
-Auth and content projectors emit `share_fact_with_sync` only after their own
-authority checks pass. Sync records those contributions and their validated
-context dependencies.
+Auth and content projectors enqueue the sync-owned `share_fact_with_sync`
+intent only after their own authority checks pass. Sync records those
+contributions and their validated context dependencies.
 
 Connection supplies established connection rows and frame send handlers. Sync
 asks connection to send fact ids; connection decides frame size, sealing, and

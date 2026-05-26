@@ -155,6 +155,39 @@ fn connection_readme_separates_sealed_transport_from_fact_dependencies() {
     }
 }
 
+#[test]
+fn readme_core_interface_sections_do_not_name_scope_owned_intent_routes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for scope in ["auth", "content", "sync"] {
+        let readme_path = root
+            .join("src")
+            .join("protocol")
+            .join(scope)
+            .join("README.md");
+        let readme = fs::read_to_string(&readme_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+        let core_interface = section(&readme, "## Interface To Core");
+        for intent in ["share_fact_with_sync", "create_key_wrap", "unwrap_key_wrap"] {
+            assert!(
+                !core_interface.contains(intent),
+                "{scope} README should describe {intent} outside Interface To Core"
+            );
+        }
+    }
+}
+
+fn section<'a>(readme: &'a str, heading: &str) -> &'a str {
+    let start = readme
+        .find(heading)
+        .unwrap_or_else(|| panic!("README is missing heading {heading:?}"));
+    let after_heading = &readme[start + heading.len()..];
+    if let Some(end) = after_heading.find("\n## ") {
+        &after_heading[..end]
+    } else {
+        after_heading
+    }
+}
+
 struct ScopeDocs {
     scope: &'static str,
     fact_modules: &'static [&'static str],

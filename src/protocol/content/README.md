@@ -21,8 +21,8 @@ Data leaves content projection as:
   `sync_exact_fact`;
 - context needs for auth signer/user/admin proof, key-material coverage,
   parent content facts, deletion facts, retention floors, and time wakes;
-- `share_fact_with_sync` or retraction intents once a fact has passed the
-  projection gates;
+- durable intent effects for follow-up work owned by registered protocol
+  handlers;
 - self-purge effects for facts whose owner row has been deleted by deletion,
   expiry, retention, or parent deletion.
 
@@ -37,9 +37,10 @@ Auth provides `content_signer`, `auth_user`, `auth_admin`, and
 `secret_coverage` context. Content never opens encrypted text or admits signed
 content until those witnesses match the payload.
 
-Sync receives content share/retract intents only after the content projector has
-validated its own proof. Sync does not decide whether a message, reaction, file,
-or deletion is valid.
+Sync receives content share/retract work through sync-owned
+`share_fact_with_sync` intents only after the content projector has validated
+its own proof. Sync does not decide whether a message, reaction, file, or
+deletion is valid.
 
 Connection is only a carrier for content facts. Received connection frames
 produce ordinary content facts plus receipts; the content projector then runs
