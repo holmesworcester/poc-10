@@ -209,6 +209,24 @@ connection context. They are separate from auth, content, and sync semantics:
 frames move bytes and produce receipts, while the owning fact projector
 validates every recovered fact.
 
+This keeps core's network interface minimal. Core owns TCP accept/write
+mechanics and stores inbound or outbound network payloads as opaque bytes. It
+does not know whether a byte string is a bootstrap request, bootstrap response,
+established connection frame, auth fact, sync fact, or content fact. On ingress,
+the daemon hands accepted bytes to the protocol-declared inbound network intent;
+the connection scope classifies the frame, emits the right local wrapper fact,
+and lets connection projectors open it with auth and connection context. Opened
+payloads re-enter the normal fact admission path as child facts, and receipt
+facts record which connection delivered them.
+
+Egress is the same boundary in reverse. Sync may decide that a fact id should
+be sent to an authorized connection, but the connection scope decides how to
+load, filter, batch, seal, and address those facts as connection frames. The
+final `send_network_frame` intent gives core only a route and opaque frame
+bytes. Core writes bytes to the socket; connection facts preserve the durable
+relationship between those bytes, the session, recovered child facts, and
+receipts.
+
 ### Simplicity Guardrails
 
 Production work is represented with immutable facts, standing context,

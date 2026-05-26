@@ -218,6 +218,14 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "### Intent Handlers",
         "### Wire Layouts And Codecs",
         "### Connection Frames",
+        "This keeps core's network interface minimal",
+        "Core owns TCP accept/write mechanics and stores inbound or outbound network payloads as opaque bytes",
+        "the daemon hands accepted bytes to the protocol-declared inbound network intent",
+        "the connection scope classifies the frame, emits the right local wrapper fact",
+        "Opened payloads re-enter the normal fact admission path as child facts",
+        "Sync may decide that a fact id should be sent to an authorized connection",
+        "the connection scope decides how to load, filter, batch, seal, and address those facts as connection frames",
+        "Core writes bytes to the socket; connection facts preserve the durable relationship",
         "### Simplicity Guardrails",
     ];
 
