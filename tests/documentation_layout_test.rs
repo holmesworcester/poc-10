@@ -241,6 +241,48 @@ fn rules_include_projector_style_after_projector_style_doc_was_archived() {
 }
 
 #[test]
+fn protocol_version_flexibility_research_is_local_and_poc10_specific() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let note_path = root.join("docs/research/protocol-version-flexibility.md");
+    let note = source_text(&note_path);
+    let normalized = normalize_whitespace(&note);
+
+    for required in [
+        "# Protocol Version Flexibility Research",
+        "docs/research/references/cambria-ink-switch.html",
+        "docs/research/references/cambria-ink-switch.pdf",
+        "Cambria: Schema Evolution in Distributed Systems with Edit Lenses",
+        "https://doi.org/10.1145/3447865.3457963",
+        "libp2p protocol IDs and fallback",
+        "Ethereum devp2p capabilities",
+        "BitTorrent Extension Protocol",
+        "QUIC version negotiation",
+        "Kafka and Confluent Schema Registry",
+        "The most appropriate external example for poc-10 is the combination of libp2p protocol IDs and Ethereum devp2p capabilities",
+        "Old canonical bytes stay hash-stable",
+        "Translation happens when opening, projecting, or querying, never by rewriting the fact before identity is computed",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "protocol version research note is missing {required:?}"
+        );
+    }
+
+    let html = source_text(&root.join("docs/research/references/cambria-ink-switch.html"));
+    assert!(
+        html.contains("<title>Project Cambria: Translate your data with lenses</title>"),
+        "downloaded Cambria HTML should be the Ink & Switch essay"
+    );
+
+    let pdf = fs::read(root.join("docs/research/references/cambria-ink-switch.pdf"))
+        .expect("read downloaded Cambria PDF");
+    assert!(
+        pdf.starts_with(b"%PDF"),
+        "downloaded Cambria PDF should have a PDF header"
+    );
+}
+
+#[test]
 fn repo_instructions_point_at_live_documentation_style_rules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let agents = source_text(&root.join("AGENTS.md"));
