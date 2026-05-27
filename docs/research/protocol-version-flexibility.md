@@ -155,94 +155,183 @@ Sources:
 and
 `https://support.signal.org/hc/en-us/articles/5109141421850-Supporting-Older-Operating-Systems`.
 
-## poc-10 Product Model
+## Minimal Design
 
-Version flexibility should be modeled as feature readiness, not as manual
-frontend release flags. The frontend should ask the local runtime whether a
-workspace can create a feature, and the runtime should derive the answer from
-protocol facts and product policy.
+The minimal design assumes one product, one canonical protocol at a time, and a
+bounded support window for old clients. It gates new feature creation until any
+client that lacks the feature would already be deprecated. Once that boundary is
+crossed, migration happens seamlessly: new binaries can write the new facts,
+projectors, intents, commands, rows, indexes, query plans, and database schema
+without preserving old-client write compatibility forever.
 
-Developers working on individual features should not need to reason through the
-whole rollout matrix each time. The product should provide a small feature
-manifest API where the feature owner declares one compatibility policy:
+This design is meant to make substantial change safe without asking every
+feature developer to become a rollout expert. It should support new features and
+new internal designs such as TreeKEM, a new file encoding, different
+disappearing-message policies, new indexing or query optimization, and
+significant intent/fact/projector reshaping without breaking supported users.
 
-- `legacy_fallback`: creation is allowed before universal support because the
-  feature writes an old-content fallback plus extension facts for upgraded
-  clients.
-- `requires_universal_support`: creation is embargoed until workspace readiness
-  says every relevant active client supports the feature, or until old clients
-  are expired by policy.
-- `internal_only`: the feature changes local behavior or read-model rendering
-  without creating new workspace-visible protocol state.
+Goals:
 
-From that declaration, shared runtime code should produce the create gate,
-frontend availability state, unsupported-client reason, telemetry label, and
-compatibility tests. Feature code should supply the new facts, the old fallback
-when required, and the upgraded renderer. It should not hand-roll version
-queries, active-device scans, or deprecation checks.
+- Preserve the workspace visibility invariant during every supported transition:
+  anything a user can create must be visible to every non-deprecated client in
+  that workspace.
+- Allow structural migrations of database tables, row layouts, fact families,
+  intent kinds, command surfaces, and internal data types behind a principled
+  release boundary.
+- Let feature code ship early but keep creation embargoed until the deprecation
+  date or compatibility epoch makes it safe.
+- Make migrations automatic once the boundary is reached, with old clients
+  expired or unable to create new workspace state.
+- Test all combinations that can occur during the transition period: old binary
+  with old data, new binary before the feature epoch, new binary after the
+  epoch, peers on both sides of the supported-version line, and upgrade order
+  permutations for active workspaces.
+- Keep developer ergonomics simple: a feature owner declares a required
+  compatibility epoch and, optionally, a fallback. Shared runtime code owns the
+  gate, reasons, telemetry, transition tests, and deprecation checks.
 
-Suggested protocol concepts:
+Minimal option A: global compatibility epochs.
 
-- Device capability facts: each active device periodically publishes product
-  version, platform, supported fact-family versions, and supported feature ids
-  for a workspace.
-- Workspace readiness: a derived row says whether a feature is creatable in the
-  workspace. It is true when every relevant active device advertises support, or
-  when the product deprecation policy has made unsupported devices unable to
-  write or participate.
-- Graceful-degradation contract: a feature can be created before universal
-  support only if its owning module declares how old clients see it as an older
-  content type.
-- Feature embargo: a non-degradable feature can ship in binaries and backend
-  code before it is usable. The runtime keeps it unavailable until workspace
-  readiness or the global deprecation date permits it.
-- Expiration policy: clients older than the supported horizon should get a hard
-  upgrade path and should not be allowed to create new workspace state after
-  expiry.
+Each release train defines a `min_supported_epoch` and a `current_epoch`.
+Features declare `requires_epoch = N`. Until the product policy expires all
+clients older than `N`, creation is disabled everywhere, even if many workspaces
+have already upgraded. After the expiration date, clients older than `N` cannot
+write, and the runtime can migrate local databases and start writing the new
+canonical facts.
 
-This avoids per-feature hand-coded frontend flags. The UI can still hide or
-disable controls, but the source of truth is a generic
-`can_create_feature(workspace, feature)` decision with a visible reason such as
-`waiting_for_devices`, `requires_upgrade`, `deprecated_client`, or
-`ready_with_legacy_fallback`.
+This is the simplest way to avoid frontend flag sprawl. It is conservative and
+may delay features because one platform approval delay or a broken release holds
+the epoch back.
 
-Graceful degradation should be explicit in protocol shape. For example, a new
-interactive content feature can be represented as an old content message plus a
-new extension fact that references the old message. Old clients render the base
-message. New clients render the richer extension and suppress duplicate display
-of the base. This preserves stable old fact bytes and makes the fallback durable
-instead of depending on old clients understanding a new envelope.
+Minimal option B: per-feature deprecation horizons.
 
-Some features will not have an honest downgrade. In those cases poc-10 should
-prefer embargo over lossy fallback. The compatibility metadata should say
-`requires_universal_support`, and tests should prove that an unsupported active
-device keeps the feature uncreatable for that workspace.
+Each feature declares the oldest client version or protocol epoch it requires.
+The product can deprecate old clients per feature family rather than advancing a
+single global epoch for everything. This allows, for example, a new file
+encoding to wait for file-capable clients while unrelated indexing changes ship
+under a different horizon.
 
-The developer workflow should make the safe path hard to skip:
+This reduces unnecessary waiting but needs clearer policy metadata and more
+transition tests than option A.
 
-- Adding a feature id requires a manifest entry with one of the compatibility
-  policies above.
-- A `legacy_fallback` entry requires tests showing that an old-content read path
-  still exposes the user-visible intent and that upgraded clients suppress
-  duplicate display.
-- A `requires_universal_support` entry requires tests showing that creation is
-  blocked while a relevant active device lacks support and allowed once the
-  workspace readiness row advances.
-- A feature cannot create a new workspace-visible fact family without either a
-  fallback mapping or a universal-support gate.
+Minimal option C: expand-then-contract storage migrations.
 
-## Recommendation For poc-10
+During the support window, new binaries write old-compatible durable state plus
+new shadow rows or facts. Old clients continue to operate on the old shape. At
+the epoch boundary, the runtime runs the contract migration, removes old rows or
+compatibility projectors, and makes the new representation canonical.
 
-Use a two-level model:
+This is the right shape for database and index changes. It avoids a hard stop on
+internal improvements, but it should still forbid user-visible creation of a
+new non-degradable feature until the epoch is safe.
 
-1. Connection-level negotiation picks the transport envelope:
-   supported `connection::frame` versions, size classes, crypto transcript
-   families, and optional connection features.
-2. Scope-level manifests register stable fact families and supported layout
-   versions. A new incompatible fixed fact layout should usually get a new
-   stable tag or versioned family entry, not a hidden branch inside core.
+Minimal option D: legacy-visible fallback facts.
 
-The implementation shape should follow existing ownership rules:
+When a feature has a true graceful downgrade, it can create an old content fact
+plus extension facts for upgraded clients. Old clients render the old content;
+new clients render the richer extension and suppress duplicate display. This
+lets safe one-person or low-risk features arrive earlier without violating
+visibility.
+
+This option should be opt-in. If the fallback is lossy or confusing, the feature
+should use an epoch gate instead.
+
+Recommended minimal path: start with option A plus option C. Add option D only
+for features with an honest old-client rendering. Option B is useful once the
+project has enough feature families that a single epoch becomes too blunt.
+
+## Maximal Design
+
+The maximal design assumes a much more chaotic future: forks, multiple clients,
+different product protocols, independent apps using protocol scopes modularly,
+several simultaneous protocols on the same network, and many devices with
+different capabilities in one workspace. In this world, compatibility is not
+only a release boundary. It is a permanent protocol feature across facts,
+intents, projectors, commands, frame envelopes, and read models.
+
+Goals:
+
+- Allow facts, intents, projectors, and commands from different versions to
+  coexist and interoperate where a module declares a safe relation.
+- Allow protocol scopes to be used independently by other applications without
+  forcing the whole poc-10 product release train.
+- Support multiple simultaneous protocols on the same connection or network,
+  with explicit capability negotiation and versioned dispatch.
+- Make one-person features available immediately when they affect only that
+  user's devices.
+- Make fixed-group features available as soon as every included participant can
+  see them on all relevant devices, such as both parties in a DM.
+- Support different desktop and mobile feature sets, including advanced
+  platform-specific features, while maintaining graceful degradation for clients
+  that do not support the richer view.
+- Keep the visibility invariant scoped to the participants affected by the
+  feature: if a user can create visible state for a group, every included
+  participant has either a native view or an explicit legacy view.
+
+Maximal option A: capability facts per device, workspace, and scope.
+
+Every active device publishes signed capability facts naming supported product
+versions, protocol scopes, fact-family versions, intent kinds, command features,
+platform affordances, and expiration policy. Projectors derive readiness rows
+per workspace, conversation, participant set, and feature.
+
+This gives precise availability but creates a new consistency surface: the
+runtime must decide which devices count as active, when stale capability facts
+expire, and how to handle offline devices.
+
+Maximal option B: versioned scope manifests and dispatch.
+
+Each protocol scope registers multiple versions of its facts, intents,
+projectors, commands, and read-model adapters. Core routes by stable scope and
+version tags, while scope-owned adapters translate to a current semantic model
+when possible. Unknown capabilities are ignored unless a feature marks them as
+required.
+
+This is the devp2p/libp2p pattern applied inside poc-10. It gives strong
+modularity, but every supported version becomes part of the test matrix.
+
+Maximal option C: explicit degradation lenses.
+
+For each feature that can be visible to older clients, the owning module
+declares a downgrade relation: new state to old visible state, old edits back to
+new state when possible, and cases where old edits must be rejected or converted
+to a limited operation. Cambria is the conceptual model, but the lens should
+operate on typed facts and commands, not arbitrary core bytes.
+
+This enables early feature availability but is only correct when the
+degradation relation preserves user intent clearly enough.
+
+Maximal option D: participant-set readiness gates.
+
+Instead of gating by whole workspace, the runtime computes readiness for the
+exact affected participant set. A DM feature can become available when both
+parties and all their active devices support it. A private draft feature can be
+available to one user immediately. A workspace-wide policy feature waits for
+workspace-wide support or legacy-visible fallback.
+
+This matches real product expectations, but it requires the feature manifest to
+state the visibility domain: `local_user`, `device_set`, `dm_participants`,
+`channel_members`, or `workspace`.
+
+Maximal option E: multi-protocol sessions.
+
+Connection bootstrap negotiates envelope versions, crypto transcript families,
+scope capabilities, and optional subprotocols. A single peer connection can run
+several protocol families at once, and handlers choose the newest mutually safe
+format per recipient or participant set.
+
+This is the most flexible network model and the highest engineering cost. It is
+appropriate only if poc-10 intentionally becomes a protocol platform or supports
+long-lived forks.
+
+Recommended maximal path: use option A and option D as product-facing concepts,
+then add option B only for scopes that genuinely need independent versioning.
+Use option C sparingly for high-value graceful degradation. Defer option E until
+there is a real multi-protocol network requirement.
+
+## Common Implementation Rules
+
+Both designs should follow the existing ownership rules:
 
 - Core routes by stable tags and registered handlers; it does not translate
   protocol data.
@@ -253,15 +342,19 @@ The implementation shape should follow existing ownership rules:
 - Unknown future capabilities are ignored unless they are required for a fact or
   frame the local node is about to send.
 - Old canonical bytes stay hash-stable. Translation happens when opening,
-  projecting, or querying, never by rewriting the fact before identity is
-  computed.
+  projecting, querying, or executing commands, never by rewriting the fact
+  before identity is computed.
+- Adding a feature id requires a manifest entry with a compatibility class:
+  `epoch_gated`, `legacy_fallback`, `participant_ready`, or `internal_only`.
+- A feature cannot create a new workspace-visible fact family without either a
+  fallback mapping, a participant/readiness gate, or an epoch gate.
 
-The most appropriate external example for poc-10 is the combination of libp2p
-protocol IDs and Ethereum devp2p capabilities: explicit protocol IDs, local
-handlers for multiple supported versions, highest-compatible or ordered
-fallback selection, and no semantic compatibility logic in the transport core.
-Cambria remains useful as the discipline for keeping each graceful-degradation
-or translation edge isolated and testable. Signal is the closest product-policy
-example: old clients can be tolerated for a bounded window, but once they block
-the product from preserving reliability or security, they need a hard upgrade
-boundary.
+The minimal design is the best fit for poc-10 now because it gives a principled
+way to ship substantial internal changes without breaking supported clients.
+The maximal design is a reserve architecture for a future where protocol scopes
+are modular, forked, or independently deployed. Signal is the closest
+product-policy example for the minimal design: old clients can be tolerated for
+a bounded window, but once they block reliability or security, they need a hard
+upgrade boundary. libp2p and Ethereum devp2p are the closest protocol examples
+for the maximal design: explicit capabilities, versioned dispatch, fallback
+selection, and no semantic compatibility logic in the transport core.
