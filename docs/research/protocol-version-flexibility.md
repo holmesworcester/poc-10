@@ -308,6 +308,15 @@ non-deprecated bootstrap format. After that, session traffic uses the highest
 mutually available version allowed by both peers and local deprecation policy.
 If the peer set or capabilities change, start a new session and negotiate again.
 
+Invites can make first contact less ambiguous. An invite may name the bootstrap
+sync-control version, workspace manifest hash, and endpoint/capability fact
+family that the joining peer should use for its first session. That invite value
+is only the entry point: it must be signed or otherwise bound to the workspace
+admission proof, and it cannot force a version below the local non-deprecated
+floor. After admission, the peer publishes signed endpoint and capability facts
+as shared state. Future peers use those shared facts, not the original invite,
+to choose the connection bootstrap and highest common session version.
+
 Different sync protocol versions negotiate through a fixed bootstrap floor:
 
 1. Start every connection in the lowest non-deprecated sync-control envelope
@@ -363,6 +372,15 @@ participants. Scope manifests and lenses still define what that version means
 and how facts degrade; core only computes the intersection. A sync or connection
 session is the same calculation with exactly two participants after the
 capability exchange is authenticated.
+
+Event-creating intents should not each hand-roll this decision. The command or
+intent handler asks a compatibility planner for a representation plan using the
+feature id, scope, visibility domain, participant set, accepted manifests, and
+deprecation policy. The planner returns either one highest-common version for a
+closed set, all non-deprecated release view versions for an open-ended audience,
+or a concrete failure explaining which participants or manifests are missing.
+The handler then emits the representation set described by that plan and records
+the plan hash or manifest ids in the representation-set proof.
 
 In the no-gate maximal design this is only an optimization for closed,
 well-known participant sets. If all affected participants can read v3, publish
