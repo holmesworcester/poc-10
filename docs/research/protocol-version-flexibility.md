@@ -139,7 +139,14 @@ Goals:
   feature: if a user can create visible state for a group, every included
   participant has either a native view or an explicit legacy view.
 
-Maximal option A: capability facts per device, workspace, and scope.
+The following items are tactics, not mutually exclusive options. The maximal
+design works only by combining several of them: version manifests define what
+exists, lenses define how representations relate, multi-publish creates signed
+durable siblings, suppression chooses one readable sibling for display, and
+handshake/sync keeps the sibling set available without leaking across access
+boundaries.
+
+Maximal tactic A: capability facts per device, workspace, and scope.
 
 Every active device publishes signed capability facts naming supported product
 versions, protocol scopes, fact-family versions, intent kinds, command features,
@@ -150,7 +157,7 @@ This gives precise availability but creates a new consistency surface: the
 runtime must decide which devices count as active, when stale capability facts
 expire, and how to handle offline devices.
 
-Maximal option B: versioned scope manifests and dispatch.
+Maximal tactic B: versioned scope manifests and dispatch.
 
 Each protocol scope registers multiple versions of its facts, intents,
 projectors, commands, and read-model adapters. Core routes by stable scope and
@@ -158,10 +165,18 @@ version tags, while scope-owned adapters translate to a current semantic model
 when possible. Unknown capabilities are ignored unless a feature marks them as
 required.
 
+A version does not need to be a linear integer. In the maximal design it can be
+a content-addressed node in a scope version graph: the hash of the fact schema,
+command semantics, projector contract, and lens edges that define that protocol
+shape. Product releases publish stable aliases such as `messages/release-v3`
+that point to graph nodes. The lens graph may include experimental commits,
+forks, platform-specific branches, and intermediate conversion nodes, but
+durable multi-publish targets only supported release aliases.
+
 This gives strong modularity, but every supported version becomes part of the
 test matrix.
 
-Maximal option C: explicit degradation lenses.
+Maximal tactic C: explicit degradation lenses.
 
 For each feature that can be visible to older clients, the owning module
 declares a downgrade relation: new state to old visible state, old edits back to
@@ -172,40 +187,83 @@ operate on typed facts and commands, not arbitrary core bytes.
 This enables early feature availability but is only correct when the
 degradation relation preserves user intent clearly enough.
 
-Maximal option D: multi-publish view versions.
+Maximal tactic D: multi-publish view versions.
 
-For multi-client-visible features, writers publish the richest fact plus bounded
-fallback view facts for supported reader versions that cannot display the rich
-fact. This is not "latest plus one lowest-common fallback" if intermediate
-versions preserve more meaning. If supported clients exist on v1, v2, and v3,
-and v2 can display a better downgraded view than v1, the writer may publish v3,
-v2-view, and v1-view facts together.
+For durable shared facts, writers publish a representation set: the richest fact
+plus bounded fallback view facts for supported reader versions that cannot
+display the rich fact. Clients project the newest readable representation in
+that set and ignore lower-fidelity siblings for display. This is not "latest
+plus one lowest-common fallback" if intermediate versions preserve more meaning.
+If supported clients exist on v1, v2, and v3, and v2 can display a better
+downgraded view than v1, the writer may publish v3, v2-view, and v1-view facts
+together.
 
-This turns dual-publish into bounded multi-publish across still-supported view
-versions. The bound is the support policy: when a version is deprecated, writers
-stop producing that view version forever. Ephemeral communication can choose a
+The set is tied together by a stable representation-set identity. A concrete
+form is an author-certified representation-set public key: the author signs a
+certificate binding that key to the originating command commitment, author,
+scope, audience, command nonce, supported release view versions, and lens graph
+root. Each representation also names its release view version or version-graph
+node, the lens path used to derive it, and any sibling fact ids that were known
+when it was created. Newer representations can refer backward to older sibling
+ids; older representations cannot know future ids, so suppression is handled by
+projection context.
+
+The representation-set identity is not trusted by name alone. Suppression needs
+a signed proof that the richer representation is allowed to dominate the older
+one: same author or author-certified representation-set public key, same scope
+and audience, same origin command commitment, a version-graph dominance
+relation, and a hash chain or manifest entry that names the older fact id. A
+separate representation-set manifest can list all sibling fact ids after they
+are computed, or each richer representation can hash-reference the older
+representation it suppresses.
+
+In practice, a newer representation projects an offer such as
+`newer_representation_available(group_id, version, fact_id)`. Older
+representation projectors keep a matching need; when the offer arrives, they
+purge only their materialized rows and emit a suppression offer such as
+`representation_suppressed(old_fact_id, by_fact_id)`. The signed old fact stays
+in the durable log until retention or version-deprecation purge removes it.
+
+This turns dual-publish into bounded multi-publish across still-supported
+release view versions. The bound is the support policy: when a version is
+deprecated, writers stop producing that view version forever, and existing
+compatibility view facts for that deprecated version are purged by fact-driven
+deprecation policy. The richest/source representation is not purged merely
+because an older view version expired. Ephemeral communication can choose a
 lowest-common-denominator representation from handshake capabilities instead of
 publishing every supported view.
 
-The benefit is signing provenance. The author signs every published
-representation at creation time, so older clients do not need an authority to
-rewrite authorship later. Cambria-style downgrade rules help generate the view
-facts from the rich command, but the signed outputs are ordinary facts.
+The benefit is signing provenance. The author or the author-certified
+representation-set key signs every published representation at creation time,
+so older clients do not need an authority to rewrite authorship later.
+Cambria-style downgrade rules help generate the view facts from the rich
+command, but the signed outputs are ordinary facts.
 
-Maximal option E: suppress fallbacks with richer context.
+Maximal tactic E: suppress fallbacks with richer context.
 
-Fallback and rich facts should share a stable `presentation_group_id` or derive
-one from the originating command. Older clients display the best view version
-they understand. Newer clients wait briefly for all facts in a presentation
-group, choose the richest readable representation, and suppress lower-fidelity
-fallbacks. Sync should keep facts in the same presentation group close together
-so upgraded clients do not flash the fallback before the rich view arrives.
+Fallback and rich facts may share a stable `presentation_group_id` for batching
+and UI grouping. It can be the hash of an author-certified representation-set
+public key, but the id itself is only a hint. It must not authorize suppression
+because another writer could copy the same display id without holding the
+private key. Older clients display the best view version they understand. Newer
+clients wait briefly for facts in the same representation set, validate the
+signed representation-set proof, choose the richest readable representation,
+and suppress lower-fidelity fallbacks only after that proof succeeds. Sync
+should keep facts in the same representation set close together so upgraded
+clients do not flash the fallback before the rich view arrives.
+
+A shared per-group secret is not sufficient for durable suppression because any
+holder of that secret could impersonate suppression authority for another
+member's representation. Group secrets can encrypt or authorize the audience,
+but replacement and suppression should be signed by the original author or by a
+one-command representation-set private key that the original author certified
+for that exact command and set of versions.
 
 If a client sees only the fallback, it should render a clear downgraded card,
 such as "Alice created a calendar event: Team sync, Friday 10am" with an info
 affordance saying the feature is not fully supported by this client.
 
-Maximal option F: access-controlled fallback placement.
+Maximal tactic F: access-controlled fallback placement.
 
 Fallback facts must be published only into scopes where the fallback is allowed
 to be visible. For a new channel, calendar, or space, the fallback cannot simply
@@ -221,7 +279,7 @@ native contents remain unavailable until a client supports that container scope,
 but the fallback preserves visibility that something happened without leaking
 more than the old scope authorizes.
 
-Maximal option G: handshake and sync capabilities.
+Maximal tactic G: handshake and sync capabilities.
 
 Handshake should advertise supported view versions, rich fact versions, fallback
 view versions, and ephemeral formats per scope. Writers use these capabilities
@@ -231,12 +289,12 @@ durable view facts are still required for supported clients.
 Sync should operate on fact ids plus metadata that lets related representations
 travel together. A negentropy-style compare can remain set reconciliation, but
 the fact ids should carry or be indexed by presentation group, scope, audience,
-and view version so a responder can include missing siblings when one member of
-a group is requested. A newer sync protocol could make presentation groups a
-first-class batch unit. Either way, access control is checked per fact and per
-scope before sending.
+release view version, and version-graph node so a responder can include missing
+siblings when one member of a group is requested. A newer sync protocol could
+make presentation groups a first-class batch unit. Either way, access control is
+checked per fact and per scope before sending.
 
-Maximal option H: participant-set readiness as optimization, not gate.
+Maximal tactic H: participant-set readiness as optimization, not gate.
 
 Instead of gating by whole workspace, the runtime computes readiness for the
 exact affected participant set. A DM feature can become available when both
@@ -250,7 +308,7 @@ view versions. The feature manifest still needs to state the visibility domain:
 `local_user`, `device_set`, `dm_participants`, `channel_members`, or
 `workspace`.
 
-Maximal option I: multi-protocol sessions.
+Maximal tactic I: multi-protocol sessions.
 
 Connection bootstrap negotiates envelope versions, crypto transcript families,
 scope capabilities, and optional subprotocols. A single peer connection can run
@@ -261,12 +319,12 @@ This is the most flexible network model and the highest engineering cost. It is
 appropriate only if poc-10 intentionally becomes a protocol platform or supports
 long-lived forks.
 
-Recommended maximal path: use versioned scope manifests, explicit degradation
-lenses, multi-publish view versions, fallback suppression, and
-access-controlled fallback placement as the core model. Use participant-set
-readiness only to reduce the number of view facts produced. Defer
-multi-protocol sessions until there is a real multi-protocol network
-requirement.
+Recommended maximal path: use graph-addressed scope manifests, explicit
+degradation lenses, durable representation sets, multi-publish release view
+versions, fallback suppression, and access-controlled fallback placement as the
+core model. Use participant-set readiness only to reduce the number of view
+facts produced. Defer multi-protocol sessions until there is a real
+multi-protocol network requirement.
 
 ## Common Implementation Rules
 
