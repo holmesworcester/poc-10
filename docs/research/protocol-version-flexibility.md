@@ -281,17 +281,40 @@ more than the old scope authorizes.
 
 Maximal tactic G: handshake and sync capabilities.
 
-Handshake should advertise supported view versions, rich fact versions, fallback
-view versions, and ephemeral formats per scope. Writers use these capabilities
-to choose which representations to publish for ephemeral messages and which
-durable view facts are still required for supported clients.
+Handshake capabilities should not decide which durable representations a shared
+fact needs. A peer on the current connection is only one observer; durable
+visibility depends on the audience, future joiners, workspace membership,
+release/deprecation policy, and the protocol manifests the workspace accepts.
+For the one-product case, the safest durable rule is to publish every
+non-deprecated released view version for that fact family. Each release manifest
+records the previous release view versions it can read and the version-graph
+nodes those releases correspond to.
+
+For heterogeneous clients, forks, or modular protocol users, missing durable
+representations should converge deterministically. Devices publish signed
+capability or representation-need facts for recognized release aliases or
+workspace-accepted protocol manifests. If an existing representation set is
+missing one of those accepted view versions, the original author or
+author-certified representation-set key can publish the missing sibling later.
+Unknown or exotic version claims do not obligate the creator to publish more
+facts; protocol admission, quotas, rate limits, and abuse handling are product
+policy around the manifest allowlist, not properties of the handshake.
+
+Handshake remains useful for ephemeral events and connection-local formats. A
+1:1 or session protocol can start with the lowest non-deprecated bootstrap
+envelope that every supported client must understand, authenticate the peer and
+capability exchange, bind the negotiation transcript to the session keys, and
+then move up to the highest mutually supported ephemeral format. If peers share
+only the bootstrap floor, they stay there. The selected version should never be
+chosen from unauthenticated offers, otherwise an active network attacker can
+strip newer capabilities and force a downgrade.
 
 Sync should operate on fact ids plus metadata that lets related representations
 travel together. A negentropy-style compare can remain set reconciliation, but
 the fact ids should carry or be indexed by presentation group, scope, audience,
 release view version, and version-graph node so a responder can include missing
 siblings when one member of a group is requested. A newer sync protocol could
-make presentation groups a first-class batch unit. Either way, access control is
+make representation sets a first-class batch unit. Either way, access control is
 checked per fact and per scope before sending.
 
 Maximal tactic H: participant-set readiness as optimization, not gate.
@@ -302,9 +325,13 @@ parties and all their active devices support it. A private draft feature can be
 available to one user immediately. A workspace-wide policy feature waits for
 workspace-wide support or legacy-visible fallback.
 
-In the no-gate maximal design this is an optimization: if all affected
-participants can read v3, publish only v3. If not, publish the needed fallback
-view versions. The feature manifest still needs to state the visibility domain:
+In the no-gate maximal design this is only an optimization for closed,
+well-known participant sets. If all affected participants can read v3, publish
+only v3. If not, publish the needed fallback view versions. For open-ended
+audiences such as a workspace that may gain new members or devices later, prefer
+the release-manifest rule: publish every non-deprecated released view version,
+then converge by adding recognized missing siblings if the accepted manifest set
+expands. The feature manifest still needs to state the visibility domain:
 `local_user`, `device_set`, `dm_participants`, `channel_members`, or
 `workspace`.
 
