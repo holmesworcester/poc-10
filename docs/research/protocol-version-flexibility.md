@@ -130,10 +130,8 @@ Goals:
   forcing the whole poc-10 product release train.
 - Support multiple simultaneous protocols on the same connection or network,
   with explicit capability negotiation and versioned dispatch.
-- Make one-person features available immediately when they affect only that
-  user's devices.
-- Make fixed-group features available as soon as every included participant can
-  see them on all relevant devices, such as both parties in a DM.
+- Avoid production write gates. New features should become writable immediately
+  by publishing every representation needed by supported readers.
 - Support different desktop and mobile feature sets, including advanced
   platform-specific features, while maintaining graceful degradation for clients
   that do not support the richer view.
@@ -174,7 +172,71 @@ operate on typed facts and commands, not arbitrary core bytes.
 This enables early feature availability but is only correct when the
 degradation relation preserves user intent clearly enough.
 
-Maximal option D: participant-set readiness gates.
+Maximal option D: multi-publish view versions.
+
+For multi-client-visible features, writers publish the richest fact plus bounded
+fallback view facts for supported reader versions that cannot display the rich
+fact. This is not "latest plus one lowest-common fallback" if intermediate
+versions preserve more meaning. If supported clients exist on v1, v2, and v3,
+and v2 can display a better downgraded view than v1, the writer may publish v3,
+v2-view, and v1-view facts together.
+
+This turns dual-publish into bounded multi-publish across still-supported view
+versions. The bound is the support policy: when a version is deprecated, writers
+stop producing that view version forever. Ephemeral communication can choose a
+lowest-common-denominator representation from handshake capabilities instead of
+publishing every supported view.
+
+The benefit is signing provenance. The author signs every published
+representation at creation time, so older clients do not need an authority to
+rewrite authorship later. Cambria-style downgrade rules help generate the view
+facts from the rich command, but the signed outputs are ordinary facts.
+
+Maximal option E: suppress fallbacks with richer context.
+
+Fallback and rich facts should share a stable `presentation_group_id` or derive
+one from the originating command. Older clients display the best view version
+they understand. Newer clients wait briefly for all facts in a presentation
+group, choose the richest readable representation, and suppress lower-fidelity
+fallbacks. Sync should keep facts in the same presentation group close together
+so upgraded clients do not flash the fallback before the rich view arrives.
+
+If a client sees only the fallback, it should render a clear downgraded card,
+such as "Alice created a calendar event: Team sync, Friday 10am" with an info
+affordance saying the feature is not fully supported by this client.
+
+Maximal option F: access-controlled fallback placement.
+
+Fallback facts must be published only into scopes where the fallback is allowed
+to be visible. For a new channel, calendar, or space, the fallback cannot simply
+go to the whole workspace if the new object has narrower membership. The feature
+must either publish fallback activity into an already-readable parent scope that
+is authorized for the same audience, publish per-member fallback facts, or accept
+that old clients see only parent-level activity such as "A space was created"
+without access to the space's contents.
+
+For entirely new private containers, old clients may be able to display only
+creation/update activity in the parent workspace or channel. The new container's
+native contents remain unavailable until a client supports that container scope,
+but the fallback preserves visibility that something happened without leaking
+more than the old scope authorizes.
+
+Maximal option G: handshake and sync capabilities.
+
+Handshake should advertise supported view versions, rich fact versions, fallback
+view versions, and ephemeral formats per scope. Writers use these capabilities
+to choose which representations to publish for ephemeral messages and which
+durable view facts are still required for supported clients.
+
+Sync should operate on fact ids plus metadata that lets related representations
+travel together. A negentropy-style compare can remain set reconciliation, but
+the fact ids should carry or be indexed by presentation group, scope, audience,
+and view version so a responder can include missing siblings when one member of
+a group is requested. A newer sync protocol could make presentation groups a
+first-class batch unit. Either way, access control is checked per fact and per
+scope before sending.
+
+Maximal option H: participant-set readiness as optimization, not gate.
 
 Instead of gating by whole workspace, the runtime computes readiness for the
 exact affected participant set. A DM feature can become available when both
@@ -182,11 +244,13 @@ parties and all their active devices support it. A private draft feature can be
 available to one user immediately. A workspace-wide policy feature waits for
 workspace-wide support or legacy-visible fallback.
 
-This matches real product expectations, but it requires the feature manifest to
-state the visibility domain: `local_user`, `device_set`, `dm_participants`,
-`channel_members`, or `workspace`.
+In the no-gate maximal design this is an optimization: if all affected
+participants can read v3, publish only v3. If not, publish the needed fallback
+view versions. The feature manifest still needs to state the visibility domain:
+`local_user`, `device_set`, `dm_participants`, `channel_members`, or
+`workspace`.
 
-Maximal option E: multi-protocol sessions.
+Maximal option I: multi-protocol sessions.
 
 Connection bootstrap negotiates envelope versions, crypto transcript families,
 scope capabilities, and optional subprotocols. A single peer connection can run
@@ -197,10 +261,12 @@ This is the most flexible network model and the highest engineering cost. It is
 appropriate only if poc-10 intentionally becomes a protocol platform or supports
 long-lived forks.
 
-Recommended maximal path: use option A and option D as product-facing concepts,
-then add option B only for scopes that genuinely need independent versioning.
-Use option C sparingly for high-value graceful degradation. Defer option E until
-there is a real multi-protocol network requirement.
+Recommended maximal path: use versioned scope manifests, explicit degradation
+lenses, multi-publish view versions, fallback suppression, and
+access-controlled fallback placement as the core model. Use participant-set
+readiness only to reduce the number of view facts produced. Defer
+multi-protocol sessions until there is a real multi-protocol network
+requirement.
 
 ## Common Implementation Rules
 
@@ -217,9 +283,10 @@ Both designs should follow the existing ownership rules:
 - Old canonical bytes stay hash-stable. Translation happens when opening,
   projecting, querying, or executing commands, never by rewriting the fact
   before identity is computed.
-- Read support and write support are separate capabilities. Production write
-  gates require reader readiness; alpha and test write paths may exist before
-  production write is enabled.
+- Read support and write support are separate capabilities. The minimal design
+  uses production write gates when supported readers cannot open a feature. The
+  maximal design avoids gates by publishing the representations required by
+  supported readers.
 - Non-ephemeral facts should replay into deterministic state on upgrade.
   Replayed projectors may rebuild derived tables and indexes, but must not
   perform IO or side effects.
@@ -227,9 +294,11 @@ Both designs should follow the existing ownership rules:
   durable needs must retain the material required to rebuild state or schedule
   follow-up durable work until that material is purged or retired.
 - Adding a feature id requires a manifest entry with a compatibility class:
-  `epoch_gated`, `legacy_fallback`, `participant_ready`, or `internal_only`.
+  `epoch_gated`, `legacy_fallback`, `multipublish_view_versions`,
+  `participant_ready`, or `internal_only`.
 - A feature cannot create a new workspace-visible fact family without either a
-  fallback mapping, a participant/readiness gate, or an epoch gate.
+  minimal gate, a legacy fallback mapping, or a maximal multi-publish and
+  degradation plan.
 
 The minimal design is the best fit for poc-10 now because it gives a principled
 way to ship substantial internal changes without breaking supported clients.
