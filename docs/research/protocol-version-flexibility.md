@@ -279,7 +279,7 @@ native contents remain unavailable until a client supports that container scope,
 but the fallback preserves visibility that something happened without leaking
 more than the old scope authorizes.
 
-Maximal tactic G: handshake and sync capabilities.
+Maximal tactic G: sync protocol negotiation and capabilities.
 
 Handshake capabilities should not decide which durable representations a shared
 fact needs. A peer on the current connection is only one observer; durable
@@ -300,35 +300,43 @@ Unknown or exotic version claims do not obligate the creator to publish more
 facts; protocol admission, quotas, rate limits, and abuse handling are product
 policy around the manifest allowlist, not properties of the handshake.
 
-Handshake remains useful for ephemeral events and connection-local formats. A
-1:1 or session protocol can start with the lowest non-deprecated bootstrap
-envelope that every supported client must understand, authenticate the peer and
-capability exchange, bind the negotiation transcript to the session keys, and
-then move up to the highest mutually supported ephemeral format. If peers share
-only the bootstrap floor, they stay there. The selected version should never be
-chosen from unauthenticated offers, otherwise an active network attacker can
-strip newer capabilities and force a downgrade.
+Different sync protocol versions negotiate through a fixed bootstrap floor:
 
-Sync has two separate jobs. The reconciliation job can remain ordinary
-set-reconciliation over fact ids: a negentropy-style compare finds that a peer
-is missing fact `X`. The representation-set job runs after that compare. The
-responder looks up `X` in a local index built from fact contents and projection
-rows: `representation_set_id -> sibling fact ids, scope, audience, release view
-version, and version-graph node`.
+1. Start every connection in the lowest non-deprecated sync-control envelope
+   that all supported clients must understand. This envelope is deliberately
+   small: identify the peer, establish or resume session keys, exchange
+   capability manifests, and select the sync protocol for the session.
+2. After authentication, each side sends a transcript-bound capability manifest:
+   supported sync protocol families, supported version graph nodes or release
+   aliases, minimum accepted version, preferred version, and feature bits such
+   as set reconciliation, chunking, resume tokens, and representation-set batch.
+3. Select deterministically from the authenticated manifests: choose the highest
+   mutually supported sync version that is not below either side's minimum and
+   is allowed by local deprecation policy. If there is no version above the
+   bootstrap floor, keep using the floor. If even the floor is not allowed,
+   close with an upgrade-required error.
+4. Bind both complete manifests and the selected version into the session
+   transcript before sending sync data. If an active network attacker strips
+   newer capabilities, the transcript check fails or both peers derive different
+   selected versions and abort.
+5. Run the negotiated sync protocol. That protocol choice controls only the
+   session algorithm and envelopes, not the durable meaning of facts. An older
+   sync protocol may transfer the same canonical facts less efficiently; it must
+   not reinterpret their scope or fact-family versions.
 
-If `X` belongs to a representation set, the responder should send the missing
-authorized siblings in the same response when the peer can admit them. This is
-what prevents extra round trips and avoids an upgraded client briefly rendering
-the v1 fallback because the v3 sibling arrives later. The fact id itself stays a
-plain hash of canonical bytes; the grouping data lives in signed facts and local
-indexes, not in the id format.
+For example, `sync-v1` might exchange raw fact ids and bytes after a basic
+set-reconciliation compare. `sync-v2` might add representation-set summaries:
+when compare finds that a peer is missing fact `X`, the responder looks up `X`
+in a local index built from signed fact contents and projection rows, then
+sends the missing authorized sibling facts in the same response. If the session
+falls back to `sync-v1`, those siblings may arrive in later requests, but they
+remain the same signed facts. Access control is checked per sibling fact and per
+scope before sending, because fallback facts may live in a parent scope, a
+private container scope, or per-member scopes.
 
-A newer sync protocol could make this explicit by reconciling representation-set
-summaries first, such as `representation_set_id`, available release view
-versions, version-graph nodes, and sibling fact ids, then transferring missing
-authorized siblings as one batch. Access control is still checked per sibling
-fact and per scope before sending, because fallback facts may live in a parent
-scope, a private container scope, or per-member scopes.
+Ephemeral 1:1 or session-only protocols use the same shape: start from the
+bootstrap floor, authenticate the capability exchange, then move up to the
+highest mutually supported ephemeral format.
 
 Maximal tactic H: participant-set readiness as optimization, not gate.
 
