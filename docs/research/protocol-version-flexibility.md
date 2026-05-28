@@ -186,6 +186,9 @@ Goals:
   state or there is an explicit legacy-visible fallback.
 - Make migrations automatic once the boundary is reached, with old clients
   expired or unable to create new workspace state.
+- Keep every non-ephemeral fact replayable into deterministic state. On upgrade,
+  a client can discard derived tables and rebuild them by replaying durable
+  facts through the current registered projectors.
 - Test all combinations that can occur during the transition period: old binary
   with old data, new binary before the feature epoch, alpha writer with prod
   readers, prod binary with write gate disabled, new binary after the epoch,
@@ -206,6 +209,37 @@ non-deprecated clients can read the state, the production write gate opens.
 
 This keeps implementation honest: the feature is fully testable before launch,
 but no production user can create state that supported teammates cannot see.
+
+Minimal baseline: replay-derived-state-on-upgrade.
+
+Every non-ephemeral fact should be a durable input to deterministic projection.
+On each upgrade, the runtime may rebuild local deterministic state from the fact
+log instead of carrying bespoke table migrations forward forever. Database
+tables, indexes, materialized rows, query caches, and compatibility rows become
+derived state. Upgrading code can wipe those derived tables, replay facts through
+the current projector registry, and produce the current local schema.
+
+This makes structural change easier: old row layouts do not need a long chain of
+imperative migrations, and major internal redesigns can be validated by replay.
+The test harness should include replay from fixture fact logs produced by every
+supported transition version. It should also compare old and new projections for
+states that are meant to remain semantically equivalent.
+
+Replay-on-upgrade needs strict boundaries:
+
+- Facts are durable protocol truth; replay must not resend network frames,
+  repeat one-time side effects, recreate already-sent key wraps, or consume
+  external IO.
+- Ephemeral facts, local intent queues, download progress, network checkpoints,
+  local-only secrets, and other operational state need their own upgrade path or
+  must be safe to drop.
+- Projectors must be deterministic over facts plus explicit context. If old work
+  should keep old semantics, those semantics need an explicit policy/version
+  fact or an `effective_from` boundary; replay must not silently reinterpret old
+  user-visible history.
+- Retention and purge rules must be represented as durable facts or explicit
+  absence semantics so replay can reconstruct the intended current state from
+  the remaining log.
 
 Minimal option A: global compatibility epochs.
 
@@ -235,12 +269,14 @@ Minimal option C: expand-then-contract storage migrations.
 
 During the support window, new binaries write old-compatible durable state plus
 new shadow rows or facts. Old clients continue to operate on the old shape. At
-the epoch boundary, the runtime runs the contract migration, removes old rows or
-compatibility projectors, and makes the new representation canonical.
+the epoch boundary, the runtime either replays durable facts into the new schema
+or runs the contract migration, removes old rows or compatibility projectors,
+and makes the new representation canonical.
 
-This is the right shape for database and index changes. It avoids a hard stop on
-internal improvements, but it should still forbid user-visible creation of a
-new non-degradable feature until the epoch is safe.
+This is the fallback for state that cannot be rebuilt cheaply on every upgrade
+or for transition periods where old and new binaries need side-by-side local
+representations. Pure derived database and index changes should prefer
+replay-on-upgrade.
 
 Minimal option D: legacy-visible fallback facts.
 
@@ -253,10 +289,12 @@ visibility.
 This option should be opt-in. If the fallback is lossy or confusing, the feature
 should use an epoch gate instead.
 
-Recommended minimal path: make read-before-prod-write the default rule, then
-start with option A plus option C. Add option D only for features with an honest
-old-client rendering. Option B is useful once the project has enough feature
-families that a single epoch becomes too blunt.
+Recommended minimal path: make read-before-prod-write and
+replay-derived-state-on-upgrade the default rules, then start with option A.
+Use option C only when replay is too expensive or the state is not purely
+fact-derived. Add option D only for features with an honest old-client
+rendering. Option B is useful once the project has enough feature families that
+a single epoch becomes too blunt.
 
 ## Maximal Design
 
@@ -365,6 +403,9 @@ Both designs should follow the existing ownership rules:
 - Read support and write support are separate capabilities. Production write
   gates require reader readiness; alpha and test write paths may exist before
   production write is enabled.
+- Non-ephemeral facts should replay into deterministic state on upgrade.
+  Replayed projectors may rebuild derived tables and indexes, but must not
+  perform IO or side effects.
 - Adding a feature id requires a manifest entry with a compatibility class:
   `epoch_gated`, `legacy_fallback`, `participant_ready`, or `internal_only`.
 - A feature cannot create a new workspace-visible fact family without either a
