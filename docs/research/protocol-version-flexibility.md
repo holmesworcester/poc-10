@@ -279,12 +279,14 @@ no remaining durable facts need it. Auth-like forever facts may require keeping
 their replay adapters indefinitely unless a new protocol explicitly retains the
 old signed bytes as evidence.
 
-Durable conversion is constrained by signatures. An admin or workspace authority
+Durable conversion is constrained by signatures. The minimal design keeps old
+author-signed facts as the provenance source. An admin or workspace authority
 must not be able to convert an author-signed fact into a new fact that appears
 to be signed by the original author. That would create impersonation authority.
-For author-signed facts, the safe default is to keep the old signed bytes and
-old replay adapter. A signer can publish their own supersession fact when they
-are still present. A policy authority can publish interpretation, retention, or
+For author-signed facts, old signed bytes and the matching replay adapter remain
+the source of truth until the fact is purged under its workspace retention
+policy. A signer can publish their own supersession fact when they are still
+present. A policy authority can publish interpretation, retention, or
 purge-policy facts, but those facts should not claim to be replacement author
 signatures.
 
