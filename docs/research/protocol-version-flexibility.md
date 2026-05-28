@@ -230,9 +230,18 @@ Replay-on-upgrade needs strict boundaries:
 - Facts are durable protocol truth; replay must not resend network frames,
   repeat one-time side effects, recreate already-sent key wraps, or consume
   external IO.
-- Ephemeral facts, local intent queues, download progress, network checkpoints,
-  local-only secrets, and other operational state need their own upgrade path or
-  must be safe to drop.
+- Non-ephemeral local state must be represented as durable local facts, durable
+  queues, or derivable rows until its purge or expiry. That includes local
+  secrets, device keys, pending durable intents, user-visible download progress,
+  correctness-affecting daemon checkpoints, and platform capability or
+  permission observations that affect feature eligibility.
+- Socket state, live sessions, in-flight connection handshakes, and other
+  transport process state are ephemeral. They do not need to survive upgrade;
+  they must be safe to drop and rebuild by reconnecting from durable facts and
+  queues.
+- Ephemeral facts and caches are safe only when losing them cannot remove
+  user-visible work, secret material needed for future decryption, or durable
+  obligations.
 - Projectors must be deterministic over facts plus explicit context. If old work
   should keep old semantics, those semantics need an explicit policy/version
   fact or an `effective_from` boundary; replay must not silently reinterpret old
@@ -241,6 +250,10 @@ Replay-on-upgrade needs strict boundaries:
   facts or explicit absence semantics so replay can reconstruct the intended
   current state from the remaining log. Some fact families, especially auth,
   may be retained forever in the current model.
+- Durable facts are purged only when the data they describe is also purged by
+  policy. Purge, retention, deletion, and disappearance decisions must be
+  expressed as facts before target facts or payloads disappear, so replay cannot
+  resurrect data that policy says is gone.
 
 Replay-on-upgrade also changes how poc-10 can handle old protocol versions. For
 the minimal design, poc-10 does not need Cambria-style lenses at first. It can
