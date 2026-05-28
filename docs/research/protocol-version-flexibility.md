@@ -367,12 +367,34 @@ This is the most flexible network model and the highest engineering cost. It is
 appropriate only if poc-10 intentionally becomes a protocol platform or supports
 long-lived forks.
 
-Recommended maximal path: use graph-addressed scope manifests, explicit
-degradation lenses, durable representation sets, multi-publish release view
-versions, fallback suppression, and access-controlled fallback placement as the
-core model. Use participant-set readiness only to reduce the number of view
-facts produced. Defer multi-protocol sessions until there is a real
-multi-protocol network requirement.
+Recommended maximal baseline:
+
+- Every release ships a graph-addressed scope manifest. The manifest names the
+  supported version-graph nodes, release aliases, non-deprecated view versions,
+  bootstrap sync floor, and deprecation policy for each scope.
+- Every durable shared feature declares its visibility domain and a typed
+  degradation lens from the richest command or fact to each non-deprecated
+  release view version that domain may require. If no degradation preserves
+  visibility, the feature must publish an explicit unsupported-activity fact in
+  an authorized parent scope or it is not maximal-compatible for old clients.
+- On write, the creator produces one author-certified representation set. For
+  open-ended audiences, publish the richest/source fact plus every
+  non-deprecated release-view sibling. For closed participant sets, omit a
+  sibling only when every included active device can read a richer sibling.
+- Projectors verify the representation-set proof, scope, audience,
+  version-graph dominance, and hash links before suppressing lower-fidelity
+  rows. Readers display the newest verified sibling they understand.
+- Sync negotiates the session protocol through the bootstrap floor and the
+  highest authenticated common sync version. The chosen sync version may batch
+  representation-set siblings, but it transfers the same canonical facts and
+  does not define durable compatibility.
+- Deprecation stops new writes of that release-view sibling and purges old
+  compatibility view facts by policy. Rich/source facts remain until normal
+  retention purges them.
+
+Defer true multi-protocol sessions, where one connection concurrently runs
+several independent product protocols, until poc-10 actually needs forked or
+third-party protocol networks.
 
 ## Common Implementation Rules
 
