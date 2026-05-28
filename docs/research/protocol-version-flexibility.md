@@ -241,6 +241,41 @@ Replay-on-upgrade needs strict boundaries:
   absence semantics so replay can reconstruct the intended current state from
   the remaining log.
 
+Replay-on-upgrade also changes how poc-10 can handle old protocol versions. For
+the minimal design, poc-10 does not need Cambria-style lenses at first. It can
+keep old versioned codecs and projectors as replay adapters, for example
+`protocol/v1/auth/key_wrap` and `protocol/v2/auth/key_wrap`. Those modules
+decode their canonical fact bytes and project into the current local rows. The
+project can accumulate supported replay adapters for the support window and
+still patch old adapters for security or validation fixes.
+
+This accumulation should be bounded by product policy. Once a protocol epoch is
+past the deprecation and retention horizon, the old replay adapter can be
+removed if no remaining durable facts need it or if there is a one-time durable
+conversion into a newer fact family. Until then, old adapters are easier and
+safer than lenses because they preserve the original canonical bytes and hash
+identity.
+
+Projectors that normally cause non-ephemeral facts through intents need a replay
+contract. Replay projectors may declare missing durable work, but they must not
+execute it directly. For example, if a new key-wrap format is required, replay
+can derive "recipient X lacks key-wrap coverage for secret Y under format Z" as
+a row or need. The normal runtime then schedules idempotent key-wrap creation
+outside replay. Each produced key-wrap fact has a deterministic coverage key, so
+all clients converge without creating unbounded duplicates.
+
+Creating many new key-wrap facts can be intended after an upgrade if the new
+format is required for future reliability or security. The safety condition is
+that creation is idempotent and coverage-based, not replay-count-based: replay
+should ask "is required coverage present?" rather than "did this projector run?"
+
+Deleting old non-ephemeral facts should also be fact-driven. If old key-wraps or
+other obsolete facts should disappear, create a retirement, supersession, or
+purge-policy fact that the old target projectors observe. Deletion should not be
+an implicit side effect of replay. Old clients either still see the old facts
+during the support window, or they are past the deprecation boundary before the
+contract step removes or ignores them.
+
 Minimal option A: global compatibility epochs.
 
 Each release train defines a `min_supported_epoch` and a `current_epoch`.
