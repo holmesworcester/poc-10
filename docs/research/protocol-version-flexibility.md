@@ -54,11 +54,13 @@ intent reshaping without breaking supported users.
 
 Rules:
 
-- **Read before production write.** New visible protocol state ships first as
-  reader support: parse, project, index, query, and display. Write paths may
-  exist in alpha, dogfood, integration tests, and fixtures. Production write UI
-  and command creation stay runtime-gated until relevant non-deprecated clients
-  can read the state or a true legacy-visible fallback exists.
+- **Gate production writes for multi-client-visible features.** A feature that
+  affects multiple clients may ship with read support and write implementation
+  in the same release, but production write UI and command creation stay behind
+  a runtime gate. Write paths may exist in alpha, dogfood, integration tests,
+  and fixtures. The production gate opens automatically when the feature's
+  unsupported client versions are deprecated or expired, or earlier if there is
+  a true legacy-visible fallback.
 - **Replay derived state on upgrade.** Every non-ephemeral fact is a durable
   input to deterministic projection. On upgrade, derived tables, indexes,
   materialized rows, query caches, and compatibility rows may be discarded and
@@ -93,12 +95,23 @@ Rules:
   material was purged or is unavailable, replay leaves an unsatisfied need
   rather than fabricating coverage.
 
-The minimal default is global compatibility epochs plus read-before-prod-write
+The minimal default is global compatibility epochs plus production write gates
 and replay-on-upgrade. Per-feature deprecation horizons are useful if a single
 epoch becomes too blunt. Legacy-visible fallback facts are allowed only when the
 fallback preserves the user's visible intent. Expand/contract storage migration
 is a fallback for state that is not purely fact-derived or is too expensive to
 replay on every upgrade.
+
+Operationally, deprecation should be data, not a manual UI flag. Each feature
+declares the minimum reader epoch or version required for production writes.
+The runtime compares that requirement to product deprecation policy and local
+observed client capabilities, then returns a create-gate reason such as
+`waiting_for_deprecation`, `ready`, `ready_with_legacy_fallback`, or
+`blocked_by_policy`. If the product goes a long time without a release, gates do
+not open merely because time passed; they open when the unsupported version is
+actually expired or when the feature has a safe fallback. Long release pauses
+therefore delay new production writes, but they should not break existing reads,
+replay, or local migrations.
 
 ## Maximal Design
 
