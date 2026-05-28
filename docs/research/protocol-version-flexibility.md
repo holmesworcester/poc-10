@@ -239,6 +239,62 @@ so older clients do not need an authority to rewrite authorship later.
 Cambria-style downgrade rules help generate the view facts from the rich
 command, but the signed outputs are ordinary facts.
 
+The hard version of this design needs a validation frontier DAG. Published
+capability/version facts act like requests: if an admitted endpoint announces
+that an accepted, non-deprecated release view version is required, that request
+can deterministically wake the original author or representation-set key to
+publish a missing sibling. This resembles key-wrap requests and responses, but
+only the original author or certified representation-set key can answer because
+the response must be signed as part of the representation set.
+
+The request chain must be monotonic and hash-linked, otherwise endpoints can
+claim arbitrary old or exotic versions and cause unbounded work. A frontier fact
+names the accepted manifest, the active view versions, the deprecated view
+versions, and the prior frontier id. New content after that frontier must
+include the required non-deprecated views, or the permanent fallback described
+below. A simplified DAG looks like this:
+
+```text
+Capability frontier:
+
+F0: active [fallback], deprecated []             (feature introduced)
+ |
+ v
+F1: active [fallback, v2], prior F0              (v2 released)
+ |
+ v
+F2: active [fallback, v3], deprecated [v2], F1   (v3 released, v2 expires)
+
+Representation set for command C:
+
+C@fallback  <----depends-on----  C@v2  <----depends-on----  C@v3
+   |                              |                          |
+ frontier F0                   frontier F1                frontier F2
+```
+
+To display `C@v3`, a client must validate that `C@v3` commits to the same
+origin command, author, scope, audience, and representation-set key as the older
+copies it suppresses. It must also validate that downgrading `C@v3` through the
+declared lens path produces the exact older fact ids it depends on. This prevents
+different versions from becoming semantically different content.
+
+This is where mandatory multi-version publishing becomes consensus-like. The
+author needs to know which frontier applies, late endpoint capability facts can
+request versions the author did not know about, and a missing author cannot
+manufacture new signed siblings. The practical escape hatch is a permanent
+fallback format for each durable fact family. The fallback is introduced with
+the fact type, is never deprecated while that fact family is retained, and is
+always published with the newest/source representation. Newer representations
+must validate against that fallback. Intermediate view versions may still be
+published for better UX, but they are optional accelerators rather than the
+thing that makes validation possible.
+
+That baseline intentionally gives up the stronger invariant that every endpoint
+receives the best intermediate view it could understand. It preserves the
+smaller invariant that every endpoint can see the permanent fallback, and every
+endpoint that understands the newest/source version can validate and display
+that newest version against the same fallback.
+
 Maximal tactic E: suppress fallbacks with richer context.
 
 Fallback and rich facts may share a stable `presentation_group_id` for batching
@@ -286,15 +342,17 @@ fact needs. A peer on the current connection is only one observer; durable
 visibility depends on the audience, future joiners, workspace membership,
 release/deprecation policy, and the protocol manifests the workspace accepts.
 For the one-product case, the safest durable rule is to publish every
-non-deprecated released view version for that fact family. Each release manifest
-records the previous release view versions it can read and the version-graph
-nodes those releases correspond to.
+durable shared fact in the permanent fallback format and in the newest/source
+format. Each release manifest records the previous release view versions it can
+read and the version-graph nodes those releases correspond to, but those
+intermediate view versions are optional publishing targets rather than required
+validation anchors.
 
-For heterogeneous clients, forks, or modular protocol users, missing durable
-representations should converge deterministically. Devices publish signed
+For heterogeneous clients, forks, or modular protocol users, missing optional
+representations can converge deterministically. Devices publish signed
 capability or representation-need facts for recognized release aliases or
 workspace-accepted protocol manifests. If an existing representation set is
-missing one of those accepted view versions, the original author or
+missing one of those accepted optional view versions, the original author or
 author-certified representation-set key can publish the missing sibling later.
 Unknown or exotic version claims do not obligate the creator to publish more
 facts; protocol admission, quotas, rate limits, and abuse handling are product
@@ -376,21 +434,22 @@ capability exchange is authenticated.
 Event-creating intents should not each hand-roll this decision. The command or
 intent handler asks a compatibility planner for a representation plan using the
 feature id, scope, visibility domain, participant set, accepted manifests, and
-deprecation policy. The planner returns either one highest-common version for a
-closed set, all non-deprecated release view versions for an open-ended audience,
-or a concrete failure explaining which participants or manifests are missing.
-The handler then emits the representation set described by that plan and records
-the plan hash or manifest ids in the representation-set proof.
+deprecation policy. The planner returns the mandatory fallback-plus-newest plan
+for open-ended durable audiences, one highest-common session or closed-set
+version when fallback is not needed, any optional intermediate view versions
+worth emitting, or a concrete failure explaining which participants or manifests
+are missing. The handler then emits the representation set described by that
+plan and records the plan hash or manifest ids in the representation-set proof.
 
 In the no-gate maximal design this is only an optimization for closed,
 well-known participant sets. If all affected participants can read v3, publish
-only v3. If not, publish the needed fallback view versions. For open-ended
-audiences such as a workspace that may gain new members or devices later, prefer
-the release-manifest rule: publish every non-deprecated released view version,
-then converge by adding recognized missing siblings if the accepted manifest set
-expands. The feature manifest still needs to state the visibility domain:
-`local_user`, `device_set`, `dm_participants`, `channel_members`, or
-`workspace`.
+only v3 for that closed set, or publish fallback plus v3 if the content must
+remain readable by future devices. If not, publish the permanent fallback plus
+the richest version the participants can share. For open-ended audiences such as
+a workspace that may gain new members or devices later, prefer the permanent
+fallback rule and optionally add recognized intermediate siblings. The feature
+manifest still needs to state the visibility domain: `local_user`, `device_set`,
+`dm_participants`, `channel_members`, or `workspace`.
 
 Maximal tactic I: multi-protocol sessions.
 
@@ -408,25 +467,32 @@ Recommended maximal baseline:
 - Every release ships a graph-addressed scope manifest. The manifest names the
   supported version-graph nodes, release aliases, non-deprecated view versions,
   bootstrap sync floor, and deprecation policy for each scope.
+- Every durable shared fact family declares a permanent fallback format when it
+  is introduced. The fallback is the validation anchor and remains available
+  until the fact family itself is purged or retired.
 - Every durable shared feature declares its visibility domain and a typed
-  degradation lens from the richest command or fact to each non-deprecated
-  release view version that domain may require. If no degradation preserves
-  visibility, the feature must publish an explicit unsupported-activity fact in
-  an authorized parent scope or it is not maximal-compatible for old clients.
+  degradation lens from the richest command or fact to the permanent fallback.
+  Optional lenses to intermediate release view versions are allowed for better
+  UX, but they are not required for correctness. If no fallback degradation
+  preserves visibility, the feature must publish an explicit unsupported-activity
+  fact in an authorized parent scope or it is not maximal-compatible for old
+  clients.
 - On write, the creator produces one author-certified representation set. For
-  open-ended audiences, publish the richest/source fact plus every
-  non-deprecated release-view sibling. For closed participant sets, omit a
-  sibling only when every included active device can read a richer sibling.
+  open-ended audiences, publish the permanent fallback plus the richest/source
+  fact. For closed participant sets, the planner may publish only the highest
+  common version, or fallback plus that version if future devices need replay.
+  Intermediate release-view siblings are optional.
 - Projectors verify the representation-set proof, scope, audience,
-  version-graph dominance, and hash links before suppressing lower-fidelity
-  rows. Readers display the newest verified sibling they understand.
+  version-graph dominance, fallback dependency, and hash links before
+  suppressing lower-fidelity rows. Readers display the newest verified sibling
+  they understand.
 - Sync negotiates the session protocol through the bootstrap floor and the
   highest authenticated common sync version. The chosen sync version may batch
   representation-set siblings, but it transfers the same canonical facts and
   does not define durable compatibility.
-- Deprecation stops new writes of that release-view sibling and purges old
-  compatibility view facts by policy. Rich/source facts remain until normal
-  retention purges them.
+- Deprecation stops new writes of optional intermediate release-view siblings
+  and purges those compatibility view facts by policy. Permanent fallback and
+  rich/source facts remain until normal retention purges them.
 
 Defer true multi-protocol sessions, where one connection concurrently runs
 several independent product protocols, until poc-10 actually needs forked or
@@ -458,11 +524,11 @@ Both designs should follow the existing ownership rules:
   durable needs must retain the material required to rebuild state or schedule
   follow-up durable work until that material is purged or retired.
 - Adding a feature id requires a manifest entry with a compatibility class:
-  `epoch_gated`, `legacy_fallback`, `multipublish_view_versions`,
-  `participant_ready`, or `internal_only`.
+  `epoch_gated`, `legacy_fallback`, `permanent_fallback`,
+  `multipublish_view_versions`, `participant_ready`, or `internal_only`.
 - A feature cannot create a new workspace-visible fact family without either a
-  minimal gate, a legacy fallback mapping, or a maximal multi-publish and
-  degradation plan.
+  minimal gate, a legacy fallback mapping, or a maximal permanent-fallback or
+  multi-publish degradation plan.
 
 The minimal design is the best fit for poc-10 now because it gives a principled
 way to ship substantial internal changes without breaking supported clients.
