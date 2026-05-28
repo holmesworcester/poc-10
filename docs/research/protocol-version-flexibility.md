@@ -300,6 +300,14 @@ Unknown or exotic version claims do not obligate the creator to publish more
 facts; protocol admission, quotas, rate limits, and abuse handling are product
 policy around the manifest allowlist, not properties of the handshake.
 
+Sync and connection protocols are the participant-aware special case. The
+audience is exactly the two peers for the lifetime of the session, so there is
+no need to publish every non-deprecated released version. Until each side knows
+the other's authenticated capabilities, all control traffic uses the lowest
+non-deprecated bootstrap format. After that, session traffic uses the highest
+mutually available version allowed by both peers and local deprecation policy.
+If the peer set or capabilities change, start a new session and negotiate again.
+
 Different sync protocol versions negotiate through a fixed bootstrap floor:
 
 1. Start every connection in the lowest non-deprecated sync-control envelope
