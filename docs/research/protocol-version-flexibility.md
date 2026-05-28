@@ -235,6 +235,12 @@ Replay-on-upgrade needs strict boundaries:
   secrets, device keys, pending durable intents, user-visible download progress,
   correctness-affecting daemon checkpoints, and platform capability or
   permission observations that affect feature eligibility.
+- Replay must include the material needed to make progress. Durable facts,
+  durable local facts, or explicit replay needs must represent every input
+  needed to rebuild deterministic state or schedule required durable work. If a
+  device must create replacement key-wrap coverage, the relevant local secret
+  material or a durable need for that material must survive until the secret is
+  intentionally purged or retired.
 - Socket state, live sessions, in-flight connection handshakes, and other
   transport process state are ephemeral. They do not need to survive upgrade;
   they must be safe to drop and rebuild by reconnecting from durable facts and
@@ -242,10 +248,12 @@ Replay-on-upgrade needs strict boundaries:
 - Ephemeral facts and caches are safe only when losing them cannot remove
   user-visible work, secret material needed for future decryption, or durable
   obligations.
-- Projectors must be deterministic over facts plus explicit context. If old work
-  should keep old semantics, those semantics need an explicit policy/version
-  fact or an `effective_from` boundary; replay must not silently reinterpret old
-  user-visible history.
+- Projectors must be deterministic over facts plus explicit context. Old-format
+  facts can be replayed by new implementations of old-version adapters, and
+  those adapters can emit current rows. Adapter selection must remain
+  version-addressed, and each adapter must preserve the old fact's semantic
+  contract unless an explicit policy/version fact or `effective_from` boundary
+  changes the interpretation.
 - Retention and purge rules vary by workspace and must be represented as durable
   facts or explicit absence semantics so replay can reconstruct the intended
   current state from the remaining log. Some fact families, especially auth,
@@ -294,6 +302,15 @@ can derive "recipient X lacks key-wrap coverage for secret Y under format Z" as
 a row or need. The normal runtime then schedules idempotent key-wrap creation
 outside replay. Each produced key-wrap fact has a deterministic coverage key, so
 all clients converge without creating unbounded duplicates.
+
+That coverage derivation is only complete if the replay surface also preserves
+the material needed to satisfy it. A client that still owns the relevant secret
+must have that secret as a durable local fact, a decryptable durable local
+secret, or an explicit durable need for secret recovery. Replay should not
+discover after upgrade that required key material was treated as disposable
+cache. If the material was intentionally purged or the device is no longer
+authorized to hold it, replay should leave a durable unsatisfied need rather
+than fabricating coverage.
 
 Creating many new key-wrap facts can be intended after an upgrade if the new
 format is required for future reliability or security. The safety condition is
@@ -472,6 +489,9 @@ Both designs should follow the existing ownership rules:
 - Non-ephemeral facts should replay into deterministic state on upgrade.
   Replayed projectors may rebuild derived tables and indexes, but must not
   perform IO or side effects.
+- Replay inputs must be complete. Facts, durable local facts, or explicit
+  durable needs must retain the material required to rebuild state or schedule
+  follow-up durable work until that material is purged or retired.
 - Adding a feature id requires a manifest entry with a compatibility class:
   `epoch_gated`, `legacy_fallback`, `participant_ready`, or `internal_only`.
 - A feature cannot create a new workspace-visible fact family without either a
