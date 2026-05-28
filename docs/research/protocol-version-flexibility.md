@@ -285,17 +285,16 @@ must not be able to convert an author-signed fact into a new fact that appears
 to be signed by the original author. That would create impersonation authority.
 For author-signed facts, old signed bytes and the matching replay adapter remain
 the source of truth until the fact is purged under its workspace retention
-policy. A signer can publish their own supersession fact when they are still
-present. A policy authority can publish interpretation, retention, or
-purge-policy facts, but those facts should not claim to be replacement author
-signatures.
+policy. The minimal design does not rely on signer-authored supersession to
+retire old content because signers may be offline, gone, or on old devices.
+Policy facts can publish interpretation, retention, or purge decisions, but
+those facts should not claim to be replacement author signatures.
 
 Lens-like conversion rules become useful only as projection rules or as
 provenance-preserving transformations. They can say how old signed facts project
-into current rows, or how a signer-authored supersession relates old and new
-facts. They should not let a third party rewrite authorship. Until then, old
-adapters are easier and safer than lenses because they preserve the original
-canonical bytes, hash identity, and author signature.
+into current rows. They should not let a third party rewrite authorship. Until
+then, old adapters are easier and safer than lenses because they preserve the
+original canonical bytes, hash identity, and author signature.
 
 Projectors that normally cause non-ephemeral facts through intents need a replay
 contract. Replay projectors may declare missing durable work, but they must not
