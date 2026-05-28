@@ -309,13 +309,26 @@ only the bootstrap floor, they stay there. The selected version should never be
 chosen from unauthenticated offers, otherwise an active network attacker can
 strip newer capabilities and force a downgrade.
 
-Sync should operate on fact ids plus metadata that lets related representations
-travel together. A negentropy-style compare can remain set reconciliation, but
-the fact ids should carry or be indexed by presentation group, scope, audience,
-release view version, and version-graph node so a responder can include missing
-siblings when one member of a group is requested. A newer sync protocol could
-make representation sets a first-class batch unit. Either way, access control is
-checked per fact and per scope before sending.
+Sync has two separate jobs. The reconciliation job can remain ordinary
+set-reconciliation over fact ids: a negentropy-style compare finds that a peer
+is missing fact `X`. The representation-set job runs after that compare. The
+responder looks up `X` in a local index built from fact contents and projection
+rows: `representation_set_id -> sibling fact ids, scope, audience, release view
+version, and version-graph node`.
+
+If `X` belongs to a representation set, the responder should send the missing
+authorized siblings in the same response when the peer can admit them. This is
+what prevents extra round trips and avoids an upgraded client briefly rendering
+the v1 fallback because the v3 sibling arrives later. The fact id itself stays a
+plain hash of canonical bytes; the grouping data lives in signed facts and local
+indexes, not in the id format.
+
+A newer sync protocol could make this explicit by reconciling representation-set
+summaries first, such as `representation_set_id`, available release view
+versions, version-graph nodes, and sibling fact ids, then transferring missing
+authorized siblings as one batch. Access control is still checked per sibling
+fact and per scope before sending, because fallback facts may live in a parent
+scope, a private container scope, or per-member scopes.
 
 Maximal tactic H: participant-set readiness as optimization, not gate.
 
