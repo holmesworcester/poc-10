@@ -354,6 +354,16 @@ parties and all their active devices support it. A private draft feature can be
 available to one user immediately. A workspace-wide policy feature waits for
 workspace-wide support or legacy-visible fallback.
 
+Core can provide the deterministic version selector for this without learning
+scope semantics. Given participant or device identifiers, their signed
+capability/version facts, the scope's accepted release aliases, and local
+deprecation policy, core returns the highest common release view version for
+that participant set or a concrete list of missing, stale, or unsupported
+participants. Scope manifests and lenses still define what that version means
+and how facts degrade; core only computes the intersection. A sync or connection
+session is the same calculation with exactly two participants after the
+capability exchange is authenticated.
+
 In the no-gate maximal design this is only an optimization for closed,
 well-known participant sets. If all affected participants can read v3, publish
 only v3. If not, publish the needed fallback view versions. For open-ended
