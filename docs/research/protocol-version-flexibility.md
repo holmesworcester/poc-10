@@ -237,9 +237,10 @@ Replay-on-upgrade needs strict boundaries:
   should keep old semantics, those semantics need an explicit policy/version
   fact or an `effective_from` boundary; replay must not silently reinterpret old
   user-visible history.
-- Retention and purge rules must be represented as durable facts or explicit
-  absence semantics so replay can reconstruct the intended current state from
-  the remaining log.
+- Retention and purge rules vary by workspace and must be represented as durable
+  facts or explicit absence semantics so replay can reconstruct the intended
+  current state from the remaining log. Some fact families, especially auth,
+  may be retained forever in the current model.
 
 Replay-on-upgrade also changes how poc-10 can handle old protocol versions. For
 the minimal design, poc-10 does not need Cambria-style lenses at first. It can
@@ -249,12 +250,29 @@ decode their canonical fact bytes and project into the current local rows. The
 project can accumulate supported replay adapters for the support window and
 still patch old adapters for security or validation fixes.
 
-This accumulation should be bounded by product policy. Once a protocol epoch is
-past the deprecation and retention horizon, the old replay adapter can be
-removed if no remaining durable facts need it or if there is a one-time durable
-conversion into a newer fact family. Until then, old adapters are easier and
-safer than lenses because they preserve the original canonical bytes and hash
-identity.
+This accumulation should be bounded by product policy where possible, but
+workspace retention policies mean some adapters may be long-lived. Once a
+protocol epoch is past the deprecation and retention horizon for every
+workspace that can contain those facts, the old replay adapter can be removed if
+no remaining durable facts need it. Auth-like forever facts may require keeping
+their replay adapters indefinitely unless a new protocol explicitly retains the
+old signed bytes as evidence.
+
+Durable conversion is constrained by signatures. An admin or workspace authority
+must not be able to convert an author-signed fact into a new fact that appears
+to be signed by the original author. That would create impersonation authority.
+For author-signed facts, the safe default is to keep the old signed bytes and
+old replay adapter. A signer can publish their own supersession fact when they
+are still present. A policy authority can publish interpretation, retention, or
+purge-policy facts, but those facts should not claim to be replacement author
+signatures.
+
+Lens-like conversion rules become useful only as projection rules or as
+provenance-preserving transformations. They can say how old signed facts project
+into current rows, or how a signer-authored supersession relates old and new
+facts. They should not let a third party rewrite authorship. Until then, old
+adapters are easier and safer than lenses because they preserve the original
+canonical bytes, hash identity, and author signature.
 
 Projectors that normally cause non-ephemeral facts through intents need a replay
 contract. Replay projectors may declare missing durable work, but they must not
