@@ -157,12 +157,16 @@ and
 
 ## Minimal Design
 
-The minimal design assumes one product, one canonical protocol at a time, and a
-bounded support window for old clients. It gates new feature creation until any
-client that lacks the feature would already be deprecated. Once that boundary is
-crossed, migration happens seamlessly: new binaries can write the new facts,
-projectors, intents, commands, rows, indexes, query plans, and database schema
-without preserving old-client write compatibility forever.
+The minimal design assumes one product, one canonical production write protocol
+per feature or scope, and a bounded support window for old clients. Older fact
+versions still have retained read/replay adapters, and old clients may continue
+writing old facts during their support window. After deprecation, old write
+protocols are disabled, but old read/replay adapters remain as long as retained
+facts require them. The design gates new feature creation until any client that
+lacks the feature would already be deprecated. Once that boundary is crossed,
+migration happens seamlessly: new binaries can write the new facts, projectors,
+intents, commands, rows, indexes, query plans, and database schema without
+preserving old-client write compatibility forever.
 
 This design is meant to make substantial change safe without asking every
 feature developer to become a rollout expert. It should support new features and
