@@ -180,15 +180,32 @@ Goals:
   release boundary.
 - Let feature code ship early but keep creation embargoed until the deprecation
   date or compatibility epoch makes it safe.
+- Ship read/display support before production write support. Write paths can be
+  implemented and available in alpha or test builds, but production creation
+  stays feature-gated until every relevant supported client can read the new
+  state or there is an explicit legacy-visible fallback.
 - Make migrations automatic once the boundary is reached, with old clients
   expired or unable to create new workspace state.
 - Test all combinations that can occur during the transition period: old binary
-  with old data, new binary before the feature epoch, new binary after the
-  epoch, peers on both sides of the supported-version line, and upgrade order
+  with old data, new binary before the feature epoch, alpha writer with prod
+  readers, prod binary with write gate disabled, new binary after the epoch,
+  peers on both sides of the supported-version line, and upgrade order
   permutations for active workspaces.
 - Keep developer ergonomics simple: a feature owner declares a required
   compatibility epoch and, optionally, a fallback. Shared runtime code owns the
   gate, reasons, telemetry, transition tests, and deprecation checks.
+
+Minimal baseline: read-before-prod-write.
+
+Every feature with new visible protocol state should land in two phases. First,
+supported clients learn to parse, project, index, query, and display the new
+state. During this phase, write support can exist for alphas, integration tests,
+dogfood builds, and compatibility fixtures. Production write UI and command
+creation remain disabled by a runtime gate. Second, once all relevant
+non-deprecated clients can read the state, the production write gate opens.
+
+This keeps implementation honest: the feature is fully testable before launch,
+but no production user can create state that supported teammates cannot see.
 
 Minimal option A: global compatibility epochs.
 
@@ -236,9 +253,10 @@ visibility.
 This option should be opt-in. If the fallback is lossy or confusing, the feature
 should use an epoch gate instead.
 
-Recommended minimal path: start with option A plus option C. Add option D only
-for features with an honest old-client rendering. Option B is useful once the
-project has enough feature families that a single epoch becomes too blunt.
+Recommended minimal path: make read-before-prod-write the default rule, then
+start with option A plus option C. Add option D only for features with an honest
+old-client rendering. Option B is useful once the project has enough feature
+families that a single epoch becomes too blunt.
 
 ## Maximal Design
 
@@ -344,6 +362,9 @@ Both designs should follow the existing ownership rules:
 - Old canonical bytes stay hash-stable. Translation happens when opening,
   projecting, querying, or executing commands, never by rewriting the fact
   before identity is computed.
+- Read support and write support are separate capabilities. Production write
+  gates require reader readiness; alpha and test write paths may exist before
+  production write is enabled.
 - Adding a feature id requires a manifest entry with a compatibility class:
   `epoch_gated`, `legacy_fallback`, `participant_ready`, or `internal_only`.
 - A feature cannot create a new workspace-visible fact family without either a
