@@ -515,9 +515,14 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         "`create_connection_response` needs an atomicity fix",
         "It must not send network bytes before the responder ephemeral fact and `connection_response` fact commit",
         "`create_key_wrap` can run during replay because it is deterministic fact creation",
-        "`unwrap_key_wrap` should be rebuilt from facts but run after the replay barrier",
+        "`unwrap_key_wrap` can run during replay under the same rule",
+        "deterministic local fact creation only",
+        "Opened local secrets are represented by local facts",
         "Registry test: every `HandlerRoute` has `runs_during_replay` set explicitly",
         "Time-wake test: every daemon `TimeWake` timeline is replayable",
+        "Unwrap test: replay dispatch of `unwrap_key_wrap` is idempotent",
+        "creates deterministic local secret facts",
+        "respects existing purge/retirement facts",
         "Connection test: replay no longer recreates bootstrap retries from old `connection_request` history alone",
     ] {
         assert!(

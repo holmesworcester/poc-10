@@ -82,7 +82,7 @@ Initial poc-10 policy:
 | --- | --- |
 | `share_fact_with_sync` | Runs during replay if kept as an intent; it rebuilds sync-derived state. |
 | `create_key_wrap` | Runs during replay; it deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
-| `unwrap_key_wrap` | Recreated from facts but dispatched after the replay barrier; ordinary purge/retirement rules decide whether local secret facts survive. |
+| `unwrap_key_wrap` | Runs during replay if its handler only creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
 | `create_connection_response` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
@@ -165,10 +165,10 @@ creation. If the recipient/key-request facts and required local source and
 signer facts remain, it emits the same `key_wrap` fact. If the local source was
 purged or retired, ordinary context rules suppress the work.
 
-`unwrap_key_wrap` should be rebuilt from facts but run after the replay barrier.
-It must carry ids, not plaintext key material, in the intent payload. Opened
-local secrets are represented by local facts and are retained or removed by the
-normal purge/retirement facts.
+`unwrap_key_wrap` can run during replay under the same rule: deterministic
+local fact creation only. It must carry ids, not plaintext key material, in the
+intent payload. Opened local secrets are represented by local facts and are
+retained or removed by the normal purge/retirement facts.
 
 ## Test Plan
 
@@ -185,8 +185,9 @@ normal purge/retirement facts.
   from retained facts.
 - Key-wrap test: replay dispatch of `create_key_wrap` is idempotent and creates
   no duplicate meaning when the same wrap already exists.
-- Unwrap test: replay recreates `unwrap_key_wrap` work from facts but does not
-  dispatch it until after the replay barrier.
+- Unwrap test: replay dispatch of `unwrap_key_wrap` is idempotent, creates
+  deterministic local secret facts, and respects existing purge/retirement
+  facts.
 - Connection test: daemon startup installs the recurring
   `maintain_connections` schedule in memory, and no persisted job row exists.
 - Connection test: replay no longer recreates bootstrap retries from old
