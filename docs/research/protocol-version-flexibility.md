@@ -22,10 +22,11 @@ outside the current design.
 
 The policy has four separations:
 
-- **Emission ceiling.** All production clients may emit shared durable protocol
-  no newer than the global provider-scheduled protocol ceiling. A binary may
-  implement newer readers, projectors, writers, commands, tests, and alpha UI,
-  but production command creation is capped.
+- **Protocol ceiling.** Production clients may create, admit, project, and
+  display shared durable protocol no newer than the global provider-scheduled
+  protocol ceiling. A binary may contain future protocol code, but production
+  must not register that reader, projector, or command path until the ceiling
+  advances.
 - **Release safety.** A release may be allowed or blocked independently from
   the facts it wrote. Releases embed `warn_after` and `expires_at`; emergency
   deprecation uses a signed, monotonic, persisted `must_update` canary.
@@ -34,13 +35,14 @@ The policy has four separations:
   does not automatically invalidate historical facts written by that release.
 - **Replay truth.** Retained facts, not rows or old queued intents, are the
   durable source of truth. Updates wipe materialized state and replay retained
-  facts through the current registry.
+  facts through historical adapters plus the ceiling-active registry.
 
 Operational rules:
 
 1. **One protocol ceiling.** The production ceiling is global product state,
    not per peer, group, workspace, or active-client observation. New shared
-   durable facts become producible only when the ceiling allows them.
+   durable fact versions become producible and admissible in production only
+   when the ceiling allows them.
 2. **Scheduled ceiling advance.** Ceiling changes are provider-scheduled at a
    wall-clock `ceiling_raises_at` time. Choose this after old-client warning and
    expiry windows plus clock-skew grace. Until that time, every production
@@ -49,9 +51,9 @@ Operational rules:
    embedded release metadata, signed registry facts, or signed canaries. If the
    local clock rolls backward too far, shared production use blocks until time
    is plausible again.
-4. **Alpha isolation.** Alpha, dogfood, and test builds may run the
-   implementation head, but newest-only facts must not enter production
-   workspaces before the production ceiling permits them.
+4. **Alpha isolation.** Alpha, dogfood, and test builds may register the
+   implementation head. Production workspaces reject or quarantine above-ceiling
+   facts instead of reading them.
 5. **Old readers stay.** Old fact adapters and projectors stay in the codebase
    for retained history because a user may later join a workspace containing
    old retained facts.
@@ -144,7 +146,7 @@ families to upgrade paths.
 | --- | --- | --- |
 | Workspaces, users, admins, invites, endpoints | poc-10 `auth::{workspace,user,admin,user_invite,device_invite,invite_accepted,endpoint,endpoint_shared}`; topo `workspace`, `user`, `admin`, `user_invite`, `device_invite`, `invite_accepted`, `peer_shared`, `endpoint_shared` | Authority changes are ceiling-gated because unsupported clients could admit different actors. Old authority adapters stay forever. A security fix may reject malformed old authority facts, but must not grant old facts new authority. |
 | Encrypted usernames and profile data | topo `user` has plaintext `username`; poc-10 user/profile naming is auth-owned | Introduce encrypted profile/user facts at a new ceiling. Old plaintext user facts remain authority anchors by default but may be hidden, quarantined, or superseded by policy if plaintext display is unsafe. Reissue encrypted names opportunistically; do not require every old signer. |
-| Messages | poc-10 `content::message`; topo `message` | New message body encoding, metadata, mentions, edits, or thread coordinates ship as readers first and become writable only at a ceiling raise. Old message projectors stay and may output current rows. Unsafe encryption or signature bugs are fact-version safety issues, handled by stricter validation, quarantine, or reissue. |
+| Messages | poc-10 `content::message`; topo `message` | New message body encoding, metadata, mentions, edits, or thread coordinates become readable/projectable and writable in production only at a ceiling raise. Before then they are alpha/test-only or dormant. Old message projectors stay and may output current rows. Unsafe encryption or signature bugs are fact-version safety issues, handled by stricter validation, quarantine, or reissue. |
 | Channels, groups, spaces | Not a first-class current poc-10 content family; retention policy already carries `scope_kind` for workspace/channel/thread-shaped scopes | Add the new scope/auth fact family behind the ceiling. Before the ceiling, production clients cannot create channel-only content. After the ceiling, message, file, reaction, deletion, retention, and sync visibility project through the new scope facts. |
 | Reactions | poc-10 `content::reaction`; topo `reaction` | New reaction payloads, custom emoji, or reaction deletion semantics are ceiling-gated if they affect shared display. Existing reaction facts keep old meaning and project to current reaction rows. |
 | Files and file slices | poc-10 `content::{file,file_slice,file_deletion}`; topo `file`, `file_slice` | New file descriptors, chunking, BAO proof formats, metadata encryption, or storage backends are new fact versions gated by the ceiling. Old descriptors and slices stay readable. If a proof format is unsafe, quarantine or tighten that fact version instead of converting every slice. |
@@ -161,12 +163,13 @@ families to upgrade paths.
 Core should stay protocol-neutral:
 
 - route facts by tag and version to scope-owned adapters;
-- route commands through a protocol-ceiling check before fact construction;
+- route command construction and fact admission through protocol-ceiling checks;
 - wipe and replay materialized state on upgrade;
 - store signed release/canary/time observations as durable local facts;
 - keep old connection/sync codecs separate from old fact projectors.
 
 Scope modules own the compatibility decisions. Adding or changing a fact family
-requires a manifest entry naming its first writable ceiling, old adapters,
-security-deprecation policy, replay output, and tests that replay old and new
-facts into the same current read-model shape where that is expected.
+requires a manifest entry naming its first production ceiling, old adapters,
+security-deprecation policy, replay output, and tests that prove above-ceiling
+facts are rejected or quarantined in production and accepted only once the
+ceiling enables them.
