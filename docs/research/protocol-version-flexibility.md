@@ -1,24 +1,22 @@
 # Protocol Version Flexibility Design
 
-This note records the poc-10 protocol evolution design. The current runtime
-uses immutable canonical fact bytes, deterministic fact ids, fixed wire layouts,
-scope-owned codecs, and connection frames with a public `TRNS` tag plus version
-byte. Version flexibility should preserve those properties instead of turning
-core into a compatibility layer.
+This note records the poc-10 protocol evolution policy. The runtime uses
+immutable canonical fact bytes, deterministic fact ids, fixed wire layouts,
+scope-owned codecs, pure projectors, and connection frames with a public `TRNS`
+tag plus version byte. Version flexibility should preserve those properties
+instead of making core a compatibility layer.
 
-The product use case is version diversity inside one product, not broad
-interoperability between independent projects. Users can delay upgrades,
-platform releases can be staggered, approval processes can hold back one
-platform, and a broken release can strand some users. poc-10 can deprecate
-sufficiently old clients, but until that deprecation boundary is crossed the
-protocol should preserve a workspace-wide visibility invariant: anything a user
-does in a workspace must become visible to everyone in that workspace.
+The product case is one provider-signed client family, not broad
+interoperability between independent implementations. Users can delay upgrades,
+platform releases can land at different times, and a bad release can strand a
+platform. The invariant is still strict:
 
-That invariant turns new features into explicit compatibility decisions. A new
-content type is safe only if it either degrades gracefully to an older content
-type or is unavailable for creation until all active, or visibly relevant,
-clients in the workspace have upgraded. Otherwise a user can create state that
-some teammates cannot see, which is a protocol failure rather than a UI gap.
+> Any shared production action emitted under the current production protocol ceiling must be visible to every supported production client.
+
+The policy below is intentionally conservative. It uses a global production
+protocol ceiling, not per-workspace or per-peer readiness, because proving that
+every relevant device in every workspace is upgraded is a consensus problem
+outside the current design.
 
 ## Local Reference
 
@@ -31,270 +29,159 @@ some teammates cannot see, which is a protocol failure rather than a UI gap.
   "Cambria: Schema Evolution in Distributed Systems with Edit Lenses." PaPoC
   2021. DOI: `https://doi.org/10.1145/3447865.3457963`.
 
-Cambria's useful lesson for poc-10 is not to lens arbitrary core bytes. The
-useful lesson is to isolate translation at the data-shape boundary, keep a
-single source of truth for each evolution edge, and avoid scattered "if old
-version" parsing inside semantic code. For poc-10 that boundary is the owning
-fact or frame layout module.
+Cambria's useful lesson here is to isolate translation at the owning fact or
+frame boundary, keep one source of truth for each evolution edge, and avoid
+scattered `if old version` branches in semantic code.
 
-## Minimal Design
+## Core Policy
 
-The minimal design is for one product with a bounded support window for old
-clients. Each feature or scope has one canonical production write protocol.
-Older fact versions keep version-addressed read/replay adapters, and old
-clients may write old facts only during their support window. After
-deprecation, old write protocols are disabled, but old read/replay adapters
-remain as long as retained facts require them.
+The policy has four separations:
 
-The operating goal is simple: a production user must not be able to create
-workspace-visible state that any non-deprecated relevant client cannot see.
-This supports large internal changes such as TreeKEM, file encoding changes,
-disappearing-message policy changes, indexing/query rewrites, and fact or
-intent reshaping without breaking supported users.
+- **Emission ceiling.** All production clients may emit shared durable protocol
+  no newer than the global provider-scheduled protocol ceiling. A binary may
+  implement newer readers, projectors, writers, commands, tests, and alpha UI,
+  but production command creation is capped.
+- **Release safety.** A release may be allowed or blocked independently from
+  the facts it wrote. Releases embed `warn_after` and `expires_at`; emergency
+  deprecation uses a signed, monotonic, persisted `must_update` canary.
+- **Fact-version safety.** A fact version is deprecated only if that fact
+  format or validation rule is unsafe. Security-deprecating a client release
+  does not automatically invalidate historical facts written by that release.
+- **Replay truth.** Retained facts, not rows or old queued intents, are the
+  durable source of truth. Updates wipe materialized state and replay retained
+  facts through the current registry.
 
-Rules:
+Operational rules:
 
-- **Gate production writes for multi-client-visible features.** A feature that
-  affects multiple clients may ship with read support and write implementation
-  in the same release, but production write UI and command creation stay behind
-  a runtime gate. Write paths may exist in alpha, dogfood, integration tests,
-  and fixtures. The production gate opens automatically when the feature's
-  unsupported client versions are deprecated or expired, or earlier if there is
-  a true legacy-visible fallback.
-- **Replay derived state on upgrade.** Every non-ephemeral fact is a durable
-  input to deterministic projection. On upgrade, derived tables, indexes,
-  materialized rows, query caches, and compatibility rows may be discarded and
-  rebuilt by replaying durable facts through the current projector registry.
-- **Keep old signed facts.** Author-signed facts remain the provenance source
-  until purged by workspace retention policy. Admin or workspace authorities
-  must not convert them into new facts that appear signed by the original
-  author. Policy facts may change interpretation, retention, or purge decisions,
-  but not authorship.
-- **Keep replay inputs complete.** Durable facts, durable local facts, or
-  explicit replay needs must represent every input needed to rebuild state or
-  schedule durable work. Local secrets, device keys, pending durable intents,
-  user-visible download progress, correctness-affecting daemon checkpoints, and
-  feature-relevant platform observations must survive until purge or expiry.
-- **Treat transport state as ephemeral.** Socket state, live sessions,
-  in-flight connection handshakes, and similar process state can be dropped on
-  upgrade and rebuilt by reconnecting from durable facts and queues.
-- **Preserve version-addressed meaning.** Old-format facts can be replayed by
-  new implementations of old-version adapters, and those adapters may emit
-  current rows. Adapter selection remains version-addressed, and adapters
-  preserve the old fact's semantic contract unless an explicit policy/version
-  fact or `effective_from` boundary changes interpretation.
-- **Make purge fact-driven.** Retention and purge rules vary by workspace.
-  Durable facts are purged only when the data they describe is also purged by
-  policy. Purge, retention, deletion, and disappearance decisions must be
-  expressed as facts before target facts or payloads disappear, so replay cannot
-  resurrect data that policy says is gone.
-- **Make durable follow-up work idempotent.** Replay projectors may declare
-  missing durable work, but must not execute it directly. For example,
-  replacement key-wrap coverage is derived as a durable need and fulfilled by
-  normal runtime handlers using deterministic coverage keys. If required
-  material was purged or is unavailable, replay leaves an unsatisfied need
-  rather than fabricating coverage.
+1. **One protocol ceiling.** The production ceiling is global product state,
+   not per peer, group, workspace, or active-client observation. New shared
+   durable facts become producible only when the ceiling allows them.
+2. **Scheduled ceiling advance.** Ceiling changes are provider-scheduled at a
+   wall-clock `ceiling_raises_at` time. Choose this after old-client warning and
+   expiry windows plus clock-skew grace. Until that time, every production
+   client writes the old ceiling even if its implementation head is newer.
+3. **Trusted time.** Clients persist the greatest trusted time learned from
+   embedded release metadata, signed registry facts, or signed canaries. If the
+   local clock rolls backward too far, shared production use blocks until time
+   is plausible again.
+4. **Alpha isolation.** Alpha, dogfood, and test builds may run the
+   implementation head, but newest-only facts must not enter production
+   workspaces before the production ceiling permits them.
+5. **Old readers stay.** Old fact adapters and projectors stay in the codebase
+   for retained history because a user may later join a workspace containing
+   old retained facts.
+6. **Old meaning stays old.** Old adapters may tighten validation or emit
+   current read-model rows and durable needs, but they must preserve the old
+   semantic contract and must not grant an old fact new authority.
+7. **Signed facts are not assumed rewritable.** Available authors or devices may
+   issue replacement or superseding facts for safety or compaction, but
+   correctness must remain safe when old signers never return.
+8. **Replay is deterministic and local.** Replay may rebuild rows, sync indexes,
+   negentropy trees, due-time indexes, and durable work queues. Replay must not
+   observe fresh time, send network frames, perform attachment IO, fire timers,
+   or sign new shared facts. Idempotent handlers perform those effects after
+   replay from declared durable needs.
+9. **Permanent state is facts.** Auth, retention, purge, deletion,
+   disappearance, and durable work requirements must be facts or derivable from
+   retained facts. Purge facts must exist before purged data disappears, so
+   replay cannot resurrect deleted or expired state.
+10. **Transport compatibility is separate.** Old connection and sync formats may
+    be parsed and answered indefinitely for reliability. A vN request receives a
+    vN-shaped response. Transport compatibility does not raise the production
+    protocol ceiling or make an expired client part of the visibility
+    guarantee.
 
-The minimal default is global compatibility epochs plus production write gates
-and replay-on-upgrade. Per-feature deprecation horizons are useful if a single
-epoch becomes too blunt. Legacy-visible fallback facts are allowed only when the
-fallback preserves the user's visible intent. Expand/contract storage migration
-is a fallback for state that is not purely fact-derived or is too expensive to
-replay on every upgrade.
+## Security Changes
 
-Operationally, deprecation should be data, not a manual UI flag. Each feature
-declares the minimum reader epoch or version required for production writes.
-The runtime compares that requirement to product deprecation policy and local
-observed client capabilities, then returns a create-gate reason such as
-`waiting_for_deprecation`, `ready`, `ready_with_legacy_fallback`, or
-`blocked_by_policy`. If the product goes a long time without a release, gates do
-not open merely because time passed; they open when the unsupported version is
-actually expired or when the feature has a safe fallback. Long release pauses
-therefore delay new production writes, but they should not break existing reads,
-replay, or local migrations.
+Security changes should name the smallest unsafe surface:
 
-## One-Client-Family Compatibility Design
+- **Unsafe release:** block the binary with embedded expiry or a `must_update`
+  canary. Historical facts from that release stay valid unless their fact
+  version is also unsafe.
+- **Unsafe fact version:** tighten that version's adapter, quarantine affected
+  facts, or add a durable policy fact that invalidates a bounded subset. Ask
+  live signers to reissue when useful, but do not require universal re-signing
+  for correctness.
+- **Unsafe derived state:** wipe and replay. If the source facts are safe, no
+  durable migration is needed.
 
-This is the useful richer design for poc-10. One app provider signs every
-client release that participates in the privacy contract. Desktop, mobile,
-daemon, and test clients may run different provider-signed releases; arbitrary
-forks and third-party clients are outside the contract unless the provider signs
-their manifest. The point is rapid feature deployment without letting a durable
-action disappear on older non-deprecated clients.
+Plaintext usernames are the useful example. If `user_v1` exposes a name in
+plaintext and the product decides that is a privacy bug, the next ceiling can
+introduce `user_v2` with encrypted profile text. Existing `user_v1` facts do
+not magically become safe. The safe outcomes are a policy fact that hides or
+quarantines old plaintext names, optional user/device reissue of encrypted
+replacement facts, and an old adapter that preserves authority identity without
+continuing to display unsafe plaintext.
 
-### Release Registry
+## Intents And Replay
 
-The provider publishes a signed releases-registry fact. Each entry contains:
+Facts are the compatibility boundary; intents are current-runtime work. On
+upgrade, old queued intents are not the durable source of correctness. Retained
+facts replay through their versioned adapters and produce current durable needs
+or current intent payloads.
 
-- `release_id`, `manifest_hash`, `status`, `not_before`, and `deprecated_after`
-- per scope/fact family: `fallback_fact_version`, `canonical_fact_version`,
-  optional view versions, lens ids, and replay adapter ids
-- sync and ephemeral support: bootstrap envelope, protocol versions, and minimum
-  accepted version
-
-Each endpoint publishes a signed capability fact:
-`endpoint_id`, user/device id, `release_id`, `manifest_hash`, platform,
-capability epoch, and expiry. A capability fact counts only if its release entry
-is provider-signed and not deprecated. Unknown, forked, or exotic version claims
-do not create write obligations.
-
-Each feature adds a manifest entry: `feature_id`, scope, visibility domain
-(`local_user`, `device_set`, `dm_participants`, `channel_members`,
-`workspace`), canonical fact, fallback fact, canonical-to-fallback lens,
-fallback placement rule, optional view lenses, and compatibility class.
-
-### Durable Facts
-
-Every durable shared fact family must define a permanent fallback format when it
-is introduced. The fallback is the validation anchor until the fact family is
-purged or retired. For a calendar event, the fallback might be a status fact:
-`actor=A, verb=created_calendar_event, title=Team sync, time=Friday 10am`. For a
-new private space, the fallback might be only `actor=A, verb=created_space` in
-an authorized parent scope.
-
-For every open-ended durable write, the handler emits one representation set:
-
-- `set_cert`: author signature over set public key, command id, author, scope,
-  audience, feature id, and release-registry id
-- `fallback_fact`: signed by the author or set key
-- `canonical_fact`: signed by the author or set key; commits to `fallback_id`
-  and `canonical_to_fallback_lens`
-- optional view facts for non-deprecated releases when they improve old-client
-  UX; each commits to `fallback_id` and the lens used
-
-Projectors accept the canonical fact only after these checks pass: registry id
-is accepted, set certificate verifies, fallback fact is admitted, scope and
-audience match the fallback placement rule, and lensing canonical to fallback
-reproduces `fallback_id`. Readers display the newest verified sibling they
-understand and suppress lower-fidelity rows only after these checks pass.
-
-If no fallback can preserve visibility without leaking across access boundaries,
-the feature uses the minimal gate/deprecation path. A private channel fallback
-cannot go to the whole workspace unless the workspace is allowed to know that
-the channel exists; otherwise use an equal-audience scope or per-member facts.
-
-### Optional Multi-Version Views
-
-Intermediate view facts are UX siblings, not validation anchors. They may be
-emitted at write time or later in response to a signed capability/request fact,
-like key-wrap requests. Only the author or certified set key can answer because
-the sibling must be signed into the representation set. If the author is gone,
-missing intermediate views are not a correctness failure; fallback plus
-canonical remains valid.
-
-Using mandatory multi-version publishing as the source of truth requires a
-hash-linked frontier DAG:
+For example, an old key-coverage fact or old key-wrap request can replay into:
 
 ```text
-Capability frontier:
-
-F0: active [fallback], deprecated []             (feature introduced)
- |
- v
-F1: active [fallback, v2], prior F0              (v2 released)
- |
- v
-F2: active [fallback, v3], deprecated [v2], F1   (v3 released, v2 expires)
-
-Representation set for command C:
-
-C@fallback  <----depends-on----  C@v2  <----depends-on----  C@v3
-   |                              |                          |
- frontier F0                   frontier F1                frontier F2
+ensure_key_wrap_coverage_vCurrent(workspace, frontier, recipient, source)
 ```
 
-That is too close to a consensus problem for the one-client-family baseline:
-late endpoints can reveal capability facts the writer did not know about, old
-authors may be unavailable to sign missing siblings, and the system must decide
-which frontier applied to each command. The permanent fallback avoids that by
-making one durable compatibility anchor exist from the beginning.
+The current handler fulfills that need idempotently if the required local
+secret still exists. If the material was purged or never available, replay
+leaves an unsatisfied durable need rather than fabricating coverage.
 
-### Planner Contract
+Pending local user actions need an explicit classification. If losing the work
+would lose user-visible shared state, persist a durable local fact before
+upgrade. If it is only process state, it may be dropped and retried by UI.
 
-Command constructors and intent handlers call:
+## Connection And Sync
 
-```text
-plan_compat(feature_id, visibility_domain, audience, durability, now)
-```
+Connection and sync have two independent compatibility surfaces:
 
-Inputs are the feature manifest, releases registry, endpoint capability facts,
-and deprecation policy. Output is one of:
+- The **transport format** is about opening requests, responses, receipts,
+  frames, range compares, have/need facts, and fact bytes.
+- The **shared durable protocol** is about what facts production clients are
+  allowed to create under the ceiling.
 
-- `DurableOpen`: emit fallback, canonical, and listed optional views
-- `DurableClosed`: emit fallback plus the highest common view for the current
-  participant/device set, unless the feature marks future replay unnecessary
-- `Ephemeral`: use bootstrap until capabilities authenticate, then highest
-  common ephemeral format
-- `Blocked`: no fallback, unauthorized fallback placement, missing capability,
-  stale endpoint fact, or deprecated release
+When an old connection or sync request fact is safe to answer, the response
+uses the same request version. New clients can keep old request/response
+formats for reliability while still enforcing release safety and the production
+ceiling. A v1 sync session may transfer facts produced at the current ceiling if
+the authenticated peer can understand them; the v1 envelope does not imply v1
+content semantics.
 
-Core can compute the highest common version from participant/device ids,
-endpoint capability facts, the registry, and deprecation policy. Scope modules
-own version semantics and lenses; core only computes the intersection. Handlers
-record the planner output hash or manifest ids in `set_cert`.
+## Upgrade Examples
 
-### Sync And Ephemeral Traffic
+These examples map current poc-10 scopes and the older poc-7/topo event
+families to upgrade paths.
 
-Sync, connection bootstrap, and 1:1 ephemeral traffic have exactly two
-participants for one session. Use this fixed flow:
+| Feature or fact family | Current surface | Upgrade path |
+| --- | --- | --- |
+| Workspaces, users, admins, invites, endpoints | poc-10 `auth::{workspace,user,admin,user_invite,device_invite,invite_accepted,endpoint,endpoint_shared}`; topo `workspace`, `user`, `admin`, `user_invite`, `device_invite`, `invite_accepted`, `peer_shared`, `endpoint_shared` | Authority changes are ceiling-gated because unsupported clients could admit different actors. Old authority adapters stay forever. A security fix may reject malformed old authority facts, but must not grant old facts new authority. |
+| Encrypted usernames and profile data | topo `user` has plaintext `username`; poc-10 user/profile naming is auth-owned | Introduce encrypted profile/user facts at a new ceiling. Old plaintext user facts remain authority anchors by default but may be hidden, quarantined, or superseded by policy if plaintext display is unsafe. Reissue encrypted names opportunistically; do not require every old signer. |
+| Messages | poc-10 `content::message`; topo `message` | New message body encoding, metadata, mentions, edits, or thread coordinates ship as readers first and become writable only at a ceiling raise. Old message projectors stay and may output current rows. Unsafe encryption or signature bugs are fact-version safety issues, handled by stricter validation, quarantine, or reissue. |
+| Channels, groups, spaces | Not a first-class current poc-10 content family; retention policy already carries `scope_kind` for workspace/channel/thread-shaped scopes | Add the new scope/auth fact family behind the ceiling. Before the ceiling, production clients cannot create channel-only content. After the ceiling, message, file, reaction, deletion, retention, and sync visibility project through the new scope facts. |
+| Reactions | poc-10 `content::reaction`; topo `reaction` | New reaction payloads, custom emoji, or reaction deletion semantics are ceiling-gated if they affect shared display. Existing reaction facts keep old meaning and project to current reaction rows. |
+| Files and file slices | poc-10 `content::{file,file_slice,file_deletion}`; topo `file`, `file_slice` | New file descriptors, chunking, BAO proof formats, metadata encryption, or storage backends are new fact versions gated by the ceiling. Old descriptors and slices stay readable. If a proof format is unsafe, quarantine or tighten that fact version instead of converting every slice. |
+| Link unfurls | Not a core current family | Local-only unfurl previews can ship anytime. Shared unfurl facts are user-visible content and must wait for the ceiling; the fact should include fetched snapshot, origin, timestamp, and authority so replay does not refetch the web. |
+| Online status and presence | Not durable content today | Ephemeral presence can use highest-common transport/session formats because it is not retained workspace state. Durable "last seen" or status history facts are shared content and follow the ceiling. |
+| Message deletion, file deletion, disappearing messages, retention | poc-10 `content::{message_deletion,file_deletion,retention_policy,purge}`; topo `message_deletion`, `removal`-style frontiers | Purge and retention policy are permanent facts. New deletion rules or disappearing-message policies are ceiling-gated. Purge facts must be retained long enough to prevent replay resurrection; target projectors own their own row and fact purge. |
+| Forward secrecy history keys | poc-10 `auth::{local_history_node_secret,local_secret_retirement,removal_frontier}`; topo `key_history`, `removal`, `key_rotation` | Key-tree coordinate changes are ceiling-gated for shared facts. Old retained key-node facts stay readable. Replay derives current key-retention and wrap needs, but handlers perform wrapping and IO after replay. |
+| TreeKEM or key-wrap redesign | poc-10 `auth::{recipient_key,key_request,key_wrap,create_key_wrap,unwrap_key_wrap}`; topo `key_request`, `key_shared`, `key_rotation`, `key_secret` | Treat as a new auth/key-material protocol under the ceiling. Keep old key-wrap and request adapters forever. Old projectors should emit current deterministic coverage needs; current handlers create new wraps only when local secret material proves they can. |
+| Connection bootstrap, receipts, frames | poc-10 `connection::{request,response,bootstrap_request,bootstrap_response,fact_receipt,frame_*}` | Keep old safe request/response formats for reliability and answer in the request version. New handshake or frame formats can be negotiated by endpoints, but they do not affect the shared durable ceiling. |
+| Sync and negentropy | poc-10 `sync::{compare,have_id,need_id,range_request,shared_fact}`; topo negentropy and dependency sync state | New sync algorithms or range-summary encodings may be negotiated per session. Sync rows, trees, and due work are replay-derived local state. Sync must move fact bytes and dependency closure without reinterpreting fact semantics. |
 
-1. Start with the invite's bootstrap sync-control version, clamped to the local
-   non-deprecated floor.
-2. Authenticate the peer and exchange endpoint capability facts.
-3. Verify both releases against the provider registry.
-4. Select the highest mutually supported session protocol not below either
-   minimum accepted version.
-5. Bind both capability facts and the selected protocol into the session
-   transcript.
+## Implementation Shape
 
-The selected sync version controls only the session algorithm and envelopes. It
-does not reinterpret durable fact semantics. A newer sync version may batch set
-siblings, but it still transfers the same canonical fact bytes and checks access
-control per sibling fact and scope.
+Core should stay protocol-neutral:
 
-### Recommended Baseline
+- route facts by tag and version to scope-owned adapters;
+- route commands through a protocol-ceiling check before fact construction;
+- wipe and replay materialized state on upgrade;
+- store signed release/canary/time observations as durable local facts;
+- keep old connection/sync codecs separate from old fact projectors.
 
-- Provider-signed release registry plus endpoint capability facts.
-- Durable shared writes publish fallback plus canonical, with optional UX views.
-- Canonical facts validate by lensing back to the permanent fallback id.
-- All write paths use `plan_compat`; feature code does not choose versions.
-- Sync and ephemeral traffic use authenticated highest-common selection.
-- Forks and third-party clients are outside the contract unless provider-signed.
-
-## Common Implementation Rules
-
-Both designs should follow the existing ownership rules:
-
-- Core routes by stable tags and registered handlers; it does not translate
-  protocol data.
-- Each fact or frame module owns its versioned codecs, compatibility tests, and
-  any typed translation into current projector inputs or rows.
-- Connection bootstrap advertises supported scope capabilities as data, then
-  handlers choose facts and frame shapes that the peer can open.
-- Unknown future capabilities are ignored unless they are required for a fact or
-  frame the local node is about to send.
-- Old canonical bytes stay hash-stable. Translation happens when opening,
-  projecting, querying, or executing commands, never by rewriting the fact
-  before identity is computed.
-- Read support and write support are separate capabilities. The minimal design
-  uses production write gates when supported readers cannot open a feature. The
-  one-client-family design avoids gates only when the planner can publish a
-  permanent fallback plus newest canonical representation, or a highest-common
-  representation for a closed participant set.
-- Non-ephemeral facts should replay into deterministic state on upgrade.
-  Replayed projectors may rebuild derived tables and indexes, but must not
-  perform IO or side effects.
-- Replay inputs must be complete. Facts, durable local facts, or explicit
-  durable needs must retain the material required to rebuild state or schedule
-  follow-up durable work until that material is purged or retired.
-- Adding a feature id requires a manifest entry with a compatibility class:
-  `epoch_gated`, `legacy_fallback`, `permanent_fallback`,
-  `multipublish_view_versions`, `participant_ready`, or `internal_only`.
-- A feature cannot create a new workspace-visible fact family without either a
-  minimal gate, a legacy fallback mapping, or a one-client-family
-  permanent-fallback degradation plan.
-
-The minimal design is the best fit for poc-10 now because it gives a principled
-way to ship substantial internal changes without breaking supported clients.
-The one-client-family compatibility design adds faster feature deployment while
-keeping privacy and compatibility tied to provider-signed clients.
+Scope modules own the compatibility decisions. Adding or changing a fact family
+requires a manifest entry naming its first writable ceiling, old adapters,
+security-deprecation policy, replay output, and tests that replay old and new
+facts into the same current read-model shape where that is expected.
