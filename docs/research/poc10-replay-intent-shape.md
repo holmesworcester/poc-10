@@ -156,6 +156,15 @@ dispatching replay-allowed candidate-registration intents. The recurring
 `maintain_connections` intent is live-only and starts after replay, once the
 candidate index has been rebuilt.
 
+Bootstrap connection attempts are covered by this maintenance loop. A
+successful candidate registration makes an endpoint eligible. A later live
+`maintain_connections` tick chooses that endpoint, creates the local attempt
+and request facts, and queues the local bootstrap send attempt. If that send is
+dropped or fails, the next live maintenance tick re-evaluates the
+connection-maintenance index and retries according to connection-owned target
+count and backoff state. There is no separate durable
+`connection_peer_retry` loop.
+
 Connection request projection should validate and materialize request history.
 It should not own an operational retry loop and should not emit
 `connection_peer_retry` wakes. Bootstrap sends become local attempts created by
@@ -183,6 +192,50 @@ local fact creation only. It must carry ids, not plaintext key material, in the
 intent payload. Opened local secrets are represented by local facts and are
 retained or removed by the normal purge/retirement facts.
 
+## CLI Test Surface
+
+Add CLI commands that exercise replay and recurring intents without requiring
+an actual upgrade:
+
+- `replay [--reverse | --scramble --seed N]`: run the replay entry point with
+  network and recurring schedules disabled. The default pass uses canonical
+  fact order, `--reverse` admits retained facts newest-first, and `--scramble`
+  admits retained facts plus replay-allowed work in a deterministic shuffled
+  order. Each pass drops queued intents, wipes derived state, projects retained
+  facts, admits replayable semantic time wakes, drains replay-allowed work to
+  fixpoint, and prints counters for dropped intents, projected facts, context
+  match wakeups, semantic time wakes, replay-allowed intents, emitted facts,
+  purged facts, row mutations, and blocked network/live-only work.
+- `state-summary`: print a stable digest of replay-relevant state: retained
+  facts, materialized rows, context edges, semantic time wakes, replay-allowed
+  queues, sync indexes, local key-material rows, connection-maintenance rows,
+  and side-effect counters. It must exclude volatile scheduler state, socket
+  state, temp network queues, and wall-clock timestamps that are not protocol
+  state.
+- `replay-check`: copy the database to scratch snapshots, run canonical replay,
+  an idempotent replay, `replay --reverse`, and several
+  `replay --scramble --seed N` passes, then compare the same state summary
+  digest for every pass. It should prove replay idempotence, projection order
+  independence, replay-allowed work interleaving independence, and report any
+  table or owned-state area whose replay-derived rows diverge.
+- `intent-registry`: list every handler route with `runs_during_replay`,
+  recurrence metadata, command exclusion, and whether the route can perform
+  network IO.
+- `recurring-intents`: list recurring intent specs from the handler registry.
+  The output should come from static registry metadata, not persisted job rows.
+- `recurring-run KIND --now MS`: test one recurring intent kind without
+  starting the daemon. It builds the registered recurring intent for the given
+  time and runs the normal handler path once, with network send handlers still
+  excluded unless the test explicitly opts in.
+- `connection-maintenance-status`: print connection-maintenance-owned state:
+  candidate rows, active attempts, active connections, backoff rows, target
+  count, and pending local bootstrap sends. It must not read auth-owned tables
+  directly.
+
+These commands should make side effects visible. A replay command that causes
+network rows, live-only local intents, recurring scheduler fires, or
+maintenance attempts before the replay barrier should report an error.
+
 ## Test Plan
 
 - Registry test: every `HandlerRoute` has `runs_during_replay` set explicitly.
@@ -205,3 +258,17 @@ retained or removed by the normal purge/retirement facts.
   `maintain_connections` schedule in memory, and no persisted job row exists.
 - Connection test: replay no longer recreates bootstrap retries from old
   `connection_request` history alone.
+- Bootstrap test: replay rebuilds the connection candidate index but creates no
+  bootstrap send before recurring maintenance runs.
+- Bootstrap test: `recurring-run maintain_connections --now MS` creates or
+  retries bootstrap attempts from connection-maintenance-owned candidate rows,
+  not by scanning auth-owned endpoint tables.
+- Recurring-intent test: `recurring-intents` and `intent-registry` show
+  `maintain_connections` as live-only recurring work and show no persisted
+  recurring job rows.
+- Replay CLI test: `replay-check` reports the same state summary digest for
+  canonical replay, idempotent replay, reverse projection order, and scrambled
+  replay order, with zero network/live-only side effects during every pass.
+- Replay order test: `replay --reverse` and `replay --scramble --seed N`
+  produce the same state summary as canonical replay while exercising different
+  projection order and replay-allowed work interleavings.
