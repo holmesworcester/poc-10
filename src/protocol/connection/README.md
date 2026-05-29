@@ -109,8 +109,18 @@ owned by request projection time wakes.
 `create_connection_response` is responder-side handshake work. It loads the
 request, invite secret, and receive receipt, validates the invite signature and
 receipt path, creates responder ephemeral material, builds the canonical local
-response fact, sends a sealed bootstrap response, and returns the responder
-ephemeral fact plus response fact.
+response fact, and returns the responder ephemeral fact, the response fact, and a
+`send_bootstrap_connection_response` intent. It does not send bytes itself: the
+responder ephemeral and response facts commit before any send, so the sealed
+response is always backed by durable local facts and a lost send can be
+re-derived from the committed response.
+
+`send_bootstrap_connection_response` ships the sealed response. It loads the
+committed response fact and its responder ephemeral secret, re-seals the
+response with that ephemeral key, stages the bytes through core networking, and
+attempts one TCP write. A failed send is consumed for a later live retry rather
+than holding the intent queued. This is network IO: it is command-excluded and
+never runs during replay.
 
 `send_facts_on_connection` packages facts chosen by sync. It loads the
 connection and payload facts, rejects local/private facts, batches small facts
@@ -327,8 +337,11 @@ inbound responder dependency graph:
   create_connection_response
     loads request + invite_secret + fact_receipt
     reads local endpoint state
-    -> responder ephemeral_secret + local response
-    -> network output: sealed bootstrap response bytes (not a fact)
+    -> responder ephemeral_secret + local response (committed first)
+    -> send_bootstrap_connection_response intent
+    -> send_bootstrap_connection_response
+       loads committed response + responder ephemeral_secret
+       network output: sealed bootstrap response bytes (not a fact)
 
 inbound initiator transport observation:
   remote sealed bootstrap response bytes (not a fact)

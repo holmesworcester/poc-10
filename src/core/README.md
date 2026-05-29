@@ -106,6 +106,33 @@ Time enters through daemon-owned `DaemonTimeWake` declarations. Core selects
 due `time_wakes`, attaches the due `TimeRange` to projection context, and lets
 the owning projector decide whether that time proves anything.
 
+## Replay And Recurring Work
+
+Queued intents are not protocol truth. Retained facts, including retained local
+facts, are the durable source of truth, so core can rebuild every derived
+artifact by replaying them. The replay entry point in `replay.rs` drops durable
+and local queued intents, wipes derived state (read-model rows, sync indexes,
+context edges, time wakes, pending projection, ephemeral inputs, and temp
+network queues) while keeping only facts, local admissions, and the clock
+observation, marks retained facts pending, and then drains projection, replayable
+semantic time wakes, and replay-allowed intents to a fixpoint.
+
+Replay-mode dispatch runs only handler routes whose `runs_during_replay` flag is
+set — deterministic rebuild work over retained facts. Live-only intents emitted
+during replay stay queued and are reported as blocked work rather than executed,
+and replay treats any network queue row as a barrier violation. Replay admits
+wall-clock context only through the replayable semantic time-wake timelines the
+caller supplies, so the result depends only on retained facts. The `state_hash`
+summary hashes that result area by area while excluding volatile scheduler,
+socket, admission, and clock state, which lets replay diagnostics prove
+idempotence and projection-order independence.
+
+Operational repetition is not durable state. A handler route may carry a
+`RecurringIntentSpec`, which the daemon installs as an in-memory schedule while
+the process is online. Recurring schedules are never persisted and never
+replayed: there is nothing to wipe on upgrade and nothing to rebuild, because
+the registry re-installs them on the next start.
+
 ## Invariants
 
 - Fact ids are deterministic BLAKE3 hashes of immutable fact bytes. Scope and
@@ -203,10 +230,21 @@ use core syntax and contracts, but core must not import their semantic rules.
   `ProjectionContext`, `ProjectionOutput`, time wakes, self-purge, and typed
   decode adapters. It enforces the owner rule: a projector emits replacement
   context and time wakes for the fact being projected.
+- `replay.rs`: replay entry point and state summary. It drops queued intents,
+  wipes everything projection derives down to the durable inputs (facts, local
+  admissions, the clock observation), reprojects retained facts in canonical,
+  reverse, or scrambled order, and drains replay-allowed projection, semantic
+  time wakes, and replay-allowed intents to a fixpoint. It also computes the
+  order-independent `state_hash` that replay diagnostics compare across passes.
+  It performs no network IO and errors if a network row appears before the
+  barrier.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command effects, drains
   projection and intent queues, admits due time wakes, filters command-safe
-  handlers, and composes the pipeline pieces into bounded runtime turns.
+  handlers, runs the replay entry point, and composes the pipeline pieces into
+  bounded runtime turns. Each `HandlerRoute` declares `runs_during_replay` and
+  an optional `RecurringIntentSpec` so core knows which work is replay-safe
+  rebuild work and which is a live-only recurring operational loop.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, ephemeral
   projection inputs, intent queues, local network tables, and the local clock
