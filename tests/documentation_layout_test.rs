@@ -327,6 +327,8 @@ fn protocol_version_flexibility_design_is_local_and_poc10_specific() {
         "`seed_connection_sync`",
         "`create_key_wrap`",
         "`unwrap_key_wrap`",
+        "local recipient private key remains valid and unretired",
+        "replay must not resurrect the opened secret",
         "`send_facts_on_connection`",
         "`send_network_frame`",
         "`receive_network_frame`",

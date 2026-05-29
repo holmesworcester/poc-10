@@ -155,7 +155,7 @@ Current poc-10 intent replay behavior:
 | `share_fact_with_sync` | any admitted shareable fact, or a retraction | Rebuild shareable-fact rows, dependency context rows, and negentropy summaries. Reject local-only bytes. Live-tail sends are derived side effects. |
 | `seed_connection_sync` | `connection_response` | Rebuild the root compare for a connection from the current shareable index. Repeated seeds are safe. |
 | `create_key_wrap` | `recipient_key` or `key_request`, wrap source, local signer secret | Recreate the deterministic `key_wrap` only if local source and signing material still exist. Replay must not fabricate missing key material. |
-| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap into local secret state when local recipient material remains. If the secret was purged, leave the wrap unopened. |
+| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap only while the local recipient private key remains valid and unretired. If purge or retirement removed that capability, replay must not resurrect the opened secret. |
 | `send_facts_on_connection` | sync compare/need/seed/live-tail work | Package current fact bytes into connection frames. This is derived transport work, not content truth. |
 | `send_network_frame` | packaged connection frame | Final local socket write. Drop queued local sends on upgrade; replay can rederive them from sync or connection retry facts. |
 | `receive_network_frame` | daemon inbound bytes | Local boundary before canonical facts exist. Once handled, replay starts from the staged request, response, frame, and receipt facts. If dropped before admission, peer retry or sync recovers. |
