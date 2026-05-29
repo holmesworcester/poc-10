@@ -72,11 +72,15 @@ Operational rules:
    negentropy trees, due-time indexes, and durable work queues. Replay must not
    observe fresh time, send network frames, perform attachment IO, fire timers,
    or sign new shared facts. Idempotent handlers perform those effects after
-   replay from declared durable needs.
+   replay from declared durable needs. After an upgrade wipe, full replay and
+   purge completion must finish before any network receive, network send, sync
+   advertisement, or connection retry resumes.
 9. **Permanent state is facts.** Auth, retention, purge, deletion,
    disappearance, and durable work requirements must be facts or derivable from
-   retained facts. Purge facts must exist before purged data disappears, so
-   replay cannot resurrect deleted or expired state.
+   retained facts. Purge facts must be preserved until every protected byte,
+   row, and local secret they cover is gone. During replay, preserved purge facts
+   define absence: matching stale material is not usable, and local purge work
+   must complete before the runtime reconnects.
 10. **Transport compatibility is separate.** Old connection and sync formats may
     be parsed and answered indefinitely for reliability. A vN request receives a
     vN-shaped response. Transport compatibility does not raise the production
@@ -155,7 +159,7 @@ Current poc-10 intent replay behavior:
 | `share_fact_with_sync` | any admitted shareable fact, or a retraction | Rebuild shareable-fact rows, dependency context rows, and negentropy summaries. Reject local-only bytes. Live-tail sends are derived side effects. |
 | `seed_connection_sync` | `connection_response` | Rebuild the root compare for a connection from the current shareable index. Repeated seeds are safe. |
 | `create_key_wrap` | `recipient_key` or `key_request`, wrap source, local signer secret | Recreate the deterministic `key_wrap` only if local source and signing material still exist. Replay must not fabricate missing key material. |
-| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap only while the local recipient private key remains valid and unretired. If purge or retirement removed that capability, replay must not resurrect the opened secret. |
+| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap only when replay finds no preserved purge or retirement fact covering the local recipient capability. A retained wrap is not enough; purge facts make matching local recipient material unusable, and replay must not resurrect the opened secret. |
 | `send_facts_on_connection` | sync compare/need/seed/live-tail work | Package current fact bytes into connection frames. This is derived transport work, not content truth. |
 | `send_network_frame` | packaged connection frame | Final local socket write. Drop queued local sends on upgrade; replay can rederive them from sync or connection retry facts. |
 | `receive_network_frame` | daemon inbound bytes | Local boundary before canonical facts exist. Once handled, replay starts from the staged request, response, frame, and receipt facts. If dropped before admission, peer retry or sync recovers. |
