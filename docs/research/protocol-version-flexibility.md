@@ -115,92 +115,72 @@ replay, or local migrations.
 
 ## One-Client-Family Compatibility Design
 
-This is the relevant richer design for poc-10. It assumes one app provider
-ships every client that participates in the privacy and compatibility contract.
-Provider-signed desktop, mobile, daemon, and test clients may be on different
-versions, but arbitrary forks or third-party clients are outside the contract
-unless the provider signs their release manifest. This matters for privacy: a
-client that enforces weaker local policy, weaker display rules, or weaker
-retention can become the weak link even if the wire protocol accepts it.
-
-The useful goal is not open interoperability. The useful goal is rapid feature
-deployment inside one client family while keeping the workspace visibility
-invariant: every non-deprecated client sees either the rich behavior it
-understands or a durable fallback that is authorized for the same audience.
-
-Goals:
-
-- Ship read support, fallback display, and test write paths early, then allow
-  production writes when the compatibility planner can produce a valid plan.
-- Keep version policy centralized in a provider-signed release registry and a
-  deprecation list.
-- Give developers a planner API instead of making every feature hand-roll
-  version choice.
-- Use permanent fallback facts as validation anchors for durable shared state.
-- Use highest-common version selection for closed participant sets, sync
-  sessions, and ephemeral events.
+This is the useful richer design for poc-10. One app provider signs every
+client release that participates in the privacy contract. Desktop, mobile,
+daemon, and test clients may run different provider-signed releases; arbitrary
+forks and third-party clients are outside the contract unless the provider signs
+their manifest. The point is rapid feature deployment without letting a durable
+action disappear on older non-deprecated clients.
 
 ### Release Registry
 
-The provider publishes a signed releases registry. Each release entry names the
-release id, manifest hash, deprecation state, supported scope and fact-family
-versions, permanent fallback formats, canonical rich formats, optional
-intermediate view formats, sync bootstrap floor, and ephemeral protocol
-versions.
+The provider publishes a signed releases-registry fact. Each entry contains:
 
-Clients publish signed endpoint capability facts that reference one registry
-entry and manifest hash. Only provider-signed release entries create compatibility
-obligations. Unknown, forked, or exotic version claims do not force writers to
-publish more facts; they are unsupported unless the provider adds them to the
-registry.
+- `release_id`, `manifest_hash`, `status`, `not_before`, and `deprecated_after`
+- per scope/fact family: `fallback_fact_version`, `canonical_fact_version`,
+  optional view versions, lens ids, and replay adapter ids
+- sync and ephemeral support: bootstrap envelope, protocol versions, and minimum
+  accepted version
 
-Deprecation is also data. When a release is deprecated, it leaves highest-common
-selection and no longer receives new optional intermediate view facts. Existing
-old-version adapters remain as long as retained facts require them.
+Each endpoint publishes a signed capability fact:
+`endpoint_id`, user/device id, `release_id`, `manifest_hash`, platform,
+capability epoch, and expiry. A capability fact counts only if its release entry
+is provider-signed and not deprecated. Unknown, forked, or exotic version claims
+do not create write obligations.
+
+Each feature adds a manifest entry: `feature_id`, scope, visibility domain
+(`local_user`, `device_set`, `dm_participants`, `channel_members`,
+`workspace`), canonical fact, fallback fact, canonical-to-fallback lens,
+fallback placement rule, optional view lenses, and compatibility class.
 
 ### Durable Facts
 
-Every durable shared fact family should be introduced with a permanent fallback
-format. The fallback is the validation anchor for that fact family and remains
-available until the fact family itself is purged or retired. It can be a compact
-status/event fact, such as "Alice created a calendar event: Team sync", or an
-explicit unsupported-activity fact in an authorized parent scope.
+Every durable shared fact family must define a permanent fallback format when it
+is introduced. The fallback is the validation anchor until the fact family is
+purged or retired. For a calendar event, the fallback might be a status fact:
+`actor=A, verb=created_calendar_event, title=Team sync, time=Friday 10am`. For a
+new private space, the fallback might be only `actor=A, verb=created_space` in
+an authorized parent scope.
 
-For open-ended audiences such as a workspace, the writer publishes one
-author-certified representation set containing:
+For every open-ended durable write, the handler emits one representation set:
 
-- the permanent fallback fact
-- the newest canonical rich fact
-- optional intermediate view facts for non-deprecated releases, only when they
-  materially improve old-client UX
+- `set_cert`: author signature over set public key, command id, author, scope,
+  audience, feature id, and release-registry id
+- `fallback_fact`: signed by the author or set key
+- `canonical_fact`: signed by the author or set key; commits to `fallback_id`
+  and `canonical_to_fallback_lens`
+- optional view facts for non-deprecated releases when they improve old-client
+  UX; each commits to `fallback_id` and the lens used
 
-The canonical rich fact commits to the fallback fact id, origin command, author,
-scope, audience, representation-set key, release manifest ids, and lens path.
-To display the rich fact, a client validates that the rich fact and fallback have
-the same provenance and that downgrading the rich fact through the declared lens
-produces the committed fallback id. That is the key invariant: different
-versions cannot become semantically different content.
+Projectors accept the canonical fact only after these checks pass: registry id
+is accepted, set certificate verifies, fallback fact is admitted, scope and
+audience match the fallback placement rule, and lensing canonical to fallback
+reproduces `fallback_id`. Readers display the newest verified sibling they
+understand and suppress lower-fidelity rows only after these checks pass.
 
-Readers display the newest verified sibling they understand and suppress lower
-fidelity rows only after the representation-set proof succeeds. If a client
-understands only the fallback, it displays the fallback. If no fallback can
-preserve visibility without leaking across access boundaries, the feature must
-use the minimal gate/deprecation path instead of pretending to be compatible.
-
-Fallback placement is part of the feature design. A fallback for a private
-channel, space, or calendar cannot simply publish to the whole workspace if the
-new object has narrower membership. It must go to an already-readable scope with
-the same audience, to per-member fallback facts, or to a parent scope that is
-authorized to reveal only that something happened.
+If no fallback can preserve visibility without leaking across access boundaries,
+the feature uses the minimal gate/deprecation path. A private channel fallback
+cannot go to the whole workspace unless the workspace is allowed to know that
+the channel exists; otherwise use an equal-audience scope or per-member facts.
 
 ### Optional Multi-Version Views
 
-Multi-publishing every non-deprecated release view can improve old-client UX,
-but it is not the validation backbone. Intermediate view facts are optional
-siblings. They may be produced at write time or later in response to a signed
-capability/request fact, much like key-wrap requests and responses. Only the
-original author or an author-certified representation-set key can answer because
-the response must be signed into the representation set.
+Intermediate view facts are UX siblings, not validation anchors. They may be
+emitted at write time or later in response to a signed capability/request fact,
+like key-wrap requests. Only the author or certified set key can answer because
+the sibling must be signed into the representation set. If the author is gone,
+missing intermediate views are not a correctness failure; fallback plus
+canonical remains valid.
 
 Using mandatory multi-version publishing as the source of truth requires a
 hash-linked frontier DAG:
@@ -229,67 +209,57 @@ authors may be unavailable to sign missing siblings, and the system must decide
 which frontier applied to each command. The permanent fallback avoids that by
 making one durable compatibility anchor exist from the beginning.
 
-### Version Selection
+### Planner Contract
 
-Core can provide a protocol-neutral version selector. Given participant or
-device ids, their signed endpoint capability facts, a scope or feature id, the
-provider releases registry, and local deprecation policy, core returns the
-highest common release view version for that participant set or a concrete list
-of missing, stale, or unsupported participants. Scope modules still own the
-semantics of each version and the degradation lenses; core only computes the
-intersection.
+Command constructors and intent handlers call:
 
-Feature code should use a compatibility planner built on that selector. The
-planner returns:
+```text
+plan_compat(feature_id, visibility_domain, audience, durability, now)
+```
 
-- for open-ended durable audiences: permanent fallback plus newest canonical,
-  with optional intermediate view siblings
-- for closed durable participant sets: the highest common version, or fallback
-  plus the highest common version if future devices need replay
-- for ephemeral events and sessions: the bootstrap/fallback format until
-  capabilities are authenticated, then the highest common ephemeral format
-- on failure: the participants, devices, or release manifests that prevent a
-  compatible write
+Inputs are the feature manifest, releases registry, endpoint capability facts,
+and deprecation policy. Output is one of:
 
-Event-creating intents and command handlers should emit the representation set
-described by the planner and record the plan hash or manifest ids in the
-representation-set proof.
+- `DurableOpen`: emit fallback, canonical, and listed optional views
+- `DurableClosed`: emit fallback plus the highest common view for the current
+  participant/device set, unless the feature marks future replay unnecessary
+- `Ephemeral`: use bootstrap until capabilities authenticate, then highest
+  common ephemeral format
+- `Blocked`: no fallback, unauthorized fallback placement, missing capability,
+  stale endpoint fact, or deprecated release
+
+Core can compute the highest common version from participant/device ids,
+endpoint capability facts, the registry, and deprecation policy. Scope modules
+own version semantics and lenses; core only computes the intersection. Handlers
+record the planner output hash or manifest ids in `set_cert`.
 
 ### Sync And Ephemeral Traffic
 
-Sync, connection bootstrap, and 1:1 ephemeral traffic are special because the
-audience is fixed for the session. There is no need to publish every
-non-deprecated version. Until peers authenticate capabilities, control traffic
-uses the lowest non-deprecated bootstrap envelope. After authentication, peers
-select the highest mutually supported session protocol allowed by both release
-manifests and deprecation policy.
+Sync, connection bootstrap, and 1:1 ephemeral traffic have exactly two
+participants for one session. Use this fixed flow:
 
-An invite link may name the bootstrap sync-control version, workspace manifest
-hash, and endpoint/capability fact family for first contact. The invite is only
-an entry point: it must be bound to the workspace admission proof and cannot
-force a version below the local non-deprecated floor. After admission, signed
-endpoint capability facts become the source of truth for future connections.
+1. Start with the invite's bootstrap sync-control version, clamped to the local
+   non-deprecated floor.
+2. Authenticate the peer and exchange endpoint capability facts.
+3. Verify both releases against the provider registry.
+4. Select the highest mutually supported session protocol not below either
+   minimum accepted version.
+5. Bind both capability facts and the selected protocol into the session
+   transcript.
 
 The selected sync version controls only the session algorithm and envelopes. It
-does not reinterpret durable fact semantics. A newer sync version may batch
-representation-set siblings more efficiently, but it still transfers the same
-canonical fact bytes and checks access control per sibling fact and scope.
+does not reinterpret durable fact semantics. A newer sync version may batch set
+siblings, but it still transfers the same canonical fact bytes and checks access
+control per sibling fact and scope.
 
 ### Recommended Baseline
 
-- Maintain a provider-signed releases registry and deprecation list.
-- Require provider-signed endpoint capability facts for compatibility decisions.
-- Introduce every durable shared fact family with a permanent fallback format.
-- Publish fallback plus newest canonical facts for open-ended durable audiences.
-- Treat intermediate release-view facts as optional UX siblings, not validation
-  anchors.
-- Use a shared compatibility planner for event-creating intents and command
-  handlers.
-- Use highest-common selection for closed participant sets, sync sessions, and
-  ephemeral events.
-- Keep forks, third-party clients, and true multi-protocol sessions outside the
-  baseline privacy and compatibility contract unless the provider signs their
-  release manifests.
+- Provider-signed release registry plus endpoint capability facts.
+- Durable shared writes publish fallback plus canonical, with optional UX views.
+- Canonical facts validate by lensing back to the permanent fallback id.
+- All write paths use `plan_compat`; feature code does not choose versions.
+- Sync and ephemeral traffic use authenticated highest-common selection.
+- Forks and third-party clients are outside the contract unless provider-signed.
 
 ## Common Implementation Rules
 
@@ -309,8 +279,8 @@ Both designs should follow the existing ownership rules:
 - Read support and write support are separate capabilities. The minimal design
   uses production write gates when supported readers cannot open a feature. The
   one-client-family design avoids gates only when the planner can publish a
-  permanent fallback, a newest canonical representation, or a highest-common
-  participant-set representation.
+  permanent fallback plus newest canonical representation, or a highest-common
+  representation for a closed participant set.
 - Non-ephemeral facts should replay into deterministic state on upgrade.
   Replayed projectors may rebuild derived tables and indexes, but must not
   perform IO or side effects.
