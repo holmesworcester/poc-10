@@ -1,9 +1,12 @@
 //! Behavioural tests for the target `connection::response` handler.
 //!
 //! The request projector schedules this handler only after exact invite and
-//! fact-receipt context exists. The handler rechecks that context,
-//! creates local responder ephemeral material, emits the response fact, and
-//! sends the response bytes back to the request's bootstrap return address.
+//! fact-receipt context exists. The handler rechecks that context, creates local
+//! responder ephemeral material, emits the response fact, and queues a
+//! `send_bootstrap_connection_response` intent. The send is split out so the
+//! responder ephemeral and response facts commit before any bytes leave; a
+//! separate test composes the send handler to prove the sealed response is
+//! derived from those committed facts.
 
 use std::io::Read;
 use std::net::TcpListener;
@@ -31,20 +34,14 @@ use topo::protocol::connection::fact_receipt::layout as received_layout;
 use topo::protocol::connection::request::fact::ConnectionRequestFact;
 use topo::protocol::connection::request::layout as request_layout;
 use topo::protocol::connection::response::layout as response_layout;
+use topo::protocol::connection::send_bootstrap_response::{
+    decode_send_bootstrap_connection_response, SendBootstrapConnectionResponseHandler,
+};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
-fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-    let return_addr = listener.local_addr().expect("listener addr");
-    let reader = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept response");
-        let mut len = [0u8; 4];
-        stream.read_exact(&mut len).expect("read len");
-        let mut body = vec![0; u32::from_be_bytes(len) as usize];
-        stream.read_exact(&mut body).expect("read body");
-        body
-    });
+fn handler_emits_responder_material_and_queues_response_send() {
+    let return_addr = "127.0.0.1:41099".parse().expect("addr");
     let scenario = synthesize_scenario(SynthOpts {
         request_return_addr: Some(return_addr),
         ..SynthOpts::default()
@@ -99,6 +96,70 @@ fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
     assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
     assert_ne!(response.handshake_hash, [0u8; 32]);
     assert_ne!(response.connection_secret, [0u8; 32]);
+
+    // Atomicity: no bytes are sent inline. The handler queues exactly one
+    // send derived from the committed response and responder ephemeral facts.
+    assert!(output.intents.is_empty());
+    assert_eq!(output.local_intents.len(), 1);
+    let send = decode_send_bootstrap_connection_response(&output.local_intents[0])
+        .expect("decode queued response send");
+    assert_eq!(send.response_id, response_fact.id);
+    assert_eq!(send.responder_ephemeral_secret_id, ephemeral_fact.id);
+    assert_eq!(send.addr, return_addr);
+}
+
+#[test]
+fn queued_response_send_seals_committed_response_to_initiator() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let return_addr = listener.local_addr().expect("listener addr");
+    let reader = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept response");
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).expect("read len");
+        let mut body = vec![0; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut body).expect("read body");
+        body
+    });
+    let scenario = synthesize_scenario(SynthOpts {
+        request_return_addr: Some(return_addr),
+        ..SynthOpts::default()
+    });
+    let store = test_store();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
+        .expect("seed local endpoint");
+
+    // Stage one: create the durable facts and the queued send.
+    let create_output = CreateConnectionResponseHandler::new()
+        .handle(
+            &scenario.intent,
+            &HandlerContext::with_facts([
+                scenario.request_fact.clone(),
+                scenario.invite_fact.clone(),
+                scenario.receive_fact.clone(),
+            ])
+            .with_store(&store),
+        )
+        .expect("create response facts");
+    let response_fact = create_output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied() == Some(response_layout::TYPE_CONNECTION_RESPONSE)
+        })
+        .expect("connection response fact")
+        .clone();
+    let response = response_layout::decode_fact(response_fact.body()).expect("decode response");
+    let send_intent = create_output.local_intents[0].clone();
+
+    // Stage two: the send handler seals the committed response and ships it.
+    SendBootstrapConnectionResponseHandler::new()
+        .handle(
+            &send_intent,
+            &HandlerContext::with_facts(create_output.facts.clone()).with_store(&store),
+        )
+        .expect("send sealed response");
+
     let sent = reader.join().expect("reader");
     assert_eq!(sent[0], bootstrap_response::TYPE_SEALED_CONNECTION_RESPONSE);
     assert_ne!(sent, response_fact.bytes);

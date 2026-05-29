@@ -37,7 +37,7 @@ fn intent_registry_exposes_replay_decision_for_every_route() {
     let (_tmp, db) = fresh_db();
     let out = assert_success(topo(&["--db", &db, "intent-registry"]));
 
-    assert_eq!(line_value(&out, "routes"), "12");
+    assert_eq!(line_value(&out, "routes"), "13");
 
     // Deterministic rebuild work runs during replay.
     for replay_route in ["share_fact_with_sync", "create_key_wrap", "unwrap_key_wrap"] {

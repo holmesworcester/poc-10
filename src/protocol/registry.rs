@@ -524,6 +524,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_bootstrap_connection_request",
+    "send_bootstrap_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -696,6 +697,14 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "create_connection_response",
         connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
         connection::create_connection_response::CreateConnectionResponseHandler,
+        replay = false
+    ),
+    // The responder ephemeral and connection_response facts commit before this
+    // send fires, so the sealed bytes are always backed by durable facts.
+    handler_route!(
+        "send_bootstrap_connection_response",
+        connection::send_bootstrap_response::SEND_BOOTSTRAP_CONNECTION_RESPONSE,
+        connection::send_bootstrap_response::SendBootstrapConnectionResponseHandler,
         replay = false
     ),
     // Sync compare/have/need/send are live session prompts and send packaging.

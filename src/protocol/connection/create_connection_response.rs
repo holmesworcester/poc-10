@@ -149,12 +149,10 @@ mod tests {
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
+    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
-use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::auth::endpoint::create as local_endpoint;
 use crate::protocol::auth::invite::layout as invite_layout;
-use crate::protocol::connection::bootstrap_response;
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
@@ -163,6 +161,9 @@ use crate::protocol::connection::request::create as request_create;
 use crate::protocol::connection::request::layout as request_layout;
 use crate::protocol::connection::response::create::{
     build_responder_response, BuildResponderResponse,
+};
+use crate::protocol::connection::send_bootstrap_response::{
+    send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -245,23 +246,24 @@ impl IntentHandler for CreateConnectionResponseHandler {
         let return_addr = request.from_listen_addr.ok_or_else(|| {
             HandlerError::fatal("create_connection_response response route is missing")
         })?;
-        let target = NetworkTarget::new(return_addr);
-        let sealed_response = bootstrap_response::seal_connection_response(
-            &built.fact.bytes,
-            &responder_ephemeral_private_key,
-        )?;
-        network::send(
-            context.store()?,
-            target,
-            OutboundFrame {
-                bytes: sealed_response,
-            },
-        )
-        .map_err(|err| retry_intent(format!("create_connection_response tcp send: {err}")))?;
+
+        // Atomicity: create the durable local response facts and queue the send
+        // derived from them. The responder ephemeral and connection_response
+        // facts commit together with this send intent, so no bytes leave before
+        // they are durable. If the send is later lost, a live retry re-seals from
+        // the committed response fact. The TCP write is owned by
+        // `send_bootstrap_response`, which never runs during replay.
+        let send_response =
+            send_bootstrap_connection_response_intent(SendBootstrapConnectionResponse {
+                response_id: built.fact.id,
+                responder_ephemeral_secret_id: responder_ephemeral_fact.id,
+                addr: return_addr,
+            })?;
 
         Ok(PipelineEffects::new()
             .fact(responder_ephemeral_fact)
-            .fact(built.fact))
+            .fact(built.fact)
+            .local_intent(send_response))
     }
 }
 
