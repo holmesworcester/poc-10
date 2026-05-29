@@ -147,26 +147,60 @@ facts replay through their versioned adapters and produce ceiling-active
 durable needs or current intent payloads. Handlers must be idempotent because
 replay may enqueue work that was already completed before the upgrade.
 
+Not every queued intent is rebuildable as the exact same action. It is safe to
+drop a queued intent on upgrade only when one of these is true:
+
+- **Exactly rebuildable:** retained facts plus retained local facts deterministically
+  recreate the same fact, row, index entry, or durable need, and no preserved
+  purge fact makes the input unusable.
+- **Recoverable by protocol retry:** the lost work was only a network attempt,
+  sync prompt, or connection retry. Replay or peer retry can ask again, possibly
+  with different bytes or timing.
+- **Already canonicalized:** raw external input was first staged as canonical
+  local/shared facts. Replay starts from those facts, not from the old queue row.
+
+The upgrade boundary must stop dispatch at a handler boundary. A queued but
+not-running intent may be dropped under the rules above. An in-flight handler
+must either finish its commit or abort without committing before the wipe.
+Handler-generated randomness is not rebuildable; if the chosen random value is
+protocol-relevant, it must be committed as a fact before later side effects rely
+on it.
+
 Current poc-10 intent replay behavior:
 
-| Intent kind | Source facts | Replay behavior |
-| --- | --- | --- |
-| `send_bootstrap_connection_request` | local `connection_request` plus local ephemeral secret | Local socket attempt. Drop queued local sends on upgrade; replay the request and retry time wake until a `connection_response` exists. |
-| `create_connection_response` | received `connection_request`, local invite secret, local fact receipt | Rebuild responder work only when the request is still valid locally. If an old local response fact exists, request projection sees it; otherwise a new retryable response may be created. |
-| `send_sync_compare_response` | `sync_compare` | Recompute child compares and exact fact sends from the current shareable index. Stale compare facts are harmless sync prompts. |
-| `send_needed_fact_id` | `sync_have_id` | If the advertised fact is already present, no-op; otherwise create a `sync_need_id` and send it. |
-| `send_requested_fact` | `sync_need_id` | Send the requested fact only if it exists and is shareable on that connection; otherwise no-op. |
-| `share_fact_with_sync` | any admitted shareable fact, or a retraction | Rebuild shareable-fact rows, dependency context rows, and negentropy summaries. Reject local-only bytes. Live-tail sends are derived side effects. |
-| `seed_connection_sync` | `connection_response` | Rebuild the root compare for a connection from the current shareable index. Repeated seeds are safe. |
-| `create_key_wrap` | `recipient_key` or `key_request`, wrap source, local signer secret | Recreate the deterministic `key_wrap` only if local source and signing material still exist. Replay must not fabricate missing key material. |
-| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap only when replay finds no preserved purge or retirement fact covering the local recipient capability. A retained wrap is not enough; purge facts make matching local recipient material unusable, and replay must not resurrect the opened secret. |
-| `send_facts_on_connection` | sync compare/need/seed/live-tail work | Package current fact bytes into connection frames. This is derived transport work, not content truth. |
-| `send_network_frame` | packaged connection frame | Final local socket write. Drop queued local sends on upgrade; replay can rederive them from sync or connection retry facts. |
-| `receive_network_frame` | daemon inbound bytes | Local boundary before canonical facts exist. Once handled, replay starts from the staged request, response, frame, and receipt facts. If dropped before admission, peer retry or sync recovers. |
+| Intent kind | Source facts | Intended replay behavior | Default upgrade behavior |
+| --- | --- | --- | --- |
+| `send_bootstrap_connection_request` | local `connection_request` plus local ephemeral secret | The exact socket attempt is not rebuilt. Replay the request and retry time wake; later retry attempts may use different timing. | Not safe during replay. Drop queued local sends and allow retry after the replay/network barrier. |
+| `create_connection_response` | received `connection_request`, local invite secret, local fact receipt | A committed response fact is replayable. An uncommitted responder ephemeral key is not. If no response fact exists, create a fresh retry response only after validating the request again. | Not safe as an in-flight replay action. The old handler must finish or abort before wipe; post-barrier retry is acceptable. |
+| `send_sync_compare_response` | `sync_compare` | Recompute child compares and exact fact sends from the rebuilt shareable index. | Safe only for live post-barrier connections. Old compare facts tied to retired connections should not drive sends. |
+| `send_needed_fact_id` | `sync_have_id` | If the advertised fact is already present, no-op; otherwise create a `sync_need_id` for that connection. | Safe only for live post-barrier connections. Old have-id facts tied to retired connections should not create fresh need-id facts. |
+| `send_requested_fact` | `sync_need_id` | Send the requested fact only if it exists and is shareable on that connection; otherwise no-op. | Safe only after the replay barrier for live connections; otherwise it should no-op because the connection is retired. |
+| `share_fact_with_sync` | any admitted shareable fact, or a retraction | Rebuild shareable-fact rows, dependency context rows, and negentropy summaries. Reject local-only bytes. | Indexing is safe. Live-tail sends are not replay work; suppress them during replay and seed sync from rebuilt indexes after reconnect. |
+| `seed_connection_sync` | `connection_response` | Build a root compare for a live connection from the current shareable index. | Not safe for pre-upgrade connections. Run only for connections explicitly recreated after the replay barrier. |
+| `create_key_wrap` | `recipient_key` or `key_request`, wrap source, local signer secret | Recreate the deterministic `key_wrap` only if local source and signing material still exist. | Fine if preserved purge and retirement facts suppress invalid local material. It must not fabricate missing key material. |
+| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap only when replay finds no preserved purge or retirement fact covering the local recipient capability. | Fine only if purge/retirement projection removes unusable local recipient capability first. A retained wrap alone is not enough; replay must not resurrect the opened secret. |
+| `send_facts_on_connection` | sync compare/need/seed/live-tail work | Package current fact bytes into connection frames. This is derived transport work, not content truth. | Not safe during replay. Safe after the barrier for a live connection. |
+| `send_network_frame` | packaged connection frame | Final local socket write. | Not safe during replay. Drop queued local sends; replay can rederive sends from retry, sync, or connection facts after the barrier. |
+| `receive_network_frame` | daemon inbound bytes | Not rebuildable until it creates canonical request, response, frame, or receipt facts. | Not safe to drop if it is the only copy of an inbound observation. For high reliability, drain or stage inbound frames as local facts before upgrade; otherwise recovery depends on peer retry or sync. |
 
 Pending local user actions need the same classification. If losing the work
 would lose user-visible shared state, persist a durable local fact before
 upgrade. If it is only process state, it may be dropped and retried by UI.
+
+Connection responses need special care. In poc-10 a `connection_response` fact
+is local durable session state; wiping rows and sockets does not close it. If a
+pre-upgrade `connection_response` is replayed without close context, the
+projector can rematerialize the connection row and emit sync seed work. The
+upgrade must therefore retire all pre-upgrade connections before replay, either
+by committing local `connection_close` facts for each `connection_response` or
+by committing an equivalent local upgrade-retirement fact that old response
+adapters treat as close context. After replay, peers reconnect or run seed sync
+through newly established connections.
+
+The same applies to sync control facts that name a connection id: compare,
+have-id, and need-id facts are idempotent prompts, but they are not useful
+across connection retirement. Their default handlers are fine for a live
+session and wrong as replay-time network activity for a retired session.
 
 ## Connection And Sync
 
@@ -198,7 +232,11 @@ Connection behavior:
    carrier version. A newer carrier can be negotiated later only inside the
    authenticated session. Until then, connection frames, receipts, and local
    send/receive intents use the established carrier.
-4. **Expired older release.** Safe old request/response formats may still be
+4. **Upgrade replay.** Existing sessions are not kept alive across the replay
+   barrier. Durable local `connection_response` facts must have close or
+   upgrade-retirement context before replay, so rebuilt sync indexes do not
+   live-tail over pre-upgrade sessions.
+5. **Expired older release.** Safe old request/response formats may still be
    answered so users can recover, update, or finish old sync. That does not make
    the expired release part of the production visibility guarantee, and it does
    not lower the durable protocol ceiling.
