@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
+use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME, REPLAYABLE_DAEMON_TIME_WAKES};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -165,6 +165,28 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
             "command runtime should exclude network handler {excluded}"
         );
     }
+}
+
+#[test]
+fn replayable_time_wakes_exclude_wall_clock_connection_retry() {
+    // Replay admits wall-clock context only through replayable semantic
+    // timelines whose high-water mark derives from retained state. The
+    // disappearing-message expiry timeline qualifies; the operational
+    // connection peer-retry timeline does not, so it must never be a replayable
+    // wake even though it remains a live daemon wake.
+    let replayable: Vec<String> = REPLAYABLE_DAEMON_TIME_WAKES
+        .iter()
+        .map(|wake| (wake.timeline)().as_str().to_string())
+        .collect();
+
+    assert!(
+        replayable.iter().any(|name| name == "content_message_expiry"),
+        "disappearing-message expiry is replayable protocol state: {replayable:?}"
+    );
+    assert!(
+        !replayable.iter().any(|name| name == "connection_peer_retry"),
+        "replay must not admit the wall-clock connection_peer_retry timeline: {replayable:?}"
+    );
 }
 
 #[test]
