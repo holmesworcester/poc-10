@@ -18,21 +18,6 @@ protocol ceiling, not per-workspace or per-peer readiness, because proving that
 every relevant device in every workspace is upgraded is a consensus problem
 outside the current design.
 
-## Local Reference
-
-- `docs/research/references/cambria-ink-switch.html` is a downloaded copy of
-  the Ink & Switch Cambria essay from `https://www.inkandswitch.com/cambria/`.
-- `docs/research/references/cambria-ink-switch.pdf` is a local PDF rendering of
-  the same page. The public page did not expose a first-party PDF download, so
-  this file preserves the readable paper format for offline review.
-- Academic citation: Geoffrey Litt, Peter van Hardenberg, and Orion Henry.
-  "Cambria: Schema Evolution in Distributed Systems with Edit Lenses." PaPoC
-  2021. DOI: `https://doi.org/10.1145/3447865.3457963`.
-
-Cambria's useful lesson here is to isolate translation at the owning fact or
-frame boundary, keep one source of truth for each evolution edge, and avoid
-scattered `if old version` branches in semantic code.
-
 ## Core Policy
 
 The policy has four separations:

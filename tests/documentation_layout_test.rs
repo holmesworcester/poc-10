@@ -254,11 +254,6 @@ fn protocol_version_flexibility_design_is_local_and_poc10_specific() {
         "one provider-signed client family",
         "Any shared production action emitted under the current production protocol ceiling",
         "global production protocol ceiling, not per-workspace or per-peer readiness",
-        "docs/research/references/cambria-ink-switch.html",
-        "docs/research/references/cambria-ink-switch.pdf",
-        "Cambria: Schema Evolution in Distributed Systems with Edit Lenses",
-        "https://doi.org/10.1145/3447865.3457963",
-        "Cambria's useful lesson here is to isolate translation at the owning fact or frame boundary",
         "Core Policy",
         "The policy has four separations",
         "**Emission ceiling.**",
@@ -351,6 +346,11 @@ fn protocol_version_flexibility_design_is_local_and_poc10_specific() {
         "QUIC version negotiation",
         "Kafka and Confluent Schema Registry",
         "Signal release expiration and old-device pressure",
+        "## Local Reference",
+        "Cambria",
+        "cambria-ink-switch",
+        "Schema Evolution in Distributed Systems with Edit Lenses",
+        "https://doi.org/10.1145/3447865.3457963",
         "## Minimal Design",
         "## One-Client-Family Compatibility Design",
         "fallback/canonical",
@@ -372,19 +372,6 @@ fn protocol_version_flexibility_design_is_local_and_poc10_specific() {
             "protocol version design should not include removed industry survey detail {removed:?}"
         );
     }
-
-    let html = source_text(&root.join("docs/research/references/cambria-ink-switch.html"));
-    assert!(
-        html.contains("<title>Project Cambria: Translate your data with lenses</title>"),
-        "downloaded Cambria HTML should be the Ink & Switch essay"
-    );
-
-    let pdf = fs::read(root.join("docs/research/references/cambria-ink-switch.pdf"))
-        .expect("read downloaded Cambria PDF");
-    assert!(
-        pdf.starts_with(b"%PDF"),
-        "downloaded Cambria PDF should have a PDF header"
-    );
 }
 
 #[test]
