@@ -106,19 +106,17 @@ request, seals the request bytes, stages them through core networking, and
 attempts one TCP write. Failed connection attempts are consumed; retry timing is
 owned by the live `maintain_connections` loop, not a durable time wake.
 
-`register_connection_candidate` and `unregister_connection_candidate` own the
-connection-maintenance candidate index in `connection::maintenance`. The request
-projector emits the registration intent when a local request projects with a
-reachable route, and the retirement intent once the request is answered. Both
-are replay-allowed deterministic rebuild work: replay reconstructs the candidate
-index from retained request facts without any network IO.
-
 `maintain_connections` is the live-only recurring loop the daemon installs as an
-in-memory schedule. Each tick it reads only the candidate index and queues a
-bootstrap send for every still-pending candidate; answered candidates are gone
-from the index, so connected peers stop being retried. It never reads auth-owned
-or endpoint-owned tables, never mutates candidate rows, and never runs during
-replay.
+in-memory schedule. It owns no state. Each tick it asks the request family for
+the pending bootstrap set — local outbound request rows whose projected
+`bootstrap_addr` is set and which have no matching connection response yet — and
+queues a bootstrap send for each. The pending set is a query over connection-owned
+read models (`request::queries::pending_bootstrap_requests`), not a separate
+maintenance index; an answered request drops out of the query, so connected peers
+stop being retried. It never reads auth-owned or endpoint-owned tables and never
+runs during replay. Because each fire re-queues sends for every still-pending
+request, the recurring cadence is the retry interval and a dropped send is retried
+on the next tick.
 
 `create_connection_response` is responder-side handshake work. It loads the
 request, invite secret, and receive receipt, validates the invite signature and
@@ -150,13 +148,13 @@ on socket or route failure.
 
 ### `request` (tag 42)
 
-Semantic handshake request. A local request with a reachable route registers a
-connection-maintenance candidate while it is unanswered and unregisters it once
-a response appears; the projector emits no time wake and no bootstrap send
-itself. Global requests are received bootstrap requests and emit
-`create_connection_response` once invite, endpoint, and receipt context
-validate. Both branches write `connection_request_rows` and offer
-`connection_request`.
+Semantic handshake request. A local outbound request projects its bootstrap
+route into `connection_request_rows` (`bootstrap_addr`), which makes it a pending
+bootstrap for the live maintenance query until a connection response appears; the
+projector emits no time wake and no bootstrap send itself. Global requests are
+received bootstrap requests and emit `create_connection_response` once invite,
+endpoint, and receipt context validate. Both branches write
+`connection_request_rows` and offer `connection_request`.
 
 ```text
 request {
@@ -332,12 +330,12 @@ outbound initiator dependency graph:
   invite_secret + initiator ephemeral_secret
     -> local request
        needs connection_response_for_request until answered
-       -> register_connection_candidate (connection-maintenance index)
+       materializes connection_request_row with bootstrap_addr (pending bootstrap)
   live maintain_connections tick (recurring, daemon-installed)
-    reads candidate index
+    queries pending bootstraps (request rows with bootstrap_addr and no response)
     -> send_bootstrap_connection_request
        network output: sealed bootstrap request bytes (not a fact)
-    answered request -> unregister_connection_candidate
+  connection_response row for the request -> no longer pending (query drops it)
 
 inbound responder transport observation:
   remote sealed bootstrap request bytes (not a fact)

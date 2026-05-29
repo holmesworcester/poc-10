@@ -44,9 +44,6 @@ use crate::protocol::connection::create_connection_response::{
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::maintenance::index::CandidateRow;
-use crate::protocol::connection::register_connection_candidate::register_connection_candidate_intent;
-use crate::protocol::connection::unregister_connection_candidate::unregister_connection_candidate_intent;
 
 use super::create::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
@@ -140,7 +137,12 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                     "connection request ephemeral public key does not match dependency".to_string(),
                 );
             }
-            // 3. Materialize local request.
+            // 3. Materialize the local outbound request. Its row carries the
+            // bootstrap route (its `to_listen_addr`), which is what makes it a
+            // pending bootstrap candidate for the live maintenance query until a
+            // response materializes. When the response context appears, the row
+            // stays (the connection response row marks it answered), and the
+            // standing response need is dropped.
             let response_need =
                 crate::protocol::connection::request::connection_response_for_request_need(
                     fact.id, fact.id,
@@ -160,9 +162,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                         "connection request response context targets another request".to_string(),
                     );
                 }
-                // Answered: retire the connection-maintenance candidate.
-                return Ok(materialized_output(fact.id, &request)?
-                    .intent(unregister_connection_candidate_intent(fact.id)));
+                return materialized_output(fact.id, &request, true);
             }
             return local_pending_output(fact, &request, response_need);
         }
@@ -265,10 +265,24 @@ fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String
     Ok(())
 }
 
+/// Materialize a request row and offer request context.
+///
+/// `bootstrap_addr` is the local outbound route: `Some(addr)` for a local
+/// request that should be bootstrapped to `addr`, `None` for a received request
+/// or a local request with no route. It is projected into the row so the live
+/// maintenance query can select pending bootstraps without re-reading the fact.
 fn materialized_output(
     request_id: [u8; 32],
     request: &ConnectionRequestFact,
+    local_outbound: bool,
 ) -> Result<ProjectionOutput, String> {
+    // Only a local outbound request projects a bootstrap route into its row; a
+    // received request is answered, not bootstrapped.
+    let bootstrap_addr = if local_outbound {
+        request.to_listen_addr
+    } else {
+        None
+    };
     Ok(ProjectionOutput::new()
         .offer(crate::core::context::ContextOffer::range(
             request_id,
@@ -278,33 +292,25 @@ fn materialized_output(
             request_id,
         ))
         .row_mutation(RowMutation::PutRow(connection_request_row(
-            request_id, request,
+            request_id,
+            request,
+            bootstrap_addr,
         )?)))
 }
 
-/// Materialize an unanswered local request and register a maintenance candidate.
+/// Materialize an unanswered local request.
 ///
-/// The request keeps its standing need for the response. When the request has a
-/// reachable bootstrap route, it registers a connection-maintenance candidate;
-/// the live `maintain_connections` loop owns the bootstrap-send attempts and
-/// their retry cadence. A request with no route cannot be bootstrapped, so no
-/// candidate is registered. This emits no time wake: retry is operational live
-/// work, not durable protocol state.
+/// The row carries the bootstrap route (`to_listen_addr`), so it is selected by
+/// the live `maintain_connections` query as a pending bootstrap until a response
+/// materializes. The request keeps its standing need for the response. The
+/// projector owns no retry loop and emits no time wake: bootstrap sends are live
+/// operational work owned by `maintain_connections`.
 fn local_pending_output(
     fact: &Fact,
     request: &ConnectionRequestFact,
     response_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let output = materialized_output(fact.id, request)?.need(response_need);
-    let Some(addr) = request.to_listen_addr else {
-        return Ok(output);
-    };
-    Ok(output.intent(register_connection_candidate_intent(CandidateRow {
-        request_id: fact.id,
-        to_endpoint: request.to_endpoint,
-        initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
-        addr,
-    })?))
+    Ok(materialized_output(fact.id, request, true)?.need(response_need))
 }
 
 fn received_materialized_output(
@@ -312,8 +318,10 @@ fn received_materialized_output(
     request: &ConnectionRequestFact,
     receive_id: [u8; 32],
 ) -> Result<ProjectionOutput, String> {
+    // A received request is not a local outbound bootstrap, so its row carries no
+    // bootstrap route.
     Ok(
-        materialized_output(request_id, request)?.intent(create_connection_response_intent(
+        materialized_output(request_id, request, false)?.intent(create_connection_response_intent(
             CreateConnectionResponse {
                 request_id,
                 invite_secret_id: request.invite_secret_fact_id,
@@ -396,12 +404,6 @@ mod projector_tests {
     use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
     use topo::protocol::connection::response::{
         fact::ConnectionResponseFact, layout as response_layout,
-    };
-    use topo::protocol::connection::register_connection_candidate::{
-        decode_register_connection_candidate_intent, REGISTER_CONNECTION_CANDIDATE,
-    };
-    use topo::protocol::connection::unregister_connection_candidate::{
-        decode_unregister_connection_candidate_intent, UNREGISTER_CONNECTION_CANDIDATE,
     };
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
@@ -645,7 +647,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_materializes_and_registers_candidate_after_context_match() {
+    fn local_request_materializes_with_bootstrap_route_after_context_match() {
         let (request, request_fact, invite_fact, ephemeral_fact) =
             signed_request_fact(FactScope::Local);
         let context = ProjectionContext::from_matches(vec![
@@ -657,25 +659,12 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        // No time wake and no inline send: the projector registers a
-        // connection-maintenance candidate instead.
+        // The projector owns no retry loop: no time wake, no send, no candidate
+        // intent. It materializes the request row carrying the bootstrap route,
+        // which is what the live maintenance query selects on.
         assert!(output.time_wakes.is_empty());
         assert!(output.effects.local_intents.is_empty());
-        assert_eq!(output.effects.intents.len(), 1);
-        assert_eq!(
-            output.effects.intents[0].kind.as_str(),
-            REGISTER_CONNECTION_CANDIDATE
-        );
-        let candidate = decode_register_connection_candidate_intent(&output.effects.intents[0])
-            .expect("decode candidate intent");
-        assert_eq!(candidate.request_id, request_fact.id);
-        assert_eq!(candidate.to_endpoint, request.to_endpoint);
-        assert_eq!(
-            candidate.initiator_ephemeral_secret_id,
-            request.initiator_ephemeral_secret_fact_id
-        );
-        assert_eq!(Some(candidate.addr), request.to_listen_addr);
-
+        assert!(output.effects.intents.is_empty());
         assert!(output
             .needs
             .iter()
@@ -689,18 +678,18 @@ mod projector_tests {
         let row = rows::decode_connection_request_row(&row.key, &row.value)
             .expect("decode connection request row");
         assert_eq!(row.request_id, request_fact.id);
-        assert_eq!(row.from_endpoint, request.from_endpoint);
         assert_eq!(row.to_endpoint, request.to_endpoint);
-        assert_eq!(row.invite_fact_id, request.invite_fact_id);
-        assert_eq!(row.invite_secret_fact_id, request.invite_secret_fact_id);
         assert_eq!(
             row.initiator_ephemeral_secret_fact_id,
             request.initiator_ephemeral_secret_fact_id
         );
+        // A local outbound request projects its bootstrap route into the row.
+        assert_eq!(row.bootstrap_addr, request.to_listen_addr);
+        assert!(row.bootstrap_addr.is_some());
     }
 
     #[test]
-    fn local_request_without_route_registers_no_candidate() {
+    fn local_request_without_route_projects_no_bootstrap_addr() {
         let (mut request, _, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
         let invite = invite_layout::decode_fact(invite_fact.body()).expect("decode invite");
         request.to_listen_addr = None;
@@ -722,10 +711,19 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        // No bootstrap route means there is nothing to maintain.
+        // No bootstrap route means the row is not a pending bootstrap candidate.
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
+            panic!("expected put row mutation");
+        };
+        assert_eq!(
+            rows::decode_connection_request_row(&row.key, &row.value)
+                .expect("decode row")
+                .bootstrap_addr,
+            None
+        );
         assert!(output
             .needs
             .iter()
@@ -733,7 +731,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_with_response_unregisters_candidate() {
+    fn local_request_with_response_drops_need_without_extra_intents() {
         let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
@@ -745,20 +743,13 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        // Answered: retire the candidate, drop the standing need, no time wake.
+        // Answered: drop the standing need, no time wake, no intents. The request
+        // row is no longer a pending bootstrap because a connection response row
+        // now exists for it (the maintenance query filters it out).
         assert!(output.effects.local_intents.is_empty());
+        assert!(output.effects.intents.is_empty());
         assert!(output.time_wakes.is_empty());
         assert!(output.needs.is_empty());
-        assert_eq!(output.effects.intents.len(), 1);
-        assert_eq!(
-            output.effects.intents[0].kind.as_str(),
-            UNREGISTER_CONNECTION_CANDIDATE
-        );
-        assert_eq!(
-            decode_unregister_connection_candidate_intent(&output.effects.intents[0])
-                .expect("decode unregister intent"),
-            request_fact.id
-        );
         assert_eq!(output.effects.row_mutations.len(), 1);
     }
 
@@ -793,7 +784,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn received_request_registers_no_candidate_and_only_creates_response() {
+    fn received_request_is_not_a_bootstrap_candidate_and_only_creates_response() {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
@@ -805,15 +796,19 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project received request");
 
-        // A received request answers a peer; it never registers an outbound
-        // bootstrap candidate and never schedules a time wake.
+        // A received request answers a peer; it never schedules a time wake, and
+        // its row carries no bootstrap route so it is not a pending bootstrap.
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
-        assert!(!output
-            .effects
-            .intents
-            .iter()
-            .any(|intent| intent.kind.as_str() == REGISTER_CONNECTION_CANDIDATE));
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
+            panic!("expected put row mutation");
+        };
+        assert_eq!(
+            rows::decode_connection_request_row(&row.key, &row.value)
+                .expect("decode row")
+                .bootstrap_addr,
+            None
+        );
         assert_eq!(
             output
                 .effects

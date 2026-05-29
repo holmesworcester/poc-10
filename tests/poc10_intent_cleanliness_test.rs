@@ -167,12 +167,10 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "create_connection_response",
                 "maintain_connections",
                 "receive_network_frame",
-                "register_connection_candidate",
                 "send_bootstrap_request",
                 "send_bootstrap_response",
                 "send_facts_on_connection",
                 "send_network_frame",
-                "unregister_connection_candidate",
             ],
         ),
         ("content", &[]),
@@ -1128,7 +1126,7 @@ const STANDARD_FAMILY_FILES: [&str; 8] = [
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local directories that are deliberately not fact families.
-const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] = ["content/purge", "connection/maintenance"];
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 1] = ["content/purge"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
@@ -1139,13 +1137,7 @@ fn fact_family_directories_contain_only_standard_role_files() {
         let scope = scope_dir.file_name().unwrap().to_str().unwrap();
         for family_dir in immediate_subdirs(&scope_dir) {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
-            let relative_key = format!("{scope}/{family}");
-            if FAMILY_FILE_RULE_EXCEPTIONS.contains(&relative_key.as_str())
-                || NON_FACT_SCOPE_DIR_EXCEPTIONS.contains(&relative_key.as_str())
-            {
-                // Non-fact scope-local helper directories (e.g. the
-                // connection-maintenance candidate index) are not fact families
-                // and do not follow the standard role-file layout.
+            if FAMILY_FILE_RULE_EXCEPTIONS.contains(&format!("{scope}/{family}").as_str()) {
                 continue;
             }
             // A fact family is a flat set of role files — no nested directories.
@@ -1298,19 +1290,8 @@ fn target_intents_are_self_contained_handler_files_without_driver_or_intent_subm
 /// The canonical intent verb vocabulary. Intent handler files are named
 /// `<verb>_<object>`; this set is deliberately small, and growing it is a
 /// deliberate act — add a verb here only when no existing verb fits.
-const INTENT_VERBS: [&str; 12] = [
-    "add",
-    "create",
-    "send",
-    "receive",
-    "purge",
-    "share",
-    "seed",
-    "unwrap",
-    "update",
-    "register",
-    "unregister",
-    "maintain",
+const INTENT_VERBS: [&str; 10] = [
+    "add", "create", "send", "receive", "purge", "share", "seed", "unwrap", "update", "maintain",
 ];
 
 /// A name is verb-first when it begins with `<verb>_` for a canonical intent

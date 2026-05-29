@@ -125,12 +125,10 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "create_connection_response.rs",
                 "maintain_connections.rs",
                 "receive_network_frame.rs",
-                "register_connection_candidate.rs",
                 "send_bootstrap_request.rs",
                 "send_bootstrap_response.rs",
                 "send_facts_on_connection.rs",
                 "send_network_frame.rs",
-                "unregister_connection_candidate.rs",
             ],
         ),
         ("content", &[]),
@@ -664,22 +662,33 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let accept_commands = source_text(&root.join("src/protocol/auth/invite/commands.rs"));
     let connection_request_projector =
         source_text(&root.join("src/protocol/connection/request/project.rs"));
+    let maintain_connections =
+        source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 
     assert!(
         !accept_commands.contains("send_bootstrap_connection_request_intent"),
         "accept/link commands should create connection_request facts, not enqueue bootstrap IO directly"
     );
+    // The projector materializes the request row (with its bootstrap route) and
+    // owns no retry loop: no inline send, no peer-retry time wake.
     assert!(
-        !connection_request_projector.contains("send_bootstrap_connection_request_intent"),
-        "the connection_request projector must not own bootstrap IO; live maintenance sends from the candidate index"
+        connection_request_projector.contains("connection_request_row"),
+        "the connection_request projector should materialize the request row"
     );
     assert!(
-        connection_request_projector.contains("register_connection_candidate_intent"),
-        "the connection_request projector should register a connection-maintenance candidate when a local request projects"
+        !connection_request_projector.contains("send_bootstrap_connection_request_intent"),
+        "the connection_request projector must not own bootstrap IO; live maintenance sends instead"
     );
     assert!(
         !connection_request_projector.contains("peer_retry_timeline"),
         "the connection_request projector must not own a peer-retry time wake"
+    );
+    // Bootstrap retry is owned by the live maintenance loop, which selects
+    // pending bootstraps by querying connection-owned read models.
+    assert!(
+        maintain_connections.contains("send_bootstrap_connection_request_intent")
+            && maintain_connections.contains("pending_bootstrap_requests"),
+        "maintain_connections should query pending bootstraps and own the bootstrap send"
     );
 }
 

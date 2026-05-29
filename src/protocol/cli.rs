@@ -744,19 +744,18 @@ pub(crate) fn connection_maintenance_status(
 ) -> Result<CliOutput, String> {
     args.require_len(0, CONNECTION_MAINTENANCE_STATUS_USAGE)?;
     ctx.settle_local_command_work()?;
-    let status = crate::protocol::connection::maintenance::index::connection_maintenance_status(
+    let status = crate::protocol::connection::request::connection_maintenance_status(
         ctx.runtime().store(),
     )?;
     let mut lines = vec![
-        format!("candidates: {}", status.candidates.len()),
+        format!("candidates: {}", status.pending.len()),
         format!("active_connections: {}", status.active_connections),
     ];
-    for candidate in &status.candidates {
+    for pending in &status.pending {
         lines.push(format!(
-            "candidate_{}: to={} addr={}",
-            encode_hex(&candidate.request_id),
-            encode_hex(&candidate.to_endpoint),
-            candidate.addr
+            "candidate_{}: addr={}",
+            encode_hex(&pending.request_id),
+            pending.addr
         ));
     }
     Ok(CliOutput::lines(lines))
@@ -771,17 +770,18 @@ pub(crate) fn intent_registry(
     let routes = ctx.runtime().handler_routes();
     let mut lines = vec![format!("routes: {}", routes.len())];
     for route in routes {
-        // The command-excluded set is exactly the network-capable set, so both
-        // columns report the same membership.
-        let network_io = excluded.contains(&route.name);
+        // The three policy questions that actually drive dispatch: can replay
+        // run this, is it a recurring loop, and may a synchronous command run
+        // it. There is no separate "network IO" column; that taxonomy is fuzzy
+        // (a maintenance tick queues a send but writes no socket), and the
+        // command-exclusion answer already covers daemon/live transport work.
         lines.push(format!(
-            "route_{}: kind={} replay={} recurring={} command_excluded={} network_io={}",
+            "route_{}: kind={} replay={} recurring={} command_excluded={}",
             route.name,
             route.intent_kind,
             route.runs_during_replay,
             route.recurrence.is_some(),
-            network_io,
-            network_io,
+            excluded.contains(&route.name),
         ));
     }
     Ok(CliOutput::lines(lines))

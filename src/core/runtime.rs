@@ -304,9 +304,8 @@ impl Runtime {
 
     /// Borrow the handler route names a synchronous command must not run.
     ///
-    /// This is exactly the set of routes that can perform network IO, so the
-    /// intent-registry diagnostic reports it as both the command-exclusion and
-    /// the network-capability column.
+    /// These are the daemon/live transport handlers; the intent-registry
+    /// diagnostic reports this as the `command_excluded` policy answer.
     pub fn command_excluded_handlers(&self) -> &'static [&'static str] {
         self.description.command_excluded_handlers
     }

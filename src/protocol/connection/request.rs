@@ -15,7 +15,15 @@ pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod queries;
 pub mod rows;
+
+// Re-export the connection-maintenance selection so the scope-root
+// maintenance intent and the status diagnostic read pending bootstraps without
+// importing a fact-family `queries` path directly.
+pub use queries::{
+    connection_maintenance_status, pending_bootstrap_requests, MaintenanceStatus, PendingBootstrap,
+};
 
 const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
 

@@ -37,31 +37,22 @@ fn intent_registry_exposes_replay_decision_for_every_route() {
     let (_tmp, db) = fresh_db();
     let out = assert_success(topo(&["--db", &db, "intent-registry"]));
 
-    assert_eq!(line_value(&out, "routes"), "16");
+    assert_eq!(line_value(&out, "routes"), "14");
 
-    // Deterministic rebuild work runs during replay, including connection-
-    // maintenance candidate registration.
-    for replay_route in [
-        "share_fact_with_sync",
-        "create_key_wrap",
-        "unwrap_key_wrap",
-        "register_connection_candidate",
-        "unregister_connection_candidate",
-    ] {
+    // Deterministic rebuild work runs during replay.
+    for replay_route in ["share_fact_with_sync", "create_key_wrap", "unwrap_key_wrap"] {
         let line = route_line(&out, replay_route);
         assert!(line.contains("replay=true"), "{line}");
-        assert!(line.contains("network_io=false"), "{line}");
+        assert!(line.contains("command_excluded=false"), "{line}");
     }
 
     // maintain_connections is live-only recurring work: it does not run during
-    // replay and is not a network-IO route.
+    // replay.
     let maintain = route_line(&out, "maintain_connections");
     assert!(maintain.contains("replay=false"), "{maintain}");
     assert!(maintain.contains("recurring=true"), "{maintain}");
-    assert!(maintain.contains("network_io=false"), "{maintain}");
 
-    // Network IO and live session work do not run during replay, and the
-    // network routes are reported as command-excluded and network-capable.
+    // Live transport handlers do not run during replay and are command-excluded.
     for network_route in [
         "send_bootstrap_connection_request",
         "send_facts_on_connection",
@@ -71,13 +62,10 @@ fn intent_registry_exposes_replay_decision_for_every_route() {
         let line = route_line(&out, network_route);
         assert!(line.contains("replay=false"), "{line}");
         assert!(line.contains("command_excluded=true"), "{line}");
-        assert!(line.contains("network_io=true"), "{line}");
     }
 
-    // create_connection_response does not run during replay but is not a
-    // network-IO route in the command-exclusion sense.
-    let response = route_line(&out, "create_connection_response");
-    assert!(response.contains("replay=false"), "{response}");
+    // The registry reports the three policy questions, not a network_io label.
+    assert!(!out.contains("network_io"), "{out}");
 }
 
 #[test]
