@@ -296,6 +296,21 @@ impl Runtime {
         stored + local
     }
 
+    /// Borrow the declared handler routes, including replay and recurrence
+    /// metadata, for registry diagnostics.
+    pub fn handler_routes(&self) -> &'static [HandlerRoute] {
+        self.description.handlers
+    }
+
+    /// Borrow the handler route names a synchronous command must not run.
+    ///
+    /// This is exactly the set of routes that can perform network IO, so the
+    /// intent-registry diagnostic reports it as both the command-exclusion and
+    /// the network-capability column.
+    pub fn command_excluded_handlers(&self) -> &'static [&'static str] {
+        self.description.command_excluded_handlers
+    }
+
     /// Build the narrow command context for a user-facing command.
     pub fn command_context<'a>(
         &'a self,

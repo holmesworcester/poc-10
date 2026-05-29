@@ -510,6 +510,16 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("replay", command::REPLAY_USAGE, replay),
     cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
     cli_command!("replay-check", command::REPLAY_CHECK_USAGE, replay_check),
+    cli_command!(
+        "intent-registry",
+        command::INTENT_REGISTRY_USAGE,
+        intent_registry
+    ),
+    cli_command!(
+        "recurring-intents",
+        command::RECURRING_INTENTS_USAGE,
+        recurring_intents
+    ),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[

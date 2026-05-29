@@ -710,6 +710,64 @@ pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
 pub const REPLAY_USAGE: &str = "replay [--reverse | --scramble --seed N]";
 pub const STATE_SUMMARY_USAGE: &str = "state-summary";
 pub const REPLAY_CHECK_USAGE: &str = "replay-check";
+pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
+pub const RECURRING_INTENTS_USAGE: &str = "recurring-intents";
+
+pub(crate) fn intent_registry(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, INTENT_REGISTRY_USAGE)?;
+    let excluded = ctx.runtime().command_excluded_handlers();
+    let routes = ctx.runtime().handler_routes();
+    let mut lines = vec![format!("routes: {}", routes.len())];
+    for route in routes {
+        // The command-excluded set is exactly the network-capable set, so both
+        // columns report the same membership.
+        let network_io = excluded.contains(&route.name);
+        lines.push(format!(
+            "route_{}: kind={} replay={} recurring={} command_excluded={} network_io={}",
+            route.name,
+            route.intent_kind,
+            route.runs_during_replay,
+            route.recurrence.is_some(),
+            network_io,
+            network_io,
+        ));
+    }
+    Ok(CliOutput::lines(lines))
+}
+
+pub(crate) fn recurring_intents(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, RECURRING_INTENTS_USAGE)?;
+    let recurring: Vec<_> = ctx
+        .runtime()
+        .handler_routes()
+        .iter()
+        .filter_map(|route| route.recurrence.map(|spec| (route, spec)))
+        .collect();
+    // Recurring schedules are in-memory only; there is no persisted job table to
+    // read, so the listing comes entirely from static registry metadata.
+    let mut lines = vec![
+        "source: handler_registry".to_string(),
+        "persisted_job_rows: 0".to_string(),
+        format!("recurring_intents: {}", recurring.len()),
+    ];
+    for (route, spec) in recurring {
+        lines.push(format!(
+            "recurring_{}: kind={} interval_ms={} initial_delay_ms={} runs_during_replay={}",
+            route.name,
+            route.intent_kind,
+            spec.interval_ms,
+            spec.initial_delay_ms,
+            route.runs_during_replay,
+        ));
+    }
+    Ok(CliOutput::lines(lines))
+}
 
 pub(crate) fn replay(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let order = parse_replay_order(args)?;
