@@ -37,14 +37,28 @@ fn intent_registry_exposes_replay_decision_for_every_route() {
     let (_tmp, db) = fresh_db();
     let out = assert_success(topo(&["--db", &db, "intent-registry"]));
 
-    assert_eq!(line_value(&out, "routes"), "13");
+    assert_eq!(line_value(&out, "routes"), "16");
 
-    // Deterministic rebuild work runs during replay.
-    for replay_route in ["share_fact_with_sync", "create_key_wrap", "unwrap_key_wrap"] {
+    // Deterministic rebuild work runs during replay, including connection-
+    // maintenance candidate registration.
+    for replay_route in [
+        "share_fact_with_sync",
+        "create_key_wrap",
+        "unwrap_key_wrap",
+        "register_connection_candidate",
+        "unregister_connection_candidate",
+    ] {
         let line = route_line(&out, replay_route);
         assert!(line.contains("replay=true"), "{line}");
         assert!(line.contains("network_io=false"), "{line}");
     }
+
+    // maintain_connections is live-only recurring work: it does not run during
+    // replay and is not a network-IO route.
+    let maintain = route_line(&out, "maintain_connections");
+    assert!(maintain.contains("replay=false"), "{maintain}");
+    assert!(maintain.contains("recurring=true"), "{maintain}");
+    assert!(maintain.contains("network_io=false"), "{maintain}");
 
     // Network IO and live session work do not run during replay, and the
     // network routes are reported as command-excluded and network-capable.
@@ -81,6 +95,17 @@ fn recurring_intents_come_from_static_registry_without_persisted_rows() {
         "0",
         "recurring schedules are in-memory only"
     );
+    assert_eq!(
+        line_value(&out, "recurring_intents"),
+        "1",
+        "maintain_connections is the live-only recurring loop"
+    );
+    let maintain = out
+        .lines()
+        .find(|line| line.starts_with("recurring_maintain_connections:"))
+        .unwrap_or_else(|| panic!("recurring-intents missing maintain_connections:\n{out}"));
+    assert!(maintain.contains("kind=maintain_connections"), "{maintain}");
+    assert!(maintain.contains("runs_during_replay=false"), "{maintain}");
 
     // No state-summary area is a persisted recurring/job/schedule table.
     let summary = assert_success(topo(&["--db", &db, "state-summary"]));

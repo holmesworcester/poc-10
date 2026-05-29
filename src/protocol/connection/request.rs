@@ -19,11 +19,6 @@ pub mod rows;
 
 const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
 
-pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
-    crate::core::projectors::Timeline::new("connection_peer_retry")
-        .expect("valid connection peer-retry timeline")
-}
-
 pub fn connection_response_for_request_need(
     owner: crate::core::facts::FactId,
     request_id: crate::core::facts::FactId,

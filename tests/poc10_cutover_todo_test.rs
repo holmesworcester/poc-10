@@ -1091,7 +1091,8 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
         pipeline.push_str(&source_text(&path));
     }
     let core_schema = source_text(&root.join("src/core/schema.rs"));
-    let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
+    let maintain_connections =
+        source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
     let send_facts_handler =
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
@@ -1110,10 +1111,9 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
             ));
         }
     }
-    if !request_projector.contains(".local_intent(send_bootstrap_connection_request_intent") {
+    if !maintain_connections.contains(".local_intent(send_bootstrap_connection_request_intent") {
         offenders.push(
-            "connection request projection does not emit bootstrap sends as local intents"
-                .to_string(),
+            "maintain_connections does not emit bootstrap sends as local intents".to_string(),
         );
     }
     let compact_send_facts_handler = send_facts_handler.split_whitespace().collect::<String>();

@@ -123,11 +123,14 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             "connection",
             &[
                 "create_connection_response.rs",
+                "maintain_connections.rs",
                 "receive_network_frame.rs",
+                "register_connection_candidate.rs",
                 "send_bootstrap_request.rs",
                 "send_bootstrap_response.rs",
                 "send_facts_on_connection.rs",
                 "send_network_frame.rs",
+                "unregister_connection_candidate.rs",
             ],
         ),
         ("content", &[]),
@@ -667,8 +670,16 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
         "accept/link commands should create connection_request facts, not enqueue bootstrap IO directly"
     );
     assert!(
-        connection_request_projector.contains("send_bootstrap_connection_request_intent"),
-        "the connection_request projector should schedule bootstrap IO when a local request projects"
+        !connection_request_projector.contains("send_bootstrap_connection_request_intent"),
+        "the connection_request projector must not own bootstrap IO; live maintenance sends from the candidate index"
+    );
+    assert!(
+        connection_request_projector.contains("register_connection_candidate_intent"),
+        "the connection_request projector should register a connection-maintenance candidate when a local request projects"
+    );
+    assert!(
+        !connection_request_projector.contains("peer_retry_timeline"),
+        "the connection_request projector must not own a peer-retry time wake"
     );
 }
 

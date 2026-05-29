@@ -580,6 +580,49 @@ impl Runtime {
 
         Ok(crate::core::replay::compare_replay_passes(summaries))
     }
+
+    /// Build and run one recurring intent kind once, without the daemon.
+    ///
+    /// This drives the same path the daemon scheduler uses — build the intent
+    /// from current store state, then dispatch it — but it runs the command-safe
+    /// handler set, so the recurring handler executes while its downstream
+    /// network-send handlers stay excluded. The report says whether a tick was
+    /// built and how much live-only work it left queued behind the network
+    /// barrier (for example bootstrap sends a maintenance tick queued).
+    pub fn run_recurring_once(&mut self, kind: &str) -> Result<RecurringRunReport, String> {
+        let spec = self
+            .description
+            .handlers
+            .iter()
+            .find(|route| route.intent_kind == kind && route.recurrence.is_some())
+            .and_then(|route| route.recurrence)
+            .ok_or_else(|| format!("no recurring intent registered for kind {kind}"))?;
+        let Some(intent) = (spec.build_intent)(&self.store)? else {
+            return Ok(RecurringRunReport {
+                kind: kind.to_string(),
+                built: false,
+                blocked_network_work: 0,
+            });
+        };
+        self.submit_local_intent(intent)?;
+        self.process_command_work_until_idle(8, 4096)?;
+        Ok(RecurringRunReport {
+            kind: kind.to_string(),
+            built: true,
+            blocked_network_work: self.pending_intent_count(),
+        })
+    }
+}
+
+/// Report from running one recurring intent kind once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurringRunReport {
+    /// Recurring intent kind that was run.
+    pub kind: String,
+    /// Whether the builder produced a tick (false means nothing to do).
+    pub built: bool,
+    /// Live-only intents left queued behind the network barrier after the tick.
+    pub blocked_network_work: usize,
 }
 
 fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource> {

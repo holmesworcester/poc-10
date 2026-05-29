@@ -26,7 +26,7 @@ use crate::core::network;
 use crate::core::projectors::{
     FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
-use crate::core::runtime::HandlerRoute;
+use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
@@ -278,6 +278,7 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_candidate_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -331,6 +332,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
+        connection::maintenance::index::CONNECTION_CANDIDATE_ROWS,
         connection::request::rows::CONNECTION_REQUEST_ROWS,
         connection::response::rows::CONNECTION_RESPONSE_ROWS,
         auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
@@ -520,6 +522,12 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         command::RECURRING_INTENTS_USAGE,
         recurring_intents
     ),
+    cli_command!("recurring-run", command::RECURRING_RUN_USAGE, recurring_run),
+    cli_command!(
+        "connection-maintenance-status",
+        command::CONNECTION_MAINTENANCE_STATUS_USAGE,
+        connection_maintenance_status
+    ),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
@@ -536,6 +544,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
+    connection::maintenance::index::CONNECTION_CANDIDATE_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,
     connection::response::rows::CONNECTION_RESPONSE_ROWS,
     read_models::FILE_ROWS,
@@ -706,6 +715,33 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         connection::send_bootstrap_response::SEND_BOOTSTRAP_CONNECTION_RESPONSE,
         connection::send_bootstrap_response::SendBootstrapConnectionResponseHandler,
         replay = false
+    ),
+    // Candidate registration rebuilds the connection-maintenance index from
+    // retained request facts, so it is deterministic replay rebuild work.
+    handler_route!(
+        "register_connection_candidate",
+        connection::register_connection_candidate::REGISTER_CONNECTION_CANDIDATE,
+        connection::register_connection_candidate::RegisterConnectionCandidateHandler,
+        replay = true
+    ),
+    handler_route!(
+        "unregister_connection_candidate",
+        connection::unregister_connection_candidate::UNREGISTER_CONNECTION_CANDIDATE,
+        connection::unregister_connection_candidate::UnregisterConnectionCandidateHandler,
+        replay = true
+    ),
+    // Connection maintenance is a live-only recurring operational loop. The
+    // daemon installs it as an in-memory schedule; it never runs during replay.
+    handler_route!(
+        "maintain_connections",
+        connection::maintain_connections::MAINTAIN_CONNECTIONS,
+        connection::maintain_connections::MaintainConnectionsHandler,
+        replay = false,
+        recurring = RecurringIntentSpec {
+            interval_ms: 250,
+            initial_delay_ms: 0,
+            build_intent: connection::maintain_connections::build_maintain_connections_intent,
+        }
     ),
     // Sync compare/have/need/send are live session prompts and send packaging.
     handler_route!(

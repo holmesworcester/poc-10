@@ -712,6 +712,55 @@ pub const STATE_SUMMARY_USAGE: &str = "state-summary";
 pub const REPLAY_CHECK_USAGE: &str = "replay-check";
 pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 pub const RECURRING_INTENTS_USAGE: &str = "recurring-intents";
+pub const RECURRING_RUN_USAGE: &str = "recurring-run KIND --now MS";
+pub const CONNECTION_MAINTENANCE_STATUS_USAGE: &str = "connection-maintenance-status";
+
+pub(crate) fn recurring_run(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    let values = args.values();
+    if values.len() != 3 || values[1] != "--now" {
+        return Err(RECURRING_RUN_USAGE.to_string());
+    }
+    let kind = values[0].clone();
+    let now_ms = values[2]
+        .parse::<u64>()
+        .map_err(|_| RECURRING_RUN_USAGE.to_string())?;
+    // Run one tick of the recurring loop through the command-safe handler set,
+    // so the recurring handler runs but its downstream network sends stay queued.
+    let report = ctx.runtime_mut().run_recurring_once(&kind)?;
+    Ok(CliOutput::lines(vec![
+        format!("kind: {}", report.kind),
+        format!("now_ms: {now_ms}"),
+        format!("built: {}", report.built),
+        format!("blocked_network_work: {}", report.blocked_network_work),
+    ]))
+}
+
+pub(crate) fn connection_maintenance_status(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, CONNECTION_MAINTENANCE_STATUS_USAGE)?;
+    ctx.settle_local_command_work()?;
+    let status = crate::protocol::connection::maintenance::index::connection_maintenance_status(
+        ctx.runtime().store(),
+    )?;
+    let mut lines = vec![
+        format!("candidates: {}", status.candidates.len()),
+        format!("active_connections: {}", status.active_connections),
+    ];
+    for candidate in &status.candidates {
+        lines.push(format!(
+            "candidate_{}: to={} addr={}",
+            encode_hex(&candidate.request_id),
+            encode_hex(&candidate.to_endpoint),
+            candidate.addr
+        ));
+    }
+    Ok(CliOutput::lines(lines))
+}
 
 pub(crate) fn intent_registry(
     ctx: &mut MatchCliContext,

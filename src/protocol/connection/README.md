@@ -104,7 +104,21 @@ local receive-wrapper facts.
 loads the request and initiator ephemeral secret, proves the secret matches the
 request, seals the request bytes, stages them through core networking, and
 attempts one TCP write. Failed connection attempts are consumed; retry timing is
-owned by request projection time wakes.
+owned by the live `maintain_connections` loop, not a durable time wake.
+
+`register_connection_candidate` and `unregister_connection_candidate` own the
+connection-maintenance candidate index in `connection::maintenance`. The request
+projector emits the registration intent when a local request projects with a
+reachable route, and the retirement intent once the request is answered. Both
+are replay-allowed deterministic rebuild work: replay reconstructs the candidate
+index from retained request facts without any network IO.
+
+`maintain_connections` is the live-only recurring loop the daemon installs as an
+in-memory schedule. Each tick it reads only the candidate index and queues a
+bootstrap send for every still-pending candidate; answered candidates are gone
+from the index, so connected peers stop being retried. It never reads auth-owned
+or endpoint-owned tables, never mutates candidate rows, and never runs during
+replay.
 
 `create_connection_response` is responder-side handshake work. It loads the
 request, invite secret, and receive receipt, validates the invite signature and
@@ -136,11 +150,13 @@ on socket or route failure.
 
 ### `request` (tag 42)
 
-Semantic handshake request. Local requests are outbound work and may schedule
-bootstrap send retries until a response arrives. Global requests are received
-bootstrap requests and emit `create_connection_response` once invite, endpoint,
-and receipt context validate. Both branches write `connection_request_rows` and
-offer `connection_request`.
+Semantic handshake request. A local request with a reachable route registers a
+connection-maintenance candidate while it is unanswered and unregisters it once
+a response appears; the projector emits no time wake and no bootstrap send
+itself. Global requests are received bootstrap requests and emit
+`create_connection_response` once invite, endpoint, and receipt context
+validate. Both branches write `connection_request_rows` and offer
+`connection_request`.
 
 ```text
 request {
@@ -316,8 +332,12 @@ outbound initiator dependency graph:
   invite_secret + initiator ephemeral_secret
     -> local request
        needs connection_response_for_request until answered
-       time wake -> send_bootstrap_connection_request
+       -> register_connection_candidate (connection-maintenance index)
+  live maintain_connections tick (recurring, daemon-installed)
+    reads candidate index
+    -> send_bootstrap_connection_request
        network output: sealed bootstrap request bytes (not a fact)
+    answered request -> unregister_connection_candidate
 
 inbound responder transport observation:
   remote sealed bootstrap request bytes (not a fact)

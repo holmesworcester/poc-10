@@ -593,6 +593,73 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_messages() {
     assert_eq!(line_value(&attacker_content, "content_messages"), "0");
 }
 
+#[test]
+fn unreachable_peer_keeps_maintenance_candidate_and_survives_replay() {
+    let _guard = invite_accept_test_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let host = temp_db(&tmp, "host.db");
+    let joiner = temp_db(&tmp, "joiner.db");
+    // The invite points at a port nobody listens on, so the bootstrap can never
+    // complete and the joiner's connection-maintenance candidate persists.
+    let dead_port = free_port();
+    let joiner_port = free_port();
+
+    let created = create_workspace(&host, "Maint", "alice", "alice-laptop");
+    let workspace_id = line_value(&created, "workspace_id");
+    let invite = workspace_invite_link(&host, &workspace_id, dead_port);
+
+    let joiner_daemon = spawn_daemon(&joiner, joiner_port);
+    let accepted = try_accept_with_identity_retry(&joiner, &invite, "bob", "bob-phone")
+        .expect("accept queues the connection");
+    assert!(accepted.contains("connected:"), "{accepted}");
+
+    // Run the maintenance diagnostics without the daemon on the stack.
+    assert_success(topo(&["--db", &joiner, "stop"]));
+    drop(joiner_daemon);
+
+    // A pending candidate exists; no connection is active.
+    let status = assert_success(topo(&["--db", &joiner, "connection-maintenance-status"]));
+    assert_eq!(line_value(&status, "candidates"), "1", "{status}");
+    assert_eq!(line_value(&status, "active_connections"), "0", "{status}");
+
+    // Replay rebuilds the candidate index from the retained request fact, with no
+    // network rows, and reaches the same state digest.
+    let before = line_value(
+        &assert_success(topo(&["--db", &joiner, "state-summary"])),
+        "state_hash",
+    );
+    let replay = assert_success(topo(&["--db", &joiner, "replay"]));
+    assert_eq!(line_value(&replay, "network_rows"), "0", "{replay}");
+    let after = line_value(
+        &assert_success(topo(&["--db", &joiner, "state-summary"])),
+        "state_hash",
+    );
+    assert_eq!(before, after, "candidate index must rebuild identically");
+
+    // The candidate is still registered after replay.
+    let status_after = assert_success(topo(&["--db", &joiner, "connection-maintenance-status"]));
+    assert_eq!(line_value(&status_after, "candidates"), "1", "{status_after}");
+
+    // recurring-run drives one maintenance tick from the candidate index and
+    // queues a bootstrap send behind the network barrier.
+    let run = assert_success(topo(&[
+        "--db",
+        &joiner,
+        "recurring-run",
+        "maintain_connections",
+        "--now",
+        "1000",
+    ]));
+    assert_eq!(line_value(&run, "built"), "true", "{run}");
+    assert!(
+        line_value(&run, "blocked_network_work")
+            .parse::<u64>()
+            .unwrap()
+            >= 1,
+        "recurring maintenance should queue at least one bootstrap send: {run}"
+    );
+}
+
 fn invite_accept_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()

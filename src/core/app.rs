@@ -126,10 +126,18 @@ fn run_start<C: 'static>(
         .db
         .ok_or_else(|| usage(description, "start requires --db PATH"))?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
+    // Recurring operational loops are not durable state: install in-memory
+    // schedules from the handler registry and fire the due ones before each
+    // tick, after the daemon is running normally.
+    let mut scheduler =
+        daemon::RecurringScheduler::install(description.runtime.handlers, daemon::now_ms());
     daemon::start(
         &db,
         CliArgs::new(&parsed.command[1..]),
-        |listener, limit| daemon::tick(description.daemon, &mut runtime, listener, limit),
+        |listener, limit| {
+            scheduler.fire_due(&mut runtime, daemon::now_ms())?;
+            daemon::tick(description.daemon, &mut runtime, listener, limit)
+        },
     )
 }
 

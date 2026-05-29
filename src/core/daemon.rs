@@ -24,7 +24,7 @@ use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
 use crate::core::network;
 use crate::core::projectors::Timeline;
-use crate::core::runtime::{Runtime, WorkStatus};
+use crate::core::runtime::{HandlerRoute, RecurringIntentBuilder, Runtime, WorkStatus};
 use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -173,11 +173,83 @@ fn drain_time_wakes(
     Ok(WorkStatus::progressed(due > 0))
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// In-memory schedule for the protocol's recurring operational intents.
+///
+/// Recurring intents are not durable state: the daemon installs these schedules
+/// once at startup from the handler registry and fires them on their declared
+/// cadence while the process runs. Nothing is persisted, so there is nothing to
+/// wipe on upgrade and nothing to replay. The schedules begin firing only after
+/// the daemon is running normally, which is after any replay has completed.
+pub struct RecurringScheduler {
+    schedules: Vec<RecurringSchedule>,
+}
+
+struct RecurringSchedule {
+    kind: &'static str,
+    build_intent: RecurringIntentBuilder,
+    interval_ms: u64,
+    next_at_ms: u64,
+}
+
+impl RecurringScheduler {
+    /// Install in-memory schedules for every handler route with a recurrence.
+    pub fn install(routes: &'static [HandlerRoute], now_ms: u64) -> Self {
+        let schedules = routes
+            .iter()
+            .filter_map(|route| {
+                route.recurrence.map(|spec| RecurringSchedule {
+                    kind: route.intent_kind,
+                    build_intent: spec.build_intent,
+                    interval_ms: spec.interval_ms,
+                    next_at_ms: now_ms.saturating_add(spec.initial_delay_ms),
+                })
+            })
+            .collect();
+        Self { schedules }
+    }
+
+    /// Number of installed recurring schedules.
+    pub fn len(&self) -> usize {
+        self.schedules.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.schedules.is_empty()
+    }
+
+    /// Fire every schedule whose next-fire time has arrived.
+    ///
+    /// Each due schedule builds its current intent from store state and queues it
+    /// as live local work for the same tick's drain to dispatch. The builder may
+    /// return `None` to skip a tick. Returns the number of intents queued.
+    pub fn fire_due(&mut self, runtime: &mut Runtime, now_ms: u64) -> Result<usize, String> {
+        let mut fired = 0;
+        for schedule in &mut self.schedules {
+            if now_ms < schedule.next_at_ms {
+                continue;
+            }
+            if let Some(intent) = (schedule.build_intent)(runtime.store())? {
+                if intent.kind.as_str() != schedule.kind {
+                    return Err(format!(
+                        "recurring builder for {} produced intent kind {}",
+                        schedule.kind,
+                        intent.kind.as_str()
+                    ));
+                }
+                runtime.submit_local_intent(intent)?;
+                fired += 1;
+            }
+            schedule.next_at_ms = now_ms.saturating_add(schedule.interval_ms);
+        }
+        Ok(fired)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

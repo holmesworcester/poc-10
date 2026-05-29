@@ -1,11 +1,12 @@
 //! Connection-request projector.
 //!
 //! Request projection validates the durable semantic handshake request. Local
-//! requests prove invite-secret and initiator ephemeral-secret context before
-//! materializing and emitting the network-send intent for the sealed bootstrap
-//! request bytes. Received requests prove invite-secret, local endpoint, and
-//! fact-receipt context after the bootstrap wrapper has already opened those
-//! bytes into this canonical `connection_request` fact.
+//! requests prove invite-secret and initiator ephemeral-secret context, then
+//! materialize and register a connection-maintenance candidate so the live
+//! maintenance loop can attempt bootstrap sends. Received requests prove
+//! invite-secret, local endpoint, and fact-receipt context after the bootstrap
+//! wrapper has already opened those bytes into this canonical
+//! `connection_request` fact.
 //!
 //! POLICY. A connection_request is admitted iff:
 //!   1. STRUCTURAL. The fact is local or global, the request fields are
@@ -15,20 +16,26 @@
 //!      local-endpoint context plus connection fact receipt addressed to
 //!      that endpoint.
 //!   3. MATERIALIZE. Valid requests write the request row and offer request
-//!      context; local requests schedule peer-retry wakes until a response
-//!      appears, and received requests emit deferred response work.
+//!      context. A local request with a reachable route registers a
+//!      connection-maintenance candidate while it is unanswered and unregisters
+//!      it once a response appears; received requests emit deferred response
+//!      work.
 //!
-//! Change this projector for request admission, branch-specific context proofs,
-//! peer-retry behavior, or materialized request rows. Bootstrap wrapper opening
-//! belongs in `bootstrap_request::project`, request byte layout belongs in
-//! `layout.rs`, and response construction belongs in `create_connection_response.rs` plus
+//! This projector does not own an operational retry loop and emits no time
+//! wakes. Bootstrap sends are live attempts created by `maintain_connections`
+//! from the candidate index. Change this projector for request admission,
+//! branch-specific context proofs, candidate registration, or materialized
+//! request rows. Bootstrap wrapper opening belongs in
+//! `bootstrap_request::project`, request byte layout belongs in `layout.rs`, and
+//! response construction belongs in `create_connection_response.rs` plus
 //! `response::create`.
 
+use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
 use crate::protocol::auth::{endpoint, invite};
@@ -37,16 +44,13 @@ use crate::protocol::connection::create_connection_response::{
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::send_bootstrap_request::{
-    send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
-};
+use crate::protocol::connection::maintenance::index::CandidateRow;
+use crate::protocol::connection::register_connection_candidate::register_connection_candidate_intent;
+use crate::protocol::connection::unregister_connection_candidate::unregister_connection_candidate_intent;
 
 use super::create::encode_optional_addr;
 use super::fact::ConnectionRequestFact;
 use super::rows::connection_request_row;
-
-const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
-const PEER_RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionRequestProjector;
@@ -156,9 +160,11 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                         "connection request response context targets another request".to_string(),
                     );
                 }
-                return materialized_output(fact.id, &request);
+                // Answered: retire the connection-maintenance candidate.
+                return Ok(materialized_output(fact.id, &request)?
+                    .intent(unregister_connection_candidate_intent(fact.id)));
             }
-            return local_retrying_output(fact, &request, response_need, projection_context);
+            return local_pending_output(fact, &request, response_need);
         }
 
         // 2b. Received semantic request path.
@@ -276,40 +282,29 @@ fn materialized_output(
         )?)))
 }
 
-fn local_retrying_output(
+/// Materialize an unanswered local request and register a maintenance candidate.
+///
+/// The request keeps its standing need for the response. When the request has a
+/// reachable bootstrap route, it registers a connection-maintenance candidate;
+/// the live `maintain_connections` loop owns the bootstrap-send attempts and
+/// their retry cadence. A request with no route cannot be bootstrapped, so no
+/// candidate is registered. This emits no time wake: retry is operational live
+/// work, not durable protocol state.
+fn local_pending_output(
     fact: &Fact,
     request: &ConnectionRequestFact,
-    response_need: crate::core::context::ContextNeed,
-    projection_context: &ProjectionContext,
+    response_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let mut output = materialized_output(fact.id, request)?.need(response_need);
+    let output = materialized_output(fact.id, request)?.need(response_need);
     let Some(addr) = request.to_listen_addr else {
         return Ok(output);
     };
-
-    let retry_timeline = crate::protocol::connection::request::peer_retry_timeline();
-    let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
-    if let Some(now_ms) = due_retry_at {
-        output = output.local_intent(send_bootstrap_connection_request_intent(
-            SendBootstrapConnectionRequest {
-                request_id: fact.id,
-                initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
-                addr,
-            },
-        )?);
-        output = output.time_wake(TimeWake {
-            owner: fact.id,
-            timeline: retry_timeline,
-            at: now_ms.saturating_add(PEER_RETRY_DELAY_MS),
-        });
-    } else {
-        output = output.time_wake(TimeWake {
-            owner: fact.id,
-            timeline: retry_timeline,
-            at: PEER_RETRY_IMMEDIATE_AT_MS,
-        });
-    }
-    Ok(output)
+    Ok(output.intent(register_connection_candidate_intent(CandidateRow {
+        request_id: fact.id,
+        to_endpoint: request.to_endpoint,
+        initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
+        addr,
+    })?))
 }
 
 fn received_materialized_output(
@@ -384,7 +379,7 @@ mod projector_tests {
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::connection::create_connection_response::{
@@ -402,7 +397,12 @@ mod projector_tests {
     use topo::protocol::connection::response::{
         fact::ConnectionResponseFact, layout as response_layout,
     };
-    use topo::protocol::connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST;
+    use topo::protocol::connection::register_connection_candidate::{
+        decode_register_connection_candidate_intent, REGISTER_CONNECTION_CANDIDATE,
+    };
+    use topo::protocol::connection::unregister_connection_candidate::{
+        decode_unregister_connection_candidate_intent, UNREGISTER_CONNECTION_CANDIDATE,
+    };
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
         let invite = InviteSecretFact::new([55; 32]);
@@ -606,14 +606,6 @@ mod projector_tests {
         }
     }
 
-    fn due_peer_retry_context(context: ProjectionContext, end_inclusive: u64) -> ProjectionContext {
-        context.with_time_ranges(vec![TimeRange {
-            timeline: topo::protocol::connection::request::peer_retry_timeline(),
-            start_exclusive: None,
-            end_inclusive,
-        }])
-    }
-
     #[test]
     fn local_request_missing_ephemeral_waits_without_row() {
         let (_, request_fact, invite_fact, _) = signed_request_fact(FactScope::Local);
@@ -653,7 +645,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_materializes_and_schedules_peer_retry_after_context_match() {
+    fn local_request_materializes_and_registers_candidate_after_context_match() {
         let (request, request_fact, invite_fact, ephemeral_fact) =
             signed_request_fact(FactScope::Local);
         let context = ProjectionContext::from_matches(vec![
@@ -665,14 +657,25 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        assert!(output.effects.intents.is_empty());
+        // No time wake and no inline send: the projector registers a
+        // connection-maintenance candidate instead.
+        assert!(output.time_wakes.is_empty());
         assert!(output.effects.local_intents.is_empty());
-        assert_eq!(output.time_wakes.len(), 1);
+        assert_eq!(output.effects.intents.len(), 1);
         assert_eq!(
-            output.time_wakes[0].timeline,
-            topo::protocol::connection::request::peer_retry_timeline()
+            output.effects.intents[0].kind.as_str(),
+            REGISTER_CONNECTION_CANDIDATE
         );
-        assert_eq!(output.time_wakes[0].at, 0);
+        let candidate = decode_register_connection_candidate_intent(&output.effects.intents[0])
+            .expect("decode candidate intent");
+        assert_eq!(candidate.request_id, request_fact.id);
+        assert_eq!(candidate.to_endpoint, request.to_endpoint);
+        assert_eq!(
+            candidate.initiator_ephemeral_secret_id,
+            request.initiator_ephemeral_secret_fact_id
+        );
+        assert_eq!(Some(candidate.addr), request.to_listen_addr);
+
         assert!(output
             .needs
             .iter()
@@ -697,36 +700,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_due_peer_retry_emits_bootstrap_send_and_next_wake() {
-        let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
-        let context = due_peer_retry_context(
-            ProjectionContext::from_matches(vec![
-                invite_match(request_fact.id, invite_fact),
-                ephemeral_match(request_fact.id, ephemeral_fact),
-            ]),
-            10_000,
-        );
-
-        let output = project::ConnectionRequestProjector::new()
-            .project(&request_fact, &context)
-            .expect("project request");
-
-        assert!(output.effects.intents.is_empty());
-        assert_eq!(output.effects.local_intents.len(), 1);
-        assert_eq!(
-            output.effects.local_intents[0].kind.as_str(),
-            SEND_BOOTSTRAP_CONNECTION_REQUEST
-        );
-        assert_eq!(output.time_wakes.len(), 1);
-        assert_eq!(output.time_wakes[0].at, 10_250);
-        assert!(output
-            .needs
-            .iter()
-            .any(|need| need.role == "connection_response_for_request"));
-    }
-
-    #[test]
-    fn local_request_without_response_route_does_not_schedule_peer_retry() {
+    fn local_request_without_route_registers_no_candidate() {
         let (mut request, _, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
         let invite = invite_layout::decode_fact(invite_fact.body()).expect("decode invite");
         request.to_listen_addr = None;
@@ -748,6 +722,7 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
+        // No bootstrap route means there is nothing to maintain.
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
@@ -758,7 +733,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_stops_peer_retry_when_response_context_exists() {
+    fn local_request_with_response_unregisters_candidate() {
         let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
@@ -770,10 +745,20 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
-        assert!(output.effects.intents.is_empty());
+        // Answered: retire the candidate, drop the standing need, no time wake.
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
         assert!(output.needs.is_empty());
+        assert_eq!(output.effects.intents.len(), 1);
+        assert_eq!(
+            output.effects.intents[0].kind.as_str(),
+            UNREGISTER_CONNECTION_CANDIDATE
+        );
+        assert_eq!(
+            decode_unregister_connection_candidate_intent(&output.effects.intents[0])
+                .expect("decode unregister intent"),
+            request_fact.id
+        );
         assert_eq!(output.effects.row_mutations.len(), 1);
     }
 
@@ -808,23 +793,27 @@ mod projector_tests {
     }
 
     #[test]
-    fn received_request_never_schedules_bootstrap_send_retry() {
+    fn received_request_registers_no_candidate_and_only_creates_response() {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
-        let context = due_peer_retry_context(
-            ProjectionContext::from_matches(vec![
-                invite_match(request_fact.id, invite_fact),
-                endpoint_match(request_fact.id, request.to_endpoint),
-                receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
-            ]),
-            10_000,
-        );
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+        ]);
 
         let output = project::ConnectionRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project received request");
 
+        // A received request answers a peer; it never registers an outbound
+        // bootstrap candidate and never schedules a time wake.
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
+        assert!(!output
+            .effects
+            .intents
+            .iter()
+            .any(|intent| intent.kind.as_str() == REGISTER_CONNECTION_CANDIDATE));
         assert_eq!(
             output
                 .effects
