@@ -636,76 +636,125 @@ projector_routes! {
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }
 
+// Every handler route declares its replay decision through `replay = <bool>`.
+// The flag is not optional: a new route does not compile until its author
+// decides whether core may dispatch it before the replay barrier finishes.
+// `recurring = <RecurringIntentSpec>` marks a live-only operational loop the
+// daemon installs as an in-memory schedule; recurring routes never run during
+// replay.
 macro_rules! handler_route {
-    ($name:literal, $intent_kind:path, $handler:path) => {
+    ($name:literal, $intent_kind:path, $handler:path, replay = $replay:expr) => {
         HandlerRoute {
             name: $name,
             intent_kind: $intent_kind,
             factory: || Box::new(<$handler>::new()),
+            runs_during_replay: $replay,
+            recurrence: None,
+        }
+    };
+    ($name:literal, $intent_kind:path, $handler:path, replay = $replay:expr, recurring = $spec:expr) => {
+        HandlerRoute {
+            name: $name,
+            intent_kind: $intent_kind,
+            factory: || Box::new(<$handler>::new()),
+            runs_during_replay: $replay,
+            recurrence: Some($spec),
         }
     };
 }
 
+// Replay classification follows the poc-10 policy in
+// docs/research/poc10-replay-intent-shape.md:
+//   - Deterministic fact/row rebuild over retained facts runs during replay.
+//   - Live session prompts, send packaging, and network IO do not. Their work
+//     is rebuilt from committed facts after the replay/network barrier.
 pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
+    // Bootstrap send is an operational IO attempt, rebuilt by live connection
+    // maintenance after replay, not replay-time work.
     handler_route!(
         "send_bootstrap_connection_request",
         connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
-        connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler
+        connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler,
+        replay = false
     ),
+    // Network-visible response work is rebuilt from committed request/response
+    // facts after the replay barrier.
     handler_route!(
         "create_connection_response",
         connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
-        connection::create_connection_response::CreateConnectionResponseHandler
+        connection::create_connection_response::CreateConnectionResponseHandler,
+        replay = false
     ),
+    // Sync compare/have/need/send are live session prompts and send packaging.
     handler_route!(
         "send_sync_compare_response",
         sync::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
-        sync::send_compare_response::SendSyncCompareResponseHandler
+        sync::send_compare_response::SendSyncCompareResponseHandler,
+        replay = false
     ),
     handler_route!(
         "send_needed_fact_id",
         sync::send_needed_fact_id::SEND_NEEDED_FACT_ID,
-        sync::send_needed_fact_id::SendNeededFactIdHandler
+        sync::send_needed_fact_id::SendNeededFactIdHandler,
+        replay = false
     ),
     handler_route!(
         "send_requested_fact",
         sync::send_requested_fact::SEND_REQUESTED_FACT,
-        sync::send_requested_fact::SendRequestedFactHandler
+        sync::send_requested_fact::SendRequestedFactHandler,
+        replay = false
     ),
+    // share_fact_with_sync rebuilds sync-derived shareable/negentropy state from
+    // retained facts, so it is deterministic replay rebuild work.
     handler_route!(
         "share_fact_with_sync",
         sync::share_fact_with_sync::SHARE_FACT_WITH_SYNC,
-        sync::share_fact_with_sync::ShareFactWithSyncHandler
+        sync::share_fact_with_sync::ShareFactWithSyncHandler,
+        replay = true
     ),
+    // Seeding sync runs only for connections explicitly recreated after replay.
     handler_route!(
         "seed_connection_sync",
         sync::seed_connection::SEED_CONNECTION_SYNC,
-        sync::seed_connection::SeedConnectionSyncHandler
+        sync::seed_connection::SeedConnectionSyncHandler,
+        replay = false
     ),
+    // Key wrap creation is deterministic, idempotent fact creation from retained
+    // recipient/request facts plus retained local source and signer facts.
     handler_route!(
         "create_key_wrap",
         auth::create_key_wrap::CREATE_KEY_WRAP,
-        auth::create_key_wrap::CreateKeyWrapHandler
+        auth::create_key_wrap::CreateKeyWrapHandler,
+        replay = true
     ),
+    // Unwrap deterministically creates local secret facts (ids, not plaintext)
+    // from retained wrap/recipient/frontier/local recipient-key facts. Ordinary
+    // purge/retirement rules decide whether those local secrets survive.
     handler_route!(
         "unwrap_key_wrap",
         auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
-        auth::unwrap_key_wrap::UnwrapKeyWrapHandler
+        auth::unwrap_key_wrap::UnwrapKeyWrapHandler,
+        replay = true
     ),
+    // Sending facts over a connection is send packaging over a live session.
     handler_route!(
         "send_facts_on_connection",
         connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
-        connection::send_facts_on_connection::SendFactsOnConnectionHandler
+        connection::send_facts_on_connection::SendFactsOnConnectionHandler,
+        replay = false
     ),
+    // Network frame send and receive are operational IO attempts.
     handler_route!(
         "send_network_frame",
         connection::send_network_frame::SEND_NETWORK_FRAME,
-        connection::send_network_frame::SendNetworkFrameHandler
+        connection::send_network_frame::SendNetworkFrameHandler,
+        replay = false
     ),
     handler_route!(
         "receive_network_frame",
         connection::receive_network_frame::RECEIVE_NETWORK_FRAME,
-        connection::receive_network_frame::ReceiveNetworkFrameHandler
+        connection::receive_network_frame::ReceiveNetworkFrameHandler,
+        replay = false
     ),
 ];
 

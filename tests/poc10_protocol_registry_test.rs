@@ -166,3 +166,67 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
         );
     }
 }
+
+#[test]
+fn every_handler_route_declares_its_replay_decision_consistently() {
+    // The `runs_during_replay` flag is a required struct field, so omitting it
+    // does not compile. This test pins the poc-10 policy classification and the
+    // invariants that tie the flag to command exclusion and recurrence.
+    let replay_decision = |name: &str| {
+        MATCH_RUNTIME
+            .handlers
+            .iter()
+            .find(|handler| handler.name == name)
+            .map(|handler| handler.runs_during_replay)
+    };
+
+    // Deterministic rebuild work over retained facts runs during replay.
+    for replay_route in ["share_fact_with_sync", "create_key_wrap", "unwrap_key_wrap"] {
+        assert_eq!(
+            replay_decision(replay_route),
+            Some(true),
+            "{replay_route} rebuilds deterministic state and must run during replay"
+        );
+    }
+
+    // Live session prompts, send packaging, response work, and network IO do not.
+    for live_route in [
+        "send_bootstrap_connection_request",
+        "create_connection_response",
+        "send_sync_compare_response",
+        "send_needed_fact_id",
+        "send_requested_fact",
+        "seed_connection_sync",
+        "send_facts_on_connection",
+        "send_network_frame",
+        "receive_network_frame",
+    ] {
+        assert_eq!(
+            replay_decision(live_route),
+            Some(false),
+            "{live_route} is live-only work and must not run during replay"
+        );
+    }
+
+    // A network-capable (command-excluded) route must never run during replay,
+    // and a recurring (live-only) route must never run during replay.
+    for handler in MATCH_RUNTIME.handlers {
+        if MATCH_RUNTIME
+            .command_excluded_handlers
+            .contains(&handler.name)
+        {
+            assert!(
+                !handler.runs_during_replay,
+                "command-excluded network handler {} must not run during replay",
+                handler.name
+            );
+        }
+        if handler.recurrence.is_some() {
+            assert!(
+                !handler.runs_during_replay,
+                "recurring live-only handler {} must not run during replay",
+                handler.name
+            );
+        }
+    }
+}
