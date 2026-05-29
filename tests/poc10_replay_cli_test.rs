@@ -155,6 +155,64 @@ fn replay_check_reports_identical_digest_across_orders() {
     assert_eq!(state_hash(&db), live_before, "replay-check must not mutate the live database");
 }
 
+fn area_line(summary: &str, area: &str) -> String {
+    summary
+        .lines()
+        .find(|line| line.starts_with(&format!("area_{area}:")))
+        .unwrap_or_else(|| panic!("state-summary missing area {area}:\n{summary}"))
+        .to_string()
+}
+
+#[test]
+fn replay_recreates_key_material_idempotently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_db(&tmp, "alice.db");
+    let workspace_id = create_workspace(&db, "Keys", "alice", "laptop");
+    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    assert_success(topo(&["--db", &db, "key-recipient", &workspace_id]));
+    assert_success(topo(&["--db", &db, "send", &workspace_id, "secret message"]));
+    assert_success(topo(&["--db", &db, "key-derive", "64"]));
+
+    let summary_before = assert_success(topo(&["--db", &db, "state-summary"]));
+    let key_wrap_before = area_line(&summary_before, "key_wrap_rows");
+    // The recipient scenario materializes at least one key wrap.
+    let key_wrap_count: u64 = key_wrap_before
+        .split_whitespace()
+        .nth(1)
+        .and_then(|count| count.parse().ok())
+        .unwrap();
+    assert!(key_wrap_count > 0, "{key_wrap_before}");
+    let before = state_hash(&db);
+
+    let replay = assert_success(topo(&["--db", &db, "replay"]));
+    // create_key_wrap / unwrap_key_wrap run during replay as deterministic fact
+    // creation. They must not duplicate any wrap or local-secret fact, so replay
+    // emits no new facts and purges none.
+    assert_eq!(
+        line_value(&replay, "emitted_facts"),
+        "0",
+        "replay key-material handlers must not create duplicate facts"
+    );
+    assert_eq!(line_value(&replay, "purged_facts"), "0");
+    assert_eq!(line_value(&replay, "network_rows"), "0");
+    assert!(
+        line_value(&replay, "replay_allowed_intents")
+            .parse::<u64>()
+            .unwrap()
+            > 0,
+        "replay should redispatch key-material work"
+    );
+
+    let after = state_hash(&db);
+    assert_eq!(before, after, "key material must rebuild identically");
+    let summary_after = assert_success(topo(&["--db", &db, "state-summary"]));
+    assert_eq!(
+        area_line(&summary_after, "key_wrap_rows"),
+        key_wrap_before,
+        "key wrap rows must be byte-identical after replay"
+    );
+}
+
 #[test]
 fn state_summary_is_stable_and_exposes_per_area_digests() {
     let tmp = tempfile::tempdir().unwrap();
