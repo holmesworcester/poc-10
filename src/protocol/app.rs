@@ -59,6 +59,19 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
     },
 ];
 
+/// Replayable semantic time-wake timelines.
+///
+/// Replay admits wall-clock context only through these timelines, whose
+/// high-water mark derives from retained protocol state (the store-local logical
+/// clock), not fresh wall-clock. `content_message_expiry` qualifies because it
+/// only advances disappearing-message expiry, which is replayable protocol
+/// state. Operational wall-clock loops such as connection peer retry are not
+/// listed here; that work belongs in live recurring intents.
+pub const REPLAYABLE_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
+    timeline: content::message::expiration_timeline,
+    end_inclusive: current_message_expiration_minute,
+}];
+
 fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {
     connection::receive_network_frame::receive_network_frame_intent(
         connection::receive_network_frame::ReceiveNetworkFrame {

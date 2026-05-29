@@ -34,6 +34,7 @@ pub mod network;
 pub mod perf_profile;
 pub mod pipeline;
 pub mod projectors;
+pub mod replay;
 pub mod runtime;
 pub mod schema;
 pub mod store;

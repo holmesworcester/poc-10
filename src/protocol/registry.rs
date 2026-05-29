@@ -507,6 +507,9 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
+    cli_command!("replay", command::REPLAY_USAGE, replay),
+    cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
+    cli_command!("replay-check", command::REPLAY_CHECK_USAGE, replay_check),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
