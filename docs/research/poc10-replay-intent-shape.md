@@ -41,9 +41,11 @@ Add an explicit replay entry point to core runtime:
 4. Mark all retained facts pending for projection.
 5. Drain fact projection.
 6. Admit replayable semantic time wakes to fixpoint.
-7. Dispatch only intent kinds whose registry entry says they may run during
-   replay.
-8. Finish purge completion before network activity resumes.
+7. Drain replay-allowed work to fixpoint: pending fact projection, context
+   match wakeups, replayable semantic time wakes, and replay-allowed intents.
+   Each pass may create facts, rows, context, semantic time wakes, or more
+   replay-allowed intents.
+8. Finish all replay-required work before network activity resumes.
 9. Start the daemon, install recurring intents from the handler registry, and
    resume normal dispatch.
 
