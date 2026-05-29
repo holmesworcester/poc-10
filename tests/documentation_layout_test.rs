@@ -477,6 +477,67 @@ fn protocol_version_flexibility_design_is_local_and_poc10_specific() {
 }
 
 #[test]
+fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let note = source_text(&root.join("docs/research/poc10-replay-intent-shape.md"));
+    let normalized = normalize_whitespace(&note);
+
+    for required in [
+        "# poc-10 Replay And Intent Shape",
+        "It does not define release ceilings, old-client compatibility, or fact-version migration",
+        "Retained facts, including retained local facts, are the durable source of truth",
+        "Every poc-10 queued intent is droppable on upgrade",
+        "Projectors are deterministic and replay-blind",
+        "All durable wall-clock `TimeWake` behavior must be replayable",
+        "If a wall-clock action is operational and not replayable, it must be a recurring intent instead",
+        "Recurring operational work is not durable state",
+        "Drop durable and local queued intents",
+        "Admit replayable semantic time wakes to fixpoint",
+        "Dispatch only intent kinds whose registry entry says they may run during replay",
+        "Extend the existing `HandlerRoute` metadata rather than creating a second registry",
+        "pub runs_during_replay: bool",
+        "pub recurrence: Option<RecurringIntentSpec>",
+        "`share_fact_with_sync`",
+        "`create_key_wrap`",
+        "`unwrap_key_wrap`",
+        "`create_connection_response`",
+        "Operational repetition belongs in the intent registry",
+        "The schedules are not persisted",
+        "Use durable `TimeWake` only when the wake changes replayable protocol state",
+        "`content_message_expiry` stays a durable semantic timeline",
+        "`connection_peer_retry` timeline should be removed from daemon time wakes",
+        "Add a recurring `maintain_connections` intent",
+        "Connection request projection should validate and materialize request history",
+        "It should not own an operational retry loop",
+        "`create_connection_response` needs an atomicity fix",
+        "It must not send network bytes before the responder ephemeral fact and `connection_response` fact commit",
+        "`create_key_wrap` can run during replay because it is deterministic fact creation",
+        "`unwrap_key_wrap` should be rebuilt from facts but run after the replay barrier",
+        "Registry test: every `HandlerRoute` has `runs_during_replay` set explicitly",
+        "Time-wake test: every daemon `TimeWake` timeline is replayable",
+        "Connection test: replay no longer recreates bootstrap retries from old `connection_request` history alone",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "poc10 replay intent shape note is missing {required:?}"
+        );
+    }
+
+    for removed in [
+        "Cambria",
+        "global protocol ceiling",
+        "old-client fallback",
+        "versioned handlers",
+        "protocol version graph",
+    ] {
+        assert!(
+            !note.contains(removed),
+            "poc10 replay intent shape note should not include versioning policy detail {removed:?}"
+        );
+    }
+}
+
+#[test]
 fn repo_instructions_point_at_live_documentation_style_rules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let agents = source_text(&root.join("AGENTS.md"));
