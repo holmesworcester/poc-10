@@ -206,18 +206,21 @@ an actual upgrade:
   fixpoint, and prints counters for dropped intents, projected facts, context
   match wakeups, semantic time wakes, replay-allowed intents, emitted facts,
   purged facts, row mutations, and blocked network/live-only work.
-- `state-summary`: print a stable digest of replay-relevant state: retained
-  facts, materialized rows, context edges, semantic time wakes, replay-allowed
-  queues, sync indexes, local key-material rows, connection-maintenance rows,
-  and side-effect counters. It must exclude volatile scheduler state, socket
-  state, temp network queues, and wall-clock timestamps that are not protocol
-  state.
+- `state-summary`: print a stable hashable summary of replay-relevant state:
+  retained facts, materialized rows, context edges, semantic time wakes,
+  replay-allowed queues, sync indexes, local key-material rows,
+  connection-maintenance rows, and side-effect counters. The output should
+  include one overall `state_hash` plus per-area hashes and counts, computed
+  from canonical row serialization with deterministic ordering. It must exclude
+  volatile scheduler state, socket state, temp network queues, and wall-clock
+  timestamps that are not protocol state.
 - `replay-check`: copy the database to scratch snapshots, run canonical replay,
   an idempotent replay, `replay --reverse`, and several
   `replay --scramble --seed N` passes, then compare the same state summary
-  digest for every pass. It should prove replay idempotence, projection order
-  independence, replay-allowed work interleaving independence, and report any
-  table or owned-state area whose replay-derived rows diverge.
+  `state_hash` for every pass. It should prove replay idempotence, projection
+  order independence, replay-allowed work interleaving independence, and report
+  the per-area hash/count differences for any table or owned-state area whose
+  replay-derived rows diverge.
 - `intent-registry`: list every handler route with `runs_during_replay`,
   recurrence metadata, command exclusion, and whether the route can perform
   network IO.
