@@ -24,8 +24,9 @@ Projection and handlers return:
   `connection_response`, `connection_response_for_request`,
   `connection_fact_receipt`, `connection_closed`, and
   `connection_ephemeral_secret_closed`;
-- local and durable intents for bootstrap sends, response creation, sync
-  seeding, fact batching, and socket writes.
+- local and durable intents for connection-maintenance candidate changes,
+  bootstrap sends, response creation, sync seeding, fact batching, and socket
+  writes.
 
 Core owns queueing, fact storage, local-intent retry/removal, socket table
 mechanics, and transaction boundaries. Connection owns packet classification,
@@ -34,10 +35,11 @@ which child facts may be emitted from received bytes.
 
 ## Managed Row State
 
-Connection owns rows for connection requests, connection responses,
-ephemeral handshake secrets, fact receipts, and close cleanup. These rows let
-connection handlers find routes, derive send context, avoid resending to an
-origin connection, and answer local CLI/status queries.
+Connection owns rows for connection requests, connection responses, connection
+maintenance candidates, ephemeral handshake secrets, fact receipts, and close
+cleanup. These rows let connection handlers find routes, derive send context,
+avoid resending to an origin connection, retry bootstrap candidates after
+replay, and answer local CLI/status queries.
 
 Connection rows are not the cross-scope transport contract. The reusable
 interfaces are connection context roles, queued connection intents, and facts
@@ -103,14 +105,26 @@ local receive-wrapper facts.
 `send_bootstrap_connection_request` sends a sealed pre-connection request. It
 loads the request and initiator ephemeral secret, proves the secret matches the
 request, seals the request bytes, stages them through core networking, and
-attempts one TCP write. Failed connection attempts are consumed; retry timing is
-owned by request projection time wakes.
+attempts one TCP write. Failed connection attempts are consumed; retry cadence
+is owned by recurring connection maintenance, which reads candidate rows
+registered by request projection.
+
+`register_connection_candidate` and `unregister_connection_candidate` own the
+candidate table used by recurring bootstrap retry. Request projection emits
+these replay-safe intents when a local request gains or loses the need for a
+bootstrap response. `maintain_connections` is live-only recurring work: it reads
+candidate rows and emits local bootstrap send attempts after the replay barrier.
 
 `create_connection_response` is responder-side handshake work. It loads the
 request, invite secret, and receive receipt, validates the invite signature and
 receipt path, creates responder ephemeral material, builds the canonical local
-response fact, sends a sealed bootstrap response, and returns the responder
-ephemeral fact plus response fact.
+response fact, and queues a local bootstrap response send. The responder
+ephemeral fact, response fact, and send intent commit together.
+
+`send_bootstrap_connection_response` sends the committed pre-connection
+response. It loads the response and responder ephemeral secret, proves the
+secret matches the response, seals the response bytes, stages them through core
+networking, and attempts one TCP write.
 
 `send_facts_on_connection` packages facts chosen by sync. It loads the
 connection and payload facts, rejects local/private facts, batches small facts
@@ -126,11 +140,11 @@ on socket or route failure.
 
 ### `request` (tag 42)
 
-Semantic handshake request. Local requests are outbound work and may schedule
-bootstrap send retries until a response arrives. Global requests are received
-bootstrap requests and emit `create_connection_response` once invite, endpoint,
-and receipt context validate. Both branches write `connection_request_rows` and
-offer `connection_request`.
+Semantic handshake request. Local requests are outbound work and register a
+connection-maintenance candidate until a response arrives. Global requests are
+received bootstrap requests and emit `create_connection_response` once invite,
+endpoint, and receipt context validate. Both branches write
+`connection_request_rows` and offer `connection_request`.
 
 ```text
 request {

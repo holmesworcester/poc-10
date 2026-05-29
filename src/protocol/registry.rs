@@ -26,7 +26,7 @@ use crate::core::network;
 use crate::core::projectors::{
     FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
-use crate::core::runtime::HandlerRoute;
+use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
@@ -278,6 +278,7 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_maintenance_candidate_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -331,6 +332,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
+        connection::request::CONNECTION_MAINTENANCE_CANDIDATE_ROWS,
         connection::request::rows::CONNECTION_REQUEST_ROWS,
         connection::response::rows::CONNECTION_RESPONSE_ROWS,
         auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
@@ -507,10 +509,30 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
+    cli_command!("replay", command::REPLAY_USAGE, replay),
+    cli_command!("replay-check", command::REPLAY_CHECK_USAGE, replay_check),
+    cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
+    cli_command!(
+        "intent-registry",
+        command::INTENT_REGISTRY_USAGE,
+        intent_registry
+    ),
+    cli_command!(
+        "recurring-intents",
+        command::RECURRING_INTENTS_USAGE,
+        recurring_intents
+    ),
+    cli_command!("recurring-run", command::RECURRING_RUN_USAGE, recurring_run),
+    cli_command!(
+        "connection-maintenance-status",
+        command::CONNECTION_MAINTENANCE_STATUS_USAGE,
+        connection_maintenance_status
+    ),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_bootstrap_connection_request",
+    "send_bootstrap_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -522,6 +544,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
+    connection::request::CONNECTION_MAINTENANCE_CANDIDATE_ROWS,
     connection::request::rows::CONNECTION_REQUEST_ROWS,
     connection::response::rows::CONNECTION_RESPONSE_ROWS,
     read_models::FILE_ROWS,
@@ -637,11 +660,20 @@ projector_routes! {
 }
 
 macro_rules! handler_route {
-    ($name:literal, $intent_kind:path, $handler:path) => {
+    (
+        $name:literal,
+        $intent_kind:path,
+        $handler:path,
+        replay = $runs_during_replay:literal,
+        network = $performs_network_io:literal
+    ) => {
         HandlerRoute {
             name: $name,
             intent_kind: $intent_kind,
             factory: || Box::new(<$handler>::new()),
+            runs_during_replay: $runs_during_replay,
+            performs_network_io: $performs_network_io,
+            recurrence: None,
         }
     };
 }
@@ -650,62 +682,119 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     handler_route!(
         "send_bootstrap_connection_request",
         connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
-        connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler
+        connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler,
+        replay = false,
+        network = true
+    ),
+    handler_route!(
+        "send_bootstrap_connection_response",
+        connection::send_bootstrap_response::SEND_BOOTSTRAP_CONNECTION_RESPONSE,
+        connection::send_bootstrap_response::SendBootstrapConnectionResponseHandler,
+        replay = false,
+        network = true
     ),
     handler_route!(
         "create_connection_response",
         connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
-        connection::create_connection_response::CreateConnectionResponseHandler
+        connection::create_connection_response::CreateConnectionResponseHandler,
+        replay = false,
+        network = false
     ),
+    handler_route!(
+        "register_connection_candidate",
+        connection::update_connections::REGISTER_CONNECTION_CANDIDATE,
+        connection::update_connections::RegisterConnectionCandidateHandler,
+        replay = true,
+        network = false
+    ),
+    handler_route!(
+        "unregister_connection_candidate",
+        connection::update_connections::UNREGISTER_CONNECTION_CANDIDATE,
+        connection::update_connections::UnregisterConnectionCandidateHandler,
+        replay = true,
+        network = false
+    ),
+    HandlerRoute {
+        name: "maintain_connections",
+        intent_kind: connection::update_connections::MAINTAIN_CONNECTIONS,
+        factory: || Box::new(connection::update_connections::MaintainConnectionsHandler::new()),
+        runs_during_replay: false,
+        performs_network_io: false,
+        recurrence: Some(RecurringIntentSpec {
+            initial_delay_ms: 0,
+            interval_ms: 250,
+            build_intent: connection::update_connections::recurring_maintain_connections_intent,
+        }),
+    },
     handler_route!(
         "send_sync_compare_response",
         sync::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
-        sync::send_compare_response::SendSyncCompareResponseHandler
+        sync::send_compare_response::SendSyncCompareResponseHandler,
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_needed_fact_id",
         sync::send_needed_fact_id::SEND_NEEDED_FACT_ID,
-        sync::send_needed_fact_id::SendNeededFactIdHandler
+        sync::send_needed_fact_id::SendNeededFactIdHandler,
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_requested_fact",
         sync::send_requested_fact::SEND_REQUESTED_FACT,
-        sync::send_requested_fact::SendRequestedFactHandler
+        sync::send_requested_fact::SendRequestedFactHandler,
+        replay = false,
+        network = false
     ),
     handler_route!(
         "share_fact_with_sync",
         sync::share_fact_with_sync::SHARE_FACT_WITH_SYNC,
-        sync::share_fact_with_sync::ShareFactWithSyncHandler
+        sync::share_fact_with_sync::ShareFactWithSyncHandler,
+        replay = true,
+        network = false
     ),
     handler_route!(
         "seed_connection_sync",
         sync::seed_connection::SEED_CONNECTION_SYNC,
-        sync::seed_connection::SeedConnectionSyncHandler
+        sync::seed_connection::SeedConnectionSyncHandler,
+        replay = false,
+        network = false
     ),
     handler_route!(
         "create_key_wrap",
         auth::create_key_wrap::CREATE_KEY_WRAP,
-        auth::create_key_wrap::CreateKeyWrapHandler
+        auth::create_key_wrap::CreateKeyWrapHandler,
+        replay = true,
+        network = false
     ),
     handler_route!(
         "unwrap_key_wrap",
         auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
-        auth::unwrap_key_wrap::UnwrapKeyWrapHandler
+        auth::unwrap_key_wrap::UnwrapKeyWrapHandler,
+        replay = true,
+        network = false
     ),
     handler_route!(
         "send_facts_on_connection",
         connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
-        connection::send_facts_on_connection::SendFactsOnConnectionHandler
+        connection::send_facts_on_connection::SendFactsOnConnectionHandler,
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_network_frame",
         connection::send_network_frame::SEND_NETWORK_FRAME,
-        connection::send_network_frame::SendNetworkFrameHandler
+        connection::send_network_frame::SendNetworkFrameHandler,
+        replay = false,
+        network = true
     ),
     handler_route!(
         "receive_network_frame",
         connection::receive_network_frame::RECEIVE_NETWORK_FRAME,
-        connection::receive_network_frame::ReceiveNetworkFrameHandler
+        connection::receive_network_frame::ReceiveNetworkFrameHandler,
+        replay = false,
+        network = false
     ),
 ];
 

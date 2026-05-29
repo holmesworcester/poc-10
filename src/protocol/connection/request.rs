@@ -17,12 +17,14 @@ pub mod layout;
 pub mod project;
 pub mod rows;
 
-const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
+pub use rows::{
+    connection_maintenance_candidate_count, connection_maintenance_candidate_key,
+    connection_maintenance_candidate_row, connection_maintenance_candidates,
+    decode_connection_maintenance_candidate_row, ConnectionMaintenanceCandidate,
+    CONNECTION_MAINTENANCE_CANDIDATE_ROWS,
+};
 
-pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
-    crate::core::projectors::Timeline::new("connection_peer_retry")
-        .expect("valid connection peer-retry timeline")
-}
+const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
 
 pub fn connection_response_for_request_need(
     owner: crate::core::facts::FactId,
@@ -52,6 +54,29 @@ pub fn connection_response_for_request_offer(
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionRequestFact, String> {
     layout::decode_fact(bytes)
+}
+
+pub fn validate_connection_maintenance_candidate(
+    fact: &crate::core::facts::Fact,
+    candidate: ConnectionMaintenanceCandidate,
+) -> Result<(), String> {
+    if fact.scope != crate::core::facts::FactScope::Local {
+        return Err("connection candidate request fact must be local".to_string());
+    }
+    let request = layout::decode_fact(fact.body())?;
+    if request.from_endpoint != candidate.from_endpoint {
+        return Err("connection candidate from_endpoint does not match request".to_string());
+    }
+    if request.to_endpoint != candidate.to_endpoint {
+        return Err("connection candidate to_endpoint does not match request".to_string());
+    }
+    if request.initiator_ephemeral_secret_fact_id != candidate.initiator_ephemeral_secret_id {
+        return Err("connection candidate ephemeral id does not match request".to_string());
+    }
+    if request.to_listen_addr != Some(candidate.addr) {
+        return Err("connection candidate addr does not match request".to_string());
+    }
+    Ok(())
 }
 
 pub(crate) struct Codec;

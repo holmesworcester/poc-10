@@ -166,3 +166,81 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
         );
     }
 }
+
+#[test]
+fn runtime_handler_routes_declare_replay_and_io_policy() {
+    let routes = MATCH_RUNTIME
+        .handlers
+        .iter()
+        .map(|handler| (handler.name, handler))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for replay_safe in [
+        "share_fact_with_sync",
+        "create_key_wrap",
+        "unwrap_key_wrap",
+        "register_connection_candidate",
+        "unregister_connection_candidate",
+    ] {
+        let route = routes
+            .get(replay_safe)
+            .unwrap_or_else(|| panic!("missing handler route {replay_safe}"));
+        assert!(
+            route.runs_during_replay,
+            "{replay_safe} should be replay-safe rebuild work"
+        );
+        assert!(
+            !route.performs_network_io,
+            "{replay_safe} must not do network IO during replay"
+        );
+    }
+
+    for live_only in [
+        "send_bootstrap_connection_request",
+        "send_bootstrap_connection_response",
+        "create_connection_response",
+        "maintain_connections",
+        "seed_connection_sync",
+        "send_facts_on_connection",
+        "send_network_frame",
+        "receive_network_frame",
+    ] {
+        let route = routes
+            .get(live_only)
+            .unwrap_or_else(|| panic!("missing handler route {live_only}"));
+        assert!(
+            !route.runs_during_replay,
+            "{live_only} should wait until after the replay barrier"
+        );
+    }
+
+    for network_io in [
+        "send_bootstrap_connection_request",
+        "send_bootstrap_connection_response",
+        "send_network_frame",
+    ] {
+        let route = routes
+            .get(network_io)
+            .unwrap_or_else(|| panic!("missing handler route {network_io}"));
+        assert!(
+            route.performs_network_io,
+            "{network_io} should be marked as network IO"
+        );
+    }
+
+    assert!(
+        !routes
+            .get("create_connection_response")
+            .expect("missing create_connection_response route")
+            .performs_network_io,
+        "create_connection_response should commit facts and queue send work, not perform network IO"
+    );
+
+    let maintain = routes
+        .get("maintain_connections")
+        .expect("missing maintain_connections route");
+    assert!(
+        maintain.recurrence.is_some(),
+        "connection maintenance should be declared as recurring runtime work"
+    );
+}

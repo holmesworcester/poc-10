@@ -24,7 +24,7 @@ use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
 use crate::core::network;
 use crate::core::projectors::Timeline;
-use crate::core::runtime::{Runtime, WorkStatus};
+use crate::core::runtime::{RecurringIntentSpec, Runtime, WorkStatus};
 use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -88,6 +88,67 @@ pub struct DaemonTimeWake {
     pub timeline: fn() -> Timeline,
     /// Current inclusive high-water mark for that timeline.
     pub end_inclusive: fn(&Store) -> Result<Option<u64>, String>,
+}
+
+/// In-memory recurring intent schedules installed from handler metadata.
+pub struct RecurringIntentSchedules {
+    entries: Vec<RecurringIntentSchedule>,
+}
+
+struct RecurringIntentSchedule {
+    next_due_ms: u64,
+    spec: RecurringIntentSpec,
+}
+
+impl RecurringIntentSchedules {
+    /// Build schedules from the runtime's static handler route metadata.
+    pub fn new(runtime: &Runtime) -> Self {
+        let now = now_ms();
+        let entries = runtime
+            .handler_routes()
+            .iter()
+            .filter_map(|route| {
+                route.recurrence.map(|spec| RecurringIntentSchedule {
+                    next_due_ms: now.saturating_add(spec.initial_delay_ms),
+                    spec,
+                })
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Queue due recurring local intents. The schedule itself is not persisted.
+    pub fn drain_due(
+        &mut self,
+        runtime: &mut Runtime,
+        work_limit: usize,
+    ) -> Result<WorkStatus, String> {
+        let now = now_ms();
+        let mut queued = 0usize;
+        let mut progressed = false;
+        for entry in &mut self.entries {
+            if queued >= work_limit || now < entry.next_due_ms {
+                continue;
+            }
+            if let Some(intent) = (entry.spec.build_intent)(runtime.store(), now)? {
+                runtime.submit_local_intent(intent)?;
+                queued += 1;
+                progressed = true;
+            }
+            advance_recurring_due(entry, now);
+        }
+        Ok(WorkStatus::progressed(progressed))
+    }
+}
+
+fn advance_recurring_due(entry: &mut RecurringIntentSchedule, now_ms: u64) {
+    let interval = entry.spec.interval_ms.max(1);
+    while entry.next_due_ms <= now_ms {
+        entry.next_due_ms = entry.next_due_ms.saturating_add(interval);
+        if entry.next_due_ms == u64::MAX {
+            break;
+        }
+    }
 }
 
 /// Run one bounded daemon tick.

@@ -126,10 +126,20 @@ fn run_start<C: 'static>(
         .db
         .ok_or_else(|| usage(description, "start requires --db PATH"))?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
+    let mut recurring = daemon::RecurringIntentSchedules::new(&runtime);
     daemon::start(
         &db,
         CliArgs::new(&parsed.command[1..]),
-        |listener, limit| daemon::tick(description.daemon, &mut runtime, listener, limit),
+        |listener, limit| {
+            let mut status = recurring.drain_due(&mut runtime, limit)?;
+            status.merge(daemon::tick(
+                description.daemon,
+                &mut runtime,
+                listener,
+                limit,
+            )?);
+            Ok(status)
+        },
     )
 }
 

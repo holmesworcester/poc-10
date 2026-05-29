@@ -29,11 +29,14 @@ use crate::core::intents::{Intent, IntentHandler};
 use crate::core::pipeline;
 use crate::core::projectors::{Projector, Timeline};
 use crate::core::schema::{
-    CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
+    CONTEXT_EDGES, CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS,
+    PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES,
 };
-use crate::core::store::{SchemaSource, Store, TableName};
+use crate::core::store::{
+    quoted_table_name, quoted_table_name_str, SchemaSource, Store, TableName,
+};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use crate::core::pipeline::WorkStatus;
 
@@ -61,12 +64,27 @@ pub struct RuntimeDescription {
 
 /// Factory for one protocol intent handler.
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
+/// Factory for one live recurring intent instance.
+pub type RecurringIntentFactory = fn(&Store, u64) -> Result<Option<Intent>, String>;
+
+/// Live-only recurring work declared beside a handler route.
+#[derive(Debug, Clone, Copy)]
+pub struct RecurringIntentSpec {
+    /// Delay before the first daemon fire after startup.
+    pub initial_delay_ms: u64,
+    /// Recurring interval after the first fire.
+    pub interval_ms: u64,
+    /// Build the local intent for this tick. Returning `None` skips the tick.
+    pub build_intent: RecurringIntentFactory,
+}
 
 /// One handler route in the protocol registry.
 ///
 /// `name` is a human-facing route name used for exclusion lists. `intent_kind`
 /// is the queue routing key that selects this handler for both durable and
-/// ephemeral intents.
+/// ephemeral intents. Replay and recurrence metadata make the upgrade/replay
+/// boundary explicit: core can rebuild derived state with replay-safe handlers
+/// while refusing live network or scheduler work until replay finishes.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
     /// Human-facing route name used for exclusion lists.
@@ -75,6 +93,12 @@ pub struct HandlerRoute {
     pub intent_kind: &'static str,
     /// Handler factory.
     pub factory: HandlerFactory,
+    /// Whether this route may dispatch before the replay barrier completes.
+    pub runs_during_replay: bool,
+    /// Whether this route can perform network IO.
+    pub performs_network_io: bool,
+    /// Optional live recurring schedule.
+    pub recurrence: Option<RecurringIntentSpec>,
 }
 
 /// Instantiated handlers for one runtime pass.
@@ -94,9 +118,18 @@ struct HandlerEntry {
 impl HandlerSet {
     /// Instantiate all declared routes.
     pub fn new(routes: &'static [HandlerRoute]) -> Self {
+        Self::new_where(routes, |_| true)
+    }
+
+    /// Instantiate routes accepted by `include`.
+    pub fn new_where(
+        routes: &'static [HandlerRoute],
+        include: impl Fn(&HandlerRoute) -> bool,
+    ) -> Self {
         Self {
             entries: routes
                 .iter()
+                .filter(|route| include(route))
                 .map(|route| HandlerEntry {
                     intent_kind: route.intent_kind,
                     handler: (route.factory)(),
@@ -107,16 +140,12 @@ impl HandlerSet {
 
     /// Instantiate every route except the protocol-declared command exclusions.
     pub fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
-        Self {
-            entries: routes
-                .iter()
-                .filter(|route| !excluded_names.contains(&route.name))
-                .map(|route| HandlerEntry {
-                    intent_kind: route.intent_kind,
-                    handler: (route.factory)(),
-                })
-                .collect(),
-        }
+        Self::new_where(routes, |route| !excluded_names.contains(&route.name))
+    }
+
+    /// Instantiate only replay-safe routes.
+    pub fn new_replay(routes: &'static [HandlerRoute]) -> Self {
+        Self::new_where(routes, |route| route.runs_during_replay)
     }
 
     fn intent_kinds(&self) -> Vec<&'static str> {
@@ -185,6 +214,59 @@ pub struct Runtime {
     handlers: HandlerSet,
 }
 
+/// Fact admission order used by the replay entry point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayOrder {
+    /// Stored canonical fact order.
+    Canonical,
+    /// Reverse of the stored canonical fact order.
+    Reverse,
+    /// Deterministically shuffled order.
+    Scramble { seed: u64 },
+}
+
+/// Replay command options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayOptions {
+    /// Fact admission order.
+    pub order: ReplayOrder,
+    /// Maximum replay fixpoint rounds.
+    pub max_rounds: usize,
+    /// Maximum work items handled per bounded stage.
+    pub limit_per_round: usize,
+}
+
+impl Default for ReplayOptions {
+    fn default() -> Self {
+        Self {
+            order: ReplayOrder::Canonical,
+            max_rounds: 64,
+            limit_per_round: 4096,
+        }
+    }
+}
+
+/// Counters reported by the replay entry point.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayReport {
+    pub retained_facts: usize,
+    pub dropped_intents: usize,
+    pub dropped_local_intents: usize,
+    pub wiped_tables: usize,
+    pub projected_facts: usize,
+    pub replay_allowed_intents: usize,
+    pub blocked_live_only_intents: usize,
+    pub pending_facts: usize,
+    pub pending_intents: usize,
+}
+
+/// Replay-check output for scratch snapshot passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayCheckReport {
+    pub state_hash: String,
+    pub checked_passes: usize,
+}
+
 impl Runtime {
     /// Open an in-memory runtime with core and protocol schema sources applied.
     pub fn open_memory(description: &'static RuntimeDescription) -> Result<Self, String> {
@@ -222,6 +304,21 @@ impl Runtime {
     /// projection and intent ordering stay centralized here.
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Borrow the static handler route declarations.
+    pub fn handler_routes(&self) -> &'static [HandlerRoute] {
+        self.description.handlers
+    }
+
+    /// Borrow the static runtime description.
+    pub fn description(&self) -> &'static RuntimeDescription {
+        self.description
+    }
+
+    /// Build a stable digest of replay-relevant state.
+    pub fn state_summary(&self) -> Result<crate::core::state_summary::StateSummary, String> {
+        crate::core::state_summary::summarize(self.description, &self.store)
     }
 
     /// Return all persisted facts known to this runtime.
@@ -356,6 +453,12 @@ impl Runtime {
         self.dispatch_with_handlers(&self.handlers, limit)
     }
 
+    /// Dispatch queued intents that are explicitly safe during replay.
+    pub fn dispatch_replay_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        let handlers = HandlerSet::new_replay(self.description.handlers);
+        self.dispatch_with_handlers(&handlers, limit)
+    }
+
     /// Run one daemon tick's queue order after IO and time wakes have been handled.
     ///
     /// Projection runs before and after intent dispatch because handlers often
@@ -433,6 +536,195 @@ impl Runtime {
         self.process_work_until_idle(max_rounds, limit_per_round, Some(&handlers))
     }
 
+    /// Wipe derived state, replay retained facts, and dispatch replay-safe work.
+    pub fn replay(&mut self, options: ReplayOptions) -> Result<ReplayReport, String> {
+        let mut report = ReplayReport::default();
+        let dropped = self.clear_intent_queues()?;
+        report.dropped_intents += dropped.0;
+        report.dropped_local_intents += dropped.1;
+        report.wiped_tables = self.wipe_derived_state()?;
+
+        let mut facts = persisted_facts(&self.store)?;
+        report.retained_facts = facts.len();
+        order_replay_facts(&mut facts, options.order);
+
+        for fact in facts {
+            self.mark_fact_pending(fact.id)?;
+            let status =
+                self.process_replay_work_until_idle(options.max_rounds, options.limit_per_round)?;
+            report.projected_facts += status.projected_facts;
+            report.replay_allowed_intents += status.replay_allowed_intents;
+        }
+
+        let status =
+            self.process_replay_work_until_idle(options.max_rounds, options.limit_per_round)?;
+        report.projected_facts += status.projected_facts;
+        report.replay_allowed_intents += status.replay_allowed_intents;
+        let blocked = self.clear_replay_blocked_intents()?;
+        report.blocked_live_only_intents += blocked.0 + blocked.1;
+        report.pending_facts = self.pending_fact_count();
+        report.pending_intents = self.pending_intent_count();
+        Ok(report)
+    }
+
+    /// Verify replay idempotence and ordering independence on scratch snapshots.
+    pub fn replay_check(&self, db_path: &Path) -> Result<ReplayCheckReport, String> {
+        let canonical_path = replay_snapshot_path(db_path, "canonical")?;
+        self.vacuum_into(&canonical_path)?;
+        let mut canonical = Runtime::open_disk(self.description, &canonical_path)?;
+        canonical.replay(ReplayOptions::default())?;
+        let baseline = canonical.state_summary()?;
+        canonical.replay(ReplayOptions::default())?;
+        let idempotent = canonical.state_summary()?;
+        compare_summary_hashes("idempotent", &baseline, &idempotent)?;
+
+        let mut checked_passes = 2usize;
+        for (label, order) in [
+            ("reverse", ReplayOrder::Reverse),
+            ("scramble_1", ReplayOrder::Scramble { seed: 1 }),
+            ("scramble_2", ReplayOrder::Scramble { seed: 2 }),
+        ] {
+            let path = replay_snapshot_path(db_path, label)?;
+            self.vacuum_into(&path)?;
+            let mut runtime = Runtime::open_disk(self.description, &path)?;
+            runtime.replay(ReplayOptions {
+                order,
+                ..ReplayOptions::default()
+            })?;
+            let summary = runtime.state_summary()?;
+            compare_summary_hashes(label, &baseline, &summary)?;
+            checked_passes += 1;
+            remove_snapshot(&path);
+        }
+        remove_snapshot(&canonical_path);
+
+        Ok(ReplayCheckReport {
+            state_hash: baseline.state_hash,
+            checked_passes,
+        })
+    }
+
+    fn vacuum_into(&self, path: &Path) -> Result<(), String> {
+        remove_snapshot(path);
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| "snapshot path must be UTF-8".to_string())?;
+        self.store
+            .conn()
+            .execute("VACUUM INTO ?1", [path_text])
+            .map(|_| ())
+            .map_err(|err| format!("create replay snapshot: {err}"))
+    }
+
+    fn process_replay_work_until_idle(
+        &mut self,
+        max_rounds: usize,
+        limit_per_round: usize,
+    ) -> Result<ReplayWorkStatus, String> {
+        let handlers = HandlerSet::new_replay(self.description.handlers);
+        let mut total = ReplayWorkStatus::default();
+        for _ in 0..max_rounds {
+            let progress = self.process_projection_work(limit_per_round)?;
+            total.projected_facts += progress.projected;
+            total.status.merge(progress.status);
+
+            let before = self.replay_allowed_intent_count()?;
+            let dispatched = self.dispatch_with_handlers(&handlers, limit_per_round)?;
+            let after = self.replay_allowed_intent_count()?;
+            total.replay_allowed_intents += before.saturating_sub(after);
+            total.status.merge(dispatched);
+
+            let progress = self.process_projection_work(limit_per_round)?;
+            total.projected_facts += progress.projected;
+            total.status.merge(progress.status);
+
+            if self.pending_fact_count() == 0
+                && self.replay_allowed_intent_count()? == 0
+                && !total.status.retried
+            {
+                return Ok(total);
+            }
+        }
+        Err("replay work did not become idle within the round limit".to_string())
+    }
+
+    fn replay_allowed_intent_count(&self) -> Result<usize, String> {
+        let allowed = self
+            .description
+            .handlers
+            .iter()
+            .filter(|route| route.runs_during_replay)
+            .map(|route| route.intent_kind)
+            .collect::<Vec<_>>();
+        intent_count_for_kinds(&self.store, &allowed)
+    }
+
+    fn clear_intent_queues(&self) -> Result<(usize, usize), String> {
+        self.store
+            .write_transaction(|tx| {
+                let durable = tx.conn().execute("DELETE FROM intents", [])?;
+                let local = tx.conn().execute("DELETE FROM local_intents", [])?;
+                Ok((durable, local))
+            })
+            .map_err(|err| format!("clear intent queues: {err}"))
+    }
+
+    fn clear_replay_blocked_intents(&self) -> Result<(usize, usize), String> {
+        let live_only = self
+            .description
+            .handlers
+            .iter()
+            .filter(|route| !route.runs_during_replay)
+            .map(|route| route.intent_kind)
+            .collect::<Vec<_>>();
+        delete_intents_for_kinds(&self.store, &live_only)
+    }
+
+    fn wipe_derived_state(&self) -> Result<usize, String> {
+        let mut tables = BTreeSet::<&'static str>::new();
+        for table in [
+            CONTEXT_EDGES,
+            TIME_WAKES,
+            PENDING_PROJECTION,
+            PENDING_TIME_RANGES,
+            EPHEMERAL_PROJECTION_INPUTS,
+        ] {
+            tables.insert(table.as_str());
+        }
+        for table in self.description.row_mutation_tables {
+            tables.insert(table.as_str());
+        }
+        for source in self.description.schema_sources {
+            for table in source.row_tables {
+                tables.insert(table.as_str());
+            }
+        }
+        tables.remove(INTENTS.as_str());
+        tables.remove(LOCAL_INTENTS.as_str());
+
+        self.store
+            .write_transaction(|tx| {
+                for table in &tables {
+                    let table = quoted_table_name_str(table)?;
+                    tx.conn().execute(&format!("DELETE FROM {table}"), [])?;
+                }
+                Ok(tables.len())
+            })
+            .map_err(|err| format!("wipe replay-derived state: {err}"))
+    }
+
+    fn mark_fact_pending(&self, fact_id: FactId) -> Result<(), String> {
+        self.store
+            .write_transaction(|tx| {
+                tx.conn().execute(
+                    "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
+                    [fact_id.as_slice()],
+                )?;
+                Ok(())
+            })
+            .map_err(|err| format!("mark replay fact pending: {err}"))
+    }
+
     pub fn process_due_time_range(
         &mut self,
         timeline: Timeline,
@@ -450,11 +742,162 @@ impl Runtime {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReplayWorkStatus {
+    projected_facts: usize,
+    replay_allowed_intents: usize,
+    status: WorkStatus,
+}
+
 fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource> {
     let mut sources = Vec::with_capacity(1 + description.schema_sources.len());
     sources.push(CORE_SCHEMA_SOURCE);
     sources.extend_from_slice(description.schema_sources);
     sources
+}
+
+fn order_replay_facts(facts: &mut [Fact], order: ReplayOrder) {
+    facts.sort_by_key(|fact| fact.id);
+    match order {
+        ReplayOrder::Canonical => {}
+        ReplayOrder::Reverse => facts.reverse(),
+        ReplayOrder::Scramble { seed } => {
+            let mut state = seed ^ 0x9e37_79b9_7f4a_7c15;
+            for index in (1..facts.len()).rev() {
+                state = splitmix64(state);
+                facts.swap(index, (state as usize) % (index + 1));
+            }
+        }
+    }
+}
+
+fn splitmix64(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+fn intent_count_for_kinds(store: &Store, kinds: &[&str]) -> Result<usize, String> {
+    if kinds.is_empty() {
+        return Ok(0);
+    }
+    let mut total = 0usize;
+    for table in [INTENTS, LOCAL_INTENTS] {
+        total += intent_count_for_kinds_in_table(store, table, kinds)?;
+    }
+    Ok(total)
+}
+
+fn intent_count_for_kinds_in_table(
+    store: &Store,
+    table: TableName,
+    kinds: &[&str],
+) -> Result<usize, String> {
+    let table = quoted_table_name(table).map_err(|err| err.to_string())?;
+    let placeholders = (1..=kinds.len())
+        .map(|idx| format!("?{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    store
+        .conn()
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE kind IN ({placeholders})"),
+            rusqlite::params_from_iter(kinds.iter().copied()),
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count as usize)
+        .map_err(|err| format!("count replay intents: {err}"))
+}
+
+fn delete_intents_for_kinds(store: &Store, kinds: &[&str]) -> Result<(usize, usize), String> {
+    if kinds.is_empty() {
+        return Ok((0, 0));
+    }
+    store
+        .write_transaction(|tx| {
+            let durable = delete_intents_for_kinds_in_table(tx, INTENTS, kinds)?;
+            let local = delete_intents_for_kinds_in_table(tx, LOCAL_INTENTS, kinds)?;
+            Ok((durable, local))
+        })
+        .map_err(|err| format!("delete replay-blocked intents: {err}"))
+}
+
+fn delete_intents_for_kinds_in_table(
+    store: &Store,
+    table: TableName,
+    kinds: &[&str],
+) -> rusqlite::Result<usize> {
+    let table = quoted_table_name(table)?;
+    let placeholders = (1..=kinds.len())
+        .map(|idx| format!("?{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    store.conn().execute(
+        &format!("DELETE FROM {table} WHERE kind IN ({placeholders})"),
+        rusqlite::params_from_iter(kinds.iter().copied()),
+    )
+}
+
+fn replay_snapshot_path(db: &Path, label: &str) -> Result<PathBuf, String> {
+    let parent = db.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = db
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "replay-check db path must have a UTF-8 file name".to_string())?;
+    Ok(parent.join(format!(
+        ".{file_name}.replay-check.{}.{}.db",
+        std::process::id(),
+        label
+    )))
+}
+
+fn remove_snapshot(path: &Path) {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        let _ = std::fs::remove_file(candidate);
+    }
+}
+
+fn compare_summary_hashes(
+    label: &str,
+    expected: &crate::core::state_summary::StateSummary,
+    actual: &crate::core::state_summary::StateSummary,
+) -> Result<(), String> {
+    if expected.state_hash == actual.state_hash {
+        return Ok(());
+    }
+    let mut diffs = Vec::new();
+    for expected_area in &expected.areas {
+        let Some(actual_area) = actual
+            .areas
+            .iter()
+            .find(|area| area.name == expected_area.name)
+        else {
+            diffs.push(format!("{} missing in actual", expected_area.name));
+            continue;
+        };
+        if expected_area.count != actual_area.count || expected_area.hash != actual_area.hash {
+            diffs.push(format!(
+                "{} expected_count={} actual_count={} expected_hash={} actual_hash={}",
+                expected_area.name,
+                expected_area.count,
+                actual_area.count,
+                expected_area.hash,
+                actual_area.hash
+            ));
+        }
+    }
+    Err(format!(
+        "replay-check {label} state hash mismatch: expected {} actual {}; {}",
+        expected.state_hash,
+        actual.state_hash,
+        diffs.join("; ")
+    ))
 }
 
 #[cfg(test)]

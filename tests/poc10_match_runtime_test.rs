@@ -17,6 +17,7 @@ use topo::protocol::auth::workspace::{
     commands::{create_workspace_with_identity, BootstrapIdentity},
     rows as workspace_rows,
 };
+use topo::protocol::connection::send_network_frame::{send_network_frame_intent, SendNetworkFrame};
 use topo::protocol::content::message as content_message;
 
 struct FixedClock(Cell<u64>);
@@ -158,6 +159,67 @@ fn runtime_dispatches_every_protocol_handler_registration() {
         dispatched.len() == MATCH_RUNTIME.handlers.len(),
         "HANDLER_ROUTES must not contain duplicate runtime handler names"
     );
+}
+
+#[test]
+fn replay_wipes_queued_live_work_and_rebuilds_rows_from_facts() {
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let clock = FixedClock(Cell::new(123_000));
+    let vault = EmptyVault;
+    let output = {
+        let ctx = runtime.command_context(&clock, &vault);
+        create_workspace_with_identity(
+            &ctx,
+            "Replay",
+            BootstrapIdentity {
+                username: "alice",
+                device_name: "laptop",
+                ttl_minutes: Some(0),
+            },
+        )
+        .expect("create workspace")
+    };
+    runtime
+        .submit_command_output(output)
+        .expect("submit command output");
+    runtime
+        .process_command_work_until_idle(8, 128)
+        .expect("settle command work");
+    assert_eq!(
+        runtime
+            .store()
+            .table_row_count(workspace_rows::WORKSPACE_ROWS)
+            .expect("workspace rows before replay"),
+        1
+    );
+    runtime
+        .submit_local_intent(send_network_frame_intent(SendNetworkFrame {
+            routing_key: [9; 32],
+            frame: vec![1, 2, 3],
+        }))
+        .expect("queue live-only local send");
+
+    let report = runtime
+        .replay(Default::default())
+        .expect("replay retained facts");
+
+    assert_eq!(report.dropped_local_intents, 1);
+    assert_eq!(report.pending_intents, 0);
+    assert_eq!(
+        runtime
+            .store()
+            .table_row_count(workspace_rows::WORKSPACE_ROWS)
+            .expect("workspace rows after replay"),
+        1,
+        "workspace projection rows should be rebuilt from retained facts"
+    );
+
+    let first = runtime.state_summary().expect("first summary");
+    runtime
+        .replay(Default::default())
+        .expect("idempotent replay");
+    let second = runtime.state_summary().expect("second summary");
+    assert_eq!(first.state_hash, second.state_hash);
 }
 
 fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) -> Fact {

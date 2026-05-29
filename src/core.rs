@@ -36,5 +36,6 @@ pub mod pipeline;
 pub mod projectors;
 pub mod runtime;
 pub mod schema;
+pub mod state_summary;
 pub mod store;
 pub mod wire;

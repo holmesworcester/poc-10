@@ -1092,11 +1092,14 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
     }
     let core_schema = source_text(&root.join("src/core/schema.rs"));
     let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
+    let connection_maintenance =
+        source_text(&root.join("src/protocol/connection/update_connections.rs"));
     let send_facts_handler =
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
     let network_io_files = [
         "src/protocol/connection/send_bootstrap_request.rs",
+        "src/protocol/connection/send_bootstrap_response.rs",
         "src/protocol/connection/send_network_frame.rs",
         "src/protocol/connection/receive_network_frame.rs",
     ];
@@ -1110,10 +1113,21 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
             ));
         }
     }
-    if !request_projector.contains(".local_intent(send_bootstrap_connection_request_intent") {
+    if request_projector.contains("send_bootstrap_connection_request_intent") {
         offenders.push(
-            "connection request projection does not emit bootstrap sends as local intents"
+            "connection request projection still emits bootstrap network sends directly"
                 .to_string(),
+        );
+    }
+    if !request_projector.contains("register_connection_candidate_intent") {
+        offenders.push(
+            "connection request projection does not register connection maintenance candidates"
+                .to_string(),
+        );
+    }
+    if !connection_maintenance.contains(".local_intent(send_bootstrap_connection_request_intent") {
+        offenders.push(
+            "connection maintenance does not emit bootstrap sends as local intents".to_string(),
         );
     }
     let compact_send_facts_handler = send_facts_handler.split_whitespace().collect::<String>();

@@ -154,8 +154,9 @@ drop a queued intent on upgrade only when one of these is true:
   recreate the same fact, row, index entry, or durable need, and no preserved
   purge fact makes the input unusable.
 - **Recoverable by protocol retry:** the lost work was only a network attempt,
-  sync prompt, or connection retry. Replay or peer retry can ask again, possibly
-  with different bytes or timing.
+  sync prompt, or connection-maintenance attempt. Replay rebuilds maintenance
+  candidates; live recurring work can ask again after the replay barrier,
+  possibly with different bytes or timing.
 - **Already canonicalized:** raw external input was first staged as canonical
   local/shared facts. Replay starts from those facts, not from the old queue row.
 
@@ -170,8 +171,12 @@ Current poc-10 intent replay behavior:
 
 | Intent kind | Source facts | Intended replay behavior | Default upgrade behavior |
 | --- | --- | --- | --- |
-| `send_bootstrap_connection_request` | local `connection_request` plus local ephemeral secret | The exact socket attempt is not rebuilt. Replay the request and retry time wake; later retry attempts may use different timing. | Not safe during replay. Drop queued local sends and allow retry after the replay/network barrier. |
-| `create_connection_response` | received `connection_request`, local invite secret, local fact receipt | A committed response fact is replayable. An uncommitted responder ephemeral key is not. If no response fact exists, create a fresh retry response only after validating the request again. | Not safe as an in-flight replay action. The old handler must finish or abort before wipe; post-barrier retry is acceptable. |
+| `register_connection_candidate` | local `connection_request` plus local ephemeral secret context | Rebuild the connection-maintenance candidate row for a pending local request. | Safe during replay. It owns maintenance rows, not socket IO. |
+| `unregister_connection_candidate` | local `connection_request` plus matching response context | Remove the connection-maintenance candidate once the request has a response or no longer needs bootstrap retry. | Safe during replay. It is idempotent row cleanup. |
+| `maintain_connections` | connection-maintenance candidate rows | Live recurring work that turns current candidates into local bootstrap send attempts. | Not safe during replay. It starts after the replay/network barrier. |
+| `send_bootstrap_connection_request` | local `connection_request` plus local ephemeral secret | The exact socket attempt is not rebuilt. Replay rebuilds the connection-maintenance candidate; later live maintenance attempts may use different timing. | Not safe during replay. Drop queued local sends and allow retry after the replay/network barrier through live maintenance. |
+| `create_connection_response` | received `connection_request`, local invite secret, local fact receipt | A committed response fact is replayable. An uncommitted responder ephemeral key is not. If no response fact exists, create a fresh response only after validating the request again. | Not safe during replay because it creates fresh responder material. It commits responder facts before queueing network send work; post-barrier retry is acceptable. |
+| `send_bootstrap_connection_response` | local `connection_response` plus responder ephemeral secret | The exact socket attempt is not rebuilt. A duplicate received request can recreate response send work if needed. | Not safe during replay. Drop queued local sends; response facts remain durable local state. |
 | `send_sync_compare_response` | `sync_compare` | Recompute child compares and exact fact sends from the rebuilt shareable index. | Safe only for live post-barrier connections. Old compare facts tied to retired connections should not drive sends. |
 | `send_needed_fact_id` | `sync_have_id` | If the advertised fact is already present, no-op; otherwise create a `sync_need_id` for that connection. | Safe only for live post-barrier connections. Old have-id facts tied to retired connections should not create fresh need-id facts. |
 | `send_requested_fact` | `sync_need_id` | Send the requested fact only if it exists and is shareable on that connection; otherwise no-op. | Safe only after the replay barrier for live connections; otherwise it should no-op because the connection is retired. |
@@ -181,7 +186,7 @@ Current poc-10 intent replay behavior:
 | `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap only when replay finds no preserved purge or retirement fact covering the local recipient capability. | Fine only if purge/retirement projection removes unusable local recipient capability first. A retained wrap alone is not enough; replay must not resurrect the opened secret. |
 | `send_facts_on_connection` | sync compare/need/seed/live-tail work | Package current fact bytes into connection frames. This is derived transport work, not content truth. | Not safe during replay. Safe after the barrier for a live connection. |
 | `send_network_frame` | packaged connection frame | Final local socket write. | Not safe during replay. Drop queued local sends; replay can rederive sends from retry, sync, or connection facts after the barrier. |
-| `receive_network_frame` | daemon inbound bytes | Not rebuildable until it creates canonical request, response, frame, or receipt facts. | Not safe to drop if it is the only copy of an inbound observation. For high reliability, drain or stage inbound frames as local facts before upgrade; otherwise recovery depends on peer retry or sync. |
+| `receive_network_frame` | daemon inbound bytes | Not rebuildable until it creates canonical request, response, frame, or receipt facts. | Not safe to drop if it is the only copy of an inbound observation. For high reliability, drain or stage inbound frames as local facts before upgrade; otherwise recovery depends on connection maintenance or sync. |
 
 Pending local user actions need the same classification. If losing the work
 would lose user-visible shared state, persist a durable local fact before

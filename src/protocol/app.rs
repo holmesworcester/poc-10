@@ -48,16 +48,10 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     context: MatchCliContext::new,
 };
 
-const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
-    DaemonTimeWake {
-        timeline: content::message::expiration_timeline,
-        end_inclusive: current_message_expiration_minute,
-    },
-    DaemonTimeWake {
-        timeline: connection::request::peer_retry_timeline,
-        end_inclusive: current_wall_clock_ms,
-    },
-];
+const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
+    timeline: content::message::expiration_timeline,
+    end_inclusive: current_message_expiration_minute,
+}];
 
 fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {
     connection::receive_network_frame::receive_network_frame_intent(
@@ -73,11 +67,4 @@ fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, St
 
 fn current_message_expiration_minute(store: &Store) -> Result<Option<u64>, String> {
     Ok(clock::logical_time(store)?.map(|now_ms| now_ms / 60_000))
-}
-
-fn current_wall_clock_ms(_store: &Store) -> Result<Option<u64>, String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|err| format!("system clock before unix epoch: {err}"))?;
-    Ok(Some(u64::try_from(now.as_millis()).unwrap_or(u64::MAX)))
 }

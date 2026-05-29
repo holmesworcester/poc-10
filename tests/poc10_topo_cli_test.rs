@@ -172,3 +172,55 @@ fn con_workspace_reads_use_target_rows() {
     let count = assert_success(con_cli(&["--db", &db, "count"]));
     assert_eq!(line_value(&count, "workspace_rows"), "2");
 }
+
+#[test]
+fn con_replay_commands_report_stable_state_hashes() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = temp_db(&temp, "con.db");
+
+    assert_success(con_cli(&[
+        "--db",
+        &db,
+        "create-workspace",
+        "Replay CLI",
+        "--username",
+        "alice",
+        "--devicename",
+        "alice-laptop",
+    ]));
+
+    let before = assert_success(con_cli(&["--db", &db, "state-summary"]));
+    let before_hash = line_value(&before, "state_hash");
+    assert_eq!(before_hash.len(), 64);
+
+    let replay = assert_success(con_cli(&["--db", &db, "replay", "--reverse"]));
+    assert_eq!(line_value(&replay, "pending_intents"), "0");
+    let replay_hash = line_value(&replay, "state_hash");
+    assert_eq!(replay_hash.len(), 64);
+
+    let check = assert_success(con_cli(&["--db", &db, "replay-check"]));
+    assert_eq!(line_value(&check, "ok"), "true");
+    assert_eq!(line_value(&check, "state_hash"), replay_hash);
+}
+
+#[test]
+fn con_recurring_intents_lists_connection_maintenance() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db = temp_db(&temp, "con.db");
+
+    let recurring = assert_success(con_cli(&["--db", &db, "recurring-intents"]));
+    assert!(
+        recurring.contains("recurring maintain_connections")
+            && recurring.contains("kind=maintain_connections")
+            && recurring.contains("interval_ms=250"),
+        "recurring-intents should come from handler route metadata; got:\n{recurring}"
+    );
+
+    let registry = assert_success(con_cli(&["--db", &db, "intent-registry"]));
+    assert!(
+        registry.contains("handler maintain_connections")
+            && registry.contains("runs_during_replay=false")
+            && registry.contains("recurrence=initial_delay_ms:0 interval_ms:250"),
+        "intent-registry should expose replay and recurrence metadata; got:\n{registry}"
+    );
+}

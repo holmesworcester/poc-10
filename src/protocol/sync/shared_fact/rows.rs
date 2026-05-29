@@ -659,18 +659,23 @@ mod tests {
         let input = upsert(workspace_id, &fact, Vec::new());
         let barrier = Arc::new(Barrier::new(2));
 
-        let handles = (0..2)
+        let stores = (0..2)
             .map(|_| {
-                let path = path.clone();
+                Store::open_disk_with_schema_sources(
+                    &path,
+                    &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
+                )
+                .expect("open store")
+            })
+            .collect::<Vec<_>>();
+
+        let handles = stores
+            .into_iter()
+            .map(|store| {
                 let fact = fact.clone();
                 let input = input.clone();
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
-                    let store = Store::open_disk_with_schema_sources(
-                        &path,
-                        &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE],
-                    )
-                    .expect("open store");
                     barrier.wait();
                     record_sync_contribution(&store, &input, Some(&fact))
                         .expect("record contribution")

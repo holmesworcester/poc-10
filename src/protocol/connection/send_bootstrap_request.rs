@@ -9,10 +9,10 @@
 //! write.
 //!
 //! The intent key is `(request_id, initiator_ephemeral_secret_id, addr)`, so
-//! duplicate attempts are idempotent for the same bootstrap target. Retry timing
-//! is owned by the request projector's peer-retry time wake. Change this file
-//! for pre-connection send payload behavior. Established connection frames use
-//! `send_network_frame`.
+//! duplicate attempts are idempotent for the same bootstrap target. Retry
+//! cadence is owned by connection maintenance, which re-emits local send work
+//! from its candidate table. Change this file for pre-connection send payload
+//! behavior. Established connection frames use `send_network_frame`.
 
 use std::net::SocketAddr;
 

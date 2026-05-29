@@ -26,13 +26,20 @@ use crate::core::command_context::{
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::daemon;
-use crate::core::runtime::Runtime;
+use crate::core::runtime::{ReplayOptions, ReplayOrder, Runtime};
 use crate::protocol::sync;
 use crate::protocol::{auth, content};
 use std::path::PathBuf;
 
 const COMMAND_SETTLE_ROUNDS: usize = 4;
 const COMMAND_SETTLE_LIMIT: usize = 4096;
+pub const REPLAY_USAGE: &str = "replay [--reverse | --scramble --seed N]";
+pub const REPLAY_CHECK_USAGE: &str = "replay-check";
+pub const STATE_SUMMARY_USAGE: &str = "state-summary";
+pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
+pub const RECURRING_INTENTS_USAGE: &str = "recurring-intents";
+pub const RECURRING_RUN_USAGE: &str = "recurring-run KIND --now MS";
+pub const CONNECTION_MAINTENANCE_STATUS_USAGE: &str = "connection-maintenance-status";
 
 pub struct MatchCliContext {
     db: Option<PathBuf>,
@@ -695,6 +702,263 @@ pub(crate) fn content_count(
 pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let observed_max = max_cli_timestamp(ctx.runtime().store())?;
     clock::run_cli(ctx.runtime().store(), args, observed_max)
+}
+
+pub(crate) fn replay(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    let options = parse_replay_options(args)?;
+    let report = ctx.runtime_mut().replay(options)?;
+    let summary = ctx.runtime().state_summary()?;
+    Ok(CliOutput::lines(vec![
+        format!("retained_facts: {}", report.retained_facts),
+        format!("dropped_intents: {}", report.dropped_intents),
+        format!("dropped_local_intents: {}", report.dropped_local_intents),
+        format!("wiped_tables: {}", report.wiped_tables),
+        format!("projected_facts: {}", report.projected_facts),
+        format!("replay_allowed_intents: {}", report.replay_allowed_intents),
+        format!(
+            "blocked_live_only_intents: {}",
+            report.blocked_live_only_intents
+        ),
+        format!("pending_facts: {}", report.pending_facts),
+        format!("pending_intents: {}", report.pending_intents),
+        format!("state_hash: {}", summary.state_hash),
+    ]))
+}
+
+pub(crate) fn state_summary(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, STATE_SUMMARY_USAGE)?;
+    let summary = ctx.runtime().state_summary()?;
+    let mut lines = vec![
+        format!("state_hash: {}", summary.state_hash),
+        format!("areas: {}", summary.areas.len()),
+    ];
+    for area in summary.areas {
+        lines.push(format!(
+            "area {} count={} hash={}",
+            area.name, area.count, area.hash
+        ));
+    }
+    Ok(CliOutput::lines(lines))
+}
+
+pub(crate) fn replay_check(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, REPLAY_CHECK_USAGE)?;
+    let db = ctx.db_path("replay-check")?.clone();
+    let report = ctx.runtime().replay_check(&db)?;
+
+    Ok(CliOutput::lines(vec![
+        "ok: true".to_string(),
+        format!("state_hash: {}", report.state_hash),
+        format!("checked_passes: {}", report.checked_passes),
+    ]))
+}
+
+pub(crate) fn intent_registry(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, INTENT_REGISTRY_USAGE)?;
+    let excluded = ctx.runtime().description().command_excluded_handlers;
+    let lines = ctx
+        .runtime()
+        .handler_routes()
+        .iter()
+        .map(|route| {
+            let recurrence = route.recurrence.map_or("none".to_string(), |spec| {
+                format!(
+                    "initial_delay_ms:{} interval_ms:{}",
+                    spec.initial_delay_ms, spec.interval_ms
+                )
+            });
+            format!(
+                "handler {} kind={} runs_during_replay={} command_excluded={} network_io={} recurrence={}",
+                route.name,
+                route.intent_kind,
+                route.runs_during_replay,
+                excluded.contains(&route.name),
+                route.performs_network_io,
+                recurrence
+            )
+        })
+        .collect();
+    Ok(CliOutput::lines(lines))
+}
+
+pub(crate) fn recurring_intents(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, RECURRING_INTENTS_USAGE)?;
+    let mut lines = Vec::new();
+    for route in ctx.runtime().handler_routes() {
+        if let Some(spec) = route.recurrence {
+            lines.push(format!(
+                "recurring {} kind={} initial_delay_ms={} interval_ms={}",
+                route.name, route.intent_kind, spec.initial_delay_ms, spec.interval_ms
+            ));
+        }
+    }
+    if lines.is_empty() {
+        lines.push("recurring_count: 0".to_string());
+    }
+    Ok(CliOutput::lines(lines))
+}
+
+pub(crate) fn recurring_run(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    let parsed = parse_recurring_run_args(args)?;
+    let route = ctx
+        .runtime()
+        .handler_routes()
+        .iter()
+        .find(|route| route.name == parsed.kind || route.intent_kind == parsed.kind)
+        .ok_or_else(|| format!("recurring route {} is not registered", parsed.kind))?;
+    if route.performs_network_io {
+        return Err(format!(
+            "recurring-run refuses network-capable route {} without daemon IO",
+            route.name
+        ));
+    }
+    let spec = route
+        .recurrence
+        .ok_or_else(|| format!("route {} is not recurring", route.name))?;
+    let Some(intent) = (spec.build_intent)(ctx.runtime().store(), parsed.now_ms)? else {
+        return Ok(CliOutput::lines(vec![
+            format!("kind: {}", route.name),
+            "queued: false".to_string(),
+            "dispatched: false".to_string(),
+        ]));
+    };
+    ctx.runtime_mut().submit_local_intent(intent)?;
+    let status = ctx.runtime_mut().dispatch_intents(1)?;
+    Ok(CliOutput::lines(vec![
+        format!("kind: {}", route.name),
+        "queued: true".to_string(),
+        format!("dispatched: {}", status.progressed),
+        format!("retried: {}", status.retried),
+    ]))
+}
+
+pub(crate) fn connection_maintenance_status(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, CONNECTION_MAINTENANCE_STATUS_USAGE)?;
+    let store = ctx.runtime().store();
+    let candidate_rows = store
+        .table_row_count(
+            crate::protocol::connection::request::CONNECTION_MAINTENANCE_CANDIDATE_ROWS,
+        )
+        .map_err(|err| format!("count connection candidates: {err}"))?;
+    let request_rows = store
+        .table_row_count(crate::protocol::connection::request::rows::CONNECTION_REQUEST_ROWS)
+        .map_err(|err| format!("count connection requests: {err}"))?;
+    let response_rows = store
+        .table_row_count(crate::protocol::connection::response::rows::CONNECTION_RESPONSE_ROWS)
+        .map_err(|err| format!("count connection responses: {err}"))?;
+    let pending_bootstrap_sends = queued_intent_count(
+        store,
+        crate::protocol::connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
+    )?;
+    Ok(CliOutput::lines(vec![
+        format!("candidate_rows: {candidate_rows}"),
+        format!("active_attempt_rows: {request_rows}"),
+        format!("active_connection_rows: {response_rows}"),
+        "backoff_rows: 0".to_string(),
+        "target_count: 0".to_string(),
+        format!("pending_bootstrap_sends: {pending_bootstrap_sends}"),
+    ]))
+}
+
+fn parse_replay_options(args: CliArgs<'_>) -> Result<ReplayOptions, String> {
+    let mut reverse = false;
+    let mut scramble = false;
+    let mut seed = 0u64;
+    let values = args.values();
+    let mut index = 0usize;
+    while index < values.len() {
+        match values[index].as_str() {
+            "--reverse" => {
+                reverse = true;
+                index += 1;
+            }
+            "--scramble" => {
+                scramble = true;
+                index += 1;
+            }
+            "--seed" => {
+                let value = values
+                    .get(index + 1)
+                    .ok_or_else(|| REPLAY_USAGE.to_string())?;
+                seed = value.parse::<u64>().map_err(|_| REPLAY_USAGE.to_string())?;
+                index += 2;
+            }
+            _ => return Err(REPLAY_USAGE.to_string()),
+        }
+    }
+    if reverse && scramble {
+        return Err(REPLAY_USAGE.to_string());
+    }
+    let order = if reverse {
+        ReplayOrder::Reverse
+    } else if scramble {
+        ReplayOrder::Scramble { seed }
+    } else {
+        ReplayOrder::Canonical
+    };
+    Ok(ReplayOptions {
+        order,
+        ..ReplayOptions::default()
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecurringRunArgs {
+    kind: String,
+    now_ms: u64,
+}
+
+fn parse_recurring_run_args(args: CliArgs<'_>) -> Result<RecurringRunArgs, String> {
+    let values = args.values();
+    if values.len() != 3 || values.get(1).map(String::as_str) != Some("--now") {
+        return Err(RECURRING_RUN_USAGE.to_string());
+    }
+    Ok(RecurringRunArgs {
+        kind: values[0].clone(),
+        now_ms: values[2]
+            .parse::<u64>()
+            .map_err(|_| RECURRING_RUN_USAGE.to_string())?,
+    })
+}
+
+fn queued_intent_count(store: &crate::core::store::Store, kind: &str) -> Result<usize, String> {
+    let durable = queued_intent_count_in_table(store, "intents", kind)?;
+    let local = queued_intent_count_in_table(store, "local_intents", kind)?;
+    Ok(durable + local)
+}
+
+fn queued_intent_count_in_table(
+    store: &crate::core::store::Store,
+    table: &str,
+    kind: &str,
+) -> Result<usize, String> {
+    store
+        .conn()
+        .query_row(
+            &format!("SELECT COUNT(*) FROM \"{table}\" WHERE kind = ?1"),
+            [kind],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count as usize)
+        .map_err(|err| format!("count queued {kind} intents: {err}"))
 }
 
 fn next_cli_timestamp(runtime: &Runtime) -> Result<u64, String> {
