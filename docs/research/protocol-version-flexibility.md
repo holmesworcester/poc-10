@@ -34,7 +34,7 @@ The policy has four separations:
 - **Fact-version safety.** A fact version is deprecated only if that fact
   format or validation rule is unsafe. Security-deprecating a client release
   does not automatically invalidate historical facts written by that release.
-- **Replay truth.** Retained facts, not rows or old queued intents, are the
+- **Replay truth.** Retained facts, not rows or queued intents, are the
   durable source of truth. Updates wipe materialized state and replay retained
   facts through historical adapters plus the ceiling-active registry.
 
@@ -97,32 +97,70 @@ Security changes should name the smallest unsafe surface:
 - **Unsafe derived state:** wipe and replay. If the source facts are safe, no
   durable migration is needed.
 
-Plaintext usernames are the useful example. If `user_v1` exposes a name in
-plaintext and the product decides that is a privacy bug, the next ceiling can
-introduce `user_v2` with encrypted profile text. Existing `user_v1` facts do
-not magically become safe. The safe outcomes are a policy fact that hides or
-quarantines old plaintext names, optional user/device reissue of encrypted
-replacement facts, and an old adapter that preserves authority identity without
-continuing to display unsafe plaintext.
+Plaintext usernames are the useful example. In poc-10,
+`auth::user::UserFact` contains plaintext `username`. That fact is signed by
+the user-invite key that admitted the user; later devices usually have only
+their endpoint signing key, proven by `auth::endpoint_shared`, not the original
+invite key. A normal device therefore cannot reissue the same `auth::user`
+shape unless it still has the original signing key.
+
+The practical fix is a new ceiling-gated profile fact, not a same-shaped user
+rewrite:
+
+```text
+auth::user_profile_v2 {
+  workspace_id,
+  subject_user_id,          // old auth_user fact id; still the membership anchor
+  supersedes_profile_id,
+  encrypted_display_name,
+  signer_endpoint_shared_id,
+  signer_public_key,
+  signature,
+}
+```
+
+`user_profile_v2` is signed by an admitted endpoint. Its projector needs the
+old `auth_user` fact and the signer `auth_endpoint_shared` fact. It admits only
+when both are in the same workspace,
+`endpoint_shared.user_authority_fact_id == subject_user_id`, and the signer
+public key matches the endpoint_shared row. The new fact may replace profile
+display data only. It cannot change membership, admin authority, the original
+user public key, or the subject user id.
+
+The old `user_v1` adapter then preserves authority identity without
+materializing unsafe plaintext into display rows. A policy fact can hide or
+quarantine old plaintext names, and live user devices can publish encrypted
+profile facts opportunistically. If the raw plaintext fact bytes themselves
+must be purged, the protocol first needs an authority-preserving replacement or
+tombstone; otherwise old content that names `author_user_id == user_v1.id`
+loses its context proof.
 
 ## Intents And Replay
 
 Facts are the compatibility boundary; intents are current-runtime work. On
-upgrade, old queued intents are not the durable source of correctness. Retained
+upgrade, queued intents are not the durable source of correctness. Retained
 facts replay through their versioned adapters and produce ceiling-active
-durable needs or intent payloads.
+durable needs or current intent payloads. Handlers must be idempotent because
+replay may enqueue work that was already completed before the upgrade.
 
-For example, an old key-coverage fact or old key-wrap request can replay into:
+Current poc-10 intent replay behavior:
 
-```text
-ensure_key_wrap_coverage_vCurrent(workspace, frontier, recipient, source)
-```
+| Intent kind | Source facts | Replay behavior |
+| --- | --- | --- |
+| `send_bootstrap_connection_request` | local `connection_request` plus local ephemeral secret | Local socket attempt. Drop queued local sends on upgrade; replay the request and retry time wake until a `connection_response` exists. |
+| `create_connection_response` | received `connection_request`, local invite secret, local fact receipt | Rebuild responder work only when the request is still valid locally. If an old local response fact exists, request projection sees it; otherwise a new retryable response may be created. |
+| `send_sync_compare_response` | `sync_compare` | Recompute child compares and exact fact sends from the current shareable index. Stale compare facts are harmless sync prompts. |
+| `send_needed_fact_id` | `sync_have_id` | If the advertised fact is already present, no-op; otherwise create a `sync_need_id` and send it. |
+| `send_requested_fact` | `sync_need_id` | Send the requested fact only if it exists and is shareable on that connection; otherwise no-op. |
+| `share_fact_with_sync` | any admitted shareable fact, or a retraction | Rebuild shareable-fact rows, dependency context rows, and negentropy summaries. Reject local-only bytes. Live-tail sends are derived side effects. |
+| `seed_connection_sync` | `connection_response` | Rebuild the root compare for a connection from the current shareable index. Repeated seeds are safe. |
+| `create_key_wrap` | `recipient_key` or `key_request`, wrap source, local signer secret | Recreate the deterministic `key_wrap` only if local source and signing material still exist. Replay must not fabricate missing key material. |
+| `unwrap_key_wrap` | `key_wrap`, recipient key, local recipient secret, frontier | Reopen the wrap into local secret state when local recipient material remains. If the secret was purged, leave the wrap unopened. |
+| `send_facts_on_connection` | sync compare/need/seed/live-tail work | Package current fact bytes into connection frames. This is derived transport work, not content truth. |
+| `send_network_frame` | packaged connection frame | Final local socket write. Drop queued local sends on upgrade; replay can rederive them from sync or connection retry facts. |
+| `receive_network_frame` | daemon inbound bytes | Local boundary before canonical facts exist. Once handled, replay starts from the staged request, response, frame, and receipt facts. If dropped before admission, peer retry or sync recovers. |
 
-The registered handler fulfills that need idempotently if the required local
-secret still exists. If the material was purged or never available, replay
-leaves an unsatisfied durable need rather than fabricating coverage.
-
-Pending local user actions need an explicit classification. If losing the work
+Pending local user actions need the same classification. If losing the work
 would lose user-visible shared state, persist a durable local fact before
 upgrade. If it is only process state, it may be dropped and retried by UI.
 
@@ -135,12 +173,54 @@ Connection and sync have two independent compatibility surfaces:
 - The **shared durable protocol** is about what facts production clients are
   allowed to create under the ceiling.
 
-When an old connection or sync request fact is safe to answer, the response
-uses the same request version. New clients can keep old request/response
-formats for reliability while still enforcing release safety and the production
-ceiling. A v1 sync session may transfer facts produced at the current ceiling if
-the authenticated peer can understand them; the v1 envelope does not imply v1
-content semantics.
+For a still-usable older release, the ceiling already guarantees that shared
+durable facts are within the older release's admission and projection surface.
+The mixed-version problem is therefore transport selection, not content
+fallback.
+
+Connection behavior:
+
+1. **Newer initiates to older.** The newer client sends the bootstrap request
+   version named by the invite/link/endpoint metadata. If no trustworthy
+   metadata exists, it uses the oldest still-safe bootstrap version. The older
+   responder answers in that same version. No pre-bootstrap negotiation is
+   required, so an active network attacker does not get a separate downgrade
+   choice.
+2. **Older initiates to newer.** The newer client parses the old request,
+   validates the same invite-secret, local-endpoint, and receipt proofs, and
+   creates an old-shaped response. The request version selects the response
+   version.
+3. **Established session.** The session starts with the request/response
+   carrier version. A newer carrier can be negotiated later only inside the
+   authenticated session. Until then, connection frames, receipts, and local
+   send/receive intents use the established carrier.
+4. **Expired older release.** Safe old request/response formats may still be
+   answered so users can recover, update, or finish old sync. That does not make
+   the expired release part of the production visibility guarantee, and it does
+   not lower the durable protocol ceiling.
+
+Sync behavior:
+
+1. **Envelope version.** The connection's carrier version selects the
+   compare/have/need/range/frame shape. A newer client answers an old compare
+   with old-shaped compare children, old-shaped have/need facts, and old-shaped
+   frame bundles.
+2. **Fact bytes stay canonical.** Sync carries opaque fact bytes plus ids and
+   dependency closure. It does not reinterpret fact contents. Receiving still
+   routes by the fact's own type tag and current ceiling-active adapters.
+3. **Dependency closure.** A newer sender should include projector-declared
+   context facts with the requested fact when the old envelope can carry them.
+   If the old sync version can only ask by exact id, it falls back to have/need
+   rounds; correctness is preserved, latency is worse.
+4. **Carrier limits are real.** If an old frame or sync version cannot carry a
+   new fact's byte size or required dependency shape, that fact family cannot
+   become ceiling-active until every release limited by that carrier has
+   expired, or until the new fact family has an old-carrier-compatible chunking
+   path.
+5. **Current-ceiling transfer.** A v1 sync session may carry current-ceiling
+   facts when the authenticated peer's release can parse and admit those fact
+   families. The `v1` label describes only the sync envelope, not the semantic
+   version of the facts inside.
 
 ## Upgrade Examples
 
