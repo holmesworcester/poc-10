@@ -23,13 +23,14 @@ that this policy does not introduce.
 The policy has four separations:
 
 - **Protocol ceiling.** Production clients may create, admit, project, and
-  display shared durable protocol no newer than the global provider-scheduled
+  display shared durable protocol no newer than the global expiry-derived
   protocol ceiling. A binary may contain future protocol code, but production
-  must not register that reader, projector, or command path until the ceiling
-  advances.
+  must not register that reader, projector, or command path until every
+  still-usable non-capable release has expired or been security-deprecated.
 - **Release safety.** A release may be allowed or blocked independently from
-  the facts it wrote. Releases embed `warn_after` and `expires_at`; emergency
-  deprecation uses a signed, monotonic, persisted `must_update` canary.
+  the facts it wrote. Releases embed `warn_after` and `expires_at`, plus their
+  shared durable protocol capabilities; emergency deprecation uses a signed,
+  monotonic, persisted `must_update` canary.
 - **Fact-version safety.** A fact version is deprecated only if that fact
   format or validation rule is unsafe. Security-deprecating a client release
   does not automatically invalidate historical facts written by that release.
@@ -39,14 +40,18 @@ The policy has four separations:
 
 Operational rules:
 
-1. **One protocol ceiling.** The production ceiling is global product state,
-   not per peer, group, workspace, or active-client observation. New shared
-   durable fact versions become producible and admissible in production only
-   when the ceiling allows them.
-2. **Scheduled ceiling advance.** Ceiling changes are provider-scheduled at a
-   wall-clock `ceiling_raises_at` time. Choose this after old-client warning and
-   expiry windows plus clock-skew grace. Until that time, every production
-   client writes the old ceiling even if its implementation head is newer.
+1. **One protocol ceiling.** At a trusted time, a release is still usable if it
+   is not past `expires_at` and has not been security-deprecated by canary. The
+   production ceiling is the greatest shared durable protocol version supported
+   by every still-usable release. New shared durable fact versions become
+   producible and admissible in production only when the ceiling allows them.
+2. **Expiry-driven ceiling advance.** A capability becomes ceiling-active when
+   the last still-usable release that cannot create, admit, project, or display
+   it expires or is security-deprecated. In a monotonic release train, the
+   blocking release is the oldest still-usable non-capable release, and its
+   `expires_at` is the ceiling transition. If a grace window is needed, set that
+   release's `expires_at` later; do not add a separate readiness signal or
+   infer readiness from observed active clients.
 3. **Trusted time.** Clients persist the greatest trusted time learned from
    embedded release metadata, signed registry facts, or signed canaries. If the
    local clock rolls backward too far, shared production use blocks until time
@@ -169,7 +174,7 @@ Core should stay protocol-neutral:
 - keep old connection/sync codecs separate from old fact projectors.
 
 Scope modules own the compatibility decisions. Adding or changing a fact family
-requires a manifest entry naming its first production ceiling, old adapters,
-security-deprecation policy, replay output, and tests that prove above-ceiling
-facts are rejected or quarantined in production and accepted only once the
-ceiling enables them.
+requires a manifest entry naming the releases that support it, the blocking
+non-capable releases and their expiries, old adapters, security-deprecation
+policy, replay output, and tests that prove above-ceiling facts are rejected or
+quarantined in production and accepted only once the ceiling enables them.
