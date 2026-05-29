@@ -84,6 +84,7 @@ Initial poc-10 policy:
 | `create_key_wrap` | Runs during replay; it deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
 | `unwrap_key_wrap` | Runs during replay if its handler only creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
 | `create_connection_response` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
+| connection candidate registration intents | Run during replay; they rebuild connection-maintenance-owned candidate rows from endpoint/auth facts. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
 
@@ -131,17 +132,29 @@ Connection retry should not be owned by historical `connection_request` facts.
 The operational goal is to keep the local endpoint connected to enough peers in
 a potentially large endpoint set.
 
-Add a recurring `maintain_connections` intent:
+Add replay-allowed candidate-registration intents plus a live recurring
+`maintain_connections` intent.
 
-1. The handler reads local endpoint state, known endpoint/shared-auth rows,
-   current connection rows, active attempt rows or facts, recent failures, and
-   target connection policy.
-2. It chooses peers needed to maintain the target connection count.
-3. It creates connection attempts and request facts for selected peers.
-4. It closes excess or stale attempts through protocol-owned close/abandon
-   facts or rows.
-5. It records backoff or failure state as local derived state or local facts,
-   depending on whether the information must survive restart.
+Endpoint/auth projectors decide which endpoints are valid connection
+candidates. They should not run the maintenance loop directly. Instead they
+emit replay-allowed registration work such as
+`register_connection_candidate` and, when needed,
+`unregister_connection_candidate`. Those handlers own the
+connection-maintenance candidate index.
+
+`maintain_connections` must not discover peers by broad-querying auth or
+endpoint-owned tables. It reads only connection-maintenance-owned state:
+candidate rows, active connection rows, active attempt rows or facts, recent
+failure/backoff rows, and target connection policy. It then chooses peers
+needed to maintain the target connection count, creates connection attempts and
+request facts, closes excess or stale attempts through protocol-owned
+close/abandon facts or rows, and records backoff or failure state in
+connection-maintenance-owned storage.
+
+Replay rebuilds the candidate table by replaying endpoint/auth facts and
+dispatching replay-allowed candidate-registration intents. The recurring
+`maintain_connections` intent is live-only and starts after replay, once the
+candidate index has been rebuilt.
 
 Connection request projection should validate and materialize request history.
 It should not own an operational retry loop and should not emit
