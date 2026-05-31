@@ -49,6 +49,68 @@ use super::fact::ConnectionRequestFact;
 const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
 const PEER_RETRY_DELAY_MS: u64 = 250;
 
+const MEMBERSHIP_CONNECTION_REQUEST_ROLE: &str = "membership_connection_request";
+const MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str =
+    "membership_connection_response_for_request";
+
+/// Peer-retry timeline shared with bootstrap: it is keyed per request fact, so
+/// reusing the constant does not cross requests.
+pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
+    crate::protocol::connection::bootstrap_request::peer_retry_timeline()
+}
+
+pub fn connection_request_need(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_REQUEST_ROLE),
+        crate::core::facts::FactScope::Global,
+        request_id,
+        request_id,
+    )
+}
+
+pub fn connection_request_offer(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_REQUEST_ROLE),
+        crate::core::facts::FactScope::Global,
+        request_id,
+        request_id,
+    )
+}
+
+pub fn connection_response_for_request_need(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
+        crate::core::facts::FactScope::Local,
+        request_id,
+        request_id,
+    )
+}
+
+pub fn connection_response_for_request_offer(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
+        crate::core::facts::FactScope::Local,
+        request_id,
+        request_id,
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionRequestProjector;
 
@@ -151,7 +213,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                 );
             }
             // 4. Materialize local request.
-            let response_need = super::connection_response_for_request_need(fact.id, fact.id);
+            let response_need = connection_response_for_request_need(fact.id, fact.id);
             if let Some(response_fact) = projection_context.payload_for(&response_need) {
                 if response_fact.scope != FactScope::Local {
                     return Err(
@@ -351,7 +413,7 @@ fn content_signer_need(
 }
 
 fn materialized_output(request_id: [u8; 32]) -> ProjectionOutput {
-    ProjectionOutput::new().offer(super::connection_request_offer(request_id, request_id))
+    ProjectionOutput::new().offer(connection_request_offer(request_id, request_id))
 }
 
 fn local_retrying_output(
@@ -371,7 +433,7 @@ fn local_retrying_output(
         addr,
     )?));
 
-    let retry_timeline = super::peer_retry_timeline();
+    let retry_timeline = peer_retry_timeline();
     let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
     if let Some(now_ms) = due_retry_at {
         output = output.local_intent(send_connection_request_intent(SendConnectionRequest {

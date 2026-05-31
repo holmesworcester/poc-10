@@ -16,49 +16,10 @@ pub mod fact;
 pub mod layout;
 pub mod project;
 
-use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
-use crate::core::facts::{FactId, FactScope};
-
-const CONNECTION_CLOSED_ROLE: &str = "connection_closed";
-const CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE: &str = "connection_ephemeral_secret_closed";
-
-pub fn connection_closed_need(owner: FactId, connection_id: FactId) -> ContextNeed {
-    exact_local_need(owner, CONNECTION_CLOSED_ROLE, connection_id)
-}
-
-pub fn connection_closed_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
-    exact_local_offer(owner, CONNECTION_CLOSED_ROLE, connection_id)
-}
-
-pub fn ephemeral_secret_closed_need(owner: FactId, secret_id: FactId) -> ContextNeed {
-    exact_local_need(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
-}
-
-pub fn ephemeral_secret_closed_offer(owner: FactId, secret_id: FactId) -> ContextOffer {
-    exact_local_offer(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
-}
-
-fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
-    let key = ContextKey::from_bytes(key);
-    ContextNeed {
-        owner,
-        role: Role::expect(role),
-        scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
-    }
-}
-
-fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextOffer {
-    let key = ContextKey::from_bytes(key);
-    ContextOffer {
-        owner,
-        role: Role::expect(role),
-        scope: FactScope::Local,
-        start_key: key.clone(),
-        end_key: key,
-    }
-}
+pub use project::{
+    connection_closed_need, connection_closed_offer, ephemeral_secret_closed_need,
+    ephemeral_secret_closed_offer,
+};
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionCloseFact, String> {
     layout::decode_fact(bytes)

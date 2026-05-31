@@ -11,12 +11,54 @@
 //!   3. MATERIALIZE. Publish close offers only; target facts own their own row
 //!      deletion and self-purge when those offers wake them.
 
-use crate::core::facts::{Fact, FactScope};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
 use crate::protocol::connection::bootstrap_response as response;
+
+const CONNECTION_CLOSED_ROLE: &str = "connection_closed";
+const CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE: &str = "connection_ephemeral_secret_closed";
+
+pub fn connection_closed_need(owner: FactId, connection_id: FactId) -> ContextNeed {
+    exact_local_need(owner, CONNECTION_CLOSED_ROLE, connection_id)
+}
+
+pub fn connection_closed_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
+    exact_local_offer(owner, CONNECTION_CLOSED_ROLE, connection_id)
+}
+
+pub fn ephemeral_secret_closed_need(owner: FactId, secret_id: FactId) -> ContextNeed {
+    exact_local_need(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
+}
+
+pub fn ephemeral_secret_closed_offer(owner: FactId, secret_id: FactId) -> ContextOffer {
+    exact_local_offer(owner, CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE, secret_id)
+}
+
+fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
+    let key = ContextKey::from_bytes(key);
+    ContextNeed {
+        owner,
+        role: Role::expect(role),
+        scope: FactScope::Local,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
+
+fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextOffer {
+    let key = ContextKey::from_bytes(key);
+    ContextOffer {
+        owner,
+        role: Role::expect(role),
+        scope: FactScope::Local,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionCloseProjector;
@@ -75,12 +117,12 @@ impl TypedProjector<super::Codec> for ConnectionCloseProjector {
         // 3. Materialize close context for the target owners.
         Ok(ProjectionOutput::new()
             .need(connection_need)
-            .offer(super::connection_closed_offer(fact.id, close.connection_id))
-            .offer(super::ephemeral_secret_closed_offer(
+            .offer(connection_closed_offer(fact.id, close.connection_id))
+            .offer(ephemeral_secret_closed_offer(
                 fact.id,
                 connection.initiator_ephemeral_secret_fact_id,
             ))
-            .offer(super::ephemeral_secret_closed_offer(
+            .offer(ephemeral_secret_closed_offer(
                 fact.id,
                 connection.responder_ephemeral_secret_fact_id,
             )))

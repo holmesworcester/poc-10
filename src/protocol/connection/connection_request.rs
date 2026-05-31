@@ -19,67 +19,10 @@ pub mod project;
 pub mod queries;
 pub mod transit;
 
-const MEMBERSHIP_CONNECTION_REQUEST_ROLE: &str = "membership_connection_request";
-const MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str =
-    "membership_connection_response_for_request";
-
-/// Peer-retry timeline shared with bootstrap: it is keyed per request fact, so
-/// reusing the constant does not cross requests.
-pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
-    crate::protocol::connection::bootstrap_request::peer_retry_timeline()
-}
-
-pub fn connection_request_need(
-    owner: crate::core::facts::FactId,
-    request_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextNeed {
-    crate::core::context::ContextNeed::range(
-        owner,
-        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_REQUEST_ROLE),
-        crate::core::facts::FactScope::Global,
-        request_id,
-        request_id,
-    )
-}
-
-pub fn connection_request_offer(
-    owner: crate::core::facts::FactId,
-    request_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextOffer {
-    crate::core::context::ContextOffer::range(
-        owner,
-        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_REQUEST_ROLE),
-        crate::core::facts::FactScope::Global,
-        request_id,
-        request_id,
-    )
-}
-
-pub fn connection_response_for_request_need(
-    owner: crate::core::facts::FactId,
-    request_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextNeed {
-    crate::core::context::ContextNeed::range(
-        owner,
-        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
-        crate::core::facts::FactScope::Local,
-        request_id,
-        request_id,
-    )
-}
-
-pub fn connection_response_for_request_offer(
-    owner: crate::core::facts::FactId,
-    request_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextOffer {
-    crate::core::context::ContextOffer::range(
-        owner,
-        crate::core::context::Role::expect(MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
-        crate::core::facts::FactScope::Local,
-        request_id,
-        request_id,
-    )
-}
+pub use project::{
+    connection_request_need, connection_request_offer, connection_response_for_request_need,
+    connection_response_for_request_offer, peer_retry_timeline,
+};
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionRequestFact, String> {
     layout::decode_fact(bytes)

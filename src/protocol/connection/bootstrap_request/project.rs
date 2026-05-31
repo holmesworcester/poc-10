@@ -49,6 +49,39 @@ use super::rows::bootstrap_request_row;
 const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
 const PEER_RETRY_DELAY_MS: u64 = 250;
 
+const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
+
+pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
+    crate::core::projectors::Timeline::new("connection_peer_retry")
+        .expect("valid connection peer-retry timeline")
+}
+
+pub fn connection_response_for_request_need(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        crate::core::context::Role::expect(CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
+        crate::core::facts::FactScope::Local,
+        request_id,
+        request_id,
+    )
+}
+
+pub fn connection_response_for_request_offer(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        crate::core::context::Role::expect(CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
+        crate::core::facts::FactScope::Local,
+        request_id,
+        request_id,
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapRequestProjector;
 
@@ -138,10 +171,7 @@ impl TypedProjector<super::Codec> for BootstrapRequestProjector {
                 );
             }
             // 3. Materialize local request.
-            let response_need =
-                crate::protocol::connection::bootstrap_request::connection_response_for_request_need(
-                    fact.id, fact.id,
-                );
+            let response_need = connection_response_for_request_need(fact.id, fact.id);
             if let Some(response_fact) = projection_context.payload_for(&response_need) {
                 if response_fact.scope != FactScope::Local {
                     return Err("connection request response context must be local".to_string());
@@ -298,7 +328,7 @@ fn local_retrying_output(
         addr,
     )?));
 
-    let retry_timeline = crate::protocol::connection::bootstrap_request::peer_retry_timeline();
+    let retry_timeline = peer_retry_timeline();
     let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
     if let Some(now_ms) = due_retry_at {
         output = output.local_intent(send_bootstrap_connection_request_intent(
