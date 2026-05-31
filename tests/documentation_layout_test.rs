@@ -18,6 +18,7 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "ARCHITECTURE_DIAGRAMS.md",
         "docs/RULES.md",
         "docs/todo-add-verus-proofs.md",
+        "docs/todo-flatten-intent-chains.md",
         "src/core/README.md",
         "src/core/pipeline/README.md",
         "src/protocol/auth/README.md",
@@ -575,6 +576,35 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         assert!(
             !note.contains(removed),
             "poc10 replay intent shape note should not include versioning policy detail {removed:?}"
+        );
+    }
+}
+
+#[test]
+fn intent_chain_flattening_todo_records_replay_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let note = source_text(&root.join("docs/todo-flatten-intent-chains.md"));
+    let normalized = normalize_whitespace(&note);
+
+    for required in [
+        "# TODO: Flatten Intent Chains",
+        "Non-recurring intent handlers should not enqueue follow-up intents",
+        "the projector should emit those intents separately",
+        "Recurring intent handlers are the exception",
+        "if route.runs_during_replay { admit intent } else { suppress intent }",
+        "Replay should not need to understand handler internals, network IO, command eligibility, or a transitive graph of follow-up work",
+        "Allowed recurring chain",
+        "`maintain_connections -> send_bootstrap_connection_request`",
+        "Cleanup candidates",
+        "`share_fact_with_sync -> send_facts_on_connection`",
+        "`send_facts_on_connection -> send_network_frame`",
+        "Keep `share_fact_with_sync` replayable for sync-index rebuilds",
+        "Recurring `maintain_connections` can enqueue bootstrap attempts only after the replay barrier",
+        "Commit the completed work on that same worktree branch before handoff or review",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "intent chain flattening TODO is missing {required:?}"
         );
     }
 }
