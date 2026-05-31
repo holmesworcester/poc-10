@@ -6,6 +6,7 @@
 //! signer, deletion, and auth key-material context before publishing file rows used by
 //! file queries and save flows.
 
+pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;

@@ -5,11 +5,12 @@
 
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::{self, Ed25519PublicKey};
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::workspace::create;
 use crate::protocol::content;
+use crate::protocol::content::retention_policy::fact::SCOPE_KIND_WORKSPACE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateWorkspaceReceipt {
@@ -146,30 +147,17 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
             .ok_or_else(|| "local endpoint row is missing".to_string())?;
         id32(&value, "local endpoint")?
     };
-    let payload = auth::endpoint_shared::fact::EndpointSharedFact {
-        created_at_ms: input.created_at_ms,
-        workspace_id: input.workspace_id,
-        user_authority_fact_id: input.user_id,
-        endpoint_id,
-        signing_public_key: input.signing_public_key,
-        endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
-        device_name: auth::endpoint_shared::fact::EndpointDeviceName::new(input.device_name)
-            .map_err(|err| format!("endpoint device name: {err}"))?,
-        signer_id: input.signer_id,
-        signer_public_key: crypto::ed25519_public_key(&input.signer_private_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let mut payload = payload;
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &input.signer_private_key,
-        &auth::endpoint_shared::layout::signing_bytes(&payload)?,
-    );
-    payload.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
+    auth::endpoint_shared::create::signed_endpoint_shared_fact(
         input.created_at_ms,
-        auth::endpoint_shared::layout::encode_fact(&payload)?,
-    ))
+        input.workspace_id,
+        input.user_id,
+        endpoint_id,
+        input.signing_public_key,
+        auth::endpoint_shared::fact::EndpointRole::Device,
+        input.device_name,
+        input.signer_id,
+        input.signer_private_key,
+    )
 }
 
 fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {
@@ -184,13 +172,11 @@ fn user_invite_fact(
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
-    auth::user_invite::commands::signed_user_invite_fact(
-        auth::user_invite::commands::CreateUserInvite {
-            created_at_ms,
-            public_key,
-            workspace_id,
-            authority_fact_id: workspace_id,
-        },
+    auth::user_invite::create::signed_user_invite_fact(
+        created_at_ms,
+        public_key,
+        workspace_id,
+        workspace_id,
         workspace_id,
         signer_private_key,
     )
@@ -203,15 +189,13 @@ fn user_fact(
     signer_private_key: [u8; 32],
     username: &str,
 ) -> Result<Fact, String> {
-    auth::user::commands::signed_user_fact(
-        &auth::user::commands::CreateSignedUser {
-            created_at_ms,
-            workspace_id,
-            signer_id,
-            signer_private_key,
-            username: username.to_string(),
-        },
-        crate::core::crypto::ed25519_public_key(&signer_private_key),
+    auth::user::create::signed_user_fact(
+        created_at_ms,
+        workspace_id,
+        crypto::ed25519_public_key(&signer_private_key),
+        username,
+        signer_id,
+        signer_private_key,
     )
 }
 
@@ -231,7 +215,7 @@ fn root_admin_fact(
         signer_public_key: crypto::ed25519_public_key(&signer_private_key),
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    auth::admin::commands::signed_admin_fact(
+    auth::admin::create::signed_admin_fact(
         created_at_ms,
         workspace_id,
         signer_private_key,
@@ -257,7 +241,7 @@ fn creator_admin_fact(
         signer_public_key: crypto::ed25519_public_key(&signer_private_key),
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    auth::admin::commands::signed_admin_fact(
+    auth::admin::create::signed_admin_fact(
         created_at_ms,
         authority_fact_id,
         signer_private_key,
@@ -273,27 +257,15 @@ fn device_invite_fact(
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
-    let payload = auth::device_invite::fact::DeviceInviteFact {
+    auth::device_invite::create::signed_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_authority_fact_id,
-        user_invite_fact_id: Some(user_invite_fact_id),
+        Some(user_invite_fact_id),
         public_key,
-        signer_id: user_authority_fact_id,
-        signer_public_key: crypto::ed25519_public_key(&signer_private_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let mut payload = payload;
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &signer_private_key,
-        &auth::device_invite::layout::signing_bytes(&payload)?,
-    );
-    payload.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
-        created_at_ms,
-        auth::device_invite::layout::encode_fact(&payload)?,
-    ))
+        user_authority_fact_id,
+        signer_private_key,
+    )
 }
 
 fn initial_retention_policy_fact(
@@ -302,28 +274,16 @@ fn initial_retention_policy_fact(
     ttl_minutes: u32,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
-    let signer_public_key = crypto::ed25519_public_key(&signer_private_key);
-    let mut payload = content::retention_policy::fact::RetentionPolicyFact {
+    content::retention_policy::create::signed_retention_policy_fact(
         workspace_id,
-        supersedes_policy_id: None,
+        None,
         ttl_minutes,
-        retire_minute: 0,
-        scope_kind: content::retention_policy::fact::SCOPE_KIND_WORKSPACE,
-        scope_id: workspace_id,
-        author_user_id: workspace_id,
-        signer_id: workspace_id,
-        signer_public_key,
+        0,
+        SCOPE_KIND_WORKSPACE,
+        workspace_id,
+        workspace_id,
+        workspace_id,
         created_at_ms,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &signer_private_key,
-        &content::retention_policy::layout::signing_bytes(&payload)?,
-    );
-    payload.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
-        created_at_ms,
-        content::retention_policy::layout::encode_fact(&payload)?,
-    ))
+        signer_private_key,
+    )
 }

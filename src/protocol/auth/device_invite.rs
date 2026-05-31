@@ -5,6 +5,7 @@
 //! the invite key for acceptance flows. This module owns device-invite layout
 //! and admission; accepting the invite is handled by `invite_accepted`.
 
+pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;

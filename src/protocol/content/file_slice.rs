@@ -6,6 +6,7 @@
 //! row materialization; higher-level file selection and output live in
 //! `content::file` queries and CLI helpers.
 
+pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;

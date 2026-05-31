@@ -7,13 +7,13 @@
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
 use crate::protocol::{auth, content};
 use std::collections::BTreeSet;
 
-use super::fact::{RetentionPolicyFact, SCOPE_KIND_WORKSPACE};
-use super::{layout, queries};
+use super::fact::SCOPE_KIND_WORKSPACE;
+use super::{create, queries};
 
 pub const UNIX_MINUTE_MS: u64 = 60_000;
 
@@ -271,29 +271,20 @@ fn policy_fact(
     author_user_id: FactId,
     created_at_ms: u64,
 ) -> Result<Fact, String> {
-    let (signer_id, signer_public_key, signer_private_key) =
+    let (signer_id, _signer_public_key, signer_private_key) =
         local_signing_material(store, workspace_id)?;
-    let mut payload = RetentionPolicyFact {
+    create::signed_retention_policy_fact(
         workspace_id,
         supersedes_policy_id,
         ttl_minutes,
         retire_minute,
-        scope_kind: SCOPE_KIND_WORKSPACE,
-        scope_id: workspace_id,
+        SCOPE_KIND_WORKSPACE,
+        workspace_id,
         author_user_id,
         signer_id,
-        signer_public_key,
         created_at_ms,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let (_, signature) =
-        crypto::ed25519_sign_canonical(&signer_private_key, &layout::signing_bytes(&payload)?);
-    payload.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
-        created_at_ms,
-        layout::encode_fact(&payload)?,
-    ))
+        signer_private_key,
+    )
 }
 
 fn local_signing_material(
