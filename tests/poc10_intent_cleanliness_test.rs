@@ -1129,7 +1129,7 @@ const STANDARD_FAMILY_FILES: [&str; 9] = [
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local directories that are deliberately not fact families.
-const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 1] = ["content/purge"];
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] = ["content/purge", "connection/peer_address"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {

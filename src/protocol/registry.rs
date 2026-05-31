@@ -278,6 +278,7 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_peer_address_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -330,6 +331,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
         auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
+        connection::peer_address::rows::CONNECTION_PEER_ADDRESS_ROWS,
         connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
         connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
         connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
@@ -522,6 +524,7 @@ pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FAC
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
+    connection::peer_address::rows::CONNECTION_PEER_ADDRESS_ROWS,
     connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
     connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
     connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,

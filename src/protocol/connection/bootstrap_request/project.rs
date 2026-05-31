@@ -26,12 +26,15 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
+use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
 
 use crate::protocol::auth::{endpoint, invite};
+use crate::protocol::connection::peer_address::rows::{
+    peer_address_key, peer_address_row, CONNECTION_PEER_ADDRESS_ROWS,
+};
 use crate::protocol::connection::create_bootstrap_response::{
     create_bootstrap_response_intent, CreateBootstrapResponse,
 };
@@ -287,6 +290,19 @@ fn local_retrying_output(
         return Ok(output);
     };
 
+    // Learn the peer's reachable listen address so a later membership connection
+    // can reconnect after the invite link expires. Keyed by endpoint, last write
+    // wins (delete then insert).
+    output = output
+        .row_mutation(RowMutation::DeleteRow(TableDelete {
+            table: CONNECTION_PEER_ADDRESS_ROWS,
+            key: peer_address_key(&request.to_endpoint),
+        }))
+        .row_mutation(RowMutation::PutRow(peer_address_row(
+            request.to_endpoint,
+            addr,
+        )?));
+
     let retry_timeline = crate::protocol::connection::bootstrap_request::peer_retry_timeline();
     let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
     if let Some(now_ms) = due_retry_at {
@@ -317,15 +333,28 @@ fn received_materialized_output(
     request: &BootstrapRequestFact,
     receive_id: [u8; 32],
 ) -> Result<ProjectionOutput, String> {
-    Ok(
+    let mut output =
         materialized_output(request_id, request)?.intent(create_bootstrap_response_intent(
             CreateBootstrapResponse {
                 request_id,
                 invite_secret_id: request.invite_secret_fact_id,
                 receive_id,
             },
-        )),
-    )
+        ));
+    // Learn the initiator's reachable listen address from the received request,
+    // so we can later open a membership connection back to it without an invite.
+    if let Some(addr) = request.from_listen_addr {
+        output = output
+            .row_mutation(RowMutation::DeleteRow(TableDelete {
+                table: CONNECTION_PEER_ADDRESS_ROWS,
+                key: peer_address_key(&request.from_endpoint),
+            }))
+            .row_mutation(RowMutation::PutRow(peer_address_row(
+                request.from_endpoint,
+                addr,
+            )?));
+    }
+    Ok(output)
 }
 
 fn waiting_output<const N: usize>(
@@ -384,6 +413,22 @@ mod projector_tests {
     use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
+    use topo::core::projectors::ProjectionOutput;
+    use topo::protocol::connection::peer_address::rows::{
+        peer_address_key, CONNECTION_PEER_ADDRESS_ROWS,
+    };
+
+    /// Whether the projection learned a reachable address for `endpoint`.
+    fn learns_peer_address(output: &ProjectionOutput, endpoint: [u8; 32]) -> bool {
+        output.effects.row_mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                RowMutation::PutRow(row)
+                    if row.table == CONNECTION_PEER_ADDRESS_ROWS
+                        && row.key == peer_address_key(&endpoint)
+            )
+        })
+    }
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
@@ -677,7 +722,9 @@ mod projector_tests {
             .needs
             .iter()
             .any(|need| need.role == "connection_response_for_request"));
-        assert_eq!(output.effects.row_mutations.len(), 1);
+        // request row + learned-address delete/put for the peer's listen addr.
+        assert_eq!(output.effects.row_mutations.len(), 3);
+        assert!(learns_peer_address(&output, request.to_endpoint));
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
@@ -793,7 +840,9 @@ mod projector_tests {
         assert_eq!(output.effects.intents.len(), 1);
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
-        assert_eq!(output.effects.row_mutations.len(), 1);
+        // request row + learned-address delete/put for the initiator's addr.
+        assert_eq!(output.effects.row_mutations.len(), 3);
+        assert!(learns_peer_address(&output, request.from_endpoint));
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let response_intent = output
             .effects
