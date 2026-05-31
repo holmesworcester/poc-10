@@ -20,7 +20,7 @@ use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::{
     auth::endpoint,
-    connection::response,
+    connection::bootstrap_response as response,
     connection_frame::{
         self as frame_policy, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
         CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,

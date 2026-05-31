@@ -20,8 +20,8 @@ use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
-use crate::protocol::connection::request::create as addr;
-use crate::protocol::connection::request::layout;
+use crate::protocol::connection::bootstrap_request::create as addr;
+use crate::protocol::connection::bootstrap_request::layout;
 
 pub const SEND_BOOTSTRAP_CONNECTION_REQUEST: &str = "send_bootstrap_connection_request";
 
@@ -43,7 +43,7 @@ pub fn send_bootstrap_connection_request_intent(
     Ok(Intent::new(
         IntentKind::new(SEND_BOOTSTRAP_CONNECTION_REQUEST)
             .expect("valid send bootstrap connection request intent kind"),
-        send_bootstrap_connection_request_key(&input),
+        send_bootstrap_bootstrap_request_key(&input),
         payload,
     ))
 }
@@ -71,7 +71,7 @@ pub fn decode_send_bootstrap_connection_request(
         initiator_ephemeral_secret_id,
         addr,
     };
-    if intent.key != send_bootstrap_connection_request_key(&input) {
+    if intent.key != send_bootstrap_bootstrap_request_key(&input) {
         return Err("send_bootstrap_connection_request key does not match payload".into());
     }
     Ok(input)
@@ -116,7 +116,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
                     .into(),
             );
         }
-        let sealed = crate::protocol::connection::bootstrap_request::seal_connection_request(
+        let sealed = crate::protocol::connection::bootstrap_request::transit::seal_connection_request(
             request_fact.body(),
             &ephemeral.ephemeral_private_key,
         )?;
@@ -128,7 +128,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
     }
 }
 
-fn send_bootstrap_connection_request_key(input: &SendBootstrapConnectionRequest) -> Vec<u8> {
+fn send_bootstrap_bootstrap_request_key(input: &SendBootstrapConnectionRequest) -> Vec<u8> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"topo:send-bootstrap-connection-request:v1:");
     hash.update(&input.request_id);
@@ -150,11 +150,11 @@ mod tests {
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
-    use crate::protocol::connection::bootstrap_request;
+    use crate::protocol::connection::bootstrap_request::transit as request_transit;
     use crate::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
-    use crate::protocol::connection::request::fact::ConnectionRequestFact;
+    use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
             .expect("send sealed request");
 
         let sent = reader.join().expect("reader");
-        assert_eq!(sent[0], bootstrap_request::TYPE_SEALED_CONNECTION_REQUEST);
+        assert_eq!(sent[0], request_transit::TYPE_SEALED_CONNECTION_REQUEST);
         assert_ne!(sent, request_fact.bytes);
         let responder = EndpointFact {
             endpoint: crypto::x25519_public_key(&responder_secret),
@@ -205,7 +205,7 @@ mod tests {
             signing_secret: [31; 32],
         };
         assert_eq!(
-            bootstrap_request::open_connection_request(&sent, &responder).expect("open request"),
+            request_transit::open_connection_request(&sent, &responder).expect("open request"),
             request_fact.bytes
         );
     }
@@ -254,7 +254,7 @@ mod tests {
             1,
             ephemeral_layout::encode_fact(&ephemeral).expect("ephemeral"),
         );
-        let request = ConnectionRequestFact {
+        let request = BootstrapRequestFact {
             from_endpoint: ephemeral.owner_endpoint,
             to_endpoint: crypto::x25519_public_key(&responder_secret),
             nonce: [12; 32],

@@ -19,6 +19,16 @@ in `src/core` or `src/protocol`.
   declared fact inputs, then return facts, purged fact ids, and follow-up
   intents. They must not own protocol fact layouts or read-model projection
   rows.
+- Intents are flat: an intent does not chain another intent. A handler whose job
+  is to create a fact does exactly that and stops — it must not also enqueue a
+  follow-on intent that does qualitatively different (especially non-replayable)
+  work. The single visible place an intent is enqueued in reaction to a fact is
+  that fact's **projector**, so "what does admitting this fact enqueue?" is
+  answerable by reading one projector, and a replayable intent can never smuggle
+  in a non-replayable one. Concretely, `create_bootstrap_response` and
+  `create_connection_response` only create the responder ephemeral and response
+  facts; the local response fact's projector emits the network send, exactly as
+  the local request projector emits its own send.
 - The product-facing binary is `con`. `src/context_app.rs` should stay a thin
   app boundary around the core runtime and protocol registry.
 

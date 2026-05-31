@@ -1,20 +1,18 @@
-//! Stable bytes for connection-response facts.
+//! Stable bytes for membership connection-response facts.
 //!
-//! The response layout is fixed width: tag byte followed by nine 32-byte
-//! fields for endpoints, request/dependency ids, responder ephemeral public
-//! key, handshake hash, and connection secret. Encoding preserves exactly that
-//! order so the response fact id is stable.
+//! Fixed width: tag byte followed by eight 32-byte fields for endpoints,
+//! request/dependency ids, responder ephemeral public key, handshake hash, and
+//! connection secret. There is no invite field on this path.
 //!
 //! Change this file for response wire compatibility only. Key-schedule
-//! construction belongs in `create.rs`, and context validation belongs in
-//! `project.rs`.
+//! construction belongs in `create.rs`, and context validation in `project.rs`.
 
 use crate::core::wire;
 
 use super::fact::ConnectionResponseFact;
 
-pub const TYPE_CONNECTION_RESPONSE: u8 = 44;
-pub const FACT_BYTES: usize = 1 + 32 * 9;
+pub const TYPE_CONNECTION_RESPONSE: u8 = 49;
+pub const FACT_BYTES: usize = 1 + 32 * 8;
 
 pub fn encode_fact(fact: &ConnectionResponseFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
@@ -22,12 +20,11 @@ pub fn encode_fact(fact: &ConnectionResponseFact) -> Result<Vec<u8>, String> {
     out[1..33].copy_from_slice(&fact.from_endpoint);
     out[33..65].copy_from_slice(&fact.to_endpoint);
     out[65..97].copy_from_slice(&fact.request_id);
-    out[97..129].copy_from_slice(&fact.invite_secret_fact_id);
-    out[129..161].copy_from_slice(&fact.initiator_ephemeral_secret_fact_id);
-    out[161..193].copy_from_slice(&fact.responder_ephemeral_secret_fact_id);
-    out[193..225].copy_from_slice(&fact.responder_ephemeral_public_key);
-    out[225..257].copy_from_slice(&fact.handshake_hash);
-    out[257..289].copy_from_slice(&fact.connection_secret);
+    out[97..129].copy_from_slice(&fact.initiator_ephemeral_secret_fact_id);
+    out[129..161].copy_from_slice(&fact.responder_ephemeral_secret_fact_id);
+    out[161..193].copy_from_slice(&fact.responder_ephemeral_public_key);
+    out[193..225].copy_from_slice(&fact.handshake_hash);
+    out[225..257].copy_from_slice(&fact.connection_secret);
     Ok(out)
 }
 
@@ -35,7 +32,7 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionResponseFact, String> {
     wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
     let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
     if tag != TYPE_CONNECTION_RESPONSE {
-        return Err("expected connection response fact".to_string());
+        return Err("expected membership connection response fact".to_string());
     }
     let mut from_endpoint = [0; 32];
     from_endpoint.copy_from_slice(&bytes[1..33]);
@@ -43,23 +40,20 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionResponseFact, String> {
     to_endpoint.copy_from_slice(&bytes[33..65]);
     let mut request_id = [0; 32];
     request_id.copy_from_slice(&bytes[65..97]);
-    let mut invite_secret_fact_id = [0; 32];
-    invite_secret_fact_id.copy_from_slice(&bytes[97..129]);
     let mut initiator_ephemeral_secret_fact_id = [0; 32];
-    initiator_ephemeral_secret_fact_id.copy_from_slice(&bytes[129..161]);
+    initiator_ephemeral_secret_fact_id.copy_from_slice(&bytes[97..129]);
     let mut responder_ephemeral_secret_fact_id = [0; 32];
-    responder_ephemeral_secret_fact_id.copy_from_slice(&bytes[161..193]);
+    responder_ephemeral_secret_fact_id.copy_from_slice(&bytes[129..161]);
     let mut responder_ephemeral_public_key = [0; 32];
-    responder_ephemeral_public_key.copy_from_slice(&bytes[193..225]);
+    responder_ephemeral_public_key.copy_from_slice(&bytes[161..193]);
     let mut handshake_hash = [0; 32];
-    handshake_hash.copy_from_slice(&bytes[225..257]);
+    handshake_hash.copy_from_slice(&bytes[193..225]);
     let mut connection_secret = [0; 32];
-    connection_secret.copy_from_slice(&bytes[257..289]);
+    connection_secret.copy_from_slice(&bytes[225..257]);
     Ok(ConnectionResponseFact {
         from_endpoint,
         to_endpoint,
         request_id,
-        invite_secret_fact_id,
         initiator_ephemeral_secret_fact_id,
         responder_ephemeral_secret_fact_id,
         responder_ephemeral_public_key,
@@ -81,17 +75,16 @@ mod tests {
             from_endpoint: [1; 32],
             to_endpoint: [2; 32],
             request_id: [3; 32],
-            invite_secret_fact_id: [4; 32],
-            initiator_ephemeral_secret_fact_id: [5; 32],
-            responder_ephemeral_secret_fact_id: [6; 32],
-            responder_ephemeral_public_key: [7; 32],
-            handshake_hash: [8; 32],
-            connection_secret: [9; 32],
+            initiator_ephemeral_secret_fact_id: [4; 32],
+            responder_ephemeral_secret_fact_id: [5; 32],
+            responder_ephemeral_public_key: [6; 32],
+            handshake_hash: [7; 32],
+            connection_secret: [8; 32],
         }
     }
 
     #[test]
-    fn connection_response_roundtrips_fixed_width() {
+    fn membership_response_roundtrips_fixed_width() {
         let bytes = encode_fact(&fact()).expect("encode");
         assert_eq!(bytes.len(), FACT_BYTES);
         assert_eq!(decode_fact(&bytes).expect("decode"), fact());

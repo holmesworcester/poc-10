@@ -33,6 +33,43 @@ use super::rows::{
     opened_message_row, OpenedMessageRow, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
 };
 
+pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
+
+const RETENTION_FLOOR_ROLE: &str = "content_retention_floor";
+
+pub fn expiration_timeline() -> crate::core::projectors::Timeline {
+    crate::core::projectors::Timeline::new("content_message_expiry")
+        .expect("valid content-message expiry timeline")
+}
+
+pub fn retention_floor_need(
+    owner: crate::core::facts::FactId,
+    workspace_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    let key = workspace_id.to_vec();
+    crate::core::context::ContextNeed::range(
+        owner,
+        crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
+        crate::protocol::auth::workspace::scope(workspace_id),
+        key.clone(),
+        key,
+    )
+}
+
+pub fn retention_floor_offer(
+    owner: crate::core::facts::FactId,
+    workspace_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    let key = workspace_id.to_vec();
+    crate::core::context::ContextOffer::range(
+        owner,
+        crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
+        crate::protocol::auth::workspace::scope(workspace_id),
+        key.clone(),
+        key,
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ContentMessageProjector;
 
@@ -79,7 +116,7 @@ impl TypedProjector<super::Codec> for ContentMessageProjector {
             message.minute,
             fact.id,
         );
-        let retention_floor_need = super::retention_floor_need(fact.id, message.workspace_id);
+        let retention_floor_need = retention_floor_need(fact.id, message.workspace_id);
         let author_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_user",
@@ -370,10 +407,7 @@ fn expiry_minute_reached(
     if message.expires_at_minute == u64::MAX {
         return None;
     }
-    context.time_reached(
-        &crate::protocol::content::message::expiration_timeline(),
-        message.expires_at_minute,
-    )
+    context.time_reached(&expiration_timeline(), message.expires_at_minute)
 }
 
 fn retention_floor_reached(
@@ -398,13 +432,10 @@ fn cover_horizon_reached(
     context: &ProjectionContext,
     message: &super::fact::ContentMessageFact,
 ) -> Option<u64> {
-    let retire_at = message.minute.checked_add(super::COVER_HORIZON_MINUTES)?;
+    let retire_at = message.minute.checked_add(COVER_HORIZON_MINUTES)?;
     context
-        .time_reached(
-            &crate::protocol::content::message::expiration_timeline(),
-            retire_at,
-        )
-        .map(|now| now.saturating_sub(super::COVER_HORIZON_MINUTES))
+        .time_reached(&expiration_timeline(), retire_at)
+        .map(|now| now.saturating_sub(COVER_HORIZON_MINUTES))
         .filter(|floor| message.minute < *floor)
 }
 
@@ -414,10 +445,10 @@ fn with_retention_wakes(
     message: &super::fact::ContentMessageFact,
 ) -> ProjectionOutput {
     let mut output = output;
-    if let Some(at) = message.minute.checked_add(super::COVER_HORIZON_MINUTES) {
+    if let Some(at) = message.minute.checked_add(COVER_HORIZON_MINUTES) {
         output = output.time_wake(TimeWake {
             owner,
-            timeline: crate::protocol::content::message::expiration_timeline(),
+            timeline: expiration_timeline(),
             at,
         });
     }
@@ -426,7 +457,7 @@ fn with_retention_wakes(
     }
     output.time_wake(TimeWake {
         owner,
-        timeline: crate::protocol::content::message::expiration_timeline(),
+        timeline: expiration_timeline(),
         at: message.expires_at_minute,
     })
 }

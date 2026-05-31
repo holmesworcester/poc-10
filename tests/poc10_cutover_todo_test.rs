@@ -117,7 +117,7 @@ const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
 const INTENT_HANDLER_FILES: [&str; 12] = [
-    "src/protocol/connection/create_connection_response.rs",
+    "src/protocol/connection/create_bootstrap_response.rs",
     "src/protocol/connection/receive_network_frame.rs",
     "src/protocol/connection/send_bootstrap_request.rs",
     "src/protocol/connection/send_facts_on_connection.rs",
@@ -562,7 +562,7 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_projector_owned() {
         "src/protocol/auth/local_history_node_secret/project.rs",
         "src/protocol/auth/local_recipient_key/project.rs",
         "src/protocol/connection/ephemeral_secret/project.rs",
-        "src/protocol/connection/response/project.rs",
+        "src/protocol/connection/bootstrap_response/project.rs",
         "src/protocol/content/message/project.rs",
         "src/protocol/content/reaction/project.rs",
         "src/protocol/content/file/project.rs",
@@ -1091,7 +1091,8 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
         pipeline.push_str(&source_text(&path));
     }
     let core_schema = source_text(&root.join("src/core/schema.rs"));
-    let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
+    let request_projector =
+        source_text(&root.join("src/protocol/connection/bootstrap_request/project.rs"));
     let send_facts_handler =
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));

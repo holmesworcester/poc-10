@@ -17,6 +17,33 @@ use crate::core::projectors::{
 
 use super::rows::endpoint_rows;
 
+const DAEMON_ENDPOINT_ROLE: &str = "auth_daemon_endpoint";
+const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
+
+pub fn daemon_endpoint_need(
+    owner: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        DAEMON_ENDPOINT_ROLE,
+        crate::core::facts::FactScope::Local,
+        DAEMON_ENDPOINT_KEY,
+        DAEMON_ENDPOINT_KEY,
+    )
+}
+
+pub fn daemon_endpoint_offer(
+    owner: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        DAEMON_ENDPOINT_ROLE,
+        crate::core::facts::FactScope::Local,
+        DAEMON_ENDPOINT_KEY,
+        DAEMON_ENDPOINT_KEY,
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EndpointProjector;
 
@@ -57,7 +84,7 @@ impl TypedProjector<super::Codec> for EndpointProjector {
             endpoint.endpoint,
             endpoint.endpoint,
         ));
-        output = output.offer(super::daemon_endpoint_offer(fact.id));
+        output = output.offer(daemon_endpoint_offer(fact.id));
         for row in endpoint_rows(&endpoint) {
             output = output.row_mutation(RowMutation::PutRow(row));
         }

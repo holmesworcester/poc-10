@@ -1,17 +1,28 @@
-//! Bootstrap-response fact payload.
+//! Connection-response payload.
 //!
-//! This fact is local ephemeral receive input. It preserves exactly one sealed
-//! network response frame together with the observed origin and receive time so
-//! projection can open it using endpoint context and create the canonical
-//! response receipt.
+//! A response is the connection fact. Its id is the connection id, and the
+//! payload records the endpoint pair, answered request id, dependency ids,
+//! responder ephemeral public key, handshake hash, and connection secret. The
+//! connection secret is local capability material used by established frame
+//! handling.
+//!
+//! This file owns only the typed payload shape. Byte order belongs in
+//! `layout.rs`, construction belongs in `create.rs`, and admission belongs in
+//! `project.rs`.
 
-use crate::protocol::connection::fact_receipt::fact::OriginAddr;
+use crate::core::facts::FactId;
 
-pub type SealedConnectionResponseFrame = [u8; super::layout::SEALED_CONNECTION_RESPONSE_BYTES];
+pub type EndpointId = [u8; 32];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectionBootstrapResponseFact {
-    pub origin_addr: OriginAddr,
-    pub received_at_local_ms: u64,
-    pub sealed_response_frame: SealedConnectionResponseFrame,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootstrapResponseFact {
+    pub from_endpoint: EndpointId,
+    pub to_endpoint: EndpointId,
+    pub request_id: FactId,
+    pub invite_secret_fact_id: FactId,
+    pub initiator_ephemeral_secret_fact_id: FactId,
+    pub responder_ephemeral_secret_fact_id: FactId,
+    pub responder_ephemeral_public_key: EndpointId,
+    pub handshake_hash: [u8; 32],
+    pub connection_secret: [u8; 32],
 }

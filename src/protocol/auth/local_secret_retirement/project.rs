@@ -8,14 +8,46 @@
 //!   3. MATERIALIZE. Once validated, projection publishes exact retirement
 //!      context for the target; the target secret projector owns self-purge.
 
-use crate::core::context::ContextNeed;
-use crate::core::facts::{Fact, FactScope};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 use crate::protocol::auth::{local_history_node_secret, local_key_secret};
 
 use super::fact::LocalSecretRetirementFact;
+
+const LOCAL_SECRET_RETIRED_ROLE: &str = "local_secret_source_retired";
+
+pub fn secret_retired_need(owner: FactId, target_secret_id: FactId) -> ContextNeed {
+    exact_local_need(owner, LOCAL_SECRET_RETIRED_ROLE, target_secret_id)
+}
+
+pub fn secret_retired_offer(owner: FactId, target_secret_id: FactId) -> ContextOffer {
+    exact_local_offer(owner, LOCAL_SECRET_RETIRED_ROLE, target_secret_id)
+}
+
+fn exact_local_need(owner: FactId, role: &'static str, key: FactId) -> ContextNeed {
+    let key = ContextKey::from_bytes(key);
+    ContextNeed {
+        owner,
+        role: Role::expect(role),
+        scope: FactScope::Local,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
+
+fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextOffer {
+    let key = ContextKey::from_bytes(key);
+    ContextOffer {
+        owner,
+        role: Role::expect(role),
+        scope: FactScope::Local,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalSecretRetirementProjector;
@@ -64,7 +96,7 @@ impl TypedProjector<super::Codec> for LocalSecretRetirementProjector {
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(target_need)
-            .offer(super::secret_retired_offer(
+            .offer(secret_retired_offer(
                 fact.id,
                 retirement.target_secret_id,
             )))

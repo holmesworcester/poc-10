@@ -54,13 +54,12 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
                 "frame_bundle",
                 "frame_file_slice",
                 "frame_small",
-                "request",
-                "response",
             ],
             handlers: &[
-                "create_connection_response",
+                "create_bootstrap_response",
                 "receive_network_frame",
                 "send_bootstrap_connection_request",
+                "send_bootstrap_connection_response",
                 "send_facts_on_connection",
                 "send_network_frame",
             ],
@@ -148,17 +147,18 @@ fn connection_readme_separates_sealed_transport_from_fact_dependencies() {
         .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
 
     for required in [
-        "sealed bootstrap request bytes (not a fact)",
-        "sealed bootstrap response bytes (not a fact)",
+        "sealed request bytes (not a fact)",
+        "sealed response bytes (not a fact)",
         "inbound responder transport observation",
         "inbound responder dependency graph",
         "needs connection_fact_receipt(request)",
-        "create_connection_response(request, invite_secret, receipt)",
-        "The sealed bootstrap request/response bytes are transport observations",
+        "create_bootstrap_response(request, invite_secret, receipt)",
+        "The sealed request/response bytes are transport observations",
+        "there is no envelope fact",
     ] {
         assert!(
             readme.contains(required),
-            "connection README should distinguish transport wrappers from dependency graph: missing {required:?}"
+            "connection README should distinguish sealed transport from the fact dependency graph: missing {required:?}"
         );
     }
 }

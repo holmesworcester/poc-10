@@ -16,42 +16,10 @@ pub mod queries;
 pub mod rows;
 
 pub const TYPE_CONTENT_MESSAGE: u8 = layout::TYPE_CONTENT_MESSAGE;
-pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
 
-const RETENTION_FLOOR_ROLE: &str = "content_retention_floor";
-
-pub fn expiration_timeline() -> crate::core::projectors::Timeline {
-    crate::core::projectors::Timeline::new("content_message_expiry")
-        .expect("valid content-message expiry timeline")
-}
-
-pub fn retention_floor_need(
-    owner: crate::core::facts::FactId,
-    workspace_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextNeed {
-    let key = workspace_id.to_vec();
-    crate::core::context::ContextNeed::range(
-        owner,
-        crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
-        crate::protocol::auth::workspace::scope(workspace_id),
-        key.clone(),
-        key,
-    )
-}
-
-pub fn retention_floor_offer(
-    owner: crate::core::facts::FactId,
-    workspace_id: crate::core::facts::FactId,
-) -> crate::core::context::ContextOffer {
-    let key = workspace_id.to_vec();
-    crate::core::context::ContextOffer::range(
-        owner,
-        crate::core::context::Role::expect(RETENTION_FLOOR_ROLE),
-        crate::protocol::auth::workspace::scope(workspace_id),
-        key.clone(),
-        key,
-    )
-}
+pub use project::{
+    expiration_timeline, retention_floor_need, retention_floor_offer, COVER_HORIZON_MINUTES,
+};
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageFact, String> {
     layout::decode_fact(bytes)

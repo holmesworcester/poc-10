@@ -60,13 +60,15 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
         connection::close::layout::TYPE_CONNECTION_CLOSE
-            | connection::bootstrap_request::layout::TYPE_CONNECTION_BOOTSTRAP_REQUEST
-            | connection::bootstrap_request::layout::TYPE_SEALED_CONNECTION_REQUEST
-            | connection::bootstrap_response::layout::TYPE_CONNECTION_BOOTSTRAP_RESPONSE
-            | connection::bootstrap_response::layout::TYPE_SEALED_CONNECTION_RESPONSE
+            | connection::bootstrap_request::transit::TYPE_SEALED_CONNECTION_REQUEST
+            | connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
-            | connection::request::layout::TYPE_CONNECTION_REQUEST
-            | connection::response::layout::TYPE_CONNECTION_RESPONSE
+            | connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST
+            | connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE
+            | connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST
+            | connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE
+            | connection::connection_request::layout::TYPE_CONNECTION_REQUEST
+            | connection::connection_response::layout::TYPE_CONNECTION_RESPONSE
             | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
             | auth::invite::layout::TYPE_INVITE_SECRET
             | auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET
@@ -116,7 +118,7 @@ pub fn received_connection_request_fact_effect(
     received_at_local_ms: u64,
     frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(request) = typed_payload_from_bytes::<connection::request::Codec>(request_bytes) else {
+    let Ok(request) = typed_payload_from_bytes::<connection::bootstrap_request::Codec>(request_bytes) else {
         return Ok(PipelineEffects::new());
     };
     let request_fact = Fact::new(
@@ -144,7 +146,7 @@ pub fn received_connection_response_fact_effect(
     received_at_local_ms: u64,
     frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(response) = typed_payload_from_bytes::<connection::response::Codec>(response_bytes)
+    let Ok(response) = typed_payload_from_bytes::<connection::bootstrap_response::Codec>(response_bytes)
     else {
         return Ok(PipelineEffects::new());
     };
@@ -153,6 +155,58 @@ pub fn received_connection_response_fact_effect(
         received_at_local_ms,
         response_bytes.to_vec(),
     );
+    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+        received_fact_id: response_fact.id,
+        origin_addr,
+        local_endpoint_id: response.to_endpoint,
+        sender_endpoint_id: response.from_endpoint,
+        receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_RESPONSE,
+        connection_id: Some(response_fact.id),
+        request_id: Some(response.request_id),
+        frame_hash,
+        received_at_local_ms,
+    })?;
+    Ok(PipelineEffects::new().fact(response_fact).fact(receipt))
+}
+
+pub fn received_membership_connection_request_fact_effect(
+    request_bytes: &[u8],
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+    frame_hash: [u8; 32],
+) -> Result<PipelineEffects, String> {
+    let Ok(request) =
+        typed_payload_from_bytes::<connection::connection_request::Codec>(request_bytes)
+    else {
+        return Ok(PipelineEffects::new());
+    };
+    let request_fact = Fact::new(FactScope::Global, received_at_local_ms, request_bytes.to_vec());
+    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+        received_fact_id: request_fact.id,
+        origin_addr,
+        local_endpoint_id: request.to_endpoint,
+        sender_endpoint_id: request.from_endpoint,
+        receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST,
+        connection_id: None,
+        request_id: Some(request_fact.id),
+        frame_hash,
+        received_at_local_ms,
+    })?;
+    Ok(PipelineEffects::new().fact(request_fact).fact(receipt))
+}
+
+pub fn received_membership_connection_response_fact_effect(
+    response_bytes: &[u8],
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+    frame_hash: [u8; 32],
+) -> Result<PipelineEffects, String> {
+    let Ok(response) =
+        typed_payload_from_bytes::<connection::connection_response::Codec>(response_bytes)
+    else {
+        return Ok(PipelineEffects::new());
+    };
+    let response_fact = Fact::new(FactScope::Local, received_at_local_ms, response_bytes.to_vec());
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: response_fact.id,
         origin_addr,
@@ -295,7 +349,7 @@ fn facts_output(facts: Vec<Fact>) -> ProjectionOutput {
 }
 
 pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, String> {
-    let connection = connection::response::Codec::decode_fact(input.connection_fact)?;
+    let connection = connection::bootstrap_response::Codec::decode_fact(input.connection_fact)?;
     let opened = wire::open_connection_frame(input.frame, &connection.connection_secret)?;
     if input.connection_fact.id != opened.connection_id {
         return Err(
@@ -563,7 +617,7 @@ fn connection_fact_receipt_for_path(input: ConnectionFactReceiptInput<'_>) -> Re
 }
 
 fn require_connection_endpoints(
-    connection: &connection::response::fact::ConnectionResponseFact,
+    connection: &connection::bootstrap_response::fact::BootstrapResponseFact,
     sender_endpoint_id: FactId,
     receiver_endpoint_id: FactId,
 ) -> Result<(), String> {
@@ -664,7 +718,7 @@ mod tests {
     #[test]
     fn duplicate_bootstrap_request_delivery_emits_only_request_and_receipt() {
         let invite = InviteSecretFact::new([33; 32]);
-        let mut request = connection::request::fact::ConnectionRequestFact {
+        let mut request = connection::bootstrap_request::fact::BootstrapRequestFact {
             from_endpoint: crypto::x25519_public_key(&[55; 32]),
             to_endpoint: crypto::x25519_public_key(&[44; 32]),
             nonce: [56; 32],
@@ -679,10 +733,10 @@ mod tests {
         };
         request.invite_signature = ed25519_sign(
             &invite.bootstrap_secret,
-            &connection::request::create::invite_signing_transcript(&request)
+            &connection::bootstrap_request::create::invite_signing_transcript(&request)
                 .expect("request transcript"),
         );
-        let frame = connection::request::layout::encode_fact(&request).expect("request");
+        let frame = connection::bootstrap_request::layout::encode_fact(&request).expect("request");
 
         let first = received_connection_request_fact_effect(
             &frame,
@@ -709,7 +763,7 @@ mod tests {
             !matches!(
                 fact.body().first().copied(),
                 Some(connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
-                    | Some(connection::response::layout::TYPE_CONNECTION_RESPONSE)
+                    | Some(connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE)
             )
         }));
     }

@@ -140,7 +140,7 @@ fn resolve_target(
     context: &HandlerContext,
 ) -> Result<NetworkTarget, HandlerError> {
     let connection_fact = context.require_fact(connection_id)?;
-    let connection = connection::response::layout::decode_fact(connection_fact.body())?;
+    let connection = connection::bootstrap_response::layout::decode_fact(connection_fact.body())?;
     let request_fact = match context.fact(&connection.request_id).cloned() {
         Some(fact) => fact,
         None => crate::core::fact_store::persisted_fact(context.store()?, &connection.request_id)?
@@ -150,7 +150,7 @@ fn resolve_target(
                 )
             })?,
     };
-    let request = connection::request::layout::decode_fact(request_fact.body())?;
+    let request = connection::bootstrap_request::layout::decode_fact(request_fact.body())?;
     let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
         .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {

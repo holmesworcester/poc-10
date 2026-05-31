@@ -828,3 +828,51 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str, daemons:
         daemon_diagnostics_block(daemons)
     );
 }
+
+/// Invite bootstrap establishes membership, and afterwards a membership
+/// `connect` reconnects the now-known peer without any invite material — the
+/// capability that survives invite-link expiry.
+#[test]
+fn cli_membership_connect_reconnects_known_peer_without_invite() {
+    let tmp = tempfile::tempdir().expect("tmp dir");
+    let alice = temp_db(&tmp, "alice.db");
+    let bob = temp_db(&tmp, "bob.db");
+    let workspace_id = create_workspace(&alice, "Connect", "alice", "alice-laptop");
+    let alice_port = free_port();
+    let bob_port = free_port();
+
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, bob_port);
+    let daemons = [("alice", alice.as_str()), ("bob", bob.as_str())];
+
+    // 1. Bootstrap join via invite; membership and a first message sync.
+    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
+    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "first"]));
+    wait_for_content_count(&bob, &workspace_id, "1", &daemons);
+
+    // 2. connect to a never-seen endpoint errors: unknown peers need an invite.
+    let unknown_endpoint = "ab".repeat(32);
+    let unknown = topo(&["--db", &bob, "connect", &unknown_endpoint]);
+    assert!(
+        !unknown.status.success(),
+        "connect to an unknown endpoint must error instead of inventing a connection:\nstdout={}\nstderr={}",
+        stdout(&unknown),
+        stderr(&unknown)
+    );
+
+    // 3. connect to the now-known peer resolves to a membership connection. bob
+    // holds alice's endpoint_shared (synced during bootstrap) plus a learned
+    // address, so the trigger picks membership — no invite material involved.
+    let alice_identity = assert_success(topo(&["--db", &alice, "identity"]));
+    let alice_endpoint = line_value(&alice_identity, "endpoint_id");
+    let connect = assert_success(topo(&["--db", &bob, "connect", &alice_endpoint]));
+    assert!(
+        connect.contains("request_id="),
+        "membership connect should report its request id:\n{connect}"
+    );
+
+    // 4. Content authored after the membership connect still syncs.
+    assert_success(topo(&["--db", &alice, "send", &workspace_id, "second"]));
+    wait_for_content_count(&bob, &workspace_id, "2", &daemons);
+}

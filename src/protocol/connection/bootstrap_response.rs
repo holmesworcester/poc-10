@@ -1,27 +1,33 @@
-//! Bootstrap-response fact family.
+//! Connection response family.
 //!
-//! A bootstrap response is a local ephemeral fact for one sealed
-//! pre-connection response frame observed at the socket boundary. Projection
-//! opens the sealed bytes with the daemon endpoint secret context, then emits
-//! the canonical `connection::response` fact plus its receive receipt. It has
-//! one fixed payload shape.
+//! A response completes a handshake and is the local connection fact: its fact
+//! id is the connection id, and its body contains the connection secret used to
+//! open established frames. Projection validates request and secret context,
+//! writes connection rows, publishes local connection context, and has the
+//! receiving side seed the single bidirectional bootstrap sync.
+//!
+//! This family owns response payload bytes, responder key-schedule
+//! construction, row materialization, and response admission policy. Frame
+//! sending and sync fact selection use the materialized connection but do not
+//! define it.
 
 pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod rows;
+pub mod transit;
 
-pub use layout::{
-    open_connection_response, seal_connection_response, SEALED_CONNECTION_RESPONSE_BYTES,
-    TYPE_CONNECTION_BOOTSTRAP_RESPONSE, TYPE_SEALED_CONNECTION_RESPONSE,
-};
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::BootstrapResponseFact, String> {
+    layout::decode_fact(bytes)
+}
 
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = fact::ConnectionBootstrapResponseFact;
+    type Payload = fact::BootstrapResponseFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        layout::decode_fact(fact.body())
+        decode_fact_payload(fact.body())
     }
 }

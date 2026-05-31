@@ -1,41 +1,97 @@
-//! Bootstrap-request projector.
+//! Connection-request projector.
 //!
-//! Bootstrap-request projection is the receive-side bridge from one sealed
-//! pre-connection request frame to the durable semantic handshake request. It
-//! does not decide request validity; it opens the flat receive fact with the
-//! daemon endpoint secret context and emits the canonical `connection_request`
-//! fact plus its receipt. The request projector owns invite, endpoint, receipt,
-//! and handshake validation.
+//! Request projection validates the durable semantic handshake request. Local
+//! requests prove invite-secret and initiator ephemeral-secret context before
+//! materializing and emitting the network-send intent for the sealed bootstrap
+//! request bytes. Received requests prove invite-secret, local endpoint, and
+//! fact-receipt context after the bootstrap wrapper has already opened those
+//! bytes into this canonical `connection_request` fact.
 //!
-//! POLICY. A `connection_bootstrap_request` fact is admitted iff:
-//!   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
-//!      exactly one sealed request frame with receive metadata.
-//!   2. CONTEXT. The projector needs the singleton local daemon endpoint
-//!      context. If it is not already available in the fixed-point pass, the
-//!      ephemeral input is discarded with no durable output.
-//!   3. MATERIALIZE. Opened request bytes become a durable global
-//!      `connection_request` plus request receipt.
+//! POLICY. A connection_request is admitted iff:
+//!   1. STRUCTURAL. The fact is local or global, the request fields are
+//!      non-empty, and the endpoints differ.
+//!   2. CONTEXT. Both branches require invite-secret context. Local requests
+//!      require initiator ephemeral-secret context; received requests require
+//!      local-endpoint context plus connection fact receipt addressed to
+//!      that endpoint.
+//!   3. MATERIALIZE. Valid requests write the request row and offer request
+//!      context; local requests schedule peer-retry wakes until a response
+//!      appears, and received requests emit deferred response work.
+//!
+//! Change this projector for request admission, branch-specific context proofs,
+//! peer-retry behavior, or materialized request rows. Bootstrap wrapper opening
+//! belongs in `bootstrap_request::project`, request byte layout belongs in
+//! `layout.rs`, and response construction belongs in `create_bootstrap_response.rs` plus
+//! `response::create`.
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
-use crate::protocol::auth::endpoint;
-use crate::protocol::connection_frame::received_connection_request_fact_effect;
 
-use super::fact::ConnectionBootstrapRequestFact;
+use crate::protocol::auth::{endpoint, invite};
+use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
+use crate::protocol::connection::create_bootstrap_response::{
+    create_bootstrap_response_intent, CreateBootstrapResponse,
+};
+use crate::protocol::connection::ephemeral_secret;
+use crate::protocol::connection::fact_receipt;
+use crate::protocol::connection::send_bootstrap_request::{
+    send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
+};
+
+use super::create::encode_optional_addr;
+use super::fact::BootstrapRequestFact;
+use super::rows::bootstrap_request_row;
+
+const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
+const PEER_RETRY_DELAY_MS: u64 = 250;
+
+const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
+
+pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
+    crate::core::projectors::Timeline::new("connection_peer_retry")
+        .expect("valid connection peer-retry timeline")
+}
+
+pub fn connection_response_for_request_need(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        crate::core::context::Role::expect(CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
+        crate::core::facts::FactScope::Local,
+        request_id,
+        request_id,
+    )
+}
+
+pub fn connection_response_for_request_offer(
+    owner: crate::core::facts::FactId,
+    request_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        crate::core::context::Role::expect(CONNECTION_RESPONSE_FOR_REQUEST_ROLE),
+        crate::core::facts::FactScope::Local,
+        request_id,
+        request_id,
+    )
+}
 
 #[derive(Debug, Clone, Default)]
-pub struct ConnectionBootstrapRequestProjector;
+pub struct BootstrapRequestProjector;
 
-impl ConnectionBootstrapRequestProjector {
+impl BootstrapRequestProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for ConnectionBootstrapRequestProjector {
+impl Projector for BootstrapRequestProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -45,166 +101,877 @@ impl Projector for ConnectionBootstrapRequestProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionBootstrapRequestProjector {
+impl TypedProjector<super::Codec> for BootstrapRequestProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        bootstrap: ConnectionBootstrapRequestFact,
+        request: BootstrapRequestFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
-        if fact.scope != FactScope::Local {
-            return Err("connection bootstrap request fact must have local scope".to_string());
+        if !matches!(fact.scope, FactScope::Local | FactScope::Global) {
+            return Err("connection request fact must be local or global".to_string());
+        }
+        validate_request_fields(&request)?;
+        if request.from_endpoint == request.to_endpoint {
+            return Err("connection request endpoints must differ".to_string());
         }
 
-        // 2. Context.
-        let endpoint_need = endpoint::daemon_endpoint_need(fact.id);
-        let Some(endpoint_fact) = projection_context.payload_for(&endpoint_need) else {
-            return Ok(ProjectionOutput::new().need(endpoint_need));
+        // 2. Shared invite context.
+        let invite_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "connection_invite_secret",
+            crate::core::facts::FactScope::Local,
+            request.invite_secret_fact_id,
+            request.invite_secret_fact_id,
+        );
+        let Some(invite) = projection_context.payload_for(&invite_need) else {
+            return Ok(waiting_output([invite_need]));
         };
-        if endpoint_fact.scope != FactScope::Local {
-            return Err("connection bootstrap request endpoint context must be local".to_string());
+        let invite_secret = invite::decode_fact_payload(&invite.bytes)
+            .map_err(|_| "connection request invite context is not an invite secret".to_string())?;
+        if invite.id != request.invite_secret_fact_id {
+            return Err("connection request invite context id does not match request".to_string());
         }
-        let local_endpoint = endpoint::decode_fact_payload(endpoint_fact.body()).map_err(|_| {
-            "connection bootstrap request endpoint context is not a local endpoint".to_string()
-        })?;
+        if invite.scope != FactScope::Local {
+            return Err("connection request invite context must be local".to_string());
+        }
+        validate_invite_signature(&request, &invite_secret)?;
 
-        // 3. Materialize.
-        let frame = &bootstrap.sealed_request_frame;
-        let frame_hash = crypto::hash(frame);
-        let Ok(request_bytes) = super::layout::open_connection_request(frame, &local_endpoint)
+        if fact.scope == FactScope::Local {
+            // 2a. Local send path.
+            let ephemeral_need = crate::core::context::ContextNeed::range(
+                fact.id,
+                "connection_ephemeral_secret",
+                crate::core::facts::FactScope::Local,
+                request.initiator_ephemeral_secret_fact_id,
+                request.initiator_ephemeral_secret_fact_id,
+            );
+            let Some(ephemeral) = projection_context.payload_for(&ephemeral_need) else {
+                return Ok(waiting_output([invite_need, ephemeral_need]));
+            };
+            let ephemeral_secret = ephemeral_secret::decode_fact_payload(&ephemeral.bytes)
+                .map_err(|_| {
+                    "connection request dependency is not an ephemeral secret".to_string()
+                })?;
+            if ephemeral.id != request.initiator_ephemeral_secret_fact_id {
+                return Err(
+                    "connection request ephemeral context id does not match request".to_string(),
+                );
+            }
+            if ephemeral.scope != FactScope::Local {
+                return Err("connection request ephemeral context must be local".to_string());
+            }
+            if ephemeral_secret.owner_endpoint != request.from_endpoint {
+                return Err("connection request ephemeral owner does not match sender".to_string());
+            }
+            if ephemeral_secret.ephemeral_public_key != request.initiator_ephemeral_public_key {
+                return Err(
+                    "connection request ephemeral public key does not match dependency".to_string(),
+                );
+            }
+            // 3. Materialize local request.
+            let response_need = connection_response_for_request_need(fact.id, fact.id);
+            if let Some(response_fact) = projection_context.payload_for(&response_need) {
+                if response_fact.scope != FactScope::Local {
+                    return Err("connection request response context must be local".to_string());
+                }
+                let response = crate::protocol::connection::bootstrap_response::decode_fact_payload(
+                    response_fact.body(),
+                )
+                .map_err(|_| {
+                    "connection request response context is not a response fact".to_string()
+                })?;
+                if response.request_id != fact.id {
+                    return Err(
+                        "connection request response context targets another request".to_string(),
+                    );
+                }
+                return materialized_output(fact.id, &request);
+            }
+            return local_retrying_output(fact, &request, response_need, projection_context);
+        }
+
+        // 2b. Received semantic request path.
+        let endpoint_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "auth_local_endpoint",
+            crate::core::facts::FactScope::Local,
+            request.to_endpoint,
+            request.to_endpoint,
+        );
+        let receive_need = crate::core::context::ContextNeed::range(
+            fact.id,
+            "connection_fact_receipt",
+            crate::core::facts::FactScope::Local,
+            fact.id,
+            fact.id,
+        );
+        let Some(endpoint_context) = projection_context.payload_for(&endpoint_need) else {
+            return Ok(waiting_output([invite_need, endpoint_need, receive_need]));
+        };
+        if endpoint_context.scope != FactScope::Local {
+            return Err("connection request endpoint context must be local".to_string());
+        }
+        let local_endpoint =
+            endpoint::decode_fact_payload(endpoint_context.body()).map_err(|_| {
+                "connection request endpoint context is not a local endpoint".to_string()
+            })?;
+        if local_endpoint.endpoint != request.to_endpoint {
+            return Err("connection request endpoint context does not match request".to_string());
+        }
+        let Some(receive) = projection_context
+            .matched_payloads_for(&receive_need)
+            .map(|(_, fact)| fact)
+            .min_by_key(|fact| fact.id)
         else {
-            return Ok(ProjectionOutput::new());
+            return Ok(waiting_output([invite_need, endpoint_need, receive_need]));
         };
-        let effects = received_connection_request_fact_effect(
-            &request_bytes,
-            bootstrap.origin_addr.bytes(),
-            bootstrap.received_at_local_ms,
-            frame_hash,
-        )?;
-        let mut output = ProjectionOutput::new();
-        for fact in effects.facts {
-            output = output.fact(fact);
+        if receive.scope != FactScope::Local {
+            return Err("connection request receive context must be local".to_string());
         }
-        Ok(output)
+        let received = fact_receipt::decode_fact_payload(receive.body()).map_err(|_| {
+            "connection request receive context is not connection fact receipt".to_string()
+        })?;
+        if received.received_fact_id != fact.id {
+            return Err("connection request receive context targets another fact".to_string());
+        }
+        if received.receive_path
+            != crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST
+        {
+            return Err("connection request requires connection request receipt".to_string());
+        }
+        if received.local_endpoint_id != request.to_endpoint {
+            return Err("connection request addressed to a different endpoint".to_string());
+        }
+        if received.sender_endpoint_id != request.from_endpoint {
+            return Err("connection request sender does not match receive sender".to_string());
+        }
+        if let Some(request_id) = received.request_id {
+            if request_id != fact.id {
+                return Err("connection request fact receipt names another request".to_string());
+            }
+        }
+        if request.from_listen_addr.is_none() {
+            return Err("connection request bootstrap response route is missing".to_string());
+        }
+
+        // 3. Materialize received request and schedule response creation.
+        received_materialized_output(fact.id, &request, receive.id)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
-    use crate::core::facts::Fact;
-    use crate::core::projectors::{MatchedContext, ProjectionContext};
-    use crate::protocol::auth::endpoint::fact::EndpointFact;
-    use crate::protocol::auth::invite::fact::InviteSecretFact;
-    use crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST;
-    use crate::protocol::connection::request::fact::ConnectionRequestFact;
-    use crate::protocol::connection::request::{
-        create as request_create, layout as request_layout,
+fn validate_request_fields(request: &BootstrapRequestFact) -> Result<(), String> {
+    if request.from_endpoint == [0; 32] {
+        return Err("connection request from_endpoint cannot be empty".to_string());
+    }
+    if request.to_endpoint == [0; 32] {
+        return Err("connection request to_endpoint cannot be empty".to_string());
+    }
+    if request.invite_fact_id == [0; 32] {
+        return Err("connection request invite_fact_id cannot be empty".to_string());
+    }
+    if request.bootstrap_hash == [0; 32] {
+        return Err("connection request bootstrap_hash cannot be empty".to_string());
+    }
+    if request.invite_secret_fact_id == [0; 32] {
+        return Err("connection request invite_secret_fact_id cannot be empty".to_string());
+    }
+    if request.initiator_ephemeral_secret_fact_id == [0; 32] {
+        return Err(
+            "connection request initiator_ephemeral_secret_fact_id cannot be empty".to_string(),
+        );
+    }
+    if request.initiator_ephemeral_public_key == [0; 32] {
+        return Err(
+            "connection request initiator_ephemeral_public_key cannot be empty".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn materialized_output(
+    request_id: [u8; 32],
+    request: &BootstrapRequestFact,
+) -> Result<ProjectionOutput, String> {
+    Ok(ProjectionOutput::new()
+        .offer(crate::core::context::ContextOffer::range(
+            request_id,
+            "connection_request",
+            crate::core::facts::FactScope::Global,
+            request_id,
+            request_id,
+        ))
+        .row_mutation(RowMutation::PutRow(bootstrap_request_row(
+            request_id, request,
+        )?)))
+}
+
+fn local_retrying_output(
+    fact: &Fact,
+    request: &BootstrapRequestFact,
+    response_need: crate::core::context::ContextNeed,
+    projection_context: &ProjectionContext,
+) -> Result<ProjectionOutput, String> {
+    let mut output = materialized_output(fact.id, request)?.need(response_need);
+    let Some(addr) = request.to_listen_addr else {
+        return Ok(output);
     };
 
-    fn endpoint_fact(secret: [u8; 32]) -> (EndpointFact, Fact) {
-        let endpoint = EndpointFact {
-            endpoint: crypto::x25519_public_key(&secret),
-            secret,
-            signing_public_key: crypto::ed25519_public_key(&[91; 32]),
-            signing_secret: [91; 32],
-        };
-        let fact = endpoint::create::endpoint_fact(1, endpoint).expect("endpoint fact");
-        (endpoint, fact)
-    }
+    // Learn the peer's reachable listen address so a later membership connection
+    // can reconnect after the invite link expires. Keyed by endpoint; `PutRow` is
+    // insert-or-ignore, so reprojecting the same request is a no-op. A same-output
+    // delete-then-put would *delete* the row (commit applies puts before deletes),
+    // so the put stands alone.
+    output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
+        request.to_endpoint,
+        addr,
+    )?));
 
-    fn endpoint_match(owner: [u8; 32], endpoint: Fact) -> MatchedContext {
-        let need = endpoint::daemon_endpoint_need(owner);
-        MatchedContext {
-            need,
-            offer: endpoint::daemon_endpoint_offer(endpoint.id),
-            payload: endpoint,
+    let retry_timeline = peer_retry_timeline();
+    let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
+    if let Some(now_ms) = due_retry_at {
+        output = output.local_intent(send_bootstrap_connection_request_intent(
+            SendBootstrapConnectionRequest {
+                request_id: fact.id,
+                initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
+                addr,
+            },
+        )?);
+        output = output.time_wake(TimeWake {
+            owner: fact.id,
+            timeline: retry_timeline,
+            at: now_ms.saturating_add(PEER_RETRY_DELAY_MS),
+        });
+    } else {
+        output = output.time_wake(TimeWake {
+            owner: fact.id,
+            timeline: retry_timeline,
+            at: PEER_RETRY_IMMEDIATE_AT_MS,
+        });
+    }
+    Ok(output)
+}
+
+fn received_materialized_output(
+    request_id: [u8; 32],
+    request: &BootstrapRequestFact,
+    receive_id: [u8; 32],
+) -> Result<ProjectionOutput, String> {
+    let mut output =
+        materialized_output(request_id, request)?.intent(create_bootstrap_response_intent(
+            CreateBootstrapResponse {
+                request_id,
+                invite_secret_id: request.invite_secret_fact_id,
+                receive_id,
+            },
+        ));
+    // Learn the initiator's reachable listen address from the received request,
+    // so we can later open a membership connection back to it without an invite.
+    if let Some(addr) = request.from_listen_addr {
+        output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
+            request.from_endpoint,
+            addr,
+        )?));
+    }
+    Ok(output)
+}
+
+fn waiting_output<const N: usize>(
+    needs: [crate::core::context::ContextNeed; N],
+) -> ProjectionOutput {
+    let mut output = ProjectionOutput::new();
+    for need in needs {
+        output = output.need(need);
+    }
+    output
+}
+
+fn validate_invite_signature(
+    request: &BootstrapRequestFact,
+    invite_secret: &crate::protocol::auth::invite::fact::InviteSecretFact,
+) -> Result<(), String> {
+    if invite_secret.bootstrap_hash != request.bootstrap_hash {
+        return Err("connection request bootstrap hash is not authorized".to_string());
+    }
+    if let Some(invite_fact_id) = invite_secret.invite_fact_id {
+        if invite_fact_id != request.invite_fact_id {
+            return Err("connection request invite id is not authorized".to_string());
         }
     }
+    let public_key = crypto::ed25519_public_key(&invite_secret.bootstrap_secret);
+    if !crypto::ed25519_verify(
+        &public_key,
+        &invite_signing_transcript(request)?,
+        &request.invite_signature,
+    ) {
+        return Err("connection request invite signature is not authorized".to_string());
+    }
+    Ok(())
+}
 
-    #[test]
-    fn sealed_request_projects_to_request_and_receipt_facts() {
-        let invite = InviteSecretFact::new([33; 32]);
-        let (endpoint, endpoint_fact) = endpoint_fact([44; 32]);
-        let initiator_ephemeral_secret = [59; 32];
-        let mut request = ConnectionRequestFact {
-            from_endpoint: crypto::x25519_public_key(&[55; 32]),
-            to_endpoint: endpoint.endpoint,
-            nonce: [56; 32],
-            invite_fact_id: [57; 32],
+fn invite_signing_transcript(request: &BootstrapRequestFact) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"topo-connection-request-invite-signing-transcript-v1");
+    out.extend_from_slice(&request.from_endpoint);
+    out.extend_from_slice(&request.to_endpoint);
+    out.extend_from_slice(&request.nonce);
+    out.extend_from_slice(&request.invite_fact_id);
+    out.extend_from_slice(&request.bootstrap_hash);
+    out.extend_from_slice(&request.invite_secret_fact_id);
+    out.extend_from_slice(&request.initiator_ephemeral_secret_fact_id);
+    out.extend_from_slice(&request.initiator_ephemeral_public_key);
+    out.extend_from_slice(&encode_optional_addr(request.from_listen_addr)?);
+    out.extend_from_slice(&encode_optional_addr(request.to_listen_addr)?);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod projector_tests {
+    use crate as topo;
+
+    use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
+    use topo::core::facts::{Fact, FactScope};
+    use topo::core::intents::RowMutation;
+    use topo::core::projectors::ProjectionOutput;
+    use topo::protocol::connection::observed_endpoint_address::rows::{
+        observed_endpoint_address_key, CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
+    };
+
+    /// Whether the projection learned a reachable address for `endpoint`.
+    fn learns_observed_endpoint_address(output: &ProjectionOutput, endpoint: [u8; 32]) -> bool {
+        output.effects.row_mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                RowMutation::PutRow(row)
+                    if row.table == CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS
+                        && row.key == observed_endpoint_address_key(&endpoint)
+            )
+        })
+    }
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
+    use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
+    use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
+    use topo::protocol::connection::create_bootstrap_response::{
+        decode_create_bootstrap_response_intent, CREATE_BOOTSTRAP_RESPONSE,
+    };
+    use topo::protocol::connection::ephemeral_secret::{
+        fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
+    };
+    use topo::protocol::connection::fact_receipt::{
+        fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST},
+        layout as received_layout,
+    };
+    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
+    use topo::protocol::connection::bootstrap_request::{fact::BootstrapRequestFact, layout, project, rows};
+    use topo::protocol::connection::bootstrap_response::{
+        fact::BootstrapResponseFact, layout as response_layout,
+    };
+    use topo::protocol::connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST;
+
+    fn invite_fact() -> (InviteSecretFact, Fact) {
+        let invite = InviteSecretFact::new([55; 32]);
+        let fact = Fact::new(
+            FactScope::Local,
+            10,
+            invite_layout::encode_fact(&invite).expect("encode invite"),
+        );
+        (invite, fact)
+    }
+
+    fn ephemeral_fact(owner_endpoint: [u8; 32]) -> (ConnectionEphemeralSecretFact, Fact) {
+        let private_key = [7u8; 32];
+        let secret = ConnectionEphemeralSecretFact {
+            owner_endpoint,
+            ephemeral_private_key: private_key,
+            ephemeral_public_key: crypto::x25519_public_key(&private_key),
+            created_at_ms: 11,
+        };
+        let fact = Fact::new(
+            FactScope::Local,
+            11,
+            ephemeral_layout::encode_fact(&secret).expect("encode ephemeral"),
+        );
+        (secret, fact)
+    }
+
+    fn signed_request_fact(scope: FactScope) -> (BootstrapRequestFact, Fact, Fact, Fact) {
+        let (invite, invite_fact) = invite_fact();
+        let (ephemeral, ephemeral_fact) = ephemeral_fact([1; 32]);
+        let mut request = BootstrapRequestFact {
+            from_endpoint: [1; 32],
+            to_endpoint: crypto::x25519_public_key(&[2; 32]),
+            nonce: [3; 32],
+            invite_fact_id: [4; 32],
             bootstrap_hash: invite.bootstrap_hash,
             invite_signature: [0; ED25519_SIGNATURE_BYTES],
-            invite_secret_fact_id: [50; 32],
-            initiator_ephemeral_secret_fact_id: [58; 32],
-            initiator_ephemeral_public_key: crypto::x25519_public_key(&initiator_ephemeral_secret),
-            from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
-            to_listen_addr: None,
+            invite_secret_fact_id: invite_fact.id,
+            initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
+            initiator_ephemeral_public_key: ephemeral.ephemeral_public_key,
+            from_listen_addr: Some("127.0.0.1:41001".parse().expect("listen addr")),
+            to_listen_addr: Some("127.0.0.1:41002".parse().expect("remote addr")),
         };
         request.invite_signature = crypto::ed25519_sign(
             &invite.bootstrap_secret,
-            &request_create::invite_signing_transcript(&request).expect("request transcript"),
+            &invite_signing_transcript(&request).expect("transcript"),
         );
-        let request_bytes = request_layout::encode_fact(&request).expect("request");
-        let sealed = super::super::layout::seal_connection_request(
-            &request_bytes,
-            &initiator_ephemeral_secret,
-        )
-        .expect("sealed request");
-        let bootstrap = ConnectionBootstrapRequestFact {
+        let request_fact = Fact::new(
+            scope,
+            12,
+            layout::encode_fact(&request).expect("encode request"),
+        );
+        (request, request_fact, invite_fact, ephemeral_fact)
+    }
+
+    fn invite_match(owner: [u8; 32], invite: Fact) -> MatchedContext {
+        let need = crate::core::context::ContextNeed::range(
+            owner,
+            "connection_invite_secret",
+            crate::core::facts::FactScope::Local,
+            invite.id,
+            invite.id,
+        );
+        MatchedContext {
+            need: need.clone(),
+            offer: crate::core::context::ContextOffer::range(
+                invite.id,
+                "connection_invite_secret",
+                crate::core::facts::FactScope::Local,
+                invite.id,
+                invite.id,
+            ),
+            payload: invite,
+        }
+    }
+
+    fn ephemeral_match(owner: [u8; 32], ephemeral: Fact) -> MatchedContext {
+        let need = crate::core::context::ContextNeed::range(
+            owner,
+            "connection_ephemeral_secret",
+            crate::core::facts::FactScope::Local,
+            ephemeral.id,
+            ephemeral.id,
+        );
+        MatchedContext {
+            need,
+            offer: crate::core::context::ContextOffer::range(
+                ephemeral.id,
+                "connection_ephemeral_secret",
+                crate::core::facts::FactScope::Local,
+                ephemeral.id,
+                ephemeral.id,
+            ),
+            payload: ephemeral,
+        }
+    }
+
+    fn receive_match(
+        owner: [u8; 32],
+        request: &BootstrapRequestFact,
+        request_id: [u8; 32],
+        received_at_local_ms: u64,
+    ) -> MatchedContext {
+        let received = ConnectionFactReceipt {
+            received_fact_id: request_id,
             origin_addr: crate::protocol::connection::fact_receipt::fact::OriginAddr::new(
-                b"127.0.0.1:41002",
+                b"127.0.0.1:41001",
             )
             .expect("origin"),
-            received_at_local_ms: 100,
-            sealed_request_frame: super::super::layout::copy_sealed_connection_request_frame(
-                &sealed,
-            )
-            .expect("copy frame"),
+            local_endpoint_id: request.to_endpoint,
+            sender_endpoint_id: request.from_endpoint,
+            receive_path: RECEIVE_PATH_CONNECTION_REQUEST,
+            connection_id: None,
+            request_id: Some(request_id),
+            frame_hash: [9; 32],
+            received_at_local_ms,
         };
-        let bootstrap_fact = Fact::new(
+        let fact = Fact::new(
             FactScope::Local,
-            100,
-            super::super::layout::encode_fact(&bootstrap).expect("bootstrap"),
+            13,
+            received_layout::encode_fact(&received).expect("encode receipt"),
         );
+        let need = crate::core::context::ContextNeed::range(
+            owner,
+            "connection_fact_receipt",
+            crate::core::facts::FactScope::Local,
+            request_id,
+            request_id,
+        );
+        MatchedContext {
+            need,
+            offer: crate::core::context::ContextOffer::range(
+                fact.id,
+                "connection_fact_receipt",
+                crate::core::facts::FactScope::Local,
+                request_id,
+                request_id,
+            ),
+            payload: fact,
+        }
+    }
 
-        let output = ConnectionBootstrapRequestProjector::new()
-            .project(
-                &bootstrap_fact,
-                &ProjectionContext::from_matches(vec![endpoint_match(
-                    bootstrap_fact.id,
-                    endpoint_fact,
-                )]),
-            )
-            .expect("project bootstrap request");
+    fn endpoint_match(owner: [u8; 32], endpoint_id: [u8; 32]) -> MatchedContext {
+        let endpoint = EndpointFact {
+            endpoint: endpoint_id,
+            secret: [2; 32],
+            signing_public_key: crypto::ed25519_public_key(&[22; 32]),
+            signing_secret: [22; 32],
+        };
+        let fact = Fact::new(
+            FactScope::Local,
+            14,
+            endpoint_layout::encode_fact(&endpoint).expect("encode endpoint"),
+        );
+        let need = crate::core::context::ContextNeed::range(
+            owner,
+            "auth_local_endpoint",
+            crate::core::facts::FactScope::Local,
+            endpoint_id,
+            endpoint_id,
+        );
+        MatchedContext {
+            need,
+            offer: crate::core::context::ContextOffer::range(
+                fact.id,
+                "auth_local_endpoint",
+                crate::core::facts::FactScope::Local,
+                endpoint_id,
+                endpoint_id,
+            ),
+            payload: fact,
+        }
+    }
+
+    fn response_match(owner: [u8; 32], request_id: [u8; 32]) -> MatchedContext {
+        let response = BootstrapResponseFact {
+            from_endpoint: [2; 32],
+            to_endpoint: [1; 32],
+            request_id,
+            invite_secret_fact_id: [3; 32],
+            initiator_ephemeral_secret_fact_id: [4; 32],
+            responder_ephemeral_secret_fact_id: [5; 32],
+            responder_ephemeral_public_key: [6; 32],
+            handshake_hash: [7; 32],
+            connection_secret: [8; 32],
+        };
+        let fact = Fact::new(
+            FactScope::Local,
+            15,
+            response_layout::encode_fact(&response).expect("encode response"),
+        );
+        let need = topo::protocol::connection::bootstrap_request::connection_response_for_request_need(
+            owner, request_id,
+        );
+        MatchedContext {
+            need,
+            offer: topo::protocol::connection::bootstrap_request::connection_response_for_request_offer(
+                fact.id, request_id,
+            ),
+            payload: fact,
+        }
+    }
+
+    fn due_peer_retry_context(context: ProjectionContext, end_inclusive: u64) -> ProjectionContext {
+        context.with_time_ranges(vec![TimeRange {
+            timeline: topo::protocol::connection::bootstrap_request::peer_retry_timeline(),
+            start_exclusive: None,
+            end_inclusive,
+        }])
+    }
+
+    #[test]
+    fn local_request_missing_ephemeral_waits_without_row() {
+        let (_, request_fact, invite_fact, _) = signed_request_fact(FactScope::Local);
+        let context =
+            ProjectionContext::from_matches(vec![invite_match(request_fact.id, invite_fact)]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project waits");
+
+        assert!(output.effects.intents.is_empty());
+        assert_eq!(output.needs.len(), 2);
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_ephemeral_secret"));
+    }
+
+    #[test]
+    fn received_request_missing_receipt_waits_without_row() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
+        ]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project waits");
+
+        assert!(output.effects.intents.is_empty());
+        assert_eq!(output.needs.len(), 3);
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == "connection_fact_receipt"));
+    }
+
+    #[test]
+    fn local_request_materializes_and_schedules_peer_retry_after_context_match() {
+        let (request, request_fact, invite_fact, ephemeral_fact) =
+            signed_request_fact(FactScope::Local);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            ephemeral_match(request_fact.id, ephemeral_fact),
+        ]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
 
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
-        assert!(output.effects.row_mutations.is_empty());
-        assert!(output.needs.is_empty());
-        assert!(output.offers.is_empty());
-        assert!(output.time_wakes.is_empty());
-        assert_eq!(output.effects.facts.len(), 2);
+        assert_eq!(output.time_wakes.len(), 1);
+        assert_eq!(
+            output.time_wakes[0].timeline,
+            topo::protocol::connection::bootstrap_request::peer_retry_timeline()
+        );
+        assert_eq!(output.time_wakes[0].at, 0);
         assert!(output
-            .effects
-            .facts
+            .needs
             .iter()
-            .any(|fact| fact.bytes == request_bytes));
-        let receipt = output
-            .effects
-            .facts
+            .any(|need| need.role == "connection_response_for_request"));
+        // request row + learned-address put for the peer's listen addr.
+        assert_eq!(output.effects.row_mutations.len(), 2);
+        assert!(learns_observed_endpoint_address(&output, request.to_endpoint));
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.offers[0].role.as_str(), "connection_request");
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
+            panic!("expected put row mutation");
+        };
+        let row = rows::decode_bootstrap_request_row(&row.key, &row.value)
+            .expect("decode connection request row");
+        assert_eq!(row.request_id, request_fact.id);
+        assert_eq!(row.from_endpoint, request.from_endpoint);
+        assert_eq!(row.to_endpoint, request.to_endpoint);
+        assert_eq!(row.invite_fact_id, request.invite_fact_id);
+        assert_eq!(row.invite_secret_fact_id, request.invite_secret_fact_id);
+        assert_eq!(
+            row.initiator_ephemeral_secret_fact_id,
+            request.initiator_ephemeral_secret_fact_id
+        );
+    }
+
+    #[test]
+    fn local_request_due_peer_retry_emits_bootstrap_send_and_next_wake() {
+        let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
+        let context = due_peer_retry_context(
+            ProjectionContext::from_matches(vec![
+                invite_match(request_fact.id, invite_fact),
+                ephemeral_match(request_fact.id, ephemeral_fact),
+            ]),
+            10_000,
+        );
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert!(output.effects.intents.is_empty());
+        assert_eq!(output.effects.local_intents.len(), 1);
+        assert_eq!(
+            output.effects.local_intents[0].kind.as_str(),
+            SEND_BOOTSTRAP_CONNECTION_REQUEST
+        );
+        assert_eq!(output.time_wakes.len(), 1);
+        assert_eq!(output.time_wakes[0].at, 10_250);
+        assert!(output
+            .needs
             .iter()
-            .find(|fact| {
-                fact.body().first().copied()
-                    == Some(
-                        crate::protocol::connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT,
-                    )
-            })
-            .expect("receipt");
-        let receipt =
-            crate::protocol::connection::fact_receipt::layout::decode_fact(receipt.body())
-                .expect("decode receipt");
-        assert_eq!(receipt.receive_path, RECEIVE_PATH_CONNECTION_REQUEST);
+            .any(|need| need.role == "connection_response_for_request"));
+    }
+
+    #[test]
+    fn local_request_without_response_route_does_not_schedule_peer_retry() {
+        let (mut request, _, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
+        let invite = invite_layout::decode_fact(invite_fact.body()).expect("decode invite");
+        request.to_listen_addr = None;
+        request.invite_signature = crypto::ed25519_sign(
+            &invite.bootstrap_secret,
+            &invite_signing_transcript(&request).expect("transcript"),
+        );
+        let request_fact = Fact::new(
+            FactScope::Local,
+            12,
+            layout::encode_fact(&request).expect("encode request"),
+        );
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            ephemeral_match(request_fact.id, ephemeral_fact),
+        ]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.local_intents.is_empty());
+        assert!(output.time_wakes.is_empty());
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == "connection_response_for_request"));
+    }
+
+    #[test]
+    fn local_request_stops_peer_retry_when_response_context_exists() {
+        let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            ephemeral_match(request_fact.id, ephemeral_fact),
+            response_match(request_fact.id, request_fact.id),
+        ]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project request");
+
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.local_intents.is_empty());
+        assert!(output.time_wakes.is_empty());
+        assert!(output.needs.is_empty());
+        assert_eq!(output.effects.row_mutations.len(), 1);
+    }
+
+    #[test]
+    fn received_request_materializes_after_invite_and_receipt_context_match() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+        ]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project received request");
+
+        assert_eq!(output.effects.intents.len(), 1);
+        assert!(output.effects.local_intents.is_empty());
+        assert!(output.time_wakes.is_empty());
+        // request row + learned-address put for the initiator's addr.
+        assert_eq!(output.effects.row_mutations.len(), 2);
+        assert!(learns_observed_endpoint_address(&output, request.from_endpoint));
+        assert_eq!(output.offers[0].role.as_str(), "connection_request");
+        let response_intent = output
+            .effects
+            .intents
+            .iter()
+            .find(|intent| intent.kind.as_str() == CREATE_BOOTSTRAP_RESPONSE)
+            .expect("create response intent");
+        let decoded =
+            decode_create_bootstrap_response_intent(response_intent).expect("decode intent");
+        assert_eq!(decoded.request_id, request_fact.id);
+        assert_eq!(decoded.invite_secret_id, request.invite_secret_fact_id);
+    }
+
+    #[test]
+    fn received_request_never_schedules_bootstrap_send_retry() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = due_peer_retry_context(
+            ProjectionContext::from_matches(vec![
+                invite_match(request_fact.id, invite_fact),
+                endpoint_match(request_fact.id, request.to_endpoint),
+                receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+            ]),
+            10_000,
+        );
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project received request");
+
+        assert!(output.effects.local_intents.is_empty());
+        assert!(output.time_wakes.is_empty());
+        assert_eq!(
+            output
+                .effects
+                .intents
+                .iter()
+                .filter(|intent| intent.kind.as_str() == CREATE_BOOTSTRAP_RESPONSE)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn received_request_duplicate_receipt_emits_one_response_intent() {
+        let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_250),
+        ]);
+
+        let output = project::BootstrapRequestProjector::new()
+            .project(&request_fact, &context)
+            .expect("project received request");
+
+        let response_intents = output
+            .effects
+            .intents
+            .iter()
+            .filter(|intent| intent.kind.as_str() == CREATE_BOOTSTRAP_RESPONSE)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            response_intents.len(),
+            1,
+            "duplicate fact receipt for one request must collapse to one response intent"
+        );
+    }
+
+    #[test]
+    fn connection_request_projector_rejects_self_loop() {
+        let (mut request, _, _, _) = signed_request_fact(FactScope::Local);
+        request.to_endpoint = request.from_endpoint;
+        let fact = Fact::new(
+            FactScope::Local,
+            0,
+            layout::encode_fact(&request).expect("encode request"),
+        );
+        let err = project::BootstrapRequestProjector::new()
+            .project(&fact, &ProjectionContext::new(Vec::new()))
+            .expect_err("self-loop request must fail projection");
+        assert!(err.contains("endpoints"), "{err}");
+    }
+
+    #[test]
+    fn connection_request_projector_rejects_malformed_bytes() {
+        let fact = Fact::new(FactScope::Local, 0, vec![0; 4]);
+        let err = project::BootstrapRequestProjector::new()
+            .project(&fact, &ProjectionContext::new(Vec::new()))
+            .expect_err("malformed bytes must fail projection");
+        assert!(
+            err.contains("connection request") || err.contains("Length"),
+            "{err}"
+        );
+    }
+
+    fn invite_signing_transcript(request: &BootstrapRequestFact) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"topo-connection-request-invite-signing-transcript-v1");
+        out.extend_from_slice(&request.from_endpoint);
+        out.extend_from_slice(&request.to_endpoint);
+        out.extend_from_slice(&request.nonce);
+        out.extend_from_slice(&request.invite_fact_id);
+        out.extend_from_slice(&request.bootstrap_hash);
+        out.extend_from_slice(&request.invite_secret_fact_id);
+        out.extend_from_slice(&request.initiator_ephemeral_secret_fact_id);
+        out.extend_from_slice(&request.initiator_ephemeral_public_key);
+        out.extend_from_slice(&encode_optional_addr(request.from_listen_addr)?);
+        out.extend_from_slice(&encode_optional_addr(request.to_listen_addr)?);
+        Ok(out)
     }
 }
