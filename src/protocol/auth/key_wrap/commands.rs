@@ -29,12 +29,8 @@ use crate::protocol::auth::local_secret_retirement::{
     fact::{LocalSecretRetirementFact, RETIRE_REASON_CHOP},
     layout as local_secret_retirement_layout,
 };
-use crate::protocol::auth::recipient_key::{
-    fact::RecipientKeyFact, layout as recipient_key_layout,
-};
-use crate::protocol::auth::removal_frontier::{
-    fact::RemovalFrontierFact, layout as removal_frontier_layout,
-};
+use crate::protocol::auth::recipient_key::layout as recipient_key_layout;
+use crate::protocol::auth::removal_frontier::layout as removal_frontier_layout;
 use crate::protocol::content;
 use rusqlite::params;
 use std::collections::BTreeSet;
@@ -185,25 +181,15 @@ pub fn create_recipient_key(
     }
     let recipient_secret = crypto::random_x25519_private_key();
     let recipient_key = crypto::x25519_public_key(&recipient_secret);
-    let mut recipient = RecipientKeyFact {
-        workspace_id: input.workspace_id,
-        endpoint_id: membership.endpoint_id,
+    let recipient_fact = auth::recipient_key::create::signed_recipient_key_fact(
+        input.workspace_id,
+        membership.endpoint_id,
         recipient_key,
-        previous_recipient_key_id: input.previous_recipient_key_id,
-        created_at_ms: input.created_at_ms,
-        signer_public_key: signing.public_key,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &signing.private_key,
-        &recipient_key_layout::signing_bytes(&recipient)?,
-    );
-    recipient.signature = signature;
-    let recipient_fact = Fact::new(
-        crate::protocol::auth::workspace::scope(input.workspace_id),
+        input.previous_recipient_key_id,
         input.created_at_ms,
-        recipient_key_layout::encode_recipient_key(&recipient)?,
-    );
+        signing.public_key,
+        signing.private_key,
+    )?;
     let local = LocalRecipientKeyFact {
         workspace_id: input.workspace_id,
         recipient_key_id: recipient_fact.id,
@@ -234,23 +220,12 @@ pub fn create_key_frontier(
     if membership.endpoint_id != endpoint.endpoint {
         return Err("local endpoint membership does not match local endpoint".to_string());
     }
-    let mut frontier = RemovalFrontierFact {
-        workspace_id: input.workspace_id,
-        owner_endpoint_id: endpoint.endpoint,
-        created_at_ms: input.created_at_ms,
-        signer_public_key: endpoint.signing_public_key,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &endpoint.signing_secret,
-        &removal_frontier_layout::signing_bytes(&frontier)?,
-    );
-    frontier.signature = signature;
-    let frontier_fact = Fact::new(
-        crate::protocol::auth::workspace::scope(input.workspace_id),
+    let frontier_fact = auth::removal_frontier::create::signed_removal_frontier_fact(
+        input.workspace_id,
+        endpoint.endpoint,
         input.created_at_ms,
-        removal_frontier_layout::encode_removal_frontier(&frontier)?,
-    );
+        endpoint.signing_secret,
+    )?;
     let local_secret = LocalKeySecretFact {
         workspace_id: input.workspace_id,
         frontier_id: frontier_fact.id,

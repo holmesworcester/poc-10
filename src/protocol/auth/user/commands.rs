@@ -6,11 +6,10 @@
 //! connected to a valid invite or authority chain before rows become visible.
 
 use crate::core::command_context::CommandOutput;
-use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
+use crate::core::facts::{Fact, FactId};
 
-use super::fact::{UserFact, Username};
-use super::layout;
+use super::create;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateUser {
@@ -66,36 +65,12 @@ pub fn signed_user_fact(
     input: &CreateSignedUser,
     public_key: Ed25519PublicKey,
 ) -> Result<Fact, String> {
-    if input.workspace_id == [0; 32] {
-        return Err("user workspace_id cannot be empty".to_string());
-    }
-    if input.signer_id == [0; 32] {
-        return Err("user signer_id cannot be empty".to_string());
-    }
-    if public_key == [0; 32] {
-        return Err("user public_key cannot be empty".to_string());
-    }
-    if input.username.trim().is_empty() {
-        return Err("username must not be empty".to_string());
-    }
-    let signer_public_key = crypto::ed25519_public_key(&input.signer_private_key);
-    let mut payload = UserFact {
-        created_at_ms: input.created_at_ms,
-        workspace_id: input.workspace_id,
-        public_key,
-        username: Username::new(&input.username).map_err(|err| format!("username: {err}"))?,
-        signer_id: input.signer_id,
-        signer_public_key,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &input.signer_private_key,
-        &layout::signing_bytes(&payload)?,
-    );
-    payload.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
+    create::signed_user_fact(
         input.created_at_ms,
-        layout::encode_fact(&payload)?,
-    ))
+        input.workspace_id,
+        public_key,
+        &input.username,
+        input.signer_id,
+        input.signer_private_key,
+    )
 }

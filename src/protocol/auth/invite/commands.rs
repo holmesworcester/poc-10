@@ -182,27 +182,15 @@ pub fn create_device_link(
         .ok_or_else(|| "local endpoint user is missing".to_string())?;
 
     let invite_private_key = crypto::random_ed25519_private_key();
-    let device_invite = auth::device_invite::fact::DeviceInviteFact {
-        created_at_ms: input.created_at_ms.saturating_add(1),
-        workspace_id: input.workspace_id,
-        user_authority_fact_id: user.user_id,
-        user_invite_fact_id: None,
-        public_key: crypto::ed25519_public_key(&invite_private_key),
-        signer_id: membership.endpoint_shared_id,
-        signer_public_key: local.signing_public_key,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let mut device_invite = device_invite;
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &local.signing_secret,
-        &auth::device_invite::layout::signing_bytes(&device_invite)?,
-    );
-    device_invite.signature = signature;
-    let device_invite_fact = Fact::new(
-        FactScope::Global,
-        device_invite.created_at_ms,
-        auth::device_invite::layout::encode_fact(&device_invite)?,
-    );
+    let device_invite_fact = auth::device_invite::create::signed_device_invite_fact(
+        input.created_at_ms.saturating_add(1),
+        input.workspace_id,
+        user.user_id,
+        None,
+        crypto::ed25519_public_key(&invite_private_key),
+        membership.endpoint_shared_id,
+        local.signing_secret,
+    )?;
     let invite_secret = InviteSecretFact::scoped(
         invite_private_key,
         input.workspace_id,
@@ -246,26 +234,15 @@ pub fn create_invite_server(
     let local = endpoint_output.receipt.endpoint;
     let authority = local_admin_id(ctx.store(), input.workspace_id, local.signing_public_key)?;
     let invite_private_key = crypto::random_ed25519_private_key();
-    let invite_server = auth::invite_server::fact::InviteServerFact {
-        created_at_ms: input.created_at_ms.saturating_add(1),
-        public_key: crypto::ed25519_public_key(&invite_private_key),
-        workspace_id: input.workspace_id,
-        authority_fact_id: authority.admin_id,
-        signer_id: authority.signer_id,
-        signer_public_key: local.signing_public_key,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let mut invite_server = invite_server;
-    let (_, signature) = crypto::ed25519_sign_canonical(
+    let invite_server_fact = auth::invite_server::create::signed_invite_server_fact(
+        input.created_at_ms.saturating_add(1),
+        crypto::ed25519_public_key(&invite_private_key),
+        input.workspace_id,
+        authority.admin_id,
+        authority.signer_id,
+        local.signing_public_key,
         &local.signing_secret,
-        &auth::invite_server::layout::signing_bytes(&invite_server)?,
-    );
-    invite_server.signature = signature;
-    let invite_server_fact = Fact::new(
-        FactScope::Global,
-        invite_server.created_at_ms,
-        auth::invite_server::layout::encode_fact(&invite_server)?,
-    );
+    )?;
     let invite_secret = InviteSecretFact::scoped(
         invite_private_key,
         input.workspace_id,
@@ -446,27 +423,15 @@ fn workspace_accept_device_invite_fact(
     user_invite_fact_id: FactId,
     bootstrap_secret: [u8; 32],
 ) -> Result<Fact, String> {
-    let payload = auth::device_invite::fact::DeviceInviteFact {
+    auth::device_invite::create::signed_device_invite_fact(
         created_at_ms,
         workspace_id,
-        user_authority_fact_id: user_id,
-        user_invite_fact_id: Some(user_invite_fact_id),
-        public_key: crypto::ed25519_public_key(&bootstrap_secret),
-        signer_id: user_id,
-        signer_public_key: crypto::ed25519_public_key(&bootstrap_secret),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let mut payload = payload;
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &bootstrap_secret,
-        &auth::device_invite::layout::signing_bytes(&payload)?,
-    );
-    payload.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
-        created_at_ms,
-        auth::device_invite::layout::encode_fact(&payload)?,
-    ))
+        user_id,
+        Some(user_invite_fact_id),
+        crypto::ed25519_public_key(&bootstrap_secret),
+        user_id,
+        bootstrap_secret,
+    )
 }
 
 pub fn accept_device_link(
