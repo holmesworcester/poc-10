@@ -14,8 +14,8 @@
 //! `clock` observation), a projection-order control used by the reverse and
 //! scrambled diagnostics, and a replay-mode dispatch filter that runs only
 //! handler routes whose `runs_during_replay` flag is set. Live-only intents
-//! emitted during replay stay queued and are reported as blocked work; they are
-//! never executed before the barrier.
+//! emitted during replay are suppressed at the commit boundary; they are never
+//! queued behind the barrier.
 //!
 //! Invariants. Replay must not perform network IO or run operational wall-clock
 //! decisions. It admits wall-clock context only through the replayable semantic
@@ -116,8 +116,8 @@ pub struct ReplayReport {
     pub context_edges: usize,
     /// Materialized read-model / sync / connection rows after replay.
     pub row_mutations: usize,
-    /// Live-only intents emitted during replay and left queued (blocked).
-    pub blocked_live_only_work: usize,
+    /// Live-only intents emitted during replay and suppressed before queueing.
+    pub suppressed_live_only_work: usize,
     /// Network queue rows produced during replay; must be zero.
     pub network_rows: usize,
 }
@@ -270,12 +270,19 @@ pub fn run_replay(
     report.projected_facts = counters.projected_facts;
     report.semantic_time_wakes = counters.time_wake_admissions;
     report.replay_allowed_intents = counters.replay_allowed_intents;
+    report.suppressed_live_only_work = counters.suppressed_live_only_work;
     report.standing_time_wakes = table_count(store, "time_wakes")?;
     report.context_edges = table_count(store, "context_edges")?;
     report.row_mutations = materialized_row_count(store)?;
-    report.blocked_live_only_work =
+    let remaining_queued_work =
         table_count(store, "intents")? + table_count(store, "local_intents")?;
     report.network_rows = table_count(store, "network_out")? + table_count(store, "network_in")?;
+
+    if remaining_queued_work > 0 {
+        return Err(format!(
+            "replay left {remaining_queued_work} queued intent rows after the barrier; replay-allowed work did not reach a fixpoint"
+        ));
+    }
 
     if report.network_rows > 0 {
         return Err(format!(
@@ -319,6 +326,7 @@ struct ReplayCounters {
     projected_facts: usize,
     time_wake_admissions: usize,
     replay_allowed_intents: usize,
+    suppressed_live_only_work: usize,
 }
 
 /// Replay-mode work driver over the ordinary projection and dispatch workers.
@@ -384,13 +392,15 @@ impl<'a> ReplayDrive<'a> {
     fn project_to_idle(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let mut progressed = false;
         loop {
-            let progress = pipeline::drain_pending_projection(
+            let progress = pipeline::drain_pending_projection_filtering_intents(
                 self.projector,
                 self.store,
                 self.allowed_tables,
                 REPLAY_WORK_LIMIT,
+                &self.kinds,
             )?;
             counters.projected_facts += progress.projected;
+            counters.suppressed_live_only_work += progress.suppressed_intents;
             if progress.projected == 0 {
                 break;
             }
@@ -430,12 +440,15 @@ impl<'a> ReplayDrive<'a> {
             let handler = self
                 .handler_for(&kind)
                 .ok_or_else(|| format!("no replay handler registered for intent kind {kind}"))?;
-            let status = pipeline::dispatch_queued_intent(
+            let report = pipeline::dispatch_queued_intent_filtering_intents(
                 handler,
                 self.store,
                 self.allowed_tables,
                 queued,
+                &self.kinds,
             )?;
+            let status = report.status;
+            counters.suppressed_live_only_work += report.suppressed_intents;
             if status.retried {
                 // A replay-allowed handler asked to wait for input that a later
                 // projection or dispatch pass should supply. Stop this pass and
@@ -650,10 +663,7 @@ fn hash_table(store: &Store, table: &str) -> Result<([u8; 32], usize), String> {
     let mut rows = stmt
         .query([])
         .map_err(|err| format!("scan {table}: {err}"))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| format!("scan {table}: {err}"))?
-    {
+    while let Some(row) = rows.next().map_err(|err| format!("scan {table}: {err}"))? {
         for index in 0..column_count {
             let value = row
                 .get_ref(index)

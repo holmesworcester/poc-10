@@ -119,13 +119,13 @@ semantic time wakes, and replay-allowed intents to a fixpoint.
 
 Replay-mode dispatch runs only handler routes whose `runs_during_replay` flag is
 set — deterministic rebuild work over retained facts. Live-only intents emitted
-during replay stay queued and are reported as blocked work rather than executed,
-and replay treats any network queue row as a barrier violation. Replay admits
-wall-clock context only through the replayable semantic time-wake timelines the
-caller supplies, so the result depends only on retained facts. The `state_hash`
-summary hashes that result area by area while excluding volatile scheduler,
-socket, admission, and clock state, which lets replay diagnostics prove
-idempotence and projection-order independence.
+during replay are suppressed before queueing, and replay treats any remaining
+queued intent or network queue row as a barrier violation. Replay admits wall-clock
+context only through the replayable semantic time-wake timelines the caller
+supplies, so the result depends only on retained facts. The `state_hash` summary
+hashes that result area by area while excluding volatile scheduler, socket,
+admission, and clock state, which lets replay diagnostics prove idempotence and
+projection-order independence.
 
 Operational repetition is not durable state. A handler route may carry a
 `RecurringIntentSpec`, which the daemon installs as an in-memory schedule while

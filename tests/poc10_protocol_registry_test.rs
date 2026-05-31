@@ -180,11 +180,15 @@ fn replayable_time_wakes_exclude_wall_clock_connection_retry() {
         .collect();
 
     assert!(
-        replayable.iter().any(|name| name == "content_message_expiry"),
+        replayable
+            .iter()
+            .any(|name| name == "content_message_expiry"),
         "disappearing-message expiry is replayable protocol state: {replayable:?}"
     );
     assert!(
-        !replayable.iter().any(|name| name == "connection_peer_retry"),
+        !replayable
+            .iter()
+            .any(|name| name == "connection_peer_retry"),
         "replay must not admit the wall-clock connection_peer_retry timeline: {replayable:?}"
     );
 }

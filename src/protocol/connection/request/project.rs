@@ -2,8 +2,9 @@
 //!
 //! Request projection validates the durable semantic handshake request. Local
 //! requests prove invite-secret and initiator ephemeral-secret context, then
-//! materialize and register a connection-maintenance candidate so the live
-//! maintenance loop can attempt bootstrap sends. Received requests prove
+//! materialize a request row with any bootstrap route. The live maintenance
+//! loop queries unanswered local request rows to attempt bootstrap sends.
+//! Received requests prove
 //! invite-secret, local endpoint, and fact-receipt context after the bootstrap
 //! wrapper has already opened those bytes into this canonical
 //! `connection_request` fact.
@@ -16,16 +17,15 @@
 //!      local-endpoint context plus connection fact receipt addressed to
 //!      that endpoint.
 //!   3. MATERIALIZE. Valid requests write the request row and offer request
-//!      context. A local request with a reachable route registers a
-//!      connection-maintenance candidate while it is unanswered and unregisters
-//!      it once a response appears; received requests emit deferred response
-//!      work.
+//!      context. A local request with a reachable route remains query-visible
+//!      to connection maintenance until a response appears; received requests
+//!      emit deferred response work.
 //!
 //! This projector does not own an operational retry loop and emits no time
 //! wakes. Bootstrap sends are live attempts created by `maintain_connections`
-//! from the candidate index. Change this projector for request admission,
-//! branch-specific context proofs, candidate registration, or materialized
-//! request rows. Bootstrap wrapper opening belongs in
+//! from unanswered local request rows. Change this projector for request
+//! admission, branch-specific context proofs, bootstrap route materialization,
+//! or request rows. Bootstrap wrapper opening belongs in
 //! `bootstrap_request::project`, request byte layout belongs in `layout.rs`, and
 //! response construction belongs in `create_connection_response.rs` plus
 //! `response::create`.

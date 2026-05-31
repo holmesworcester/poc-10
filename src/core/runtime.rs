@@ -95,11 +95,12 @@ pub struct RecurringIntentSpec {
 /// ephemeral intents.
 ///
 /// `runs_during_replay` answers one question: if this intent is emitted while
-/// replay is rebuilding facts and rows, may core dispatch it before the replay
-/// barrier finishes? Replay-enabled handlers must be deterministic rebuild work
-/// over retained facts: no network IO, no fresh randomness, no process-global
-/// mutable state, and no operational wall-clock decisions. Every route declares
-/// this flag explicitly so adding a route forces a conscious replay decision.
+/// replay is rebuilding facts and rows, may core record and dispatch it before
+/// the replay barrier finishes? Replay-enabled handlers must be deterministic
+/// rebuild work over retained facts: no network IO, no fresh randomness, no
+/// process-global mutable state, and no operational wall-clock decisions. Every
+/// route declares this flag explicitly so adding a route forces a conscious
+/// replay decision.
 ///
 /// `recurrence` marks live-only operational repetition. A route with a
 /// recurrence is installed as an in-memory daemon schedule and must not run
@@ -558,7 +559,10 @@ impl Runtime {
         // already-replayed state changes nothing.
         let plans: &[(&str, &[ReplayOrder])] = &[
             ("canonical", &[ReplayOrder::Canonical]),
-            ("idempotent", &[ReplayOrder::Canonical, ReplayOrder::Canonical]),
+            (
+                "idempotent",
+                &[ReplayOrder::Canonical, ReplayOrder::Canonical],
+            ),
             ("reverse", &[ReplayOrder::Reverse]),
             ("scramble-1", &[ReplayOrder::Scramble { seed: 1 }]),
             ("scramble-2", &[ReplayOrder::Scramble { seed: 2 }]),

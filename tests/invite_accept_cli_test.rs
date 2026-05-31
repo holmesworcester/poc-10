@@ -594,13 +594,13 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_messages() {
 }
 
 #[test]
-fn unreachable_peer_keeps_maintenance_candidate_and_survives_replay() {
+fn unreachable_peer_keeps_pending_bootstrap_and_survives_replay() {
     let _guard = invite_accept_test_guard();
     let tmp = tempfile::tempdir().unwrap();
     let host = temp_db(&tmp, "host.db");
     let joiner = temp_db(&tmp, "joiner.db");
     // The invite points at a port nobody listens on, so the bootstrap can never
-    // complete and the joiner's connection-maintenance candidate persists.
+    // complete and the joiner's pending bootstrap request persists.
     let dead_port = free_port();
     let joiner_port = free_port();
 
@@ -617,12 +617,12 @@ fn unreachable_peer_keeps_maintenance_candidate_and_survives_replay() {
     assert_success(topo(&["--db", &joiner, "stop"]));
     drop(joiner_daemon);
 
-    // A pending candidate exists; no connection is active.
+    // A pending bootstrap exists; no connection is active.
     let status = assert_success(topo(&["--db", &joiner, "connection-maintenance-status"]));
     assert_eq!(line_value(&status, "candidates"), "1", "{status}");
     assert_eq!(line_value(&status, "active_connections"), "0", "{status}");
 
-    // Replay rebuilds the candidate index from the retained request fact, with no
+    // Replay rebuilds the pending bootstrap query from the retained request fact, with no
     // network rows, and reaches the same state digest.
     let before = line_value(
         &assert_success(topo(&["--db", &joiner, "state-summary"])),
@@ -634,13 +634,20 @@ fn unreachable_peer_keeps_maintenance_candidate_and_survives_replay() {
         &assert_success(topo(&["--db", &joiner, "state-summary"])),
         "state_hash",
     );
-    assert_eq!(before, after, "candidate index must rebuild identically");
+    assert_eq!(
+        before, after,
+        "pending bootstrap state must rebuild identically"
+    );
 
-    // The candidate is still registered after replay.
+    // The pending bootstrap is still visible after replay.
     let status_after = assert_success(topo(&["--db", &joiner, "connection-maintenance-status"]));
-    assert_eq!(line_value(&status_after, "candidates"), "1", "{status_after}");
+    assert_eq!(
+        line_value(&status_after, "candidates"),
+        "1",
+        "{status_after}"
+    );
 
-    // recurring-run drives one maintenance tick from the candidate index and
+    // recurring-run drives one maintenance tick from pending bootstrap rows and
     // queues a bootstrap send behind the network barrier.
     let run = assert_success(topo(&[
         "--db",

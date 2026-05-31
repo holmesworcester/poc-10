@@ -100,7 +100,8 @@ fn recurring_intents_come_from_static_registry_without_persisted_rows() {
     for line in summary.lines() {
         let lowered = line.to_lowercase();
         assert!(
-            !(lowered.starts_with("area_") && (lowered.contains("recurring_job") || lowered.contains("schedule"))),
+            !(lowered.starts_with("area_")
+                && (lowered.contains("recurring_job") || lowered.contains("schedule"))),
             "no persisted recurring schedule table should exist: {line}"
         );
     }

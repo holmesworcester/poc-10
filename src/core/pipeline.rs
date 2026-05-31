@@ -69,10 +69,11 @@ impl WorkStatus {
 
 pub(crate) use commit_effects::commit_pipeline_effects_to_store;
 pub(crate) use dispatch::{
-    dispatch_queued_intent, next_queued_intent, submit_intent_to_store,
-    submit_local_intent_to_store,
+    dispatch_queued_intent, dispatch_queued_intent_filtering_intents, next_queued_intent,
+    submit_intent_to_store, submit_local_intent_to_store,
 };
 pub(crate) use project_pending_facts::{
-    commit_projected_context_offers, drain_pending_projection, process_due_time_range,
-    purge_fact_from_store, submit_fact_to_store, submit_facts_to_store, ProjectionProgress,
+    commit_projected_context_offers, drain_pending_projection,
+    drain_pending_projection_filtering_intents, process_due_time_range, purge_fact_from_store,
+    submit_fact_to_store, submit_facts_to_store, ProjectionProgress,
 };

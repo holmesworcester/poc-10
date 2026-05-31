@@ -15,9 +15,8 @@ retained facts, and resume operational work without preserving queued intents.
 - Projectors are deterministic and replay-blind. Given the same facts and
   context, they emit the same rows, needs, offers, semantic time wakes, and
   intent requests.
-- Core owns replay mode. During replay, core may suppress or defer emitted
-  intents according to intent-registry metadata; projectors do not branch on
-  replay.
+- Core owns replay mode. During replay, core records only replay-allowed
+  intents and suppresses live-only intents; projectors do not branch on replay.
 - All durable wall-clock `TimeWake` behavior must be replayable. If a
   wall-clock action is operational and not replayable, it must be a recurring
   intent instead.
@@ -69,8 +68,9 @@ pub struct HandlerRoute {
 ```
 
 `runs_during_replay` answers one question: if this intent is emitted while
-replay is rebuilding facts and rows, may core dispatch it before the replay
-barrier finishes?
+replay is rebuilding facts and rows, may core queue and dispatch it before the
+replay barrier finishes? If the answer is no, replay suppresses the emitted
+intent instead of inserting an intent row.
 
 Replay-enabled handlers must be deterministic rebuild work. They may create
 facts or local rows from retained facts. They must not use network IO, fresh
@@ -84,7 +84,7 @@ Initial poc-10 policy:
 | `create_key_wrap` | Runs during replay; it deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
 | `unwrap_key_wrap` | Runs during replay if its handler only creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
 | `create_connection_response` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
-| connection candidate registration intents | Run during replay; they rebuild connection-maintenance-owned candidate rows from endpoint/auth facts. |
+| `maintain_connections` | Does not run during replay. The daemon installs it as a live recurring loop after replay. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
 
@@ -132,38 +132,23 @@ Connection retry should not be owned by historical `connection_request` facts.
 The operational goal is to keep the local endpoint connected to enough peers in
 a potentially large endpoint set.
 
-Add replay-allowed candidate-registration intents plus a live recurring
-`maintain_connections` intent.
+Add a live recurring `maintain_connections` intent. It owns the operational
+bootstrap retry loop, but it does not own durable protocol truth.
 
-Endpoint/auth projectors decide which endpoints are valid connection
-candidates. They should not run the maintenance loop directly. Instead they
-emit replay-allowed registration work such as
-`register_connection_candidate` and, when needed,
-`unregister_connection_candidate`. Those handlers own the
-connection-maintenance candidate index.
+In the current poc-10 shape, `maintain_connections` derives pending bootstrap
+work from connection-owned read models: local `connection_request` rows with a
+`bootstrap_addr` and no matching `connection_response` row. It does not scan
+auth-owned endpoint tables, and it does not require a separate persisted
+candidate table. Future target-count/backoff work can add
+connection-maintenance-owned rows, but replay must still rebuild those rows
+from retained connection facts before the live recurring loop starts.
 
-`maintain_connections` must not discover peers by broad-querying auth or
-endpoint-owned tables. It reads only connection-maintenance-owned state:
-candidate rows, active connection rows, active attempt rows or facts, recent
-failure/backoff rows, and target connection policy. It then chooses peers
-needed to maintain the target connection count, creates connection attempts and
-request facts, closes excess or stale attempts through protocol-owned
-close/abandon facts or rows, and records backoff or failure state in
-connection-maintenance-owned storage.
-
-Replay rebuilds the candidate table by replaying endpoint/auth facts and
-dispatching replay-allowed candidate-registration intents. The recurring
-`maintain_connections` intent is live-only and starts after replay, once the
-candidate index has been rebuilt.
-
-Bootstrap connection attempts are covered by this maintenance loop. A
-successful candidate registration makes an endpoint eligible. A later live
-`maintain_connections` tick chooses that endpoint, creates the local attempt
-and request facts, and queues the local bootstrap send attempt. If that send is
-dropped or fails, the next live maintenance tick re-evaluates the
-connection-maintenance index and retries according to connection-owned target
-count and backoff state. There is no separate durable
-`connection_peer_retry` loop.
+Replay rebuilds request and response rows by replaying retained connection
+facts. The recurring `maintain_connections` intent is live-only and starts
+after replay. A later live tick queries the pending bootstrap set and queues
+local bootstrap sends. If a send is dropped or fails, the next live tick
+re-evaluates the same connection-owned state and retries. There is no separate
+durable `connection_peer_retry` loop.
 
 Connection request projection should validate and materialize request history.
 It should not own an operational retry loop and should not emit
@@ -205,11 +190,10 @@ an actual upgrade:
   facts, admits replayable semantic time wakes, drains replay-allowed work to
   fixpoint, and prints counters for dropped intents, projected facts, context
   match wakeups, semantic time wakes, replay-allowed intents, emitted facts,
-  purged facts, row mutations, and blocked network/live-only work.
+  purged facts, row mutations, suppressed live-only work, and network rows.
 - `state-summary`: print a stable hashable summary of replay-relevant state:
-  retained facts, materialized rows, context edges, semantic time wakes,
-  replay-allowed queues, sync indexes, local key-material rows,
-  connection-maintenance rows, and side-effect counters. The output should
+  retained facts, materialized rows, context edges, semantic time wakes, sync
+  indexes, local key-material rows, and connection rows. The output should
   include one overall `state_hash` plus per-area hashes and counts, computed
   from canonical row serialization with deterministic ordering. It must exclude
   volatile scheduler state, socket state, temp network queues, and wall-clock
@@ -222,21 +206,19 @@ an actual upgrade:
   the per-area hash/count differences for any table or owned-state area whose
   replay-derived rows diverge.
 - `intent-registry`: list every handler route with `runs_during_replay`,
-  recurrence metadata, command exclusion, and whether the route can perform
-  network IO.
+  recurrence metadata, and command exclusion.
 - `recurring-intents`: list recurring intent specs from the handler registry.
   The output should come from static registry metadata, not persisted job rows.
 - `recurring-run KIND --now MS`: test one recurring intent kind without
   starting the daemon. It builds the registered recurring intent for the given
   time and runs the normal handler path once, with network send handlers still
   excluded unless the test explicitly opts in.
-- `connection-maintenance-status`: print connection-maintenance-owned state:
-  candidate rows, active attempts, active connections, backoff rows, target
-  count, and pending local bootstrap sends. It must not read auth-owned tables
-  directly.
+- `connection-maintenance-status`: print connection-owned maintenance state:
+  pending bootstrap requests, answered requests, active connection rows, and
+  pending local bootstrap sends. It must not read auth-owned tables directly.
 
-These commands should make side effects visible. A replay command that causes
-network rows, live-only local intents, recurring scheduler fires, or
+These commands should make side effects visible. A replay command that leaves
+queued intents, causes network rows, fires recurring schedules, or runs
 maintenance attempts before the replay barrier should report an error.
 
 ## Test Plan
@@ -261,17 +243,18 @@ maintenance attempts before the replay barrier should report an error.
   `maintain_connections` schedule in memory, and no persisted job row exists.
 - Connection test: replay no longer recreates bootstrap retries from old
   `connection_request` history alone.
-- Bootstrap test: replay rebuilds the connection candidate index but creates no
+- Bootstrap test: replay rebuilds request/response rows but creates no
   bootstrap send before recurring maintenance runs.
 - Bootstrap test: `recurring-run maintain_connections --now MS` creates or
-  retries bootstrap attempts from connection-maintenance-owned candidate rows,
-  not by scanning auth-owned endpoint tables.
+  retries bootstrap attempts from connection-owned pending request rows, not by
+  scanning auth-owned endpoint tables.
 - Recurring-intent test: `recurring-intents` and `intent-registry` show
   `maintain_connections` as live-only recurring work and show no persisted
   recurring job rows.
 - Replay CLI test: `replay-check` reports the same state summary digest for
   canonical replay, idempotent replay, reverse projection order, and scrambled
-  replay order, with zero network/live-only side effects during every pass.
+  replay order, with zero queued intents and zero network side effects during
+  every pass.
 - Replay order test: `replay --reverse` and `replay --scramble --seed N`
   produce the same state summary as canonical replay while exercising different
   projection order and replay-allowed work interleavings.

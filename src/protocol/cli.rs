@@ -744,9 +744,8 @@ pub(crate) fn connection_maintenance_status(
 ) -> Result<CliOutput, String> {
     args.require_len(0, CONNECTION_MAINTENANCE_STATUS_USAGE)?;
     ctx.settle_local_command_work()?;
-    let status = crate::protocol::connection::request::connection_maintenance_status(
-        ctx.runtime().store(),
-    )?;
+    let status =
+        crate::protocol::connection::request::connection_maintenance_status(ctx.runtime().store())?;
     let mut lines = vec![
         format!("candidates: {}", status.pending.len()),
         format!("active_connections: {}", status.active_connections),
@@ -870,12 +869,8 @@ fn parse_replay_order(args: CliArgs<'_>) -> Result<ReplayOrder, String> {
     match args.values() {
         [] => Ok(ReplayOrder::Canonical),
         [flag] if flag == "--reverse" => Ok(ReplayOrder::Reverse),
-        [scramble, seed_flag, seed]
-            if scramble == "--scramble" && seed_flag == "--seed" =>
-        {
-            let seed = seed
-                .parse::<u64>()
-                .map_err(|_| REPLAY_USAGE.to_string())?;
+        [scramble, seed_flag, seed] if scramble == "--scramble" && seed_flag == "--seed" => {
+            let seed = seed.parse::<u64>().map_err(|_| REPLAY_USAGE.to_string())?;
             Ok(ReplayOrder::Scramble { seed })
         }
         _ => Err(REPLAY_USAGE.to_string()),
@@ -893,7 +888,10 @@ fn replay_order_label(order: ReplayOrder) -> String {
 fn replay_report_output(order: ReplayOrder, report: &ReplayReport) -> CliOutput {
     CliOutput::lines(vec![
         format!("order: {}", replay_order_label(order)),
-        format!("dropped_durable_intents: {}", report.dropped_durable_intents),
+        format!(
+            "dropped_durable_intents: {}",
+            report.dropped_durable_intents
+        ),
         format!("dropped_local_intents: {}", report.dropped_local_intents),
         format!("wiped_tables: {}", report.wiped_tables),
         format!("retained_facts: {}", report.retained_facts),
@@ -905,7 +903,10 @@ fn replay_report_output(order: ReplayOrder, report: &ReplayReport) -> CliOutput 
         format!("replay_allowed_intents: {}", report.replay_allowed_intents),
         format!("context_edges: {}", report.context_edges),
         format!("row_mutations: {}", report.row_mutations),
-        format!("blocked_live_only_work: {}", report.blocked_live_only_work),
+        format!(
+            "suppressed_live_only_work: {}",
+            report.suppressed_live_only_work
+        ),
         format!("network_rows: {}", report.network_rows),
     ])
 }

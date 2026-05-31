@@ -35,7 +35,10 @@ fn seed_workspace_with_content(db: &str) -> String {
 }
 
 fn state_hash(db: &str) -> String {
-    line_value(&assert_success(topo(&["--db", db, "state-summary"])), "state_hash")
+    line_value(
+        &assert_success(topo(&["--db", db, "state-summary"])),
+        "state_hash",
+    )
 }
 
 #[test]
@@ -58,12 +61,15 @@ fn replay_is_idempotent_and_rebuilds_derived_state() {
         "replay must not produce network rows before the barrier"
     );
     assert_eq!(
-        line_value(&replay, "blocked_live_only_work"),
+        line_value(&replay, "suppressed_live_only_work"),
         "0",
-        "this offline scenario should not leave live-only work queued"
+        "this offline scenario should not emit live-only replay work"
     );
     assert!(
-        line_value(&replay, "retained_facts").parse::<u64>().unwrap() > 0,
+        line_value(&replay, "retained_facts")
+            .parse::<u64>()
+            .unwrap()
+            > 0,
         "replay should reproject retained facts"
     );
     assert!(
@@ -152,7 +158,11 @@ fn replay_check_reports_identical_digest_across_orders() {
     // replay-check works on scratch copies and must not mutate the live db.
     let live_before = state_hash(&db);
     assert_success(topo(&["--db", &db, "replay-check"]));
-    assert_eq!(state_hash(&db), live_before, "replay-check must not mutate the live database");
+    assert_eq!(
+        state_hash(&db),
+        live_before,
+        "replay-check must not mutate the live database"
+    );
 }
 
 fn area_line(summary: &str, area: &str) -> String {
@@ -170,7 +180,13 @@ fn replay_recreates_key_material_idempotently() {
     let workspace_id = create_workspace(&db, "Keys", "alice", "laptop");
     assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
     assert_success(topo(&["--db", &db, "key-recipient", &workspace_id]));
-    assert_success(topo(&["--db", &db, "send", &workspace_id, "secret message"]));
+    assert_success(topo(&[
+        "--db",
+        &db,
+        "send",
+        &workspace_id,
+        "secret message",
+    ]));
     assert_success(topo(&["--db", &db, "key-derive", "64"]));
 
     let summary_before = assert_success(topo(&["--db", &db, "state-summary"]));
@@ -227,14 +243,18 @@ fn state_summary_is_stable_and_exposes_per_area_digests() {
         "state summary exposes the retained facts area: {first}"
     );
     assert!(
-        first.lines().any(|line| line.starts_with("area_content_messages:")),
+        first
+            .lines()
+            .any(|line| line.starts_with("area_content_messages:")),
         "state summary exposes the materialized message rows area: {first}"
     );
     // Volatile scheduler/socket state is excluded from the digest areas.
     assert!(
-        !first.lines().any(|line| line.starts_with("area_network_out:")
-            || line.starts_with("area_intents:")
-            || line.starts_with("area_pending_projection:")),
+        !first
+            .lines()
+            .any(|line| line.starts_with("area_network_out:")
+                || line.starts_with("area_intents:")
+                || line.starts_with("area_pending_projection:")),
         "state summary must exclude volatile scheduler and socket state: {first}"
     );
 }
