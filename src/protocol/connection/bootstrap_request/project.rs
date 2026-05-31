@@ -32,7 +32,7 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::auth::{endpoint, invite};
-use crate::protocol::connection::peer_address::rows::peer_address_row;
+use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
 use crate::protocol::connection::create_bootstrap_response::{
     create_bootstrap_response_intent, CreateBootstrapResponse,
 };
@@ -293,7 +293,7 @@ fn local_retrying_output(
     // insert-or-ignore, so reprojecting the same request is a no-op. A same-output
     // delete-then-put would *delete* the row (commit applies puts before deletes),
     // so the put stands alone.
-    output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+    output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
         request.to_endpoint,
         addr,
     )?));
@@ -339,7 +339,7 @@ fn received_materialized_output(
     // Learn the initiator's reachable listen address from the received request,
     // so we can later open a membership connection back to it without an invite.
     if let Some(addr) = request.from_listen_addr {
-        output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+        output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
             request.from_endpoint,
             addr,
         )?));
@@ -404,18 +404,18 @@ mod projector_tests {
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
     use topo::core::projectors::ProjectionOutput;
-    use topo::protocol::connection::peer_address::rows::{
-        peer_address_key, CONNECTION_PEER_ADDRESS_ROWS,
+    use topo::protocol::connection::observed_endpoint_address::rows::{
+        observed_endpoint_address_key, CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
     };
 
     /// Whether the projection learned a reachable address for `endpoint`.
-    fn learns_peer_address(output: &ProjectionOutput, endpoint: [u8; 32]) -> bool {
+    fn learns_observed_endpoint_address(output: &ProjectionOutput, endpoint: [u8; 32]) -> bool {
         output.effects.row_mutations.iter().any(|mutation| {
             matches!(
                 mutation,
                 RowMutation::PutRow(row)
-                    if row.table == CONNECTION_PEER_ADDRESS_ROWS
-                        && row.key == peer_address_key(&endpoint)
+                    if row.table == CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS
+                        && row.key == observed_endpoint_address_key(&endpoint)
             )
         })
     }
@@ -714,7 +714,7 @@ mod projector_tests {
             .any(|need| need.role == "connection_response_for_request"));
         // request row + learned-address put for the peer's listen addr.
         assert_eq!(output.effects.row_mutations.len(), 2);
-        assert!(learns_peer_address(&output, request.to_endpoint));
+        assert!(learns_observed_endpoint_address(&output, request.to_endpoint));
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
@@ -832,7 +832,7 @@ mod projector_tests {
         assert!(output.time_wakes.is_empty());
         // request row + learned-address put for the initiator's addr.
         assert_eq!(output.effects.row_mutations.len(), 2);
-        assert!(learns_peer_address(&output, request.from_endpoint));
+        assert!(learns_observed_endpoint_address(&output, request.from_endpoint));
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let response_intent = output
             .effects

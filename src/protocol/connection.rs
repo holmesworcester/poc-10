@@ -30,7 +30,7 @@ pub mod frame_bundle;
 pub mod frame_file_slice;
 pub mod frame_observation;
 pub mod frame_small;
-pub mod peer_address;
+pub mod observed_endpoint_address;
 pub mod receive_network_frame;
 
 // Intents: delayed handshake work. Projection emits these when a request has

@@ -38,7 +38,7 @@ use crate::protocol::connection::create_connection_response::{
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::peer_address::rows::peer_address_row;
+use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
 use crate::protocol::connection::send_connection_request::{
     send_connection_request_intent, SendConnectionRequest,
 };
@@ -366,7 +366,7 @@ fn local_retrying_output(
     };
     // `PutRow` is insert-or-ignore; a same-output delete-then-put would delete
     // the row (commit applies puts before deletes), so the put stands alone.
-    output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+    output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
         request.to_endpoint,
         addr,
     )?));
@@ -408,7 +408,7 @@ fn received_materialized_output(
             },
         ));
     if let Some(addr) = request.from_listen_addr {
-        output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+        output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
             request.from_endpoint,
             addr,
         )?));

@@ -5,7 +5,7 @@
 //! without an invite? That is true exactly when we hold mutual `endpoint_shared`
 //! membership with the target in some workspace (we are both admitted members)
 //! and we have a learned reachable address for it. First contact is always
-//! bootstrap (the peer cannot validate us yet); after a bootstrap sync both
+//! bootstrap (the endpoint cannot validate us yet); after a bootstrap sync both
 //! sides hold mutual membership, so the next connect resolves to a membership
 //! connection that needs no invite material and survives invite-link expiry.
 //!
@@ -19,9 +19,9 @@ use crate::core::store::Store;
 
 use crate::protocol::auth::endpoint::create::local_endpoint;
 use crate::protocol::auth::endpoint_shared::queries::all_memberships;
-use crate::protocol::connection::peer_address::queries::peer_address;
+use crate::protocol::connection::observed_endpoint_address::queries::observed_endpoint_address;
 
-/// A membership connection we can open to a known peer without an invite.
+/// A membership connection we can open to a known endpoint without an invite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MembershipConnectionPlan {
     pub workspace_id: FactId,
@@ -61,7 +61,7 @@ pub fn choose_connection_mode(
         }) else {
             continue;
         };
-        let Some(addr) = peer_address(store, &target_endpoint)? else {
+        let Some(addr) = observed_endpoint_address(store, &target_endpoint)? else {
             continue;
         };
         return Ok(Some(MembershipConnectionPlan {

@@ -30,9 +30,9 @@ receive handler into the same canonical fact. Both `*_response` facts are "the
 connection" and write the same shared connection-row table keyed by connection
 id, so established frames and sync treat the two kinds identically.
 
-**Transition.** First contact is always bootstrap (the peer cannot validate us
+**Transition.** First contact is always bootstrap (the endpoint cannot validate us
 yet). Bootstrap sync propagates `endpoint_shared` membership both ways plus a
-learned peer address (`peer_address` rows, fed from received handshake listen
+learned endpoint address (`observed_endpoint_address` rows, fed from received handshake listen
 addresses). After that, `choose_connection_mode` resolves to a membership
 connection — mutual membership plus a learned address — so reconnects need no
 invite. `connect <endpoint>` uses that trigger; `accept <invite>` is always
@@ -160,7 +160,7 @@ or file slices into frame classes, seals each batch with the connection secret,
 and emits local `send_network_frame` intents.
 
 `send_network_frame` is the final outbound socket boundary. It loads the
-connection fact, resolves the peer address from the original request and local
+connection fact, resolves the endpoint address from the original request and local
 endpoint, validates frame size, stages the opaque bytes, and retries the intent
 on socket or route failure.
 

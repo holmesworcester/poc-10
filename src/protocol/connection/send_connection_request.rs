@@ -1,7 +1,7 @@
 //! Membership connection-request network-send intent.
 //!
 //! Before a membership connection exists, the only outbound network operation is
-//! sending a sealed `connection_request` fact to the peer's learned listen
+//! sending a sealed `connection_request` fact to the endpoint's learned listen
 //! address. The request projector emits this local intent after it has offered
 //! request context; the handler loads exactly that request fact plus its
 //! initiator ephemeral secret, seals the canonical bytes, and attempts one

@@ -1,6 +1,6 @@
 //! User-facing constructor for membership connection requests.
 //!
-//! `connect` to a known peer creates the local facts that start a membership
+//! `connect` to a known endpoint creates the local facts that start a membership
 //! handshake: an initiator ephemeral secret and a global connection request
 //! signed by the local endpoint signing key. There is no invite material; the
 //! request carries the initiator's `endpoint_shared` membership id as its
@@ -95,9 +95,9 @@ pub struct Connect {
     pub from_listen_addr: Option<SocketAddr>,
 }
 
-/// Build a membership connection request to a known peer, using the
+/// Build a membership connection request to a known endpoint, using the
 /// connection-mode trigger. Errors if no membership connection is available
-/// (the peer is unknown or has not synced our membership yet) — the caller
+/// (the endpoint is unknown or has not synced our membership yet) — the caller
 /// should accept an invite to bootstrap first.
 pub fn connect(
     ctx: &CommandContext<'_>,
