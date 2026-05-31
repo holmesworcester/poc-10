@@ -14,10 +14,10 @@ use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
-use topo::protocol::connection::request::fact::ConnectionRequestFact;
-use topo::protocol::connection::request::layout as connection_request_layout;
-use topo::protocol::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+use topo::protocol::connection::bootstrap_request::layout as connection_request_layout;
+use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
+use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
 use topo::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame, SendNetworkFrameHandler, SEND_NETWORK_FRAME,
 };
@@ -161,7 +161,7 @@ fn connection_with_return_route(
     return_addr: Option<std::net::SocketAddr>,
     local_endpoint: [u8; 32],
 ) -> (Fact, Fact) {
-    let request = ConnectionRequestFact {
+    let request = BootstrapRequestFact {
         from_endpoint: [10; 32],
         to_endpoint: local_endpoint,
         nonce: [12; 32],
@@ -179,7 +179,7 @@ fn connection_with_return_route(
         1,
         connection_request_layout::encode_fact(&request).expect("request"),
     );
-    let connection = ConnectionResponseFact {
+    let connection = BootstrapResponseFact {
         from_endpoint: request.to_endpoint,
         to_endpoint: request.from_endpoint,
         request_id: request_fact.id,

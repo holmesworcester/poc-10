@@ -15,7 +15,7 @@ use crate::core::facts::FactId;
 pub type EndpointId = [u8; 32];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConnectionResponseFact {
+pub struct BootstrapResponseFact {
     pub from_endpoint: EndpointId,
     pub to_endpoint: EndpointId,
     pub request_id: FactId,

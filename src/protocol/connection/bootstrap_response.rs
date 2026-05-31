@@ -18,14 +18,14 @@ pub mod project;
 pub mod rows;
 pub mod transit;
 
-pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionResponseFact, String> {
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::BootstrapResponseFact, String> {
     layout::decode_fact(bytes)
 }
 
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = fact::ConnectionResponseFact;
+    type Payload = fact::BootstrapResponseFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         decode_fact_payload(fact.body())

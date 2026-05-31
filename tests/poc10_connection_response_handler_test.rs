@@ -19,22 +19,74 @@ use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::invite::layout as invite_layout;
-use topo::protocol::connection::response::transit as bootstrap_response;
-use topo::protocol::connection::create_connection_response::{
-    create_connection_response_intent, CreateConnectionResponse, CreateConnectionResponseHandler,
+use topo::protocol::connection::bootstrap_response::transit as bootstrap_response;
+use topo::protocol::connection::create_bootstrap_response::{
+    create_bootstrap_response_intent, CreateBootstrapResponse, CreateBootstrapResponseHandler,
 };
 use topo::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
+use topo::protocol::connection::send_bootstrap_response::{
+    send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
+    SendBootstrapConnectionResponseHandler,
+};
 use topo::protocol::connection::fact_receipt::fact::{
     ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST,
 };
 use topo::protocol::connection::fact_receipt::layout as received_layout;
-use topo::protocol::connection::request::fact::ConnectionRequestFact;
-use topo::protocol::connection::request::layout as request_layout;
-use topo::protocol::connection::response::layout as response_layout;
+use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+use topo::protocol::connection::bootstrap_request::layout as request_layout;
+use topo::protocol::connection::bootstrap_response::layout as response_layout;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
-fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
+fn create_handler_emits_responder_material_and_response_fact_without_sending() {
+    // Flat-intent rule: create_bootstrap_response only creates the responder
+    // ephemeral + response facts. It performs no send and chains no intent; the
+    // local response projector emits the send once the response fact is admitted.
+    let scenario = synthesize_scenario(SynthOpts {
+        request_return_addr: Some("127.0.0.1:41099".parse().expect("addr")),
+        ..SynthOpts::default()
+    });
+    let store = test_store();
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
+        .expect("seed local endpoint");
+    let handler = CreateBootstrapResponseHandler::new();
+    let context = HandlerContext::with_facts([
+        scenario.request_fact.clone(),
+        scenario.invite_fact.clone(),
+        scenario.receive_fact.clone(),
+    ])
+    .with_store(&store);
+
+    let output = handler
+        .handle(&scenario.intent, &context)
+        .expect("handler produces response fact");
+
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.intents.is_empty(), "create handler chains no intent");
+    assert!(output.local_intents.is_empty(), "create handler sends nothing");
+    let ephemeral_fact = responder_ephemeral_fact(&output);
+    let response_fact = response_fact(&output);
+    let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body()).expect("ephemeral");
+    let response = response_layout::decode_fact(response_fact.body()).expect("decode response");
+
+    assert_eq!(ephemeral.owner_endpoint, scenario.responder_endpoint);
+    assert_eq!(ephemeral.created_at_ms, scenario.received_at);
+    assert_ne!(ephemeral.ephemeral_private_key, [0u8; 32]);
+    assert_eq!(response.responder_ephemeral_secret_fact_id, ephemeral_fact.id);
+    assert_eq!(
+        response.responder_ephemeral_public_key,
+        ephemeral.ephemeral_public_key
+    );
+    assert_eq!(response.request_id, scenario.request_fact.id);
+    assert_eq!(response.from_endpoint, scenario.responder_endpoint);
+    assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
+    assert_ne!(response.handshake_hash, [0u8; 32]);
+    assert_ne!(response.connection_secret, [0u8; 32]);
+}
+
+#[test]
+fn send_bootstrap_response_handler_seals_committed_response_to_initiator() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
     let return_addr = listener.local_addr().expect("listener addr");
     let reader = thread::spawn(move || {
@@ -53,52 +105,37 @@ fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
         .expect("seed local endpoint");
-    let handler = CreateConnectionResponseHandler::new();
-    let context = HandlerContext::with_facts([
-        scenario.request_fact.clone(),
-        scenario.invite_fact.clone(),
-        scenario.receive_fact.clone(),
-    ])
-    .with_store(&store);
 
-    let output = handler
-        .handle(&scenario.intent, &context)
-        .expect("handler produces response fact");
-
-    assert_eq!(output.facts.len(), 2);
-    let ephemeral_fact = output
-        .facts
-        .iter()
-        .find(|fact| {
-            fact.body().first().copied() == Some(ephemeral_layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
-        })
-        .expect("responder ephemeral fact");
-    let response_fact = output
-        .facts
-        .iter()
-        .find(|fact| {
-            fact.body().first().copied() == Some(response_layout::TYPE_CONNECTION_RESPONSE)
-        })
-        .expect("connection response fact");
-    let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body()).expect("ephemeral");
+    // Stage one: create the durable responder ephemeral + response facts.
+    let create_output = CreateBootstrapResponseHandler::new()
+        .handle(
+            &scenario.intent,
+            &HandlerContext::with_facts([
+                scenario.request_fact.clone(),
+                scenario.invite_fact.clone(),
+                scenario.receive_fact.clone(),
+            ])
+            .with_store(&store),
+        )
+        .expect("create response facts");
+    let ephemeral_fact = responder_ephemeral_fact(&create_output).clone();
+    let response_fact = response_fact(&create_output).clone();
     let response = response_layout::decode_fact(response_fact.body()).expect("decode response");
 
-    assert_eq!(ephemeral.owner_endpoint, scenario.responder_endpoint);
-    assert_eq!(ephemeral.created_at_ms, scenario.received_at);
-    assert_ne!(ephemeral.ephemeral_private_key, [0u8; 32]);
-    assert_eq!(
-        response.responder_ephemeral_secret_fact_id,
-        ephemeral_fact.id
-    );
-    assert_eq!(
-        response.responder_ephemeral_public_key,
-        ephemeral.ephemeral_public_key
-    );
-    assert_eq!(response.request_id, scenario.request_fact.id);
-    assert_eq!(response.from_endpoint, scenario.responder_endpoint);
-    assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
-    assert_ne!(response.handshake_hash, [0u8; 32]);
-    assert_ne!(response.connection_secret, [0u8; 32]);
+    // Stage two: the projector-emitted send intent seals the committed response.
+    let send_intent = send_bootstrap_connection_response_intent(SendBootstrapConnectionResponse {
+        response_id: response_fact.id,
+        responder_ephemeral_secret_id: ephemeral_fact.id,
+        addr: return_addr,
+    })
+    .expect("send intent");
+    SendBootstrapConnectionResponseHandler::new()
+        .handle(
+            &send_intent,
+            &HandlerContext::with_facts([response_fact.clone(), ephemeral_fact]).with_store(&store),
+        )
+        .expect("send sealed response");
+
     let sent = reader.join().expect("reader");
     assert_eq!(sent[0], bootstrap_response::TYPE_SEALED_CONNECTION_RESPONSE);
     assert_ne!(sent, response_fact.bytes);
@@ -118,6 +155,24 @@ fn handler_emits_responder_material_response_fact_and_sends_response_bytes() {
     );
 }
 
+fn responder_ephemeral_fact(output: &topo::core::effects::PipelineEffects) -> &Fact {
+    output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied() == Some(ephemeral_layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
+        })
+        .expect("responder ephemeral fact")
+}
+
+fn response_fact(output: &topo::core::effects::PipelineEffects) -> &Fact {
+    output
+        .facts
+        .iter()
+        .find(|fact| fact.body().first().copied() == Some(response_layout::TYPE_BOOTSTRAP_RESPONSE))
+        .expect("connection response fact")
+}
+
 #[test]
 fn handler_rejects_request_addressed_to_a_different_endpoint() {
     let scenario = synthesize_scenario(SynthOpts {
@@ -128,7 +183,7 @@ fn handler_rejects_request_addressed_to_a_different_endpoint() {
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&scenario.endpoint))
         .expect("seed local endpoint");
-    let handler = CreateConnectionResponseHandler::new();
+    let handler = CreateBootstrapResponseHandler::new();
     let context = HandlerContext::with_facts([
         scenario.request_fact.clone(),
         scenario.invite_fact.clone(),
@@ -190,7 +245,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         signing_secret,
     };
 
-    let mut request = ConnectionRequestFact {
+    let mut request = BootstrapRequestFact {
         from_endpoint: initiator_endpoint,
         to_endpoint: opts.request_to_endpoint.unwrap_or(responder_endpoint),
         nonce: [77u8; 32],
@@ -205,7 +260,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
     };
     request.invite_signature = crypto::ed25519_sign(
         &invite.bootstrap_secret,
-        &topo::protocol::connection::request::create::invite_signing_transcript(&request)
+        &topo::protocol::connection::bootstrap_request::create::invite_signing_transcript(&request)
             .expect("transcript"),
     );
     let request_fact = Fact::new(
@@ -235,7 +290,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         received_layout::encode_fact(&received).expect("encode receive"),
     );
 
-    let intent = create_connection_response_intent(CreateConnectionResponse {
+    let intent = create_bootstrap_response_intent(CreateBootstrapResponse {
         request_id: request_fact.id,
         invite_secret_id: invite_fact.id,
         receive_id: receive_fact.id,

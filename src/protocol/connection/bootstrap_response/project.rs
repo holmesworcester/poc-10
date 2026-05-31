@@ -30,24 +30,27 @@ use crate::core::projectors::{
 
 use crate::protocol::auth::invite;
 use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
-use crate::protocol::connection::request;
+use crate::protocol::connection::bootstrap_request as request;
+use crate::protocol::connection::send_bootstrap_response::{
+    send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
+};
 use crate::protocol::connection::{close, ephemeral_secret};
 use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
 
 use super::create;
-use super::fact::ConnectionResponseFact;
-use super::rows::{connection_response_key, connection_response_row, CONNECTION_RESPONSE_ROWS};
+use super::fact::BootstrapResponseFact;
+use super::rows::{bootstrap_response_key, bootstrap_response_row, BOOTSTRAP_RESPONSE_ROWS};
 
 #[derive(Debug, Clone, Default)]
-pub struct ConnectionResponseProjector;
+pub struct BootstrapResponseProjector;
 
-impl ConnectionResponseProjector {
+impl BootstrapResponseProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for ConnectionResponseProjector {
+impl Projector for BootstrapResponseProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -57,11 +60,11 @@ impl Projector for ConnectionResponseProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionResponseProjector {
+impl TypedProjector<super::Codec> for BootstrapResponseProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        response: ConnectionResponseFact,
+        response: BootstrapResponseFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -260,8 +263,22 @@ impl TypedProjector<super::Codec> for ConnectionResponseProjector {
                     .to_string(),
             );
         }
-        // 3. Materialize local response.
-        materialized_output(fact, &response, SeedSync::None)
+        // 3. Materialize the local response and queue its send. Flat-intent rule:
+        // create_bootstrap_response only creates the responder ephemeral and
+        // response facts; this projector emits the send once the local response
+        // fact is admitted, mirroring how the local request projector emits its
+        // own send. The bytes are backed by the now-durable response fact.
+        let mut output = materialized_output(fact, &response, SeedSync::None)?;
+        if let Some(addr) = request.from_listen_addr {
+            output = output.intent(send_bootstrap_connection_response_intent(
+                SendBootstrapConnectionResponse {
+                    response_id: fact.id,
+                    responder_ephemeral_secret_id: response.responder_ephemeral_secret_fact_id,
+                    addr,
+                },
+            )?);
+        }
+        Ok(output)
     }
 }
 
@@ -271,7 +288,7 @@ enum SeedSync {
     Immediate,
 }
 
-fn validate_response_fields(response: &ConnectionResponseFact) -> Result<(), String> {
+fn validate_response_fields(response: &BootstrapResponseFact) -> Result<(), String> {
     if response.from_endpoint == [0; 32] {
         return Err("connection response from_endpoint cannot be empty".to_string());
     }
@@ -309,8 +326,8 @@ fn validate_response_fields(response: &ConnectionResponseFact) -> Result<(), Str
 }
 
 fn validate_request_response(
-    response: &ConnectionResponseFact,
-    request: &crate::protocol::connection::request::fact::ConnectionRequestFact,
+    response: &BootstrapResponseFact,
+    request: &crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact,
 ) -> Result<(), String> {
     if request.from_endpoint != response.to_endpoint {
         return Err("connection response references another endpoint's request".to_string());
@@ -329,7 +346,7 @@ fn validate_request_response(
 
 fn validate_fact_receipt(
     response_id: [u8; 32],
-    response: &ConnectionResponseFact,
+    response: &BootstrapResponseFact,
     received: &crate::protocol::connection::fact_receipt::fact::ConnectionFactReceipt,
 ) -> Result<(), String> {
     if received.received_fact_id != response_id {
@@ -357,7 +374,7 @@ fn validate_fact_receipt(
 
 fn materialized_output(
     fact: &Fact,
-    response: &ConnectionResponseFact,
+    response: &BootstrapResponseFact,
     seed_sync: SeedSync,
 ) -> Result<ProjectionOutput, String> {
     let response_id = fact.id;
@@ -374,7 +391,7 @@ fn materialized_output(
             response_id,
             response.request_id,
         ))
-        .row_mutation(RowMutation::PutRow(connection_response_row(
+        .row_mutation(RowMutation::PutRow(bootstrap_response_row(
             response_id,
             response,
         )?));
@@ -389,8 +406,8 @@ fn materialized_output(
 fn closed_output(response_id: [u8; 32]) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
         .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: CONNECTION_RESPONSE_ROWS,
-            key: connection_response_key(&response_id),
+            table: BOOTSTRAP_RESPONSE_ROWS,
+            key: bootstrap_response_key(&response_id),
         }))
         .purge_self(response_id))
 }
@@ -422,11 +439,11 @@ mod projector_tests {
         fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_RESPONSE},
         layout as received_layout,
     };
-    use topo::protocol::connection::request::create::encode_optional_addr;
-    use topo::protocol::connection::request::{
-        fact::ConnectionRequestFact, layout as request_layout,
+    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
+    use topo::protocol::connection::bootstrap_request::{
+        fact::BootstrapRequestFact, layout as request_layout,
     };
-    use topo::protocol::connection::response::{create, layout, project, rows};
+    use topo::protocol::connection::bootstrap_response::{create, layout, project, rows};
     use topo::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 
     struct Scenario {
@@ -451,7 +468,7 @@ mod projector_tests {
             ephemeral_fact(initiator_endpoint, [33; 32], 11);
         let (responder_ephemeral, responder_ephemeral_fact) =
             ephemeral_fact(responder_endpoint, [44; 32], 12);
-        let mut request = ConnectionRequestFact {
+        let mut request = BootstrapRequestFact {
             from_endpoint: initiator_endpoint,
             to_endpoint: responder_endpoint,
             nonce: [77; 32],
@@ -581,7 +598,7 @@ mod projector_tests {
         owner: [u8; 32],
         response_id: [u8; 32],
         request_id: [u8; 32],
-        response: &topo::protocol::connection::response::fact::ConnectionResponseFact,
+        response: &topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact,
     ) -> MatchedContext {
         let received = ConnectionFactReceipt {
             received_fact_id: response_id,
@@ -629,7 +646,7 @@ mod projector_tests {
             ephemeral_match(scenario.response_fact.id, scenario.responder_ephemeral_fact),
         ]);
 
-        let output = project::ConnectionResponseProjector::new()
+        let output = project::BootstrapResponseProjector::new()
             .project(&scenario.response_fact, &context)
             .expect("project waits");
 
@@ -652,7 +669,7 @@ mod projector_tests {
             ),
         ]);
 
-        let output = project::ConnectionResponseProjector::new()
+        let output = project::BootstrapResponseProjector::new()
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
@@ -663,7 +680,7 @@ mod projector_tests {
             panic!("expected put row mutation");
         };
         let response = layout::decode_fact(&scenario.response_fact.bytes).expect("decode response");
-        let row = rows::decode_connection_response_row(&row.key, &row.value)
+        let row = rows::decode_bootstrap_response_row(&row.key, &row.value)
             .expect("decode connection response row");
         assert_eq!(row.connection_id, scenario.response_fact.id);
         assert_eq!(row.from_endpoint, response.from_endpoint);
@@ -695,7 +712,7 @@ mod projector_tests {
             ),
         ]);
 
-        let output = project::ConnectionResponseProjector::new()
+        let output = project::BootstrapResponseProjector::new()
             .project(&scenario.response_fact, &context)
             .expect("project response");
 
@@ -722,7 +739,7 @@ mod projector_tests {
             ),
         ]);
 
-        let output = project::ConnectionResponseProjector::new()
+        let output = project::BootstrapResponseProjector::new()
             .project(&scenario.response_fact, &context)
             .expect("project received response");
 
@@ -736,7 +753,7 @@ mod projector_tests {
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
         };
-        let row = rows::decode_connection_response_row(&row.key, &row.value)
+        let row = rows::decode_bootstrap_response_row(&row.key, &row.value)
             .expect("decode connection response row");
         assert_eq!(row.connection_id, scenario.response_fact.id);
         assert_eq!(row.to_endpoint, response.to_endpoint);
@@ -757,7 +774,7 @@ mod projector_tests {
             0,
             layout::encode_fact(&response).expect("encode response"),
         );
-        let err = project::ConnectionResponseProjector::new()
+        let err = project::BootstrapResponseProjector::new()
             .project(&fact, &ProjectionContext::new(Vec::new()))
             .expect_err("self-loop endpoints must fail projection");
         assert!(err.contains("endpoints"), "{err}");
@@ -766,7 +783,7 @@ mod projector_tests {
     #[test]
     fn connection_response_projector_rejects_malformed_bytes() {
         let fact = Fact::new(FactScope::Local, 0, vec![0; 4]);
-        let err = project::ConnectionResponseProjector::new()
+        let err = project::BootstrapResponseProjector::new()
             .project(&fact, &ProjectionContext::new(Vec::new()))
             .expect_err("malformed bytes must fail projection");
         assert!(
@@ -775,7 +792,7 @@ mod projector_tests {
         );
     }
 
-    fn invite_signing_transcript(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
+    fn invite_signing_transcript(request: &BootstrapRequestFact) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
         out.extend_from_slice(b"topo-connection-request-invite-signing-transcript-v1");
         out.extend_from_slice(&request.from_endpoint);

@@ -278,8 +278,8 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS connection_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS bootstrap_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS bootstrap_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_server_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS user_invite_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -331,8 +331,8 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
-        connection::request::rows::CONNECTION_REQUEST_ROWS,
-        connection::response::rows::CONNECTION_RESPONSE_ROWS,
+        connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
+        connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
         auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
         auth::invite_server::rows::INVITE_SERVER_ROWS,
         auth::user_invite::rows::USER_INVITE_ROWS,
@@ -511,6 +511,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_bootstrap_connection_request",
+    "send_bootstrap_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -522,8 +523,8 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
-    connection::request::rows::CONNECTION_REQUEST_ROWS,
-    connection::response::rows::CONNECTION_RESPONSE_ROWS,
+    connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
+    connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
     read_models::FILE_ROWS,
     read_models::FILE_DELETION_ROWS,
     read_models::FILE_SLICE_ROWS,
@@ -594,8 +595,8 @@ projector_routes! {
     project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
     project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
-    project_connection_request => connection::request::layout::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector;
-    project_connection_response => connection::response::layout::TYPE_CONNECTION_RESPONSE, connection::response::project::ConnectionResponseProjector;
+    project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector;
+    project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector;
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
@@ -651,9 +652,14 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler
     ),
     handler_route!(
-        "create_connection_response",
-        connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
-        connection::create_connection_response::CreateConnectionResponseHandler
+        "send_bootstrap_connection_response",
+        connection::send_bootstrap_response::SEND_BOOTSTRAP_CONNECTION_RESPONSE,
+        connection::send_bootstrap_response::SendBootstrapConnectionResponseHandler
+    ),
+    handler_route!(
+        "create_bootstrap_response",
+        connection::create_bootstrap_response::CREATE_BOOTSTRAP_RESPONSE,
+        connection::create_bootstrap_response::CreateBootstrapResponseHandler
     ),
     handler_route!(
         "send_sync_compare_response",

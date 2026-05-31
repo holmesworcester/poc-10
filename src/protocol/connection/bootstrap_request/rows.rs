@@ -11,13 +11,13 @@
 use crate::core::facts::FactId;
 use crate::core::store::{TableName, TableRow};
 
-use super::fact::{ConnectionRequestFact, EndpointId};
+use super::fact::{BootstrapRequestFact, EndpointId};
 
-pub const CONNECTION_REQUEST_ROWS: TableName = TableName::new("connection_request_rows");
+pub const BOOTSTRAP_REQUEST_ROWS: TableName = TableName::new("bootstrap_request_rows");
 pub const ROW_VALUE_BYTES: usize = 32 + 32 + 32 + 32 + 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConnectionRequestRow {
+pub struct BootstrapRequestRow {
     pub request_id: FactId,
     pub from_endpoint: EndpointId,
     pub to_endpoint: EndpointId,
@@ -26,13 +26,13 @@ pub struct ConnectionRequestRow {
     pub initiator_ephemeral_secret_fact_id: FactId,
 }
 
-pub fn connection_request_key(request_id: &FactId) -> Vec<u8> {
+pub fn bootstrap_request_key(request_id: &FactId) -> Vec<u8> {
     request_id.to_vec()
 }
 
-pub fn connection_request_row(
+pub fn bootstrap_request_row(
     request_id: FactId,
-    fact: &ConnectionRequestFact,
+    fact: &BootstrapRequestFact,
 ) -> Result<TableRow, String> {
     let mut value = vec![0; ROW_VALUE_BYTES];
     value[0..32].copy_from_slice(&fact.from_endpoint);
@@ -41,16 +41,16 @@ pub fn connection_request_row(
     value[96..128].copy_from_slice(&fact.invite_secret_fact_id);
     value[128..160].copy_from_slice(&fact.initiator_ephemeral_secret_fact_id);
     Ok(TableRow {
-        table: CONNECTION_REQUEST_ROWS,
-        key: connection_request_key(&request_id),
+        table: BOOTSTRAP_REQUEST_ROWS,
+        key: bootstrap_request_key(&request_id),
         value,
     })
 }
 
-pub fn decode_connection_request_row(
+pub fn decode_bootstrap_request_row(
     key: &[u8],
     value: &[u8],
-) -> Result<ConnectionRequestRow, String> {
+) -> Result<BootstrapRequestRow, String> {
     if key.len() != 32 {
         return Err("connection request row key must be the request fact id".to_string());
     }
@@ -69,7 +69,7 @@ pub fn decode_connection_request_row(
     invite_secret_fact_id.copy_from_slice(&value[96..128]);
     let mut initiator_ephemeral_secret_fact_id = [0; 32];
     initiator_ephemeral_secret_fact_id.copy_from_slice(&value[128..160]);
-    Ok(ConnectionRequestRow {
+    Ok(BootstrapRequestRow {
         request_id,
         from_endpoint,
         to_endpoint,

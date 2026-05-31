@@ -160,7 +160,7 @@ flowchart TD
     RECEIVE --> BOOT_REQ["bootstrap_request"]
     BOOT_REQ --> REQ["request"]
     BOOT_REQ --> REC1["fact_receipt for request"]
-    REQ --> CREATE_RESP["create_connection_response"]
+    REQ --> CREATE_RESP["create_bootstrap_response"]
     REC1 --> CREATE_RESP
     CREATE_RESP --> RESP_SECRET["responder ephemeral_secret"]
     CREATE_RESP --> RESP["response"]
@@ -208,7 +208,7 @@ have, need, send, and time-wake work when catch-up remains.
 %%{init: {"flowchart": {"wrappingWidth": 340}} }%%
 flowchart TD
     BOOT_RESP["bootstrap_response opens sealed bytes"] --> RESP_FACT["response fact"]
-    RESPONDER["create_connection_response handler"] --> RESP_FACT
+    RESPONDER["create_bootstrap_response handler"] --> RESP_FACT
     REQUEST_CTX["connection_request context"] --> RESP_PROJECTOR["response projector"]
     INVITE_CTX["connection_invite_secret context"] --> RESP_PROJECTOR
     RECEIPT_CTX["connection_fact_receipt context"] --> RESP_PROJECTOR

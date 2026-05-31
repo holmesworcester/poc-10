@@ -164,9 +164,10 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "connection",
             &[
-                "create_connection_response",
+                "create_bootstrap_response",
                 "receive_network_frame",
                 "send_bootstrap_request",
+                "send_bootstrap_response",
                 "send_facts_on_connection",
                 "send_network_frame",
             ],
@@ -1767,7 +1768,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
         // wire seal/open primitives live in the request/response `transit.rs`
         // and established-frame wire modules, not in handlers. Loading the local
         // endpoint to seal/unseal a first-contact handshake frame (the receive
-        // boundary, create_connection_response) is allowed, so this rule targets
+        // boundary, create_bootstrap_response) is allowed, so this rule targets
         // the crypto primitives rather than any auth dependency.
         for forbidden in [
             "canonical_events",

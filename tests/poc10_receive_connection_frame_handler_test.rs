@@ -20,8 +20,8 @@ use topo::core::store::Store;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection;
 use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
-use topo::protocol::connection::request::transit as request_transit;
-use topo::protocol::connection::response::transit as response_transit;
+use topo::protocol::connection::bootstrap_request::transit as request_transit;
+use topo::protocol::connection::bootstrap_response::transit as response_transit;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
@@ -36,10 +36,10 @@ use topo::protocol::connection::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
 };
-use topo::protocol::connection::request::fact::ConnectionRequestFact;
-use topo::protocol::connection::request::layout as connection_request_layout;
-use topo::protocol::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+use topo::protocol::connection::bootstrap_request::layout as connection_request_layout;
+use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
+use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
 use topo::protocol::connection_frame_wire::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
@@ -171,8 +171,8 @@ fn observed_connection_context(frame_fact: &Fact, connection_fact: Fact) -> Proj
     ])
 }
 
-fn connection_fact() -> (Fact, ConnectionResponseFact) {
-    let connection = ConnectionResponseFact {
+fn connection_fact() -> (Fact, BootstrapResponseFact) {
+    let connection = BootstrapResponseFact {
         from_endpoint: [10; 32],
         to_endpoint: [11; 32],
         request_id: [12; 32],
@@ -214,7 +214,7 @@ fn key_wrap_bytes() -> Vec<u8> {
     auth_layout::encode_key_wrap(&wrap).expect("key wrap")
 }
 
-fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionResponseFact, Vec<u8>) {
+fn encrypted_small_frame() -> (Vec<u8>, Fact, BootstrapResponseFact, Vec<u8>) {
     let (connection_fact, connection) = connection_fact();
     let signed_wrap = key_wrap_bytes();
     let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
@@ -315,7 +315,7 @@ fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
     );
     let endpoint = local_endpoint();
     let initiator_ephemeral_private = [59; 32];
-    let mut request = ConnectionRequestFact {
+    let mut request = BootstrapRequestFact {
         from_endpoint: crypto::x25519_public_key(&[55; 32]),
         to_endpoint: endpoint.endpoint,
         nonce: [56; 32],
@@ -330,7 +330,7 @@ fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
     };
     request.invite_signature = crypto::ed25519_sign(
         &invite.bootstrap_secret,
-        &topo::protocol::connection::request::create::invite_signing_transcript(&request)
+        &topo::protocol::connection::bootstrap_request::create::invite_signing_transcript(&request)
             .expect("request transcript"),
     );
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
@@ -371,7 +371,7 @@ fn receive_handler_without_local_endpoint_retries_sealed_request() {
     let endpoint = local_endpoint();
     let initiator_ephemeral_private = [59; 32];
     let invite = InviteSecretFact::new([33; 32]);
-    let mut request = ConnectionRequestFact {
+    let mut request = BootstrapRequestFact {
         from_endpoint: crypto::x25519_public_key(&[55; 32]),
         to_endpoint: endpoint.endpoint,
         nonce: [56; 32],
@@ -386,7 +386,7 @@ fn receive_handler_without_local_endpoint_retries_sealed_request() {
     };
     request.invite_signature = crypto::ed25519_sign(
         &invite.bootstrap_secret,
-        &topo::protocol::connection::request::create::invite_signing_transcript(&request)
+        &topo::protocol::connection::bootstrap_request::create::invite_signing_transcript(&request)
             .expect("request transcript"),
     );
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
@@ -411,7 +411,7 @@ fn receive_handler_without_local_endpoint_retries_sealed_request() {
 #[test]
 fn raw_bootstrap_request_bytes_are_discarded_at_the_network_boundary() {
     let endpoint = local_endpoint();
-    let request = ConnectionRequestFact {
+    let request = BootstrapRequestFact {
         from_endpoint: crypto::x25519_public_key(&[55; 32]),
         to_endpoint: endpoint.endpoint,
         nonce: [56; 32],
@@ -437,7 +437,7 @@ fn raw_bootstrap_request_bytes_are_discarded_at_the_network_boundary() {
 #[test]
 fn raw_bootstrap_response_bytes_are_discarded_at_the_network_boundary() {
     let endpoint = local_endpoint();
-    let response = ConnectionResponseFact {
+    let response = BootstrapResponseFact {
         from_endpoint: crypto::x25519_public_key(&[63; 32]),
         to_endpoint: endpoint.endpoint,
         request_id: [64; 32],
@@ -462,7 +462,7 @@ fn raw_bootstrap_response_bytes_are_discarded_at_the_network_boundary() {
 fn receive_handler_opens_sealed_response_to_durable_response_and_receipt() {
     let endpoint = local_endpoint();
     let responder_ephemeral_private = [72; 32];
-    let response = ConnectionResponseFact {
+    let response = BootstrapResponseFact {
         from_endpoint: crypto::x25519_public_key(&[71; 32]),
         to_endpoint: endpoint.endpoint,
         request_id: [73; 32],

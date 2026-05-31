@@ -20,7 +20,7 @@ use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
 
-use super::fact::ConnectionRequestFact;
+use super::fact::BootstrapRequestFact;
 use super::{create as request_create, layout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +77,7 @@ pub fn create(
         ephemeral_layout::encode_fact(&ephemeral)?,
     );
 
-    let mut request = ConnectionRequestFact {
+    let mut request = BootstrapRequestFact {
         from_endpoint: input.local_endpoint.endpoint,
         to_endpoint: input.remote_endpoint,
         nonce: crypto::random_bytes_32(),

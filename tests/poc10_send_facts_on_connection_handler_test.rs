@@ -7,8 +7,8 @@ use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
-use topo::protocol::connection::response::fact::ConnectionResponseFact;
-use topo::protocol::connection::response::layout as connection_response_layout;
+use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
+use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
 use topo::protocol::connection::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -18,8 +18,8 @@ use topo::protocol::connection_frame_wire as connection_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
 
-fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionResponseFact) {
-    let connection = ConnectionResponseFact {
+fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, BootstrapResponseFact) {
+    let connection = BootstrapResponseFact {
         from_endpoint: local_endpoint,
         to_endpoint: [11; 32],
         request_id: [12; 32],

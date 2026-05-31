@@ -16,7 +16,7 @@ use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
-use crate::protocol::connection::response;
+use crate::protocol::connection::bootstrap_response as response;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionCloseProjector;

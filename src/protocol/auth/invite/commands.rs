@@ -349,8 +349,8 @@ pub fn accept(
         reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
     }
 
-    let request = connection::request::commands::create(
-        connection::request::commands::CreateConnectionRequest {
+    let request = connection::bootstrap_request::commands::create(
+        connection::bootstrap_request::commands::CreateConnectionRequest {
             created_at_ms: input.created_at_ms.saturating_add(1),
             local_endpoint: local,
             remote_endpoint: input.invite.endpoint,
@@ -491,8 +491,8 @@ pub fn accept_device_link(
     let local = endpoint_output.receipt.endpoint;
     reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
 
-    let request = connection::request::commands::create(
-        connection::request::commands::CreateConnectionRequest {
+    let request = connection::bootstrap_request::commands::create(
+        connection::bootstrap_request::commands::CreateConnectionRequest {
             created_at_ms: input.created_at_ms.saturating_add(1),
             local_endpoint: local,
             remote_endpoint: input.invite.endpoint,
@@ -561,8 +561,8 @@ pub fn accept_invite_server(
     let local = endpoint_output.receipt.endpoint;
     reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
 
-    let request = connection::request::commands::create(
-        connection::request::commands::CreateConnectionRequest {
+    let request = connection::bootstrap_request::commands::create(
+        connection::bootstrap_request::commands::CreateConnectionRequest {
             created_at_ms: input.created_at_ms.saturating_add(1),
             local_endpoint: local,
             remote_endpoint: input.invite.endpoint,

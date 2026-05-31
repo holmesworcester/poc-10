@@ -15,7 +15,7 @@ use crate::core::crypto;
 use crate::core::wire;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
 
-use super::fact::ConnectionRequestFact;
+use super::fact::BootstrapRequestFact;
 
 // Optional listen-address conversion is request construction logic because it
 // interprets `std::net::SocketAddr`; `layout.rs` only consumes fixed bytes.
@@ -84,7 +84,7 @@ fn addr_wire_err(err: wire::WireError) -> String {
     format!("{err:?}")
 }
 
-pub fn invite_signing_transcript(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
+pub fn invite_signing_transcript(request: &BootstrapRequestFact) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     out.extend_from_slice(b"topo-connection-request-invite-signing-transcript-v1");
     out.extend_from_slice(&request.from_endpoint);
@@ -101,7 +101,7 @@ pub fn invite_signing_transcript(request: &ConnectionRequestFact) -> Result<Vec<
 }
 
 pub fn validate_invite_signature(
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     invite_secret: &InviteSecretFact,
 ) -> Result<(), String> {
     if invite_secret.bootstrap_hash != request.bootstrap_hash {

@@ -87,7 +87,7 @@ impl IntentHandler for SeedConnectionSyncHandler {
         if connection_fact.id != input.connection_id {
             return Err("seed_connection_sync context payload id mismatch".into());
         }
-        connection::response::layout::decode_fact(connection_fact.body()).map_err(|_| {
+        connection::bootstrap_response::layout::decode_fact(connection_fact.body()).map_err(|_| {
             HandlerError::fatal("seed_connection_sync context is not a connection response")
         })?;
         advertise_connection_shareable_facts(context.store()?, input.connection_id)
@@ -190,9 +190,9 @@ mod tests {
         );
         store
             .insert_table_rows(vec![
-                connection::response::rows::connection_response_row(
+                connection::bootstrap_response::rows::bootstrap_response_row(
                     connection_id,
-                    &connection::response::fact::ConnectionResponseFact {
+                    &connection::bootstrap_response::fact::BootstrapResponseFact {
                         from_endpoint: [1; 32],
                         to_endpoint: [2; 32],
                         request_id: [3; 32],
@@ -251,9 +251,9 @@ mod tests {
             signing_secret: [13; 32],
         });
         rows.push(
-            connection::response::rows::connection_response_row(
+            connection::bootstrap_response::rows::bootstrap_response_row(
                 connection_id,
-                &connection::response::fact::ConnectionResponseFact {
+                &connection::bootstrap_response::fact::BootstrapResponseFact {
                     from_endpoint: local_endpoint,
                     to_endpoint: remote_endpoint,
                     request_id: [3; 32],

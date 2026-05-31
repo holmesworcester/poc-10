@@ -21,7 +21,7 @@
 //! Change this projector for request admission, branch-specific context proofs,
 //! peer-retry behavior, or materialized request rows. Bootstrap wrapper opening
 //! belongs in `bootstrap_request::project`, request byte layout belongs in
-//! `layout.rs`, and response construction belongs in `create_connection_response.rs` plus
+//! `layout.rs`, and response construction belongs in `create_bootstrap_response.rs` plus
 //! `response::create`.
 
 use crate::core::crypto;
@@ -32,8 +32,8 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::auth::{endpoint, invite};
-use crate::protocol::connection::create_connection_response::{
-    create_connection_response_intent, CreateConnectionResponse,
+use crate::protocol::connection::create_bootstrap_response::{
+    create_bootstrap_response_intent, CreateBootstrapResponse,
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
@@ -42,22 +42,22 @@ use crate::protocol::connection::send_bootstrap_request::{
 };
 
 use super::create::encode_optional_addr;
-use super::fact::ConnectionRequestFact;
-use super::rows::connection_request_row;
+use super::fact::BootstrapRequestFact;
+use super::rows::bootstrap_request_row;
 
 const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
 const PEER_RETRY_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, Default)]
-pub struct ConnectionRequestProjector;
+pub struct BootstrapRequestProjector;
 
-impl ConnectionRequestProjector {
+impl BootstrapRequestProjector {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Projector for ConnectionRequestProjector {
+impl Projector for BootstrapRequestProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -67,11 +67,11 @@ impl Projector for ConnectionRequestProjector {
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionRequestProjector {
+impl TypedProjector<super::Codec> for BootstrapRequestProjector {
     fn project_typed(
         &self,
         fact: &Fact,
-        request: ConnectionRequestFact,
+        request: BootstrapRequestFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 1. Structural.
@@ -138,14 +138,14 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
             }
             // 3. Materialize local request.
             let response_need =
-                crate::protocol::connection::request::connection_response_for_request_need(
+                crate::protocol::connection::bootstrap_request::connection_response_for_request_need(
                     fact.id, fact.id,
                 );
             if let Some(response_fact) = projection_context.payload_for(&response_need) {
                 if response_fact.scope != FactScope::Local {
                     return Err("connection request response context must be local".to_string());
                 }
-                let response = crate::protocol::connection::response::decode_fact_payload(
+                let response = crate::protocol::connection::bootstrap_response::decode_fact_payload(
                     response_fact.body(),
                 )
                 .map_err(|_| {
@@ -230,7 +230,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
     }
 }
 
-fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String> {
+fn validate_request_fields(request: &BootstrapRequestFact) -> Result<(), String> {
     if request.from_endpoint == [0; 32] {
         return Err("connection request from_endpoint cannot be empty".to_string());
     }
@@ -261,7 +261,7 @@ fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String
 
 fn materialized_output(
     request_id: [u8; 32],
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
 ) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
         .offer(crate::core::context::ContextOffer::range(
@@ -271,14 +271,14 @@ fn materialized_output(
             request_id,
             request_id,
         ))
-        .row_mutation(RowMutation::PutRow(connection_request_row(
+        .row_mutation(RowMutation::PutRow(bootstrap_request_row(
             request_id, request,
         )?)))
 }
 
 fn local_retrying_output(
     fact: &Fact,
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     response_need: crate::core::context::ContextNeed,
     projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
@@ -287,7 +287,7 @@ fn local_retrying_output(
         return Ok(output);
     };
 
-    let retry_timeline = crate::protocol::connection::request::peer_retry_timeline();
+    let retry_timeline = crate::protocol::connection::bootstrap_request::peer_retry_timeline();
     let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
     if let Some(now_ms) = due_retry_at {
         output = output.local_intent(send_bootstrap_connection_request_intent(
@@ -314,12 +314,12 @@ fn local_retrying_output(
 
 fn received_materialized_output(
     request_id: [u8; 32],
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     receive_id: [u8; 32],
 ) -> Result<ProjectionOutput, String> {
     Ok(
-        materialized_output(request_id, request)?.intent(create_connection_response_intent(
-            CreateConnectionResponse {
+        materialized_output(request_id, request)?.intent(create_bootstrap_response_intent(
+            CreateBootstrapResponse {
                 request_id,
                 invite_secret_id: request.invite_secret_fact_id,
                 receive_id,
@@ -339,7 +339,7 @@ fn waiting_output<const N: usize>(
 }
 
 fn validate_invite_signature(
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     invite_secret: &crate::protocol::auth::invite::fact::InviteSecretFact,
 ) -> Result<(), String> {
     if invite_secret.bootstrap_hash != request.bootstrap_hash {
@@ -361,7 +361,7 @@ fn validate_invite_signature(
     Ok(())
 }
 
-fn invite_signing_transcript(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
+fn invite_signing_transcript(request: &BootstrapRequestFact) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     out.extend_from_slice(b"topo-connection-request-invite-signing-transcript-v1");
     out.extend_from_slice(&request.from_endpoint);
@@ -387,8 +387,8 @@ mod projector_tests {
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
-    use topo::protocol::connection::create_connection_response::{
-        decode_create_connection_response_intent, CREATE_CONNECTION_RESPONSE,
+    use topo::protocol::connection::create_bootstrap_response::{
+        decode_create_bootstrap_response_intent, CREATE_BOOTSTRAP_RESPONSE,
     };
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
@@ -397,10 +397,10 @@ mod projector_tests {
         fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST},
         layout as received_layout,
     };
-    use topo::protocol::connection::request::create::encode_optional_addr;
-    use topo::protocol::connection::request::{fact::ConnectionRequestFact, layout, project, rows};
-    use topo::protocol::connection::response::{
-        fact::ConnectionResponseFact, layout as response_layout,
+    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
+    use topo::protocol::connection::bootstrap_request::{fact::BootstrapRequestFact, layout, project, rows};
+    use topo::protocol::connection::bootstrap_response::{
+        fact::BootstrapResponseFact, layout as response_layout,
     };
     use topo::protocol::connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST;
 
@@ -430,10 +430,10 @@ mod projector_tests {
         (secret, fact)
     }
 
-    fn signed_request_fact(scope: FactScope) -> (ConnectionRequestFact, Fact, Fact, Fact) {
+    fn signed_request_fact(scope: FactScope) -> (BootstrapRequestFact, Fact, Fact, Fact) {
         let (invite, invite_fact) = invite_fact();
         let (ephemeral, ephemeral_fact) = ephemeral_fact([1; 32]);
-        let mut request = ConnectionRequestFact {
+        let mut request = BootstrapRequestFact {
             from_endpoint: [1; 32],
             to_endpoint: crypto::x25519_public_key(&[2; 32]),
             nonce: [3; 32],
@@ -502,7 +502,7 @@ mod projector_tests {
 
     fn receive_match(
         owner: [u8; 32],
-        request: &ConnectionRequestFact,
+        request: &BootstrapRequestFact,
         request_id: [u8; 32],
         received_at_local_ms: u64,
     ) -> MatchedContext {
@@ -578,7 +578,7 @@ mod projector_tests {
     }
 
     fn response_match(owner: [u8; 32], request_id: [u8; 32]) -> MatchedContext {
-        let response = ConnectionResponseFact {
+        let response = BootstrapResponseFact {
             from_endpoint: [2; 32],
             to_endpoint: [1; 32],
             request_id,
@@ -594,12 +594,12 @@ mod projector_tests {
             15,
             response_layout::encode_fact(&response).expect("encode response"),
         );
-        let need = topo::protocol::connection::request::connection_response_for_request_need(
+        let need = topo::protocol::connection::bootstrap_request::connection_response_for_request_need(
             owner, request_id,
         );
         MatchedContext {
             need,
-            offer: topo::protocol::connection::request::connection_response_for_request_offer(
+            offer: topo::protocol::connection::bootstrap_request::connection_response_for_request_offer(
                 fact.id, request_id,
             ),
             payload: fact,
@@ -608,7 +608,7 @@ mod projector_tests {
 
     fn due_peer_retry_context(context: ProjectionContext, end_inclusive: u64) -> ProjectionContext {
         context.with_time_ranges(vec![TimeRange {
-            timeline: topo::protocol::connection::request::peer_retry_timeline(),
+            timeline: topo::protocol::connection::bootstrap_request::peer_retry_timeline(),
             start_exclusive: None,
             end_inclusive,
         }])
@@ -620,7 +620,7 @@ mod projector_tests {
         let context =
             ProjectionContext::from_matches(vec![invite_match(request_fact.id, invite_fact)]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project waits");
 
@@ -640,7 +640,7 @@ mod projector_tests {
             endpoint_match(request_fact.id, request.to_endpoint),
         ]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project waits");
 
@@ -661,7 +661,7 @@ mod projector_tests {
             ephemeral_match(request_fact.id, ephemeral_fact),
         ]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project request");
 
@@ -670,7 +670,7 @@ mod projector_tests {
         assert_eq!(output.time_wakes.len(), 1);
         assert_eq!(
             output.time_wakes[0].timeline,
-            topo::protocol::connection::request::peer_retry_timeline()
+            topo::protocol::connection::bootstrap_request::peer_retry_timeline()
         );
         assert_eq!(output.time_wakes[0].at, 0);
         assert!(output
@@ -683,7 +683,7 @@ mod projector_tests {
         let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
             panic!("expected put row mutation");
         };
-        let row = rows::decode_connection_request_row(&row.key, &row.value)
+        let row = rows::decode_bootstrap_request_row(&row.key, &row.value)
             .expect("decode connection request row");
         assert_eq!(row.request_id, request_fact.id);
         assert_eq!(row.from_endpoint, request.from_endpoint);
@@ -707,7 +707,7 @@ mod projector_tests {
             10_000,
         );
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project request");
 
@@ -744,7 +744,7 @@ mod projector_tests {
             ephemeral_match(request_fact.id, ephemeral_fact),
         ]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project request");
 
@@ -766,7 +766,7 @@ mod projector_tests {
             response_match(request_fact.id, request_fact.id),
         ]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project request");
 
@@ -786,7 +786,7 @@ mod projector_tests {
             receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
         ]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project received request");
 
@@ -799,10 +799,10 @@ mod projector_tests {
             .effects
             .intents
             .iter()
-            .find(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
+            .find(|intent| intent.kind.as_str() == CREATE_BOOTSTRAP_RESPONSE)
             .expect("create response intent");
         let decoded =
-            decode_create_connection_response_intent(response_intent).expect("decode intent");
+            decode_create_bootstrap_response_intent(response_intent).expect("decode intent");
         assert_eq!(decoded.request_id, request_fact.id);
         assert_eq!(decoded.invite_secret_id, request.invite_secret_fact_id);
     }
@@ -819,7 +819,7 @@ mod projector_tests {
             10_000,
         );
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project received request");
 
@@ -830,7 +830,7 @@ mod projector_tests {
                 .effects
                 .intents
                 .iter()
-                .filter(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
+                .filter(|intent| intent.kind.as_str() == CREATE_BOOTSTRAP_RESPONSE)
                 .count(),
             1
         );
@@ -846,7 +846,7 @@ mod projector_tests {
             receive_match(request_fact.id, &request, request_fact.id, 1_700_000_250),
         ]);
 
-        let output = project::ConnectionRequestProjector::new()
+        let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)
             .expect("project received request");
 
@@ -854,7 +854,7 @@ mod projector_tests {
             .effects
             .intents
             .iter()
-            .filter(|intent| intent.kind.as_str() == CREATE_CONNECTION_RESPONSE)
+            .filter(|intent| intent.kind.as_str() == CREATE_BOOTSTRAP_RESPONSE)
             .collect::<Vec<_>>();
         assert_eq!(
             response_intents.len(),
@@ -872,7 +872,7 @@ mod projector_tests {
             0,
             layout::encode_fact(&request).expect("encode request"),
         );
-        let err = project::ConnectionRequestProjector::new()
+        let err = project::BootstrapRequestProjector::new()
             .project(&fact, &ProjectionContext::new(Vec::new()))
             .expect_err("self-loop request must fail projection");
         assert!(err.contains("endpoints"), "{err}");
@@ -881,7 +881,7 @@ mod projector_tests {
     #[test]
     fn connection_request_projector_rejects_malformed_bytes() {
         let fact = Fact::new(FactScope::Local, 0, vec![0; 4]);
-        let err = project::ConnectionRequestProjector::new()
+        let err = project::BootstrapRequestProjector::new()
             .project(&fact, &ProjectionContext::new(Vec::new()))
             .expect_err("malformed bytes must fail projection");
         assert!(
@@ -890,7 +890,7 @@ mod projector_tests {
         );
     }
 
-    fn invite_signing_transcript(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
+    fn invite_signing_transcript(request: &BootstrapRequestFact) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
         out.extend_from_slice(b"topo-connection-request-invite-signing-transcript-v1");
         out.extend_from_slice(&request.from_endpoint);

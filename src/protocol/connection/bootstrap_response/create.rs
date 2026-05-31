@@ -15,12 +15,12 @@ use crate::core::crypto::{
 };
 use crate::core::facts::{Fact, FactScope};
 
-use super::fact::ConnectionResponseFact;
+use super::fact::BootstrapResponseFact;
 use super::layout;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
-use crate::protocol::connection::request::fact::ConnectionRequestFact;
+use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
 
 const HANDSHAKE_PURPOSE: &[u8] = b"topo-connection-handshake-v1";
 const CONNECTION_SECRET_PURPOSE: &[u8] = b"topo-connection-secret-v1";
@@ -35,7 +35,7 @@ const TRANSCRIPT_LABEL: &[u8] = b"topo-native-connection-handshake-v1";
 /// fact the response will reference.
 pub struct BuildResponderResponse<'a> {
     pub request_id: [u8; 32],
-    pub request: &'a ConnectionRequestFact,
+    pub request: &'a BootstrapRequestFact,
     pub invite: &'a InviteSecretFact,
     pub endpoint: &'a EndpointFact,
     pub responder_ephemeral_private_key: X25519PrivateKey,
@@ -48,7 +48,7 @@ pub struct BuildResponderResponse<'a> {
 /// want to read the connection secret without re-decoding).
 pub struct BuildResponderResult {
     pub fact: Fact,
-    pub response: ConnectionResponseFact,
+    pub response: BootstrapResponseFact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +98,7 @@ pub fn build_responder_response(
         es,
     )?;
 
-    let response = ConnectionResponseFact {
+    let response = BootstrapResponseFact {
         from_endpoint: endpoint.endpoint,
         to_endpoint: request.from_endpoint,
         request_id,
@@ -116,7 +116,7 @@ pub fn build_responder_response(
 
 pub fn initiator_material(
     request_id: [u8; 32],
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     invite: &InviteSecretFact,
     initiator_ephemeral: &ConnectionEphemeralSecretFact,
     responder_ephemeral_public_key: &[u8; 32],
@@ -151,7 +151,7 @@ pub fn initiator_material(
 
 pub fn public_handshake_hash(
     request_id: [u8; 32],
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     responder_ephemeral_public_key: &[u8; 32],
 ) -> [u8; 32] {
     crypto::hash(&public_transcript(
@@ -163,7 +163,7 @@ pub fn public_handshake_hash(
 
 fn material(
     request_id: [u8; 32],
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     invite: &InviteSecretFact,
     responder_ephemeral_public_key: &[u8; 32],
     ee: [u8; 32],
@@ -190,7 +190,7 @@ fn material(
 
 fn public_transcript(
     request_id: [u8; 32],
-    request: &ConnectionRequestFact,
+    request: &BootstrapRequestFact,
     responder_ephemeral_public_key: &[u8; 32],
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(TRANSCRIPT_LABEL.len() + 32 * 10 + 64);

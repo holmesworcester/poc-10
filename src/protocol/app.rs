@@ -54,7 +54,7 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
         end_inclusive: current_message_expiration_minute,
     },
     DaemonTimeWake {
-        timeline: connection::request::peer_retry_timeline,
+        timeline: connection::bootstrap_request::peer_retry_timeline,
         end_inclusive: current_wall_clock_ms,
     },
 ];

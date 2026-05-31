@@ -51,14 +51,14 @@ pub fn connection_response_for_request_offer(
     )
 }
 
-pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionRequestFact, String> {
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::BootstrapRequestFact, String> {
     layout::decode_fact(bytes)
 }
 
 pub(crate) struct Codec;
 
 impl crate::core::projectors::FactCodec for Codec {
-    type Payload = fact::ConnectionRequestFact;
+    type Payload = fact::BootstrapRequestFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
         decode_fact_payload(fact.body())

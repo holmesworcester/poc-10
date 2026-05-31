@@ -105,7 +105,7 @@ use crate::core::intents::{
     retry_intent, HandlerContext, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::protocol::auth::endpoint::{create as local_endpoint, fact::EndpointFact};
-use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small, request, response};
+use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small, bootstrap_request as request, bootstrap_response as response};
 use crate::protocol::connection_frame::{
     self, received_connection_request_fact_effect, received_connection_response_fact_effect,
     ConnectionFrameKind,

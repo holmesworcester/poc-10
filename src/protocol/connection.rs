@@ -19,6 +19,8 @@
 //! which fact ids should move, and the receiving fact families own the meaning
 //! of child facts opened from a frame.
 
+pub mod bootstrap_request;
+pub mod bootstrap_response;
 pub mod close;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
@@ -27,13 +29,12 @@ pub mod frame_file_slice;
 pub mod frame_observation;
 pub mod frame_small;
 pub mod receive_network_frame;
-pub mod request;
-pub mod response;
 
 // Intents: delayed handshake work. Projection emits these when a request has
 // enough context to answer or when an invite/server bootstrap should send a
 // request over the network.
-pub mod create_connection_response;
+pub mod create_bootstrap_response;
 pub mod send_bootstrap_request;
+pub mod send_bootstrap_response;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

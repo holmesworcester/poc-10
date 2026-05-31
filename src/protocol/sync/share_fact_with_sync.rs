@@ -304,9 +304,9 @@ mod tests {
         );
         for connection_id in [origin_connection_id, other_connection_id] {
             rows.push(
-                connection::response::rows::connection_response_row(
+                connection::bootstrap_response::rows::bootstrap_response_row(
                     connection_id,
-                    &connection::response::fact::ConnectionResponseFact {
+                    &connection::bootstrap_response::fact::BootstrapResponseFact {
                         from_endpoint: local_endpoint,
                         to_endpoint: remote_endpoint,
                         request_id: [8; 32],

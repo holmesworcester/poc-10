@@ -779,9 +779,9 @@ mod tests {
             signing_secret: [13; 32],
         });
         rows.push(
-            connection::response::rows::connection_response_row(
+            connection::bootstrap_response::rows::bootstrap_response_row(
                 connection_id,
-                &connection::response::fact::ConnectionResponseFact {
+                &connection::bootstrap_response::fact::BootstrapResponseFact {
                     from_endpoint: local_endpoint,
                     to_endpoint: remote_endpoint,
                     request_id: [3; 32],
@@ -894,7 +894,7 @@ fn shareable_fact_entries_for_connection(
     store: &Store,
     connection_id: FactId,
 ) -> Result<Vec<ShareableFactEntry>, String> {
-    let Some(connection) = connection_response_row(store, connection_id)? else {
+    let Some(connection) = bootstrap_response_row(store, connection_id)? else {
         return Ok(Vec::new());
     };
     let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
@@ -931,7 +931,7 @@ fn authorized_workspaces_for_connection(
     store: &Store,
     connection_id: FactId,
 ) -> Result<BTreeSet<FactId>, String> {
-    let Some(connection) = connection_response_row(store, connection_id)? else {
+    let Some(connection) = bootstrap_response_row(store, connection_id)? else {
         return Ok(BTreeSet::new());
     };
     let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
@@ -1059,14 +1059,14 @@ pub fn connection_id_for_peer_or_connection(
     workspace_id: FactId,
     peer_or_connection_id: FactId,
 ) -> Result<Option<FactId>, String> {
-    if connection_response_row(store, peer_or_connection_id)?.is_some() {
+    if bootstrap_response_row(store, peer_or_connection_id)?.is_some() {
         return Ok(Some(peer_or_connection_id));
     }
     let Some(local_endpoint) = auth::endpoint::create::local_endpoint(store)? else {
         return Ok(None);
     };
     let endpoint_memberships = endpoint_memberships(store)?;
-    for connection in connection_response_rows(store)? {
+    for connection in bootstrap_response_rows(store)? {
         let Some(remote_endpoint) =
             remote_endpoint_for_connection(&connection, local_endpoint.endpoint)
         else {
@@ -1095,7 +1095,7 @@ pub fn connection_ids_for_shareable_fact(
         return Ok(Vec::new());
     };
     let endpoint_memberships = endpoint_memberships(store)?;
-    for connection in connection_response_rows(store)? {
+    for connection in bootstrap_response_rows(store)? {
         let Some(remote_endpoint) =
             remote_endpoint_for_connection(&connection, local_endpoint.endpoint)
         else {
@@ -1130,31 +1130,31 @@ fn shareable_workspaces_for_fact(store: &Store, fact: &Fact) -> Result<Vec<FactI
     Ok(workspace_ids)
 }
 
-fn connection_response_rows(
+fn bootstrap_response_rows(
     store: &Store,
-) -> Result<Vec<connection::response::rows::ConnectionResponseRow>, String> {
+) -> Result<Vec<connection::bootstrap_response::rows::BootstrapResponseRow>, String> {
     store
-        .table_rows(connection::response::rows::CONNECTION_RESPONSE_ROWS)
+        .table_rows(connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS)
         .map_err(|err| format!("load connection rows for shareable sync: {err}"))?
         .into_iter()
         .map(|(key, value)| {
-            connection::response::rows::decode_connection_response_row(&key, &value)
+            connection::bootstrap_response::rows::decode_bootstrap_response_row(&key, &value)
         })
         .collect()
 }
 
-fn connection_response_row(
+fn bootstrap_response_row(
     store: &Store,
     connection_id: FactId,
-) -> Result<Option<connection::response::rows::ConnectionResponseRow>, String> {
+) -> Result<Option<connection::bootstrap_response::rows::BootstrapResponseRow>, String> {
     store
         .table_row(
-            connection::response::rows::CONNECTION_RESPONSE_ROWS,
+            connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
             &connection_id,
         )
         .map_err(|err| format!("load connection row for shareable sync: {err}"))?
         .map(|value| {
-            connection::response::rows::decode_connection_response_row(&connection_id, &value)
+            connection::bootstrap_response::rows::decode_bootstrap_response_row(&connection_id, &value)
         })
         .transpose()
 }
@@ -1179,7 +1179,7 @@ fn endpoint_shared_rows(
 
 fn connection_workspaces(
     store: &Store,
-    connection: &connection::response::rows::ConnectionResponseRow,
+    connection: &connection::bootstrap_response::rows::BootstrapResponseRow,
 ) -> Result<BTreeSet<FactId>, String> {
     let mut workspace_ids = BTreeSet::new();
     let Some(invite_secret_id) = connection_invite_secret_id(store, connection)? else {
@@ -1197,21 +1197,21 @@ fn connection_workspaces(
 
 fn connection_invite_secret_id(
     store: &Store,
-    connection: &connection::response::rows::ConnectionResponseRow,
+    connection: &connection::bootstrap_response::rows::BootstrapResponseRow,
 ) -> Result<Option<FactId>, String> {
     if let Some(response_fact) = persisted_fact(store, &connection.connection_id)? {
-        let response = connection::response::layout::decode_fact(&response_fact.bytes)
+        let response = connection::bootstrap_response::layout::decode_fact(&response_fact.bytes)
             .map_err(|_| "connection response fact row is not a connection response".to_string())?;
         return Ok(Some(response.invite_secret_fact_id));
     }
     store
         .table_row(
-            connection::request::rows::CONNECTION_REQUEST_ROWS,
+            connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
             &connection.request_id,
         )
         .map_err(|err| format!("load connection request row for shareable sync: {err}"))?
         .map(|value| {
-            connection::request::rows::decode_connection_request_row(&connection.request_id, &value)
+            connection::bootstrap_request::rows::decode_bootstrap_request_row(&connection.request_id, &value)
                 .map(|row| row.invite_secret_fact_id)
         })
         .transpose()
@@ -1319,7 +1319,7 @@ fn fact_for_shareable_row(store: &Store, row: &ShareableFactRow) -> Result<Optio
 }
 
 fn remote_endpoint_for_connection(
-    row: &connection::response::rows::ConnectionResponseRow,
+    row: &connection::bootstrap_response::rows::BootstrapResponseRow,
     local_endpoint: FactId,
 ) -> Option<FactId> {
     if row.from_endpoint == local_endpoint {

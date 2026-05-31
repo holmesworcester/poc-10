@@ -20,13 +20,13 @@ use topo::protocol::connection::fact_receipt::{
     fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_RESPONSE},
     layout as receipt_layout,
 };
-use topo::protocol::connection::request::{
+use topo::protocol::connection::bootstrap_request::{
     commands::{create as create_request, CreateConnectionRequest},
     layout as request_layout,
 };
-use topo::protocol::connection::response::{
+use topo::protocol::connection::bootstrap_response::{
     create::{build_responder_response, BuildResponderResponse},
-    rows::CONNECTION_RESPONSE_ROWS,
+    rows::BOOTSTRAP_RESPONSE_ROWS,
 };
 
 struct FixedClock(Cell<u64>);
@@ -163,7 +163,7 @@ fn closing_connection_purges_ephemeral_secret_facts_and_rows() {
     assert_eq!(
         runtime
             .store()
-            .table_row_count(CONNECTION_RESPONSE_ROWS)
+            .table_row_count(BOOTSTRAP_RESPONSE_ROWS)
             .expect("connection rows"),
         1
     );
@@ -198,7 +198,7 @@ fn closing_connection_purges_ephemeral_secret_facts_and_rows() {
     assert_eq!(
         runtime
             .store()
-            .table_row_count(CONNECTION_RESPONSE_ROWS)
+            .table_row_count(BOOTSTRAP_RESPONSE_ROWS)
             .expect("connection rows after close"),
         0
     );
