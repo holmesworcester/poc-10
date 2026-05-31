@@ -27,6 +27,7 @@ use crate::core::command_context::{
 };
 use crate::core::daemon;
 use crate::core::runtime::Runtime;
+use crate::protocol::connection;
 use crate::protocol::sync;
 use crate::protocol::{auth, content};
 use std::path::PathBuf;
@@ -140,6 +141,31 @@ pub(crate) fn accept_link(
     })?;
     let receipt = ctx.submit_and_settle(output)?;
     Ok(auth::invite::cli::accept_output(&receipt))
+}
+
+pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    args.require_len(1, connection::connection_request::commands::CONNECT_USAGE)?;
+    let target_endpoint = decode_hex_32(
+        args.get(0)
+            .ok_or(connection::connection_request::commands::CONNECT_USAGE)?,
+        "endpoint id",
+    )?;
+    let from_listen_addr = daemon::current_listen_addr(ctx.db_path("connect")?)?;
+    let output = ctx.with_command_context(|command_context| {
+        connection::connection_request::commands::connect(
+            command_context,
+            connection::connection_request::commands::Connect {
+                created_at_ms: command_context.next_timestamp(),
+                target_endpoint,
+                from_listen_addr,
+            },
+        )
+    })?;
+    let receipt = ctx.submit_and_settle(output)?;
+    Ok(CliOutput::line(format!(
+        "connecting: request_id={}",
+        encode_hex_32(&receipt.request_id)
+    )))
 }
 
 pub(crate) fn identity(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {

@@ -11,10 +11,12 @@
 //! request admission policy. It carries no invite material. Response creation,
 //! frame sending, and socket IO belong to the downstream connection modules.
 
+pub mod commands;
 pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod queries;
 pub mod transit;
 
 const MEMBERSHIP_CONNECTION_REQUEST_ROLE: &str = "membership_connection_request";

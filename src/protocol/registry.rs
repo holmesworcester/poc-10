@@ -380,6 +380,11 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("accept", auth::invite::cli::ACCEPT_USAGE, accept),
     cli_command!(
+        "connect",
+        connection::connection_request::commands::CONNECT_USAGE,
+        connect
+    ),
+    cli_command!(
         "accept-invite-server",
         auth::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
         accept_invite_server
