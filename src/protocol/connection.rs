@@ -21,6 +21,8 @@
 
 pub mod bootstrap_request;
 pub mod bootstrap_response;
+pub mod connection_request;
+pub mod connection_response;
 pub mod close;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
@@ -35,7 +37,10 @@ pub mod receive_network_frame;
 // enough context to answer or when an invite/server bootstrap should send a
 // request over the network.
 pub mod create_bootstrap_response;
+pub mod create_connection_response;
 pub mod send_bootstrap_request;
 pub mod send_bootstrap_response;
+pub mod send_connection_request;
+pub mod send_connection_response;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

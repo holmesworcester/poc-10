@@ -105,10 +105,14 @@ use crate::core::intents::{
     retry_intent, HandlerContext, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::protocol::auth::endpoint::{create as local_endpoint, fact::EndpointFact};
-use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small, bootstrap_request as request, bootstrap_response as response};
+use crate::protocol::connection::{
+    bootstrap_request as request, bootstrap_response as response, connection_request,
+    connection_response, frame_bundle, frame_file_slice, frame_small,
+};
 use crate::protocol::connection_frame::{
     self, received_connection_request_fact_effect, received_connection_response_fact_effect,
-    ConnectionFrameKind,
+    received_membership_connection_request_fact_effect,
+    received_membership_connection_response_fact_effect, ConnectionFrameKind,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -134,6 +138,12 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         }
         if response::transit::is_sealed_response_frame(&input.frame) {
             return open_sealed_response(context, &input);
+        }
+        if connection_request::transit::is_sealed_request_frame(&input.frame) {
+            return open_sealed_membership_request(context, &input);
+        }
+        if connection_response::transit::is_sealed_response_frame(&input.frame) {
+            return open_sealed_membership_response(context, &input);
         }
 
         Ok(match connection_frame::classify_frame(&input.frame) {
@@ -192,6 +202,44 @@ fn open_sealed_response(context: &HandlerContext, input: &ReceiveNetworkFrame) -
         return Ok(PipelineEffects::new());
     };
     Ok(received_connection_response_fact_effect(
+        &response_bytes,
+        &input.origin_addr,
+        input.received_at_local_ms,
+        frame_hash,
+    )?)
+}
+
+fn open_sealed_membership_request(
+    context: &HandlerContext,
+    input: &ReceiveNetworkFrame,
+) -> HandlerResult {
+    let endpoint = require_local_endpoint(context)?;
+    let frame_hash = crypto::hash(&input.frame);
+    let Ok(request_bytes) =
+        connection_request::transit::open_connection_request(&input.frame, &endpoint)
+    else {
+        return Ok(PipelineEffects::new());
+    };
+    Ok(received_membership_connection_request_fact_effect(
+        &request_bytes,
+        &input.origin_addr,
+        input.received_at_local_ms,
+        frame_hash,
+    )?)
+}
+
+fn open_sealed_membership_response(
+    context: &HandlerContext,
+    input: &ReceiveNetworkFrame,
+) -> HandlerResult {
+    let endpoint = require_local_endpoint(context)?;
+    let frame_hash = crypto::hash(&input.frame);
+    let Ok(response_bytes) =
+        connection_response::transit::open_connection_response(&input.frame, &endpoint)
+    else {
+        return Ok(PipelineEffects::new());
+    };
+    Ok(received_membership_connection_response_fact_effect(
         &response_bytes,
         &input.origin_addr,
         input.received_at_local_ms,

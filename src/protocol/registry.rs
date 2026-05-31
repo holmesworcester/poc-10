@@ -514,6 +514,8 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_bootstrap_connection_request",
     "send_bootstrap_connection_response",
+    "send_connection_request",
+    "send_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -600,6 +602,8 @@ projector_routes! {
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
     project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector;
     project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector;
+    project_connection_request => connection::connection_request::layout::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector;
+    project_connection_response => connection::connection_response::layout::TYPE_CONNECTION_RESPONSE, connection::connection_response::project::ConnectionResponseProjector;
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
@@ -663,6 +667,21 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "create_bootstrap_response",
         connection::create_bootstrap_response::CREATE_BOOTSTRAP_RESPONSE,
         connection::create_bootstrap_response::CreateBootstrapResponseHandler
+    ),
+    handler_route!(
+        "send_connection_request",
+        connection::send_connection_request::SEND_CONNECTION_REQUEST,
+        connection::send_connection_request::SendConnectionRequestHandler
+    ),
+    handler_route!(
+        "send_connection_response",
+        connection::send_connection_response::SEND_CONNECTION_RESPONSE,
+        connection::send_connection_response::SendConnectionResponseHandler
+    ),
+    handler_route!(
+        "create_connection_response",
+        connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
+        connection::create_connection_response::CreateConnectionResponseHandler
     ),
     handler_route!(
         "send_sync_compare_response",

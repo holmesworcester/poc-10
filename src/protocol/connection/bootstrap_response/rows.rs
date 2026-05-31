@@ -36,16 +36,43 @@ pub fn bootstrap_response_row(
     connection_id: FactId,
     fact: &BootstrapResponseFact,
 ) -> Result<TableRow, String> {
+    connection_row(ConnectionRowFields {
+        connection_id,
+        from_endpoint: fact.from_endpoint,
+        to_endpoint: fact.to_endpoint,
+        request_id: fact.request_id,
+        responder_ephemeral_public_key: fact.responder_ephemeral_public_key,
+        handshake_hash: fact.handshake_hash,
+        connection_secret: fact.connection_secret,
+    })
+}
+
+/// The connection-row fields shared by both connection kinds (bootstrap and
+/// membership). The membership `connection_response` family builds the same row
+/// from these fields so all established-frame and sync machinery — which keys
+/// off this single table by connection id — treats both kinds identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionRowFields {
+    pub connection_id: FactId,
+    pub from_endpoint: EndpointId,
+    pub to_endpoint: EndpointId,
+    pub request_id: FactId,
+    pub responder_ephemeral_public_key: EndpointId,
+    pub handshake_hash: [u8; 32],
+    pub connection_secret: [u8; 32],
+}
+
+pub fn connection_row(fields: ConnectionRowFields) -> Result<TableRow, String> {
     let mut value = vec![0; ROW_VALUE_BYTES];
-    value[0..32].copy_from_slice(&fact.from_endpoint);
-    value[32..64].copy_from_slice(&fact.to_endpoint);
-    value[64..96].copy_from_slice(&fact.request_id);
-    value[96..128].copy_from_slice(&fact.responder_ephemeral_public_key);
-    value[128..160].copy_from_slice(&fact.handshake_hash);
-    value[160..192].copy_from_slice(&fact.connection_secret);
+    value[0..32].copy_from_slice(&fields.from_endpoint);
+    value[32..64].copy_from_slice(&fields.to_endpoint);
+    value[64..96].copy_from_slice(&fields.request_id);
+    value[96..128].copy_from_slice(&fields.responder_ephemeral_public_key);
+    value[128..160].copy_from_slice(&fields.handshake_hash);
+    value[160..192].copy_from_slice(&fields.connection_secret);
     Ok(TableRow {
         table: BOOTSTRAP_RESPONSE_ROWS,
-        key: bootstrap_response_key(&connection_id),
+        key: bootstrap_response_key(&fields.connection_id),
         value,
     })
 }
