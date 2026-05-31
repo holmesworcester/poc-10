@@ -7,6 +7,37 @@ networking to move opaque bytes. The scope owns request/response handshake
 facts and their wire-transport seal, local handshake secrets, established frame
 wrappers, receive receipts, close signals, and connection network handlers.
 
+## Bootstrap vs Membership Connections
+
+There are two ways to make first contact, kept as separate fact families rather
+than one polymorphic request:
+
+- **Bootstrap** (`bootstrap_request`/`bootstrap_response`) is first contact with
+  an endpoint that does not know us yet. It is authorized by an **invite**: the
+  request carries invite proof and the connection secret mixes invite material.
+- **Membership** (`connection_request`/`connection_response`) is contact with an
+  endpoint that already knows us. It is authorized by **`endpoint_shared`
+  membership**: the request is signed by the initiator endpoint signing key and
+  validated against the initiator's `endpoint_shared` in a workspace where the
+  responder is also a member (the receiver projector parks until that membership
+  syncs rather than rejecting). The connection secret is derived from
+  Diffie-Hellman only — no invite material — so membership connections survive
+  invite-link expiry.
+
+Neither path uses a transport envelope: the request/response facts *are* the
+wire payload, sealed only in transit (`transit.rs`) and opened inline by the
+receive handler into the same canonical fact. Both `*_response` facts are "the
+connection" and write the same shared connection-row table keyed by connection
+id, so established frames and sync treat the two kinds identically.
+
+**Transition.** First contact is always bootstrap (the peer cannot validate us
+yet). Bootstrap sync propagates `endpoint_shared` membership both ways plus a
+learned peer address (`peer_address` rows, fed from received handshake listen
+addresses). After that, `choose_connection_mode` resolves to a membership
+connection — mutual membership plus a learned address — so reconnects need no
+invite. `connect <endpoint>` uses that trigger; `accept <invite>` is always
+bootstrap by construction.
+
 ## Interface To Core
 
 Data enters core from three places:

@@ -2188,3 +2188,42 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
         offenders.join("\n")
     );
 }
+
+/// Flat-intent rule: a handler that creates a fact does only that and stops; it
+/// must never enqueue a follow-on intent or open a socket. Handshake sends are
+/// emitted by the local response fact's *projector*, so the `create_*_response`
+/// handlers must contain no chained send intents and no network IO. This keeps
+/// "what does admitting this fact enqueue?" answerable from one projector and
+/// keeps replay classification honest (a replayable create can never smuggle in
+/// a non-replayable send).
+#[test]
+fn create_response_handlers_only_create_facts_and_chain_no_intents() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for relative in [
+        "src/protocol/connection/create_bootstrap_response.rs",
+        "src/protocol/connection/create_connection_response.rs",
+    ] {
+        let text = source_text(&root.join(relative));
+        for forbidden in [
+            ".intent(",
+            ".local_intent(",
+            "network::send",
+            "send_network_frame",
+            "send_bootstrap_response::",
+            "send_connection_response::",
+        ] {
+            if text.contains(forbidden) {
+                offenders.push(format!(
+                    "{relative} chains {forbidden:?}; create_*_response must only create facts \
+                     (the local response projector emits the send)"
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "create_*_response handlers must stay flat (fact creation only):\n{}",
+        offenders.join("\n")
+    );
+}
