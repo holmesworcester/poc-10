@@ -73,3 +73,24 @@ pub fn choose_connection_mode(
     }
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use crate::core::store::Store;
+    use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+
+    // The full transition — Bootstrap before mutual membership, Normal after a
+    // bootstrap sync, and content reconnect without an invite — is covered by the
+    // `cli_membership_connect_reconnects_known_peer_without_invite` black-box test.
+    // Here we only pin the local guard: with no local endpoint identity there is
+    // no membership connection to choose.
+    #[test]
+    fn no_local_endpoint_yields_no_membership_connection() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        assert_eq!(choose_connection_mode(&store, [9; 32]).expect("query"), None);
+    }
+}

@@ -26,15 +26,13 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
 
 use crate::protocol::auth::{endpoint, invite};
-use crate::protocol::connection::peer_address::rows::{
-    peer_address_key, peer_address_row, CONNECTION_PEER_ADDRESS_ROWS,
-};
+use crate::protocol::connection::peer_address::rows::peer_address_row;
 use crate::protocol::connection::create_bootstrap_response::{
     create_bootstrap_response_intent, CreateBootstrapResponse,
 };
@@ -291,17 +289,14 @@ fn local_retrying_output(
     };
 
     // Learn the peer's reachable listen address so a later membership connection
-    // can reconnect after the invite link expires. Keyed by endpoint, last write
-    // wins (delete then insert).
-    output = output
-        .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: CONNECTION_PEER_ADDRESS_ROWS,
-            key: peer_address_key(&request.to_endpoint),
-        }))
-        .row_mutation(RowMutation::PutRow(peer_address_row(
-            request.to_endpoint,
-            addr,
-        )?));
+    // can reconnect after the invite link expires. Keyed by endpoint; `PutRow` is
+    // insert-or-ignore, so reprojecting the same request is a no-op. A same-output
+    // delete-then-put would *delete* the row (commit applies puts before deletes),
+    // so the put stands alone.
+    output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+        request.to_endpoint,
+        addr,
+    )?));
 
     let retry_timeline = crate::protocol::connection::bootstrap_request::peer_retry_timeline();
     let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
@@ -344,15 +339,10 @@ fn received_materialized_output(
     // Learn the initiator's reachable listen address from the received request,
     // so we can later open a membership connection back to it without an invite.
     if let Some(addr) = request.from_listen_addr {
-        output = output
-            .row_mutation(RowMutation::DeleteRow(TableDelete {
-                table: CONNECTION_PEER_ADDRESS_ROWS,
-                key: peer_address_key(&request.from_endpoint),
-            }))
-            .row_mutation(RowMutation::PutRow(peer_address_row(
-                request.from_endpoint,
-                addr,
-            )?));
+        output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+            request.from_endpoint,
+            addr,
+        )?));
     }
     Ok(output)
 }
@@ -722,8 +712,8 @@ mod projector_tests {
             .needs
             .iter()
             .any(|need| need.role == "connection_response_for_request"));
-        // request row + learned-address delete/put for the peer's listen addr.
-        assert_eq!(output.effects.row_mutations.len(), 3);
+        // request row + learned-address put for the peer's listen addr.
+        assert_eq!(output.effects.row_mutations.len(), 2);
         assert!(learns_peer_address(&output, request.to_endpoint));
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
@@ -840,8 +830,8 @@ mod projector_tests {
         assert_eq!(output.effects.intents.len(), 1);
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
-        // request row + learned-address delete/put for the initiator's addr.
-        assert_eq!(output.effects.row_mutations.len(), 3);
+        // request row + learned-address put for the initiator's addr.
+        assert_eq!(output.effects.row_mutations.len(), 2);
         assert!(learns_peer_address(&output, request.from_endpoint));
         assert_eq!(output.offers[0].role.as_str(), "connection_request");
         let response_intent = output

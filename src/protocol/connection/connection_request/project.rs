@@ -27,7 +27,7 @@
 //! `create_connection_response.rs` plus `connection_response::create`.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::intents::RowMutation;
 use crate::core::projectors::{
     project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
 };
@@ -38,9 +38,7 @@ use crate::protocol::connection::create_connection_response::{
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::peer_address::rows::{
-    peer_address_key, peer_address_row, CONNECTION_PEER_ADDRESS_ROWS,
-};
+use crate::protocol::connection::peer_address::rows::peer_address_row;
 use crate::protocol::connection::send_connection_request::{
     send_connection_request_intent, SendConnectionRequest,
 };
@@ -366,15 +364,12 @@ fn local_retrying_output(
     let Some(addr) = request.to_listen_addr else {
         return Ok(output);
     };
-    output = output
-        .row_mutation(RowMutation::DeleteRow(TableDelete {
-            table: CONNECTION_PEER_ADDRESS_ROWS,
-            key: peer_address_key(&request.to_endpoint),
-        }))
-        .row_mutation(RowMutation::PutRow(peer_address_row(
-            request.to_endpoint,
-            addr,
-        )?));
+    // `PutRow` is insert-or-ignore; a same-output delete-then-put would delete
+    // the row (commit applies puts before deletes), so the put stands alone.
+    output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+        request.to_endpoint,
+        addr,
+    )?));
 
     let retry_timeline = super::peer_retry_timeline();
     let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
@@ -413,15 +408,10 @@ fn received_materialized_output(
             },
         ));
     if let Some(addr) = request.from_listen_addr {
-        output = output
-            .row_mutation(RowMutation::DeleteRow(TableDelete {
-                table: CONNECTION_PEER_ADDRESS_ROWS,
-                key: peer_address_key(&request.from_endpoint),
-            }))
-            .row_mutation(RowMutation::PutRow(peer_address_row(
-                request.from_endpoint,
-                addr,
-            )?));
+        output = output.row_mutation(RowMutation::PutRow(peer_address_row(
+            request.from_endpoint,
+            addr,
+        )?));
     }
     Ok(output)
 }
