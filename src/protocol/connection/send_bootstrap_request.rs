@@ -116,7 +116,7 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
                     .into(),
             );
         }
-        let sealed = crate::protocol::connection::bootstrap_request::seal_connection_request(
+        let sealed = crate::protocol::connection::request::transit::seal_connection_request(
             request_fact.body(),
             &ephemeral.ephemeral_private_key,
         )?;
@@ -150,7 +150,7 @@ mod tests {
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
-    use crate::protocol::connection::bootstrap_request;
+    use crate::protocol::connection::request::transit as request_transit;
     use crate::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
@@ -196,7 +196,7 @@ mod tests {
             .expect("send sealed request");
 
         let sent = reader.join().expect("reader");
-        assert_eq!(sent[0], bootstrap_request::TYPE_SEALED_CONNECTION_REQUEST);
+        assert_eq!(sent[0], request_transit::TYPE_SEALED_CONNECTION_REQUEST);
         assert_ne!(sent, request_fact.bytes);
         let responder = EndpointFact {
             endpoint: crypto::x25519_public_key(&responder_secret),
@@ -205,7 +205,7 @@ mod tests {
             signing_secret: [31; 32],
         };
         assert_eq!(
-            bootstrap_request::open_connection_request(&sent, &responder).expect("open request"),
+            request_transit::open_connection_request(&sent, &responder).expect("open request"),
             request_fact.bytes
         );
     }

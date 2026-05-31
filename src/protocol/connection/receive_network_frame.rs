@@ -93,16 +93,23 @@ fn payload_error(err: PayloadError) -> String {
 
 // The handler is the incoming socket boundary. It has no input facts because
 // raw network bytes are not authorized by durable context until projection.
+// Sealed handshake frames carry no separate envelope fact: the handler opens
+// them inline with the local endpoint secret and admits the recovered
+// request/response fact directly (plus its receive receipt). Opening is
+// transport decoding, not protocol validation; the request/response projectors
+// still own invite/membership/handshake validation.
 
-use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
-use crate::protocol::connection::bootstrap_request::create::{
-    is_bootstrap_request_frame, received_bootstrap_request_frame_effect,
+use crate::core::crypto;
+use crate::core::effects::PipelineEffects;
+use crate::core::intents::{
+    retry_intent, HandlerContext, HandlerFactId, HandlerResult, IntentHandler,
 };
-use crate::protocol::connection::bootstrap_response::create::{
-    is_bootstrap_response_frame, received_bootstrap_response_frame_effect,
+use crate::protocol::auth::endpoint::{create as local_endpoint, fact::EndpointFact};
+use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small, request, response};
+use crate::protocol::connection_frame::{
+    self, received_connection_request_fact_effect, received_connection_response_fact_effect,
+    ConnectionFrameKind,
 };
-use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small};
-use crate::protocol::connection_frame::{self, ConnectionFrameKind};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveNetworkFrameHandler;
@@ -119,26 +126,16 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         Ok(Vec::new())
     }
 
-    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
-        if is_bootstrap_request_frame(&input.frame) {
-            if let Some(effects) = received_bootstrap_request_frame_effect(
-                &input.frame,
-                &input.origin_addr,
-                input.received_at_local_ms,
-            )? {
-                return Ok(effects);
-            }
+
+        if request::transit::is_sealed_request_frame(&input.frame) {
+            return open_sealed_request(context, &input);
         }
-        if is_bootstrap_response_frame(&input.frame) {
-            if let Some(effects) = received_bootstrap_response_frame_effect(
-                &input.frame,
-                &input.origin_addr,
-                input.received_at_local_ms,
-            )? {
-                return Ok(effects);
-            }
+        if response::transit::is_sealed_response_frame(&input.frame) {
+            return open_sealed_response(context, &input);
         }
+
         Ok(match connection_frame::classify_frame(&input.frame) {
             Some(ConnectionFrameKind::Small) => connection_frame::observed_frame_effect(
                 frame_small::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
@@ -155,7 +152,49 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
                 &input.origin_addr,
                 input.received_at_local_ms,
             )?,
-            None => crate::core::effects::PipelineEffects::new(),
+            None => PipelineEffects::new(),
         })
     }
+}
+
+/// Load the local endpoint, or ask to retry until it exists.
+///
+/// A sealed handshake frame can only be opened with the local endpoint secret;
+/// if the endpoint is not yet materialized, leaving the intent queued is the
+/// retry-safe behavior.
+fn require_local_endpoint(context: &HandlerContext) -> Result<EndpointFact, crate::core::intents::HandlerError> {
+    local_endpoint::local_endpoint(context.store()?)?
+        .ok_or_else(|| retry_intent("receive_network_frame has no local endpoint yet"))
+}
+
+fn open_sealed_request(context: &HandlerContext, input: &ReceiveNetworkFrame) -> HandlerResult {
+    let endpoint = require_local_endpoint(context)?;
+    let frame_hash = crypto::hash(&input.frame);
+    // An unopenable frame (wrong recipient, tampered) is silently dropped: it is
+    // transport noise, not a protocol violation that should fail the handler.
+    let Ok(request_bytes) = request::transit::open_connection_request(&input.frame, &endpoint)
+    else {
+        return Ok(PipelineEffects::new());
+    };
+    Ok(received_connection_request_fact_effect(
+        &request_bytes,
+        &input.origin_addr,
+        input.received_at_local_ms,
+        frame_hash,
+    )?)
+}
+
+fn open_sealed_response(context: &HandlerContext, input: &ReceiveNetworkFrame) -> HandlerResult {
+    let endpoint = require_local_endpoint(context)?;
+    let frame_hash = crypto::hash(&input.frame);
+    let Ok(response_bytes) = response::transit::open_connection_response(&input.frame, &endpoint)
+    else {
+        return Ok(PipelineEffects::new());
+    };
+    Ok(received_connection_response_fact_effect(
+        &response_bytes,
+        &input.origin_addr,
+        input.received_at_local_ms,
+        frame_hash,
+    )?)
 }

@@ -16,6 +16,7 @@ pub mod fact;
 pub mod layout;
 pub mod project;
 pub mod rows;
+pub mod transit;
 
 const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
 

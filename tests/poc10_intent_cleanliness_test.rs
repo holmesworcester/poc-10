@@ -1109,7 +1109,7 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 8] = [
+const STANDARD_FAMILY_FILES: [&str; 9] = [
     "fact.rs",
     "layout.rs",
     "project.rs",
@@ -1118,6 +1118,10 @@ const STANDARD_FAMILY_FILES: [&str; 8] = [
     "create.rs",
     "commands.rs",
     "cli.rs",
+    // Wire-transport encoding for a fact family whose canonical bytes are sent
+    // sealed on the wire (connection request/response), kept separate from the
+    // durable `layout.rs`.
+    "transit.rs",
 ];
 
 /// Fact families that do not yet meet the standard-role-file rule.
@@ -1759,9 +1763,14 @@ fn connection_intents_treat_connection_frames_as_opaque() {
     for path in connection_handlers {
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
+        // Connection intent handlers must not hand-roll connection crypto: the
+        // wire seal/open primitives live in the request/response `transit.rs`
+        // and established-frame wire modules, not in handlers. Loading the local
+        // endpoint to seal/unseal a first-contact handshake frame (the receive
+        // boundary, create_connection_response) is allowed, so this rule targets
+        // the crypto primitives rather than any auth dependency.
         for forbidden in [
             "canonical_events",
-            "protocol::auth",
             "XChaCha",
             "X25519",
             "ciphertext",
@@ -1780,7 +1789,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
 
     assert!(
         offenders.is_empty(),
-        "connection intents must treat connection::frame frames as opaque network bytes:\n{}",
+        "connection intents must treat connection::frame frames as opaque network bytes and must not hand-roll connection crypto:\n{}",
         offenders.join("\n")
     );
 }

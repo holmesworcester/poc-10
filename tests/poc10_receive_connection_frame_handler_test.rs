@@ -14,9 +14,15 @@ use topo::protocol::auth::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
+use topo::core::network;
+use topo::core::schema::CORE_SCHEMA_SOURCE;
+use topo::core::store::Store;
+use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection;
-use topo::protocol::connection::bootstrap_request;
-use topo::protocol::connection::bootstrap_response;
+use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
+use topo::protocol::connection::request::transit as request_transit;
+use topo::protocol::connection::response::transit as response_transit;
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
@@ -300,7 +306,7 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
 }
 
 #[test]
-fn receive_handler_emits_ephemeral_bootstrap_request_fact() {
+fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
     let invite = InviteSecretFact::new([33; 32]);
     let invite_fact = Fact::new(
         FactScope::Local,
@@ -308,6 +314,7 @@ fn receive_handler_emits_ephemeral_bootstrap_request_fact() {
         invite_layout::encode_fact(&invite).expect("invite"),
     );
     let endpoint = local_endpoint();
+    let initiator_ephemeral_private = [59; 32];
     let mut request = ConnectionRequestFact {
         from_endpoint: crypto::x25519_public_key(&[55; 32]),
         to_endpoint: endpoint.endpoint,
@@ -317,7 +324,7 @@ fn receive_handler_emits_ephemeral_bootstrap_request_fact() {
         invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         invite_secret_fact_id: invite_fact.id,
         initiator_ephemeral_secret_fact_id: [58; 32],
-        initiator_ephemeral_public_key: crypto::x25519_public_key(&[59; 32]),
+        initiator_ephemeral_public_key: crypto::x25519_public_key(&initiator_ephemeral_private),
         from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
         to_listen_addr: None,
     };
@@ -327,21 +334,78 @@ fn receive_handler_emits_ephemeral_bootstrap_request_fact() {
             .expect("request transcript"),
     );
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
-    let frame = bootstrap_request::seal_connection_request(&request_bytes, &[59; 32])
+    let frame = request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
         .expect("seal request");
 
+    // No envelope fact: the handler opens the sealed frame inline with the local
+    // endpoint secret and admits the recovered request fact plus its receipt.
+    let store = store_with_endpoint(&endpoint);
     let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .handle(
+            &receive_intent(frame.clone()),
+            &HandlerContext::new().with_store(&store),
+        )
         .expect("receive request");
 
-    assert!(output.facts.is_empty());
-    assert_eq!(output.ephemeral_facts.len(), 1);
+    assert!(output.ephemeral_facts.is_empty());
     assert!(output.intents.is_empty());
-    let bootstrap_input = bootstrap_request::layout::decode_fact(output.ephemeral_facts[0].body())
-        .expect("bootstrap request fact");
-    assert_eq!(&bootstrap_input.sealed_request_frame[..], frame.as_slice());
-    assert_eq!(bootstrap_input.origin_addr, ORIGIN);
-    assert_eq!(bootstrap_input.received_at_local_ms, RECEIVED_AT);
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.facts.iter().any(|fact| fact.bytes == request_bytes));
+    let receipt_fact = output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied()
+                == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
+        })
+        .expect("receipt fact");
+    let receipt = fact_receipt_layout::decode_fact(receipt_fact.body()).expect("decode receipt");
+    assert_eq!(receipt.origin_addr, ORIGIN);
+    assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
+}
+
+#[test]
+fn receive_handler_without_local_endpoint_retries_sealed_request() {
+    // Opening needs the local endpoint secret; with none present the handler
+    // leaves the intent queued for retry rather than dropping the frame.
+    let endpoint = local_endpoint();
+    let initiator_ephemeral_private = [59; 32];
+    let invite = InviteSecretFact::new([33; 32]);
+    let mut request = ConnectionRequestFact {
+        from_endpoint: crypto::x25519_public_key(&[55; 32]),
+        to_endpoint: endpoint.endpoint,
+        nonce: [56; 32],
+        invite_fact_id: [57; 32],
+        bootstrap_hash: invite.bootstrap_hash,
+        invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        invite_secret_fact_id: [60; 32],
+        initiator_ephemeral_secret_fact_id: [58; 32],
+        initiator_ephemeral_public_key: crypto::x25519_public_key(&initiator_ephemeral_private),
+        from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
+        to_listen_addr: None,
+    };
+    request.invite_signature = crypto::ed25519_sign(
+        &invite.bootstrap_secret,
+        &topo::protocol::connection::request::create::invite_signing_transcript(&request)
+            .expect("request transcript"),
+    );
+    let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
+    let frame = request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
+        .expect("seal request");
+    let empty = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        network::SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
+
+    let err = ReceiveNetworkFrameHandler::new()
+        .handle(
+            &receive_intent(frame),
+            &HandlerContext::new().with_store(&empty),
+        )
+        .expect_err("missing local endpoint retries");
+    assert!(topo::core::intents::retry_intent_reason(&err).is_some());
 }
 
 #[test]
@@ -395,7 +459,7 @@ fn raw_bootstrap_response_bytes_are_discarded_at_the_network_boundary() {
 }
 
 #[test]
-fn receive_handler_emits_ephemeral_bootstrap_response_fact() {
+fn receive_handler_opens_sealed_response_to_durable_response_and_receipt() {
     let endpoint = local_endpoint();
     let responder_ephemeral_private = [72; 32];
     let response = ConnectionResponseFact {
@@ -411,20 +475,31 @@ fn receive_handler_emits_ephemeral_bootstrap_response_fact() {
     };
     let response_bytes = connection_response_layout::encode_fact(&response).expect("response");
     let frame =
-        bootstrap_response::seal_connection_response(&response_bytes, &responder_ephemeral_private)
+        response_transit::seal_connection_response(&response_bytes, &responder_ephemeral_private)
             .expect("seal response");
 
+    let store = store_with_endpoint(&endpoint);
     let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .handle(
+            &receive_intent(frame.clone()),
+            &HandlerContext::new().with_store(&store),
+        )
         .expect("receive response");
 
-    assert!(output.facts.is_empty());
-    assert_eq!(output.ephemeral_facts.len(), 1);
-    let bootstrap_input = bootstrap_response::layout::decode_fact(output.ephemeral_facts[0].body())
-        .expect("bootstrap response fact");
-    assert_eq!(&bootstrap_input.sealed_response_frame[..], frame.as_slice());
-    assert_eq!(bootstrap_input.origin_addr, ORIGIN);
-    assert_eq!(bootstrap_input.received_at_local_ms, RECEIVED_AT);
+    assert!(output.ephemeral_facts.is_empty());
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.facts.iter().any(|fact| fact.bytes == response_bytes));
+    let receipt_fact = output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied()
+                == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
+        })
+        .expect("receipt fact");
+    let receipt = fact_receipt_layout::decode_fact(receipt_fact.body()).expect("decode receipt");
+    assert_eq!(receipt.origin_addr, ORIGIN);
+    assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
@@ -592,4 +667,17 @@ fn local_endpoint() -> EndpointFact {
         signing_public_key: crypto::ed25519_public_key(&signing_secret),
         signing_secret,
     }
+}
+
+fn store_with_endpoint(endpoint: &EndpointFact) -> Store {
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        network::SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
+    store
+        .insert_table_rows(endpoint_rows::endpoint_rows(endpoint))
+        .expect("seed local endpoint");
+    store
 }

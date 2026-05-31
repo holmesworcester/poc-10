@@ -154,7 +154,7 @@ use crate::core::intents::{
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
 use crate::protocol::auth::endpoint::create as local_endpoint;
 use crate::protocol::auth::invite::layout as invite_layout;
-use crate::protocol::connection::bootstrap_response;
+use crate::protocol::connection::response::transit as response_transit;
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
@@ -246,7 +246,7 @@ impl IntentHandler for CreateConnectionResponseHandler {
             HandlerError::fatal("create_connection_response response route is missing")
         })?;
         let target = NetworkTarget::new(return_addr);
-        let sealed_response = bootstrap_response::seal_connection_response(
+        let sealed_response = response_transit::seal_connection_response(
             &built.fact.bytes,
             &responder_ephemeral_private_key,
         )?;
