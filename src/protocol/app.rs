@@ -48,16 +48,14 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     context: MatchCliContext::new,
 };
 
-const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
-    DaemonTimeWake {
-        timeline: content::message::expiration_timeline,
-        end_inclusive: current_message_expiration_minute,
-    },
-    DaemonTimeWake {
-        timeline: connection::bootstrap_request::peer_retry_timeline,
-        end_inclusive: current_wall_clock_ms,
-    },
-];
+/// Daemon-owned time wakes.
+///
+/// Every daemon time wake must be replayable: its high-water mark derives from
+/// retained protocol state, not fresh wall-clock. The set is therefore exactly
+/// the replayable timelines. Operational wall-clock loops such as connection
+/// peer retry are not daemon time wakes; that work is the live recurring
+/// `maintain_connections` intent.
+const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = REPLAYABLE_DAEMON_TIME_WAKES;
 
 /// Replayable semantic time-wake timelines.
 ///
@@ -65,9 +63,7 @@ const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[
 /// high-water mark derives from retained protocol state (the store-local
 /// logical clock), not fresh wall-clock. `content_message_expiry` qualifies
 /// because it only advances disappearing-message expiry, which is replayable
-/// protocol state. The operational `connection_peer_retry` wall-clock timeline
-/// is deliberately excluded: it is not replayable, and phase D retires it in
-/// favor of a live recurring maintenance intent.
+/// protocol state.
 pub const REPLAYABLE_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
     timeline: content::message::expiration_timeline,
     end_inclusive: current_message_expiration_minute,
@@ -89,9 +85,3 @@ fn current_message_expiration_minute(store: &Store) -> Result<Option<u64>, Strin
     Ok(clock::logical_time(store)?.map(|now_ms| now_ms / 60_000))
 }
 
-fn current_wall_clock_ms(_store: &Store) -> Result<Option<u64>, String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|err| format!("system clock before unix epoch: {err}"))?;
-    Ok(Some(u64::try_from(now.as_millis()).unwrap_or(u64::MAX)))
-}

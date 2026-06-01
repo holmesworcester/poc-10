@@ -15,13 +15,11 @@ pub mod create;
 pub mod fact;
 pub mod layout;
 pub mod project;
+pub mod queries;
 pub mod rows;
 pub mod transit;
 
-pub use project::{
-    connection_response_for_request_need, connection_response_for_request_offer,
-    peer_retry_timeline,
-};
+pub use project::{connection_response_for_request_need, connection_response_for_request_offer};
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::BootstrapRequestFact, String> {
     layout::decode_fact(bytes)

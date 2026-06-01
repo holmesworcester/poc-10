@@ -74,6 +74,43 @@ pub fn choose_connection_mode(
     Ok(None)
 }
 
+/// One local outbound membership request still awaiting a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingMembershipRequest {
+    pub request_id: FactId,
+    pub initiator_ephemeral_secret_id: FactId,
+    pub addr: SocketAddr,
+}
+
+/// Local outbound membership request rows whose request id has no connection
+/// (response) row yet. The live `maintain_connections` loop queues one send per
+/// entry; an answered request drops out so a connected peer stops being retried.
+pub fn pending_membership_requests(
+    store: &Store,
+) -> Result<Vec<PendingMembershipRequest>, String> {
+    let answered =
+        crate::protocol::connection::bootstrap_response::rows::answered_request_ids(store)?;
+    let mut pending = Vec::new();
+    for (key, value) in store
+        .table_rows(super::rows::CONNECTION_REQUEST_ROWS)
+        .map_err(|err| format!("read membership connection request rows: {err}"))?
+    {
+        let row = super::rows::decode_connection_request_row(&key, &value)?;
+        let Some(addr) = row.peer_addr else {
+            continue;
+        };
+        if answered.contains(&row.request_id) {
+            continue;
+        }
+        pending.push(PendingMembershipRequest {
+            request_id: row.request_id,
+            initiator_ephemeral_secret_id: row.initiator_ephemeral_secret_fact_id,
+            addr,
+        });
+    }
+    Ok(pending)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

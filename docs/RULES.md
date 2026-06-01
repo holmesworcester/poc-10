@@ -27,8 +27,15 @@ in `src/core` or `src/protocol`.
   answerable by reading one projector, and a replayable intent can never smuggle
   in a non-replayable one. Concretely, `create_bootstrap_response` and
   `create_connection_response` only create the responder ephemeral and response
-  facts; the local response fact's projector emits the network send, exactly as
-  the local request projector emits its own send.
+  facts; the local response fact's projector emits the network send.
+- Replayability decides where a send is emitted. A response send is reactive to
+  a received request and is emitted by the response fact's projector. A *request*
+  send is operational liveness, not durable truth: a projector-emitted request
+  send would be a live-only intent that replay suppresses and never re-issues, so
+  request sends are driven by the live recurring `maintain_connections` loop,
+  which re-queries unanswered local outbound request rows each tick. Operational
+  repetition belongs in a recurring intent, not a wall-clock time wake or a
+  projector-scheduled retry.
 - The product-facing binary is `con`. `src/context_app.rs` should stay a thin
   app boundary around the core runtime and protocol registry.
 

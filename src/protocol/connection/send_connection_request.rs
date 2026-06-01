@@ -2,11 +2,11 @@
 //!
 //! Before a membership connection exists, the only outbound network operation is
 //! sending a sealed `connection_request` fact to the endpoint's learned listen
-//! address. The request projector emits this local intent after it has offered
-//! request context; the handler loads exactly that request fact plus its
-//! initiator ephemeral secret, seals the canonical bytes, and attempts one
-//! bounded write. Retry timing is owned by the request projector's peer-retry
-//! time wake.
+//! address. The live `maintain_connections` recurring loop emits this local
+//! intent for each unanswered local outbound membership request; the handler
+//! loads exactly that request fact plus its initiator ephemeral secret, seals
+//! the canonical bytes, and attempts one bounded write. Retry timing is the
+//! maintenance cadence: a dropped send is re-queued on the next tick.
 
 use std::net::SocketAddr;
 

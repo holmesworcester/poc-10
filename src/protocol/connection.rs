@@ -38,6 +38,7 @@ pub mod receive_network_frame;
 // request over the network.
 pub mod create_bootstrap_response;
 pub mod create_connection_response;
+pub mod maintain_connections;
 pub mod send_bootstrap_request;
 pub mod send_bootstrap_response;
 pub mod send_connection_request;

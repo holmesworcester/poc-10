@@ -659,16 +659,21 @@ fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents() {
 fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let accept_commands = source_text(&root.join("src/protocol/auth/invite/commands.rs"));
-    let connection_request_projector =
+    let request_projector =
         source_text(&root.join("src/protocol/connection/bootstrap_request/project.rs"));
+    let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 
     assert!(
         !accept_commands.contains("send_bootstrap_connection_request_intent"),
         "accept/link commands should create connection_request facts, not enqueue bootstrap IO directly"
     );
     assert!(
-        connection_request_projector.contains("send_bootstrap_connection_request_intent"),
-        "the connection_request projector should schedule bootstrap IO when a local request projects"
+        maintenance.contains("send_bootstrap_connection_request_intent"),
+        "the live maintenance loop should schedule bootstrap IO for unanswered local requests"
+    );
+    assert!(
+        !request_projector.contains("send_bootstrap_connection_request_intent"),
+        "request sends are driven by the maintenance loop so they survive replay; the request projector must not emit them"
     );
 }
 

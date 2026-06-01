@@ -26,7 +26,7 @@ use crate::core::network;
 use crate::core::projectors::{
     FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
-use crate::core::runtime::HandlerRoute;
+use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
@@ -280,6 +280,7 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_observed_endpoint_address_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_server_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -334,6 +335,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         connection::observed_endpoint_address::rows::CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
         connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
         connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
+        connection::connection_request::rows::CONNECTION_REQUEST_ROWS,
         connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
         auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
         auth::invite_server::rows::INVITE_SERVER_ROWS,
@@ -544,6 +546,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     connection::observed_endpoint_address::rows::CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
     connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
     connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
+    connection::connection_request::rows::CONNECTION_REQUEST_ROWS,
     connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
     read_models::FILE_ROWS,
     read_models::FILE_DELETION_ROWS,
@@ -764,6 +767,21 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         sync::seed_connection::SEED_CONNECTION_SYNC,
         sync::seed_connection::SeedConnectionSyncHandler,
         replay = false
+    ),
+    // Connection maintenance is a live-only recurring operational loop. The
+    // daemon installs it as an in-memory schedule and fires it on a fixed
+    // cadence; it re-sends unanswered local outbound requests and never runs
+    // during replay. This replaces the wall-clock connection_peer_retry wake.
+    handler_route!(
+        "maintain_connections",
+        connection::maintain_connections::MAINTAIN_CONNECTIONS,
+        connection::maintain_connections::MaintainConnectionsHandler,
+        replay = false,
+        recurring = RecurringIntentSpec {
+            interval_ms: 250,
+            initial_delay_ms: 0,
+            build_intent: connection::maintain_connections::build_maintain_connections_intent,
+        }
     ),
     // Key wrap creation is deterministic, idempotent fact creation from retained
     // recipient/request/source/signer facts.

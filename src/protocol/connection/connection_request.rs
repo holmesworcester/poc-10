@@ -17,11 +17,12 @@ pub mod fact;
 pub mod layout;
 pub mod project;
 pub mod queries;
+pub mod rows;
 pub mod transit;
 
 pub use project::{
     connection_request_need, connection_request_offer, connection_response_for_request_need,
-    connection_response_for_request_offer, peer_retry_timeline,
+    connection_response_for_request_offer,
 };
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionRequestFact, String> {

@@ -29,7 +29,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
 use crate::protocol::auth::{endpoint, endpoint_shared, workspace};
@@ -39,25 +39,14 @@ use crate::protocol::connection::create_connection_response::{
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
 use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
-use crate::protocol::connection::send_connection_request::{
-    send_connection_request_intent, SendConnectionRequest,
-};
 
 use super::create::validate_endpoint_signature;
 use super::fact::ConnectionRequestFact;
-
-const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
-const PEER_RETRY_DELAY_MS: u64 = 250;
+use super::rows::connection_request_row;
 
 const MEMBERSHIP_CONNECTION_REQUEST_ROLE: &str = "membership_connection_request";
 const MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str =
     "membership_connection_response_for_request";
-
-/// Peer-retry timeline shared with bootstrap: it is keyed per request fact, so
-/// reusing the constant does not cross requests.
-pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
-    crate::protocol::connection::bootstrap_request::peer_retry_timeline()
-}
 
 pub fn connection_request_need(
     owner: crate::core::facts::FactId,
@@ -235,12 +224,7 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                 }
                 return Ok(materialized_output(fact.id));
             }
-            return Ok(local_retrying_output(
-                fact,
-                &request,
-                response_need,
-                projection_context,
-            )?);
+            return Ok(local_outbound_output(fact, &request, response_need)?);
         }
 
         // 3b. Received membership request path.
@@ -416,43 +400,36 @@ fn materialized_output(request_id: [u8; 32]) -> ProjectionOutput {
     ProjectionOutput::new().offer(connection_request_offer(request_id, request_id))
 }
 
-fn local_retrying_output(
+/// Local outbound membership request: materialize the request row carrying the
+/// peer address, learn the peer's reachable address, and keep the
+/// response-for-request need so the row drops out of maintenance once answered.
+///
+/// As with bootstrap, the send is not emitted here: a projector-emitted send is
+/// a live-only intent that replay suppresses and never re-issues. The live
+/// `maintain_connections` recurring loop re-queries unanswered local outbound
+/// membership rows each tick and queues the send.
+fn local_outbound_output(
     fact: &Fact,
     request: &ConnectionRequestFact,
     response_need: crate::core::context::ContextNeed,
-    projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let mut output = materialized_output(fact.id).need(response_need);
     let Some(addr) = request.to_listen_addr else {
         return Ok(output);
     };
-    // `PutRow` is insert-or-ignore; a same-output delete-then-put would delete
-    // the row (commit applies puts before deletes), so the put stands alone.
-    output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
-        request.to_endpoint,
-        addr,
-    )?));
-
-    let retry_timeline = peer_retry_timeline();
-    let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
-    if let Some(now_ms) = due_retry_at {
-        output = output.local_intent(send_connection_request_intent(SendConnectionRequest {
-            request_id: fact.id,
-            initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
+    // The request row lets maintenance re-send; the learned-address row lets a
+    // later reconnect resolve the peer. `PutRow` is insert-or-ignore, so
+    // reprojecting the same request is a no-op.
+    output = output
+        .row_mutation(RowMutation::PutRow(connection_request_row(
+            fact.id,
+            request.initiator_ephemeral_secret_fact_id,
+            Some(addr),
+        )?))
+        .row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
+            request.to_endpoint,
             addr,
-        })?);
-        output = output.time_wake(TimeWake {
-            owner: fact.id,
-            timeline: retry_timeline,
-            at: now_ms.saturating_add(PEER_RETRY_DELAY_MS),
-        });
-    } else {
-        output = output.time_wake(TimeWake {
-            owner: fact.id,
-            timeline: retry_timeline,
-            at: PEER_RETRY_IMMEDIATE_AT_MS,
-        });
-    }
+        )?));
     Ok(output)
 }
 

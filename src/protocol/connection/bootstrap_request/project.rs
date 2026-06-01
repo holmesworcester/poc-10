@@ -28,7 +28,7 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
+    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
 };
 
 use crate::protocol::auth::{endpoint, invite};
@@ -38,23 +38,12 @@ use crate::protocol::connection::create_bootstrap_response::{
 };
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::send_bootstrap_request::{
-    send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
-};
 
 use super::create::encode_optional_addr;
 use super::fact::BootstrapRequestFact;
 use super::rows::bootstrap_request_row;
 
-const PEER_RETRY_IMMEDIATE_AT_MS: u64 = 0;
-const PEER_RETRY_DELAY_MS: u64 = 250;
-
 const CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str = "connection_response_for_request";
-
-pub fn peer_retry_timeline() -> crate::core::projectors::Timeline {
-    crate::core::projectors::Timeline::new("connection_peer_retry")
-        .expect("valid connection peer-retry timeline")
-}
 
 pub fn connection_response_for_request_need(
     owner: crate::core::facts::FactId,
@@ -187,9 +176,9 @@ impl TypedProjector<super::Codec> for BootstrapRequestProjector {
                         "connection request response context targets another request".to_string(),
                     );
                 }
-                return materialized_output(fact.id, &request);
+                return materialized_output(fact.id, &request, true);
             }
-            return local_retrying_output(fact, &request, response_need, projection_context);
+            return local_outbound_output(fact, &request, response_need);
         }
 
         // 2b. Received semantic request path.
@@ -293,6 +282,7 @@ fn validate_request_fields(request: &BootstrapRequestFact) -> Result<(), String>
 fn materialized_output(
     request_id: [u8; 32],
     request: &BootstrapRequestFact,
+    is_local_outbound: bool,
 ) -> Result<ProjectionOutput, String> {
     Ok(ProjectionOutput::new()
         .offer(crate::core::context::ContextOffer::range(
@@ -303,52 +293,36 @@ fn materialized_output(
             request_id,
         ))
         .row_mutation(RowMutation::PutRow(bootstrap_request_row(
-            request_id, request,
+            request_id,
+            request,
+            is_local_outbound,
         )?)))
 }
 
-fn local_retrying_output(
+/// Local outbound request: materialize the request row carrying the peer
+/// address and learn the peer's reachable address, then keep the
+/// response-for-request need so the row drops out of maintenance once answered.
+///
+/// The send itself is not emitted here. A projector-emitted send is a live-only
+/// intent that replay suppresses and never re-issues, so request sends are
+/// driven by the live `maintain_connections` recurring loop, which re-queries
+/// the unanswered local outbound rows each tick.
+fn local_outbound_output(
     fact: &Fact,
     request: &BootstrapRequestFact,
     response_need: crate::core::context::ContextNeed,
-    projection_context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    let mut output = materialized_output(fact.id, request)?.need(response_need);
-    let Some(addr) = request.to_listen_addr else {
-        return Ok(output);
-    };
-
+    let mut output = materialized_output(fact.id, request, true)?.need(response_need);
     // Learn the peer's reachable listen address so a later membership connection
     // can reconnect after the invite link expires. Keyed by endpoint; `PutRow` is
     // insert-or-ignore, so reprojecting the same request is a no-op. A same-output
     // delete-then-put would *delete* the row (commit applies puts before deletes),
     // so the put stands alone.
-    output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
-        request.to_endpoint,
-        addr,
-    )?));
-
-    let retry_timeline = peer_retry_timeline();
-    let due_retry_at = projection_context.time_reached(&retry_timeline, PEER_RETRY_IMMEDIATE_AT_MS);
-    if let Some(now_ms) = due_retry_at {
-        output = output.local_intent(send_bootstrap_connection_request_intent(
-            SendBootstrapConnectionRequest {
-                request_id: fact.id,
-                initiator_ephemeral_secret_id: request.initiator_ephemeral_secret_fact_id,
-                addr,
-            },
-        )?);
-        output = output.time_wake(TimeWake {
-            owner: fact.id,
-            timeline: retry_timeline,
-            at: now_ms.saturating_add(PEER_RETRY_DELAY_MS),
-        });
-    } else {
-        output = output.time_wake(TimeWake {
-            owner: fact.id,
-            timeline: retry_timeline,
-            at: PEER_RETRY_IMMEDIATE_AT_MS,
-        });
+    if let Some(addr) = request.to_listen_addr {
+        output = output.row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
+            request.to_endpoint,
+            addr,
+        )?));
     }
     Ok(output)
 }
@@ -358,14 +332,13 @@ fn received_materialized_output(
     request: &BootstrapRequestFact,
     receive_id: [u8; 32],
 ) -> Result<ProjectionOutput, String> {
-    let mut output =
-        materialized_output(request_id, request)?.intent(create_bootstrap_response_intent(
-            CreateBootstrapResponse {
-                request_id,
-                invite_secret_id: request.invite_secret_fact_id,
-                receive_id,
-            },
-        ));
+    let mut output = materialized_output(request_id, request, false)?.intent(
+        create_bootstrap_response_intent(CreateBootstrapResponse {
+            request_id,
+            invite_secret_id: request.invite_secret_fact_id,
+            receive_id,
+        }),
+    );
     // Learn the initiator's reachable listen address from the received request,
     // so we can later open a membership connection back to it without an invite.
     if let Some(addr) = request.from_listen_addr {
@@ -449,7 +422,7 @@ mod projector_tests {
             )
         })
     }
-    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
+    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth::endpoint::{fact::EndpointFact, layout as endpoint_layout};
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use topo::protocol::connection::create_bootstrap_response::{
@@ -467,7 +440,6 @@ mod projector_tests {
     use topo::protocol::connection::bootstrap_response::{
         fact::BootstrapResponseFact, layout as response_layout,
     };
-    use topo::protocol::connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST;
 
     fn invite_fact() -> (InviteSecretFact, Fact) {
         let invite = InviteSecretFact::new([55; 32]);
@@ -671,14 +643,6 @@ mod projector_tests {
         }
     }
 
-    fn due_peer_retry_context(context: ProjectionContext, end_inclusive: u64) -> ProjectionContext {
-        context.with_time_ranges(vec![TimeRange {
-            timeline: topo::protocol::connection::bootstrap_request::peer_retry_timeline(),
-            start_exclusive: None,
-            end_inclusive,
-        }])
-    }
-
     #[test]
     fn local_request_missing_ephemeral_waits_without_row() {
         let (_, request_fact, invite_fact, _) = signed_request_fact(FactScope::Local);
@@ -718,7 +682,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_materializes_and_schedules_peer_retry_after_context_match() {
+    fn local_request_materializes_row_with_peer_addr_and_learned_address() {
         let (request, request_fact, invite_fact, ephemeral_fact) =
             signed_request_fact(FactScope::Local);
         let context = ProjectionContext::from_matches(vec![
@@ -730,14 +694,11 @@ mod projector_tests {
             .project(&request_fact, &context)
             .expect("project request");
 
+        // No projector-emitted send and no wall-clock retry wake: the live
+        // maintenance loop drives sends off the materialized row instead.
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
-        assert_eq!(output.time_wakes.len(), 1);
-        assert_eq!(
-            output.time_wakes[0].timeline,
-            topo::protocol::connection::bootstrap_request::peer_retry_timeline()
-        );
-        assert_eq!(output.time_wakes[0].at, 0);
+        assert!(output.time_wakes.is_empty());
         assert!(output
             .needs
             .iter()
@@ -761,39 +722,12 @@ mod projector_tests {
             row.initiator_ephemeral_secret_fact_id,
             request.initiator_ephemeral_secret_fact_id
         );
+        // Local outbound rows carry the peer address so maintenance can re-send.
+        assert_eq!(row.peer_addr, request.to_listen_addr);
     }
 
     #[test]
-    fn local_request_due_peer_retry_emits_bootstrap_send_and_next_wake() {
-        let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
-        let context = due_peer_retry_context(
-            ProjectionContext::from_matches(vec![
-                invite_match(request_fact.id, invite_fact),
-                ephemeral_match(request_fact.id, ephemeral_fact),
-            ]),
-            10_000,
-        );
-
-        let output = project::BootstrapRequestProjector::new()
-            .project(&request_fact, &context)
-            .expect("project request");
-
-        assert!(output.effects.intents.is_empty());
-        assert_eq!(output.effects.local_intents.len(), 1);
-        assert_eq!(
-            output.effects.local_intents[0].kind.as_str(),
-            SEND_BOOTSTRAP_CONNECTION_REQUEST
-        );
-        assert_eq!(output.time_wakes.len(), 1);
-        assert_eq!(output.time_wakes[0].at, 10_250);
-        assert!(output
-            .needs
-            .iter()
-            .any(|need| need.role == "connection_response_for_request"));
-    }
-
-    #[test]
-    fn local_request_without_response_route_does_not_schedule_peer_retry() {
+    fn local_request_without_route_materializes_row_with_no_peer_addr() {
         let (mut request, _, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
         let invite = invite_layout::decode_fact(invite_fact.body()).expect("decode invite");
         request.to_listen_addr = None;
@@ -818,6 +752,14 @@ mod projector_tests {
         assert!(output.effects.intents.is_empty());
         assert!(output.effects.local_intents.is_empty());
         assert!(output.time_wakes.is_empty());
+        // Only the request row (no route, so no learned-address put).
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        let RowMutation::PutRow(row) = &output.effects.row_mutations[0] else {
+            panic!("expected put row mutation");
+        };
+        let row = rows::decode_bootstrap_request_row(&row.key, &row.value)
+            .expect("decode connection request row");
+        assert_eq!(row.peer_addr, None);
         assert!(output
             .needs
             .iter()
@@ -825,7 +767,7 @@ mod projector_tests {
     }
 
     #[test]
-    fn local_request_stops_peer_retry_when_response_context_exists() {
+    fn local_request_stops_when_response_context_exists() {
         let (_, request_fact, invite_fact, ephemeral_fact) = signed_request_fact(FactScope::Local);
         let context = ProjectionContext::from_matches(vec![
             invite_match(request_fact.id, invite_fact),
@@ -879,14 +821,11 @@ mod projector_tests {
     #[test]
     fn received_request_never_schedules_bootstrap_send_retry() {
         let (request, request_fact, invite_fact, _) = signed_request_fact(FactScope::Global);
-        let context = due_peer_retry_context(
-            ProjectionContext::from_matches(vec![
-                invite_match(request_fact.id, invite_fact),
-                endpoint_match(request_fact.id, request.to_endpoint),
-                receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
-            ]),
-            10_000,
-        );
+        let context = ProjectionContext::from_matches(vec![
+            invite_match(request_fact.id, invite_fact),
+            endpoint_match(request_fact.id, request.to_endpoint),
+            receive_match(request_fact.id, &request, request_fact.id, 1_700_000_000),
+        ]);
 
         let output = project::BootstrapRequestProjector::new()
             .project(&request_fact, &context)

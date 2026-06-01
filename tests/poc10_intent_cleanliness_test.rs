@@ -166,6 +166,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             &[
                 "create_bootstrap_response",
                 "create_connection_response",
+                "maintain_connections",
                 "receive_network_frame",
                 "send_bootstrap_request",
                 "send_bootstrap_response",
@@ -1296,8 +1297,8 @@ fn target_intents_are_self_contained_handler_files_without_driver_or_intent_subm
 /// The canonical intent verb vocabulary. Intent handler files are named
 /// `<verb>_<object>`; this set is deliberately small, and growing it is a
 /// deliberate act — add a verb here only when no existing verb fits.
-const INTENT_VERBS: [&str; 9] = [
-    "add", "create", "send", "receive", "purge", "share", "seed", "unwrap", "update",
+const INTENT_VERBS: [&str; 10] = [
+    "add", "create", "send", "receive", "purge", "share", "seed", "unwrap", "update", "maintain",
 ];
 
 /// A name is verb-first when it begins with `<verb>_` for a canonical intent

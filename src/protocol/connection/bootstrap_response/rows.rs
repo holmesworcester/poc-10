@@ -9,8 +9,10 @@
 //! key/value compatibility; projection owns when rows are written and when
 //! connection context is offered.
 
+use std::collections::BTreeSet;
+
 use crate::core::facts::FactId;
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow};
 
 use super::fact::{BootstrapResponseFact, EndpointId};
 
@@ -110,4 +112,21 @@ pub fn decode_bootstrap_response_row(
         handshake_hash,
         connection_secret,
     })
+}
+
+/// Request ids that already have a connection (response) row.
+///
+/// Both bootstrap and membership responses write this shared connection-row
+/// table, so an answered request — of either kind — appears here. The live
+/// `maintain_connections` loop subtracts this set from its pending request rows
+/// so a connected peer stops being re-sent.
+pub fn answered_request_ids(store: &Store) -> Result<BTreeSet<FactId>, String> {
+    let mut answered = BTreeSet::new();
+    for (key, value) in store
+        .table_rows(BOOTSTRAP_RESPONSE_ROWS)
+        .map_err(|err| format!("read connection response rows: {err}"))?
+    {
+        answered.insert(decode_bootstrap_response_row(&key, &value)?.request_id);
+    }
+    Ok(answered)
 }
