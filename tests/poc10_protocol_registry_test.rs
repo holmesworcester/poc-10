@@ -224,13 +224,15 @@ fn replay_classification_marks_only_deterministic_rebuild_handlers() {
 }
 
 #[test]
-fn only_connection_transport_facts_are_not_replayed() {
-    use topo::protocol::connection;
+fn only_transport_and_negotiation_facts_are_not_replayed() {
+    use topo::protocol::{connection, sync};
 
-    // Durable facts whose projection materializes live session state — the
-    // handshake request and the connection itself — must be retained but not
-    // re-projected on replay, so a rebuild never resurrects a dead connection.
-    // Everything else is durable truth that replay rebuilds deterministically.
+    // Durable facts whose projection materializes live session/negotiation state
+    // must be retained but not re-projected on replay, so a rebuild never
+    // resurrects a dead connection or a stale sync negotiation. The handshake
+    // request and the connection itself, plus the sync need/have advertisements,
+    // are this category. Everything else is durable truth that replay rebuilds
+    // deterministically.
     let not_replayed: BTreeSet<u8> = MATCH_RUNTIME
         .fact_routes
         .iter()
@@ -242,12 +244,14 @@ fn only_connection_transport_facts_are_not_replayed() {
         connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE,
         connection::connection_request::layout::TYPE_CONNECTION_REQUEST,
         connection::connection_response::layout::TYPE_CONNECTION_RESPONSE,
+        sync::have_id::layout::TYPE_SYNC_HAVE_ID,
+        sync::need_id::layout::TYPE_SYNC_NEED_ID,
     ]
     .into_iter()
     .collect();
     assert_eq!(
         not_replayed, expected,
-        "only the connection request/response handshake facts may be not-replayed"
+        "only connection handshake and sync need/have negotiation facts may be not-replayed"
     );
 
     // Truth facts — including the connection fact receipt that carries the
