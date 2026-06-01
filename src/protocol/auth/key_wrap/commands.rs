@@ -544,24 +544,8 @@ pub fn create_history_node(
 }
 
 pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt, String> {
-    let old_recipient = latest_local_recipient_key(runtime, input.workspace_id)?;
-    if let Some(previous) = old_recipient {
-        let clock = FixedClock(input.created_at_ms);
-        let vault = KeyMaterialVault::new(runtime.store());
-        let output = {
-            let ctx = runtime.command_context(&clock, &vault);
-            create_recipient_key(
-                &ctx,
-                CreateRecipientKey {
-                    created_at_ms: input.created_at_ms,
-                    workspace_id: input.workspace_id,
-                    previous_recipient_key_id: previous,
-                },
-            )?
-        };
-        let _ = runtime.submit_command_output(output)?;
-        runtime.process_all_work_until_idle(4, 512)?;
-    }
+    apply_retention_floor(runtime, input)?;
+
     let local_key_secret_ids = runtime
         .facts()
         .filter_map(|fact| {
@@ -571,6 +555,9 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
                 .map(|_| fact.id)
         })
         .collect::<Vec<_>>();
+    if !local_key_secret_ids.is_empty() {
+        rotate_recipient_for_chop(runtime, input)?;
+    }
     let retirement_facts = local_key_secret_ids
         .iter()
         .map(|fact_id| {
@@ -597,6 +584,49 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
         subsumed_message_tombstones_gcd: 0,
         subsumed_leaf_tombstones_gcd: 0,
     })
+}
+
+fn apply_retention_floor(runtime: &mut Runtime, input: ChopNow) -> Result<(), String> {
+    let Some(active_policy) = content::retention_policy::queries::active_for_workspace(
+        runtime.store(),
+        input.workspace_id,
+    )?
+    else {
+        return Ok(());
+    };
+    let output = content::retention_policy::commands::author_set_with_auto_floor(
+        runtime.store(),
+        content::retention_policy::commands::AuthorPolicy {
+            workspace_id: input.workspace_id,
+            now_ms: input.created_at_ms,
+            ttl_minutes: active_policy.ttl_minutes,
+            explicit_floor: Some(input.floor_minute),
+        },
+    )?;
+    runtime.submit_command_output(output)?;
+    runtime.process_all_work_until_idle(4, 512)?;
+    Ok(())
+}
+
+fn rotate_recipient_for_chop(runtime: &mut Runtime, input: ChopNow) -> Result<(), String> {
+    if let Some(previous) = latest_local_recipient_key(runtime, input.workspace_id)? {
+        let clock = FixedClock(input.created_at_ms);
+        let vault = KeyMaterialVault::new(runtime.store());
+        let output = {
+            let ctx = runtime.command_context(&clock, &vault);
+            create_recipient_key(
+                &ctx,
+                CreateRecipientKey {
+                    created_at_ms: input.created_at_ms,
+                    workspace_id: input.workspace_id,
+                    previous_recipient_key_id: previous,
+                },
+            )?
+        };
+        let _ = runtime.submit_command_output(output)?;
+        runtime.process_all_work_until_idle(4, 512)?;
+    }
+    Ok(())
 }
 
 fn recipient_key_is_superseded(
