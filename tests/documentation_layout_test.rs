@@ -347,6 +347,55 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
 }
 
 #[test]
+fn fact_authenticator_research_docs_record_authentication_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let authenticator_note = source_text(&root.join("docs/research/fact-validators.md"));
+    let versioning_note = source_text(&root.join("docs/research/protocol-versioning.md"));
+    let normalized_authenticator = normalize_whitespace(&authenticator_note);
+    let normalized_versioning = normalize_whitespace(&versioning_note);
+    let pipeline = format!("authenticate {} lens {} project", '\u{2192}', '\u{2192}');
+
+    for required in [
+        "# Fact Authenticators",
+        "pre-projector layer should not claim full protocol validity",
+        "`authenticate.rs`",
+        "`AuthenticatedFact<T>`",
+        "`NeedsAuthentication(AuthenticationNeed)`",
+        "Signatures, encryption, and container facts",
+        "The inner facts are admitted back through the normal authenticate/project pipeline",
+        "Purge, deletion, retention, and all materialization effects stay projector-owned",
+    ] {
+        assert!(
+            normalized_authenticator.contains(required),
+            "fact authenticator note is missing boundary detail {required:?}"
+        );
+    }
+    assert!(
+        normalized_authenticator.contains(&pipeline),
+        "fact authenticator note should name the authenticate/lens/project pipeline"
+    );
+
+    for required in [
+        "fact-authenticator split",
+        "first-class fact authenticators",
+        "Known-route authentication",
+        "`Authenticated(AuthenticatedFact<T>)`",
+        "`NeedsAuthentication(AuthenticationNeed)`",
+        "the projector materializes the recovered inner fact bytes and receipts",
+        "Those inner facts then re-enter the normal authenticate/project pipeline by their own tags",
+    ] {
+        assert!(
+            normalized_versioning.contains(required),
+            "protocol versioning note is missing authenticator detail {required:?}"
+        );
+    }
+    assert!(
+        normalized_versioning.contains(&pipeline),
+        "protocol versioning note should name the authenticate/lens/project pipeline"
+    );
+}
+
+#[test]
 fn repo_instructions_point_at_live_documentation_style_rules() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let agents = source_text(&root.join("AGENTS.md"));

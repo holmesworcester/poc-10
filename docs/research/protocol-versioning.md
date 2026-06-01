@@ -6,10 +6,10 @@ Single authoritative note: the model and phased implementation plan (Part I), th
 
 This is the authoritative, consolidated plan for protocol versioning in poc-10.
 It builds on two prerequisites that land first: the replay runtime
-(`poc10-replay-intent-shape.md`) and the **fact-validator split**
-(`fact-validators.md`) — the bottom of the `validate → lens → project` pipeline,
-specced and shippable on its own before any ceiling/lens work. Its exhaustive
-test matrix lives in Part II below.
+(`poc10-replay-intent-shape.md`) and the **fact-authenticator split**
+(`fact-validators.md`) — the bottom of the `authenticate → lens → project`
+pipeline, specced and shippable on its own before any ceiling/lens work. Its
+exhaustive test matrix lives in Part II below.
 
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
@@ -28,7 +28,7 @@ the plan reuses:
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
 routes, a release manifest, trusted time, the wipe-and-replay entry point,
-first-class fact validators, scope-owned ceiling lenses, and
+first-class fact authenticators, scope-owned ceiling lenses, and
 `runs_during_replay` / `intro_version` on routes.
 
 ## 1. Summary — the model in one breath
@@ -36,20 +36,21 @@ first-class fact validators, scope-owned ceiling lenses, and
 - **One substance: facts.** Everything protocol-meaningful is a fact — content,
   auth, connection frames, sync messages, the sealed handshake. Encryption is
   not a layer outside facts: a frame is a **container fact** whose payload is a
-  cleartext key hint plus AEAD ciphertext, and whose projector decrypts and
-  **emits the inner content facts**. The only non-fact layer is core's TCP
+  cleartext key hint plus AEAD ciphertext. Opening authenticates the carrier
+  boundary, and projection emits recovered inner fact bytes that re-enter the
+  normal pipeline by their own tags. The only non-fact layer is core's TCP
   framing (length prefix + heartbeat), which is protocol-neutral substrate.
 - **One versioning knob: the fact tag.** An incompatible durable fact shape is a
-  new tag, a kept-forever validator/reader, a scope-owned lens edge toward the
-  active ceiling model, and a sibling `_vN/` directory. No internal version bytes
-  for routed facts. The `TRNS` magic is a socket-level recognizer for the
+  new tag, a kept-forever authenticator/reader, a scope-owned lens edge toward
+  the active ceiling model, and a sibling `_vN/` directory. No internal version
+  bytes for routed facts. The `TRNS` magic is a socket-level recognizer for the
   framing substrate, not a fact-versioning device.
 - **One coordination number: the protocol version, defined as a named bundle of
   tag-versions.** `protocol 7 = protocol 6 + {message:2, file:3}`. It is
   platform-neutral. Per-platform semver maps onto it through a fleet-wide
   signed manifest. The **ceiling** is the minimum protocol version supported by
   every still-usable release, across all platforms. Because durable-fact support
-  is left-anchored at `[1, head]` (validators-forever), `min(supported_protocol
+  is left-anchored at `[1, head]` (authenticators-forever), `min(supported_protocol
   .end())` is exactly the ceiling; the version-range *intersection* concern
   applies only to transport carriers, which have a moving floor.
 - **Two uniformity invariants:**
@@ -59,18 +60,19 @@ first-class fact validators, scope-owned ceiling lenses, and
     `(retained facts, protocol version)` — identical across every supported
     client and platform. Clients render **at the ceiling, not their head**; only
     presentation chrome is platform-local.
-- **Validators forever; transport lives in `[floor, head]`.** Old fact
-  validators/readers are kept forever because retained signed history must
-  always validate as historical evidence. Old transport formats are kept only
+- **Authenticators forever; transport lives in `[floor, head]`.** Old fact
+  authenticators/readers are kept forever because retained signed history must
+  always authenticate as historical evidence. Old transport formats are kept only
   while some still-usable release speaks them; once every speaker has expired
   (**sub-floor**) — or a format is unsafe — the format is dropped. **Expired /
   sub-floor peers are out**: no recovery responder. Updating is the
   app-store/updater's job; local data is safe regardless because it replays after
   update.
-- **Replay validates, lenses, then projects.** Wipe and replay rebuilds derived
-  state from retained facts by routing bytes to their historical validator,
-  translating typed validated facts through the scope-owned lens chain to the
-  active ceiling semantic type, and running the ceiling projector.
+- **Replay authenticates, lenses, then projects.** Wipe and replay rebuilds
+  derived state from retained facts by routing bytes to their historical
+  authenticator, translating typed authenticated facts through the scope-owned
+  lens chain to the active ceiling semantic type, and running the ceiling
+  projector.
 
 Invariants stated precisely:
 
@@ -85,9 +87,9 @@ Invariants stated precisely:
 4. **Replay determinism.** Given the same retained facts, trusted time, and
    active ceiling, replay produces the same state regardless of admission order,
    and recreates only facts that are deterministic functions of retained facts.
-5. **Keep-forever validators, floor-bounded transport.** No retained fact ever
-   loses the validator/reader for its original signed bytes. No transport format
-   is answered below the floor.
+5. **Keep-forever authenticators, floor-bounded transport.** No retained fact
+   ever loses the authenticator/reader for its original signed bytes. No
+   transport format is answered below the floor.
 6. **Safety floor.** A fact version or transport format is removed before
    natural expiry only when it is unsafe.
 
@@ -246,7 +248,7 @@ trusted to the AEAD/DH primitive, not to poc-10.
 
 ### Phase 2 — Route gating (`intro_version` on every route)
 
-- `FactRoute` gains `intro_version: u32`, a validator/reader entry, a source
+- `FactRoute` gains `intro_version: u32`, an authenticator/reader entry, a source
   semantic node, and a scope-owned lens path into the active ceiling node.
   `registry::protocol_projector()` builds a **ceiling-filtered** projection
   pipeline containing only routes with `intro_version <= ceiling`, recomputed
@@ -270,10 +272,12 @@ trusted to the AEAD/DH primitive, not to poc-10.
   truth and is not replay input.
 - **Local creation** of an above-ceiling fact is refused at the command/admission
   boundary.
-- **Known-route validation.** Once a tag is ceiling-active and registered, core
-  routes the raw bytes to that tag's validator. The validator returns typed
-  validated data or invalid bytes. Projectors, not validators, express missing
-  context, authority requirements, parking, purge rules, and reproject needs.
+- **Known-route authentication.** Once a tag is ceiling-active and registered,
+  core routes the raw bytes to that tag's authenticator. The authenticator
+  returns typed authenticated data, invalid bytes, or a narrow authentication
+  need for verifier/opening context. Projectors, not authenticators, express
+  semantic context, authority requirements, parking, purge rules, and reproject
+  needs.
 
 ### Context integrity (core-enforced)
 
@@ -309,11 +313,14 @@ closed:
 
 - A new incompatible fact version is a sibling `_vN/` directory (original stays
   unsuffixed; never renamed). The **bucket holds the deltas**:
-  - `layout.rs` / `fact.rs` / `validate.rs`: always present per version; kept
-    forever; routed by tag. The validator parses raw bytes, computes/checks the
-    fact id, verifies the signature/domain, enforces intrinsic layout rules, and
-    emits a typed validated fact. Its result shape is only
-    `Valid(ValidatedFact<T>)` or `Invalid(ValidationError)`.
+  - `layout.rs` / `fact.rs` / `authenticate.rs`: always present per version;
+    kept forever; routed by tag. The authenticator parses raw bytes,
+    computes/checks the fact id, verifies the fact-boundary cryptographic proof
+    (usually signature/domain, sometimes a container AEAD opening), enforces
+    intrinsic layout rules, and emits a typed authenticated fact. Its result
+    shape is `Authenticated(AuthenticatedFact<T>)`,
+    `NeedsAuthentication(AuthenticationNeed)`, or
+    `Invalid(AuthenticationError)`.
   - `semantic.rs`: the in-memory typed value this version's projector consumes.
     It is not a durable fact. It carries source fact ids and provenance because
     the value is derived from signed bytes, not signed itself.
@@ -350,8 +357,8 @@ The projection pipeline is:
 ```text
 raw retained fact bytes
   -> tag route
-  -> version validator / reader
-  -> typed validated fact
+  -> version authenticator / reader
+  -> typed authenticated fact
   -> source semantic type
   -> scope-owned lens chain to the active ceiling semantic type
   -> ceiling projector
@@ -360,7 +367,7 @@ raw retained fact bytes
 
 The lens chain is per scope. Nodes are semantic Rust types, not durable facts.
 The default convention is linear: `vN/lens.rs` converts `vN-1::semantic` to
-`vN::semantic`. Replay to ceiling v2 runs `v0 validate -> v0 semantic ->
+`vN::semantic`. Replay to ceiling v2 runs `v0 authenticate -> v0 semantic ->
 v1/lens.rs -> v1 semantic -> v2/lens.rs -> v2 semantic -> v2/project.rs`.
 Branched evolution or shortcuts are allowed only after renaming the edge
 explicitly, for example `v2/from_v0.rs`, and declaring the canonical path in the
@@ -374,8 +381,9 @@ by the next semantic type, the next type must represent that absence explicitly
 durable fact. The lens must not invent authority, silently widen access, expose
 data hidden by a ceiling policy, or reinterpret old facts by accident.
 An authority lens may only preserve or narrow authority relative to the previous
-validated semantic value. Any authority widening requires a new durable authority
-fact and normal projector/context validation; it cannot be introduced by a lens.
+authenticated semantic value. Any authority widening requires a new durable
+authority fact and normal projector/context validation; it cannot be introduced
+by a lens.
 
 Projectors still own context. Cross-scope projectors should depend on semantic
 contracts, not raw foreign fact layouts: content may require
@@ -385,18 +393,18 @@ workspace membership, revocations, purge facts, and policy facts, and it parks o
 rejects according to normal context rules.
 
 This replaces "keep every old projector forever" with a narrower obligation:
-keep every old validator/reader forever, keep the linear lens chain for retained
-durable facts to the active ceiling semantic type, and keep the ceiling projector
-for the current semantic contract. Security fixes land at the smallest layer:
-malformed old bytes are handled in validators, unsafe representation mapping in
-lenses, unsafe interpretation in projectors or policy facts, and bad derived
-state by replaying with the fixed projector.
+keep every old authenticator/reader forever, keep the linear lens chain for
+retained durable facts to the active ceiling semantic type, and keep the ceiling
+projector for the current semantic contract. Security fixes land at the smallest
+layer: malformed old bytes are handled in authenticators, unsafe representation
+mapping in lenses, unsafe interpretation in projectors or policy facts, and bad
+derived state by replaying with the fixed projector.
 
 ### Fact durability and replay classes
 
 Durability and replay are **two axes**, not one: *retained* (the bytes survive a
-wipe) and *replay-projected* (re-fed through `validate → lens → project` on an
-upgrade wipe to rebuild derived state). That gives three classes:
+wipe) and *replay-projected* (re-fed through `authenticate → lens → project` on
+an upgrade wipe to rebuild derived state). That gives three classes:
 
 - **Replay-durable** (retained + replay-projected) — the shared event log:
   `content::*`, `auth::*`. Kept **forever** (source of truth), lensed to the
@@ -418,7 +426,7 @@ upgrade wipe to rebuild derived state). That gives three classes:
 
 So **a fact has a `lens.rs` iff it is replay-projected** — only replay-durable
 facts are lensed; local-durable and ephemeral both skip it. The non-replayed
-classes' `_vN/` buckets carry `validate.rs` + `project.rs` and no `lens.rs`.
+classes' `_vN/` buckets carry `authenticate.rs` + `project.rs` and no `lens.rs`.
 
 This **replaces the connection-retirement-before-replay dance**: because
 `connection::request`/`response` are local-durable (not replay-projected), the
@@ -457,9 +465,12 @@ explicit marker, not derived from scope.
 - **Frames are facts.** Drop any "envelope is not a fact" framing.
   `connection_frame_wire.rs` is the AEAD wire-layout module for the frame facts;
   the cleartext header (`tag + version + size_class + connection_id + nonce`) is
-  the key hint, and the projector decrypts and emits content facts. The `TRNS`
-  4-byte magic is a stream recognizer owned by the framing substrate
-  (`core/network.rs`), not a fact-version device.
+  the key hint. The carrier authenticator/opener proves and opens the frame
+  boundary with connection context; the projector materializes the recovered
+  inner fact bytes and receipts. Those inner facts then re-enter the normal
+  authenticate/project pipeline by their own tags. The `TRNS` 4-byte magic is a
+  stream recognizer owned by the framing substrate (`core/network.rs`), not a
+  fact-version device.
 - **Negotiate up** between capable peers (highest common frame version inside the
   authenticated session). **Initiate at the operational floor** when the peer is
   unknown. **Answer in the request's version** for a still-usable older peer.
@@ -481,7 +492,7 @@ explicit marker, not derived from scope.
 
 - Adding or changing a fact family requires a manifest entry naming: the tag,
   its `intro_version`, the blocking non-capable releases and their expiries (per
-  platform), the kept old validators/readers, the lens chain to the active
+  platform), the kept old authenticators/readers, the lens chain to the active
   ceiling semantic type, the security-deprecation policy, the replay output, and
   the tests below.
 - **No-regression gate.** A production release whose `supported_protocol` does
@@ -505,9 +516,10 @@ usually hold only their endpoint signing key (proven by `auth::endpoint_shared`)
 not the original invite key, so a normal device cannot reissue the same
 `auth::user` shape. The fix is a new ceiling-gated profile fact — a new tag in a
 sibling bucket (Phase 4), not a same-shaped rewrite. The old `auth::user`
-validator still proves membership authority from the old signature, while the
-auth lens to the ceiling profile model refuses to use the plaintext field as a
-display claim once the policy says it is unsafe. Illustrative shape:
+authenticator still proves the old signed bytes are authentic, while the auth
+lens/projector path preserves membership authority and refuses to use the
+plaintext field as a display claim once the policy says it is unsafe.
+Illustrative shape:
 
 ```text
 auth::user_profile_v2 {
@@ -526,10 +538,10 @@ fact and the signer `auth_endpoint_shared` fact, and admits only when both are i
 the same workspace, `endpoint_shared.user_authority_fact_id == subject_user_id`,
 and the signer key matches the endpoint_shared row. It may replace display data
 only — never membership, admin authority, the original user key, or the subject
-id. The old `auth::user` validator plus lens keeps emitting authority identity
-without materializing plaintext into display rows; a policy fact can hide or
-quarantine old plaintext names; live devices publish encrypted profile facts
-opportunistically. Purging the raw plaintext bytes first needs an
+id. The old `auth::user` authenticator plus lens keeps emitting authenticated
+membership identity without materializing plaintext into display rows; a policy
+fact can hide or quarantine old plaintext names; live devices publish encrypted
+profile facts opportunistically. Purging the raw plaintext bytes first needs an
 authority-preserving replacement or tombstone — authority anchors are not freely
 purgeable — or content naming `author_user_id == auth::user.id` loses its context
 proof.
@@ -593,9 +605,10 @@ proof-of-record kind. Each is triaged (full table in
 Part II §21 below) into:
 
 - **P — pure**: the assertion is really on a constructor (`create::*`),
-  validator (`validate_*`), layout decoder, frame classifier, version resolver,
-  or projector. Re-tag `projector-unit`/`pure-unit` (trusted) and build its input
-  facts through the real owning-module encoder, never hand-written bytes.
+  authenticator (`authenticate_*`), layout decoder, frame classifier, version
+  resolver, or projector. Re-tag `projector-unit`/`pure-unit` (trusted) and build
+  its input facts through the real owning-module encoder, never hand-written
+  bytes.
 - **A — stateful-deterministic**: black-box via a real `con` command + observe
   the emitted fact/row, with `replay-check` for idempotence and order
   independence. (Includes `require_fact` "never fabricate" backstops — observe
@@ -1624,11 +1637,11 @@ used (they do not exist — inventory section 6).
 - **Defends:** Negative case for "fact tags globally unique"; VERSIONING KNOB correctness.
 - **Refs:** `fact_route_tags_are_globally_unique` (registry.rs:718-728); `FactRoute.tag`.
 
-### ROUTE-23 — connection frame (container fact) admits at ceiling and its projector emits inner content facts; an above-ceiling INNER fact is quarantined  `projector-unit`
+### ROUTE-23 — connection frame (container fact) admits at ceiling and emits inner fact bytes; an above-ceiling INNER fact is quarantined  `projector-unit`
 - **Setup:** Ceiling C. A `connection::frame_small` fact (tag 168, the TRNS container) whose decrypted inner bundle packs two content facts: one at-ceiling `content::message` (tag 50) and one above-ceiling inner fact (tag T, `V(T) > C`).
-- **Action:** Project the frame_small container fact; let its projector decrypt and re-submit the inner facts through the ceiling-filtered router.
-- **Expect:** The container fact admits and decrypts; the inner tag-50 message projects and is counted/displayed; the inner above-ceiling fact T is QUARANTINED (retained opaque, uncounted), NOT errored. The container projection result is `Ok`. Quarantine of one inner fact does not fail the whole frame.
-- **Defends:** ADMISSION/quarantine applies to emitted inner content facts; Invariant (1); "connection frame is a CONTAINER FACT whose projector decrypts and EMITS inner content facts".
+- **Action:** Open and project the frame_small container fact; materialize its recovered inner fact bytes and re-submit them through the ceiling-filtered router.
+- **Expect:** The container fact admits and opens; the inner tag-50 message authenticates/projects and is counted/displayed; the inner above-ceiling fact T is QUARANTINED (retained opaque, uncounted), NOT errored. The container projection result is `Ok`. Quarantine of one inner fact does not fail the whole frame.
+- **Defends:** ADMISSION/quarantine applies to emitted inner fact bytes; Invariant (1); "connection frame is a CONTAINER FACT whose opened children re-enter authenticate/project by their own tags".
 - **Refs:** `connection::frame_small` tag 168 `project_connection_frame_small` (registry.rs:630); `connection_frame_wire.rs` inner-bundle decode; `RouterProjector` quarantine branch; tag 50.
 
 ### ROUTE-24 — connection scope: above-ceiling NEW frame variant tag is quarantined, existing frame tags still admit  `projector-unit`
@@ -2627,11 +2640,11 @@ Verified grounding from `/home/holmes/poc-10/src`:
 - **Defends:** Invariant 2 across all four scopes (auth/content/connection/sync).
 - **Refs:** `sync::shared_fact::project::SyncSharedFactProjector`, `sync/shared_fact/rows.rs`.
 
-### PROJ-06 — connection::frame_small (tag 168) old container fact decrypts and emits inner content facts (current shape) `projector-unit`
+### PROJ-06 — connection::frame_small (tag 168) old container fact opens and emits inner fact bytes (current shape) `projector-unit`
 - **Setup:** Current binary. A retained `connection::frame_small` container fact (tag 168) sealed under an older frame era (TRNS v1), carrying one inner `content::message` fact; the connection's ephemeral secret / send context pre-loaded.
-- **Action:** Call `ConnectionFrameSmallProjector::project` (route `project_connection_frame_small`, registry.rs:630).
-- **Expect:** Output AEAD-decrypts the inner bundle and emits the inner content fact(s) as durable child facts via `ProjectionOutput::fact(...)` (frame_small/project.rs MATERIALIZE step), which are then routed by their OWN tag (50) on a later pass. The container projector emits child facts, not rows of its own.
-- **Defends:** Invariant 2 + "a connection frame is a CONTAINER FACT: projector decrypts and EMITS inner content facts" (connection scope).
+- **Action:** Open the carrier boundary and call `ConnectionFrameSmallProjector::project` (route `project_connection_frame_small`, registry.rs:630).
+- **Expect:** Output emits the recovered inner fact bytes as durable child facts via `ProjectionOutput::fact(...)` (frame_small/project.rs MATERIALIZE step), which are then routed by their OWN tag (50) on a later pass. The container projector emits child facts, not rows of its own, and does not authenticate the child facts for their owning families.
+- **Defends:** Invariant 2 + "a connection frame is a CONTAINER FACT: opening recovers inner fact bytes that re-enter authenticate/project by their own tags" (connection scope).
 - **Refs:** `connection::frame_small::project::ConnectionFrameSmallProjector`, `connection_frame_wire.rs` (`open_connection_frame`, `decode_inner_bundle`).
 
 ### PROJ-07 — old message adapter may REJECT a structurally-malformed old fact (tighten validation) `projector-unit`
@@ -3183,7 +3196,7 @@ Grounding notes for this cluster (verified against `/home/holmes/poc-10/src`):
 ### CONN-13 — A transport format is kept while a still-usable release speaks it (frame_small projector live at current ceiling)  `projector-unit`
 - **Setup:** Ceiling activates the carriers used by every still-usable release. The `frame_small` (168) projector is registered in `FACT_ROUTES`.
 - **Action:** Project a valid in-version `frame_small` frame fact through `RouterProjector` (route present, `intro_version <= ceiling`).
-- **Expect:** `RouterProjector::project` finds the `frame_small` route, the projector decrypts and emits inner child facts — i.e. the format is retained and active because at least one still-usable release speaks it. No "no target projector registered" error.
+- **Expect:** `RouterProjector::project` finds the `frame_small` route, the carrier opens and the projector emits recovered inner fact bytes — i.e. the format is retained and active because at least one still-usable release speaks it. No "no target projector registered" error.
 - **Defends:** (5) old transport formats kept while a still-usable release speaks them; (1) VISIBILITY.
 - **Refs:** `core/projectors.rs` (`RouterProjector::project`, `FactRoute`:402), `registry.rs` `FACT_ROUTES`, `connection::frame_small` tag 168.
 
@@ -5212,7 +5225,7 @@ Skew margin = M, staleness window = S.
 - **Defends:** (5) EXPIRED/SUB-FLOOR PEERS ARE OUT; TRANSPORT in [floor, head] (drop sub-floor).
 - **Refs:** `connection::bootstrap_request` 171, `validate_sealed_connection_request_frame` (`bootstrap_request/layout.rs:84`, rejects unless `frame[0]==46 && frame[1]==1`), operational floor.
 
-### E2EX-17 — Sub-floor peer refusal is observable at the sealed-handshake validator (frame[1] version mismatch)  `handler-unit`
+### E2EX-17 — Sub-floor peer refusal is observable at the sealed-handshake authenticator/opener (frame[1] version mismatch)  `handler-unit`
 - **Setup:** A sealed connection-request frame whose header version byte is below the current internal `VERSION` (sub-floor), i.e. `frame[1] != 1`.
 - **Action:** Call `validate_sealed_connection_request_frame` on the sub-floor frame, then drive `SendBootstrapConnectionRequestHandler` / `CreateConnectionResponseHandler`.
 - **Expect:** `validate_sealed_connection_request_frame` returns Err (version mismatch), the bootstrap fact is never minted, and no `connection::response` (44) is created — the peer gets no answer (no recovery responder).
@@ -5970,8 +5983,8 @@ fault-injection; only the structural `guardrail` cluster sits outside the
 proof-of-record set.
 
 **P — mis-tagged pure → re-tag `projector-unit`/`pure-unit` (trusted). 52 tests.**
-Assertion is on a pure function — a constructor (`create::*`), validator
-(`validate_*`), layout decoder, frame classifier (`is_bootstrap_*`,
+Assertion is on a pure function — a constructor (`create::*`), authenticator
+(`authenticate_*`), layout decoder, frame classifier (`is_bootstrap_*`,
 `classify_frame`), batcher (`fact_batches`, `require_sendable_fact`), version
 resolver, or projector — with no store state and no effect. Trusted **provided
 input facts are built via the real owning-module encoder, never byte literals.**
