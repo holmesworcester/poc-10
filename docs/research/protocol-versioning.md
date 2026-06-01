@@ -5,12 +5,11 @@
 These are unresolved issues from a review of this note. Resolve them before
 treating the design or the test matrix below as implementation-ready.
 
-- **Replay versus quarantine.** The document currently says replay is
-  ceiling-independent, but quarantine and render-at-ceiling require replay to be
-  deterministic over `(retained facts, trusted time, active ceiling)`.
-  Above-ceiling facts may be retained, but they must not project, display, or
-  feed sync indexes until their tag is ceiling-active and authorization
-  validates.
+- **Replay versus active ceiling.** The document currently says replay is
+  ceiling-independent, but render-at-ceiling requires replay to be deterministic
+  over `(retained facts, trusted time, active ceiling)`. Above-ceiling facts are
+  not production inputs in the minimal policy, and must not project, display, or
+  feed sync indexes.
 - **Ceiling over version ranges.** `ceiling = min(supported_protocol.end())` is
   safe only if every still-usable release supports every protocol version from
   the product floor through its `end()`. If ranges can have different starts,
@@ -23,13 +22,20 @@ treating the design or the test matrix below as implementation-ready.
 - **Validator and lens boundary.** Signed historical facts cannot be converted
   into new signed facts unless their signer signs again. Split fact handling into
   permanent version validators/readers, scope-owned ceiling lenses, and ceiling
-  projectors. A lens consumes already-validated historical evidence and produces
-  a provenance-preserving ceiling claim; it must not parse raw bytes, invent
-  missing authority/data, or bypass the old signature domain.
-- **Quarantine boundary.** Unknown or above-ceiling received bytes cannot be
-  parsed for workspace, authority, purge semantics, or shareability. Quarantine
-  must be local-only, connection- or audience-scoped, quota-bounded, not shared
-  onward, and activated only after route support plus authorization validation.
+  projectors. A validator returns typed validated data or invalid; it does not
+  park, quarantine, or perform context requirement checks. A lens consumes typed
+  validated data or typed semantic data and produces the next semantic version;
+  it must not parse raw bytes, invent missing authority/data, or bypass the old
+  signature domain.
+- **Durable facts only.** Lens machinery is for retained durable facts whose
+  historical signed bytes must replay into the current ceiling model. Ephemeral
+  transport/session prompts, live network frames, queued operational intents,
+  and diagnostic retained bytes do not get lenses unless they are also durable
+  protocol facts.
+- **Unsupported input boundary.** There is no quarantine-by-tag path in the
+  minimal policy. Unknown, unsupported, or above-ceiling bytes are not parsed as
+  shareable facts and are not forwarded. If retained for diagnostics, retention
+  is local-only and outside the protocol truth path.
 - **Read-model changes.** Invisible storage/index/schema changes may be free, but
   user-visible row content, query semantics, ordering, aggregation, and filters
   are rendering changes and need ceiling treatment. Authority rows are stricter:
@@ -111,8 +117,8 @@ first-class fact validators, scope-owned ceiling lenses, and
   update.
 - **Replay validates, lenses, then projects.** Wipe and replay rebuilds derived
   state from retained facts by routing bytes to their historical validator,
-  translating valid evidence through the scope-owned lens graph to the active
-  ceiling contract, and running the ceiling projector.
+  translating typed validated facts through the scope-owned lens chain to the
+  active ceiling semantic type, and running the ceiling projector.
 
 Invariants stated precisely:
 
@@ -302,17 +308,20 @@ trusted to the AEAD/DH primitive, not to poc-10.
 - Guardrail: every route (fact, handler, command) declares `intro_version`
   explicitly; a registry completeness test fails if one is omitted.
 
-### Phase 3 — Admission and quarantine
+### Phase 3 — Admission and unsupported input
 
-- **Change the unknown-tag branch** in `RouterProjector::project`
-  (`projectors.rs:454`) from a hard `Err("no target projector registered…")` to
-  a **quarantine** outcome for a *received* fact: retain the opaque bytes, mark
-  unprojected, never drop (dropping breaks dependency closure of in-range facts).
+- **No quarantine by tag.** Production clients create and admit only
+  ceiling-active fact tags. Unknown, unsupported, or above-ceiling bytes are
+  rejected as protocol input for this runtime; they are not parsed for
+  workspace, authority, purge semantics, or shareability and are not forwarded.
+  A local diagnostic store may keep opaque bytes, but that store is not protocol
+  truth and is not replay input.
 - **Local creation** of an above-ceiling fact is refused at the command/admission
   boundary.
-- **Quarantine activation.** Quarantined facts are retained across the wipe.
-  When the ceiling rises to cover their tag, the next wipe-and-replay projects
-  them through the now-ceiling-active registry; no separate rescan.
+- **Known-route validation.** Once a tag is ceiling-active and registered, core
+  routes the raw bytes to that tag's validator. The validator returns typed
+  validated data or invalid bytes. Projectors, not validators, express missing
+  context, authority requirements, parking, purge rules, and reproject needs.
 
 ### Phase 4 — Directory layout and version buckets
 
@@ -321,14 +330,19 @@ trusted to the AEAD/DH primitive, not to poc-10.
   - `layout.rs` / `fact.rs` / `validate.rs`: always present per version; kept
     forever; routed by tag. The validator parses raw bytes, computes/checks the
     fact id, verifies the signature/domain, enforces intrinsic layout rules, and
-    emits typed historical evidence.
-  - `lens.rs`: present when this version is not already the ceiling semantic
-    shape. The lens consumes only validated evidence plus validated context /
-    policy, never raw bytes, and emits a provenance-preserving ceiling input or
-    an explicit park/quarantine/weak claim.
-  - `project.rs`: owned by the active ceiling semantic node; it consumes ceiling
-    inputs, not arbitrary historical layouts. An old `project.rs` may be kept
-    only when the old projector is itself the clearest implementation of a lens.
+    emits a typed validated fact. Its result shape is only
+    `Valid(ValidatedFact<T>)` or `Invalid(ValidationError)`.
+  - `semantic.rs`: the in-memory typed value this version's projector consumes.
+    It is not a durable fact. It carries source fact ids and provenance because
+    the value is derived from signed bytes, not signed itself.
+  - `lens.rs`: present for `vN` when `N > 0`. In the linear default, `vN/lens.rs`
+    converts `vN-1::semantic` into `vN::semantic`. It never parses raw bytes,
+    queries context, parks, quarantines, or performs authorization checks.
+  - `project.rs`: owned by the active ceiling semantic node; it consumes that
+    version's `semantic.rs` type, checks context/authority/purge requirements,
+    and emits rows, context offers, and replayable intents. An old `project.rs`
+    may be kept only when the old projector is itself the clearest
+    implementation of a lens.
   - `create.rs`: always present per version; selected by ceiling through a
     version-neutral constructor entry (so the old CLI need not be edited to reach
     the new constructor).
@@ -343,42 +357,58 @@ trusted to the AEAD/DH primitive, not to poc-10.
 
 ### Phase 4a — Scope-owned ceiling lenses
 
+Scope-owned lenses apply to retained **durable facts**. They are not a general
+conversion layer for ephemeral transport/session prompts, live network frames,
+queued operational intents, or local diagnostic bytes. Those surfaces are either
+current-runtime work or transport compatibility, and are handled by their own
+floor/negotiation/retry rules.
+
 The projection pipeline is:
 
 ```text
 raw retained fact bytes
   -> tag route
   -> version validator / reader
-  -> valid historical evidence
-  -> scope-owned lens graph path to the active ceiling semantic contract
+  -> typed validated fact
+  -> source semantic type
+  -> scope-owned lens chain to the active ceiling semantic type
   -> ceiling projector
   -> rows, context offers, replayable intents
 ```
 
-The lens graph is per scope. Nodes are semantic contract versions, and edges are
-deterministic, replay-pure transforms. Linear evolution can be a chain
-(`v0 -> v1 -> v2`); branched evolution is allowed only when the release manifest
-or scope registry declares one canonical path from each retained source node to
-the active ceiling node. Cross-scope projectors should depend on semantic
-contracts, not raw foreign fact layouts: content may require
-`auth.endpoint_authority@ceiling`, while auth owns how `endpoint_shared_v0`,
-`endpoint_shared_v1`, revocations, purge facts, and policy facts prove or fail
-that contract.
+The lens chain is per scope. Nodes are semantic Rust types, not durable facts.
+The default convention is linear: `vN/lens.rs` converts `vN-1::semantic` to
+`vN::semantic`. Replay to ceiling v2 runs `v0 validate -> v0 semantic ->
+v1/lens.rs -> v1 semantic -> v2/lens.rs -> v2 semantic -> v2/project.rs`.
+Branched evolution or shortcuts are allowed only after renaming the edge
+explicitly, for example `v2/from_v0.rs`, and declaring the canonical path in the
+scope registry. A shortcut must be tested equivalent to the chain it replaces.
 
 A lens does not create a new signed fact. The original signature remains over
-the original bytes and domain; the lens output carries provenance pointing back
-to the signed source fact ids and policy/context facts that justify the ceiling
-claim. If old evidence cannot honestly prove the ceiling contract, the lens must
-emit an explicit weaker/default value, park, quarantine, or require a new fact.
-It must not invent authority, silently widen access, expose data hidden by a
-ceiling policy, or reinterpret old facts by accident.
+the original bytes and domain; the semantic output carries provenance pointing
+back to the signed source fact ids. If the old semantic type lacks data required
+by the next semantic type, the next type must represent that absence explicitly
+(`Unknown`, `NotPresent`, weaker capability, etc.) or the change needs a new
+durable fact. The lens must not invent authority, silently widen access, expose
+data hidden by a ceiling policy, or reinterpret old facts by accident.
+An authority lens may only preserve or narrow authority relative to the previous
+validated semantic value. Any authority widening requires a new durable authority
+fact and normal projector/context validation; it cannot be introduced by a lens.
+
+Projectors still own context. Cross-scope projectors should depend on semantic
+contracts, not raw foreign fact layouts: content may require
+`auth.endpoint_authority@ceiling`, while auth owns how its durable facts and
+lens chain produce the ceiling auth semantic type. The auth projector then checks
+workspace membership, revocations, purge facts, and policy facts, and it parks or
+rejects according to normal context rules.
 
 This replaces "keep every old projector forever" with a narrower obligation:
-keep every old validator/reader forever, keep lens graph paths for retained
-historical evidence to the active ceiling model, and keep the ceiling projector
+keep every old validator/reader forever, keep the linear lens chain for retained
+durable facts to the active ceiling semantic type, and keep the ceiling projector
 for the current semantic contract. Security fixes land at the smallest layer:
-malformed old bytes are handled in validators, unsafe interpretation in lenses
-or policy facts, and bad derived state by replaying with the fixed projector.
+malformed old bytes are handled in validators, unsafe representation mapping in
+lenses, unsafe interpretation in projectors or policy facts, and bad derived
+state by replaying with the fixed projector.
 
 ### Phase 5 — Rendering uniformity
 
@@ -419,8 +449,9 @@ or policy facts, and bad derived state by replaying with the fixed projector.
 
 - Adding or changing a fact family requires a manifest entry naming: the tag,
   its `intro_version`, the blocking non-capable releases and their expiries (per
-  platform), the kept old adapters, the security-deprecation policy, the replay
-  output, and the tests below.
+  platform), the kept old validators/readers, the lens chain to the active
+  ceiling semantic type, the security-deprecation policy, the replay output, and
+  the tests below.
 - **No-regression gate.** A production release whose `supported_protocol` does
   not cover the current ceiling is refused for production (alpha only). This keeps
   the ceiling monotonic.
