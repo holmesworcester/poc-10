@@ -101,20 +101,26 @@ validate and project, without changing the validators.
 - Foreign context is still read through module-owned typed helpers, never another
   module's raw layout codec — unchanged by this refactor.
 
-## Migration — incremental, per family
+## Scope — complete in one pass
 
-Each family is independently shippable:
+This is **one cohesive change covering every routed fact family** — finish it in
+one go. Do **not** land a partial split (some families validated, others still
+parsing in the projector): that leaves two contradictory patterns in the tree.
+The per-family order below is **internal sequencing** so the tree compiles and
+the suite stays green at each commit — not a licence to stop early.
+
+Per family (order: `auth` → `connection` → `content` → `sync`):
 
 1. Move the policy's section 1 (STRUCTURAL + `verify_signature` + intrinsic field
    checks) out of `project_typed` into `validate.rs`, returning `Valid` /
    `Invalid`.
 2. Re-type the projector's `project_typed` to take `ValidatedFact<T>`; it now
    begins at section 2 (CONTEXT).
-3. Register the validator route so core runs it before projection.
-4. Add the boundary guardrail (below) for that family.
+3. Register the `ValidatorRoute` so core runs the validator before projection.
+4. Add the per-family validator pure-unit tests and the boundary guardrail.
 
-Suggested order: `auth`, then `connection`, then `content`, then `sync`. Each
-family's PR is green on its own; nothing here depends on the versioning work.
+Then, in the **same** change, do the cross-cutting *Align docs and rules* work
+below. Nothing here depends on the versioning work.
 
 ## Tests — all in trusted classes
 
@@ -132,6 +138,53 @@ family's PR is green on its own; nothing here depends on the versioning work.
 - **Guardrail (extends the boundary tests):** no `project.rs` imports another
   module's raw layout codec or calls `decode_fact` / `verify_signature` on its
   primary fact; validation lives only in `validate.rs`.
+
+## Align docs and rules
+
+Part of this change — **not** a follow-up — is making every doc and rule describe
+the post-refactor reality, so nothing still says "projectors validate":
+
+- **`RULES.md`** — update "Projectors do protocol validation, not IO" and the
+  *Projector Style* / *Typed Facts* sections: validation now lives in
+  `validate.rs`; a projector consumes a `ValidatedFact<T>` and its policy starts
+  at the CONTEXT section (no STRUCTURAL / `verify_signature` / `decode_fact`
+  step). Add `validate.rs` to the standard fact-family role files and add the
+  "projectors do not parse raw bytes" boundary rule.
+- **Boundary / guardrail tests** (`documentation_layout_test.rs` and the
+  architecture guardrails) — enforce the new file shape (`validate.rs` present
+  per routed family) and the no-raw-bytes-in-projectors rule.
+- **`protocol-versioning.md`** — its Phase 3 / Phase 4 `validate.rs` descriptions
+  point here as the authority (already cross-referenced); keep them consistent.
+- Any scope README or comment that still describes the projector-does-validation
+  model.
+
+## Success criteria (done when)
+
+Complete — in one pass — when **all** of the following hold:
+
+- Every routed fact family has a `validate.rs` whose validator returns
+  `Valid(ValidatedFact<T>) | Invalid(ValidationError)` and does only decode +
+  id-check + signature/domain + intrinsic field rules (no context, authority,
+  parking, IO, or clock).
+- No `project.rs` decodes raw bytes, calls `FactCodec::decode_fact` /
+  `verify_signature`, or checks the fact id on its primary fact; every
+  `project_typed` takes a `ValidatedFact<T>`. The boundary guardrail enforces this
+  and passes.
+- Every routed fact tag has a registered `ValidatorRoute`; a registry
+  completeness test fails if a routed tag lacks one.
+- Validator pure-unit tests (accept canonical; reject the full malformed set:
+  wrong tag / length / trailing / padding / enum, bad signature, wrong domain, id
+  mismatch, out-of-range fields) exist for every family and pass; a fuzz target
+  per validator exists; projector tests build their inputs through the real
+  validator.
+- `RULES.md`, the boundary tests, and the affected docs are aligned (above) — no
+  doc or rule still says projectors validate.
+- **Behaviour is unchanged.** This is a pure refactor: validation relocates, but
+  the accept / reject / project outcome for every fact is identical. The full
+  `cargo build` and test suite are green.
+
+Hand-off note: this is a **single deliverable**. An agent assigned it should land
+the entire split *plus* the doc/rule alignment together, not a subset.
 
 ## Relationship to protocol versioning
 
