@@ -643,6 +643,10 @@ projector_routes! {
     project_connection_frame_bundle => connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector;
     project_connection_frame_observation => connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector;
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
+    project_sealed_bootstrap_request => connection::bootstrap_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
+    project_sealed_bootstrap_response => connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
+    project_sealed_connection_request => connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
+    project_sealed_connection_response => connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
     project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }

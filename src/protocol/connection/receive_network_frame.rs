@@ -2,9 +2,10 @@
 //!
 //! The daemon turns each accepted TCP frame into this local intent with the raw
 //! bytes, observed origin address, and local receive time. The handler decodes
-//! and validates that boundary metadata, stages sealed bootstrap request or
-//! response facts, then delegates durable fact admission to fact projectors; it
-//! does not open established frames or validate child facts itself.
+//! and validates that boundary metadata, stages sealed handshake request or
+//! response facts (bootstrap and membership alike), then delegates durable fact
+//! admission to fact projectors; it does not open frames or validate child
+//! facts itself.
 //!
 //! The intent key is deterministic over origin, receive time, and frame bytes
 //! so duplicate local submissions collapse while distinct observations remain
@@ -93,27 +94,22 @@ fn payload_error(err: PayloadError) -> String {
 
 // The handler is the incoming socket boundary. It has no input facts because
 // raw network bytes are not authorized by durable context until projection.
-// Sealed handshake frames carry no separate envelope fact: the handler opens
-// them inline with the local endpoint secret and admits the recovered
-// request/response fact directly (plus its receive receipt). Opening is
-// transport decoding, not protocol validation; the request/response projectors
-// still own invite/membership/handshake validation.
+// Sealed handshake frames carry no separate envelope fact: the handler admits
+// the sealed bytes as their own ephemeral fact (whose type tag is the sealed
+// type) plus a frame observation, and does no unsealing itself. That fact's
+// projector opens it with the local endpoint secret drawn from
+// `auth_local_endpoint` context and emits the recovered request/response fact
+// plus its receive receipt. Opening is transport decoding, not protocol
+// validation; the request/response projectors still own
+// invite/membership/handshake validation.
 
-use crate::core::crypto;
 use crate::core::effects::PipelineEffects;
-use crate::core::intents::{
-    retry_intent, HandlerContext, HandlerFactId, HandlerResult, IntentHandler,
-};
-use crate::protocol::auth::endpoint::{create as local_endpoint, fact::EndpointFact};
+use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::connection::{
     bootstrap_request as request, bootstrap_response as response, connection_request,
     connection_response, frame_bundle, frame_file_slice, frame_small,
 };
-use crate::protocol::connection_frame::{
-    self, received_connection_request_fact_effect, received_connection_response_fact_effect,
-    received_membership_connection_request_fact_effect,
-    received_membership_connection_response_fact_effect, ConnectionFrameKind,
-};
+use crate::protocol::connection_frame::{self, ConnectionFrameKind};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveNetworkFrameHandler;
@@ -130,20 +126,27 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         Ok(Vec::new())
     }
 
-    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
+    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
 
-        if request::transit::is_sealed_request_frame(&input.frame) {
-            return open_sealed_request(context, &input);
-        }
-        if response::transit::is_sealed_response_frame(&input.frame) {
-            return open_sealed_response(context, &input);
-        }
-        if connection_request::transit::is_sealed_request_frame(&input.frame) {
-            return open_sealed_membership_request(context, &input);
-        }
-        if connection_response::transit::is_sealed_response_frame(&input.frame) {
-            return open_sealed_membership_response(context, &input);
+        // A sealed handshake frame is admitted as its own ephemeral fact (whose
+        // type tag is the sealed type) plus a frame observation. Its projector
+        // unseals it with the local endpoint secret from `auth_local_endpoint`
+        // context — the boundary does no unsealing itself.
+        if request::transit::is_sealed_request_frame(&input.frame)
+            || response::transit::is_sealed_response_frame(&input.frame)
+            || connection_request::transit::is_sealed_request_frame(&input.frame)
+            || connection_response::transit::is_sealed_response_frame(&input.frame)
+        {
+            let frame_fact = connection_frame::sealed_handshake_frame_fact(
+                input.frame.clone(),
+                input.received_at_local_ms,
+            );
+            return Ok(connection_frame::observed_frame_effect(
+                frame_fact,
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?);
         }
 
         Ok(match connection_frame::classify_frame(&input.frame) {
@@ -167,82 +170,3 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
     }
 }
 
-/// Load the local endpoint, or ask to retry until it exists.
-///
-/// A sealed handshake frame can only be opened with the local endpoint secret;
-/// if the endpoint is not yet materialized, leaving the intent queued is the
-/// retry-safe behavior.
-fn require_local_endpoint(context: &HandlerContext) -> Result<EndpointFact, crate::core::intents::HandlerError> {
-    local_endpoint::local_endpoint(context.store()?)?
-        .ok_or_else(|| retry_intent("receive_network_frame has no local endpoint yet"))
-}
-
-fn open_sealed_request(context: &HandlerContext, input: &ReceiveNetworkFrame) -> HandlerResult {
-    let endpoint = require_local_endpoint(context)?;
-    let frame_hash = crypto::hash(&input.frame);
-    // An unopenable frame (wrong recipient, tampered) is silently dropped: it is
-    // transport noise, not a protocol violation that should fail the handler.
-    let Ok(request_bytes) = request::transit::open_connection_request(&input.frame, &endpoint)
-    else {
-        return Ok(PipelineEffects::new());
-    };
-    Ok(received_connection_request_fact_effect(
-        &request_bytes,
-        &input.origin_addr,
-        input.received_at_local_ms,
-        frame_hash,
-    )?)
-}
-
-fn open_sealed_response(context: &HandlerContext, input: &ReceiveNetworkFrame) -> HandlerResult {
-    let endpoint = require_local_endpoint(context)?;
-    let frame_hash = crypto::hash(&input.frame);
-    let Ok(response_bytes) = response::transit::open_connection_response(&input.frame, &endpoint)
-    else {
-        return Ok(PipelineEffects::new());
-    };
-    Ok(received_connection_response_fact_effect(
-        &response_bytes,
-        &input.origin_addr,
-        input.received_at_local_ms,
-        frame_hash,
-    )?)
-}
-
-fn open_sealed_membership_request(
-    context: &HandlerContext,
-    input: &ReceiveNetworkFrame,
-) -> HandlerResult {
-    let endpoint = require_local_endpoint(context)?;
-    let frame_hash = crypto::hash(&input.frame);
-    let Ok(request_bytes) =
-        connection_request::transit::open_connection_request(&input.frame, &endpoint)
-    else {
-        return Ok(PipelineEffects::new());
-    };
-    Ok(received_membership_connection_request_fact_effect(
-        &request_bytes,
-        &input.origin_addr,
-        input.received_at_local_ms,
-        frame_hash,
-    )?)
-}
-
-fn open_sealed_membership_response(
-    context: &HandlerContext,
-    input: &ReceiveNetworkFrame,
-) -> HandlerResult {
-    let endpoint = require_local_endpoint(context)?;
-    let frame_hash = crypto::hash(&input.frame);
-    let Ok(response_bytes) =
-        connection_response::transit::open_connection_response(&input.frame, &endpoint)
-    else {
-        return Ok(PipelineEffects::new());
-    };
-    Ok(received_membership_connection_response_fact_effect(
-        &response_bytes,
-        &input.origin_addr,
-        input.received_at_local_ms,
-        frame_hash,
-    )?)
-}

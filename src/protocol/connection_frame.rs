@@ -19,7 +19,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::projectors::{FactCodec, ProjectionContext, ProjectionOutput};
+use crate::core::projectors::{FactCodec, ProjectionContext, ProjectionOutput, Projector};
 use crate::core::wire::FixedSlot;
 use crate::protocol::connection_frame_wire as wire;
 pub(crate) use crate::protocol::connection_frame_wire::{
@@ -258,6 +258,14 @@ pub fn observed_frame_effect(
         .ephemeral_fact(frame_fact))
 }
 
+/// Build the ephemeral fact for a received sealed handshake frame. Its type tag
+/// is the sealed type carried in the bytes, so it routes to
+/// `SealedHandshakeFrameProjector`, which unseals it with the local endpoint
+/// secret from context. Construction lives here, not in the receive handler.
+pub fn sealed_handshake_frame_fact(frame_bytes: Vec<u8>, received_at_local_ms: u64) -> Fact {
+    Fact::new(FactScope::Local, received_at_local_ms, frame_bytes)
+}
+
 pub fn wire_from_frame_fact(fact: &Fact) -> Result<Vec<u8>, String> {
     if fact.scope != FactScope::Local {
         return Err("connection frame fact must have local scope".to_string());
@@ -338,6 +346,132 @@ pub fn project_observed_frame(
 
 fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 32]) -> ContextNeed {
     ContextNeed::range(owner, role, scope, key, key)
+}
+
+/// Projector for an endpoint-sealed handshake frame fact.
+///
+/// A first-contact handshake fact's wire form is its sealed bytes, admitted by
+/// `receive_network_frame` as an ephemeral fact whose type tag is the sealed
+/// type (`46`/`47`/`56`/`57`). This projector mirrors `project_observed_frame`
+/// for established frames, but the unseal key is the local endpoint secret from
+/// `auth_local_endpoint` context rather than the `connection_secret`. It opens
+/// the sealed bytes with that fact's own opener and emits the recovered
+/// canonical request/response fact plus its `fact_receipt`. Undecryptable frames
+/// (wrong recipient, tampered) produce no output — transport noise, not error.
+#[derive(Debug, Clone, Default)]
+pub struct SealedHandshakeFrameProjector;
+
+impl SealedHandshakeFrameProjector {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Projector for SealedHandshakeFrameProjector {
+    fn project(
+        &self,
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        if fact.scope != FactScope::Local {
+            return Err("sealed handshake frame fact must have local scope".to_string());
+        }
+        let kind = fact
+            .body()
+            .first()
+            .copied()
+            .ok_or_else(|| "sealed handshake frame is empty".to_string())?;
+
+        // Origin address and local receive time come from the frame observation,
+        // exactly as established frames get them.
+        let observation_need = exact_need(
+            fact.id,
+            "connection_frame_observation",
+            FactScope::Local,
+            fact.id,
+        );
+        let Some(observation_fact) = context.payload_for(&observation_need) else {
+            return Ok(ProjectionOutput::new().need(observation_need));
+        };
+        let observation = connection::frame_observation::Codec::decode_fact(observation_fact)?;
+        if observation.frame_fact_id != fact.id {
+            return Err("sealed handshake frame observation does not name frame fact".to_string());
+        }
+
+        // The unseal key is a context need: a node has exactly one local endpoint,
+        // so a full-range `auth_local_endpoint` need matches it without knowing
+        // the recipient id before opening.
+        let endpoint_need = ContextNeed::range(
+            fact.id,
+            "auth_local_endpoint",
+            FactScope::Local,
+            [0u8; 32],
+            [0xffu8; 32],
+        );
+        let Some(endpoint_fact) = context.payload_for(&endpoint_need) else {
+            return Ok(ProjectionOutput::new().need(endpoint_need));
+        };
+        if endpoint_fact.scope != FactScope::Local {
+            return Err("sealed handshake frame endpoint context must be local".to_string());
+        }
+        let endpoint = auth::endpoint::decode_fact_payload(endpoint_fact.body())
+            .map_err(|_| "sealed handshake frame endpoint context is not a local endpoint".to_string())?;
+
+        let origin = observation.origin_addr.bytes();
+        let received_at_local_ms = observation.received_at_local_ms;
+        let frame_hash = crate::core::crypto::hash(fact.body());
+
+        let effects = match kind {
+            connection::bootstrap_request::transit::TYPE_SEALED_CONNECTION_REQUEST => {
+                let Ok(bytes) = connection::bootstrap_request::transit::open_connection_request(
+                    fact.body(),
+                    &endpoint,
+                ) else {
+                    return Ok(ProjectionOutput::new());
+                };
+                received_connection_request_fact_effect(&bytes, origin, received_at_local_ms, frame_hash)?
+            }
+            connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE => {
+                let Ok(bytes) = connection::bootstrap_response::transit::open_connection_response(
+                    fact.body(),
+                    &endpoint,
+                ) else {
+                    return Ok(ProjectionOutput::new());
+                };
+                received_connection_response_fact_effect(&bytes, origin, received_at_local_ms, frame_hash)?
+            }
+            connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST => {
+                let Ok(bytes) = connection::connection_request::transit::open_connection_request(
+                    fact.body(),
+                    &endpoint,
+                ) else {
+                    return Ok(ProjectionOutput::new());
+                };
+                received_membership_connection_request_fact_effect(
+                    &bytes,
+                    origin,
+                    received_at_local_ms,
+                    frame_hash,
+                )?
+            }
+            connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE => {
+                let Ok(bytes) = connection::connection_response::transit::open_connection_response(
+                    fact.body(),
+                    &endpoint,
+                ) else {
+                    return Ok(ProjectionOutput::new());
+                };
+                received_membership_connection_response_fact_effect(
+                    &bytes,
+                    origin,
+                    received_at_local_ms,
+                    frame_hash,
+                )?
+            }
+            other => return Err(format!("unsupported sealed handshake frame tag {other}")),
+        };
+        Ok(facts_output(effects.facts))
+    }
 }
 
 fn facts_output(facts: Vec<Fact>) -> ProjectionOutput {

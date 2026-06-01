@@ -8,21 +8,16 @@ use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
-use topo::protocol::auth::invite::layout as invite_layout;
 use topo::protocol::auth::key_wrap::create as auth_create;
 use topo::protocol::auth::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
-use topo::core::network;
-use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
-use topo::protocol::auth::endpoint::rows as endpoint_rows;
+use topo::protocol::auth::endpoint::layout as endpoint_layout;
 use topo::protocol::connection;
 use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
 use topo::protocol::connection::bootstrap_request::transit as request_transit;
 use topo::protocol::connection::bootstrap_response::transit as response_transit;
-use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
@@ -157,6 +152,35 @@ fn observation_match(frame_fact: &Fact) -> MatchedContext {
         frame_fact.id,
         observation,
     )
+}
+
+/// The local endpoint as `auth_local_endpoint` context for a sealed handshake
+/// frame projector. The projector needs the single local endpoint over the full
+/// key range (it cannot know the recipient id before opening), so the matched
+/// need mirrors that full range exactly.
+fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> MatchedContext {
+    let endpoint_fact = Fact::new(
+        FactScope::Local,
+        0,
+        endpoint_layout::encode_fact(endpoint).expect("encode endpoint"),
+    );
+    MatchedContext {
+        need: ContextNeed::range(
+            frame_fact_id,
+            "auth_local_endpoint",
+            FactScope::Local,
+            [0u8; 32],
+            [0xffu8; 32],
+        ),
+        offer: ContextOffer::range(
+            endpoint_fact.id,
+            "auth_local_endpoint",
+            FactScope::Local,
+            endpoint.endpoint,
+            endpoint.endpoint,
+        ),
+        payload: endpoint_fact,
+    }
 }
 
 fn observed_connection_context(frame_fact: &Fact, connection_fact: Fact) -> ProjectionContext {
@@ -306,13 +330,8 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
 }
 
 #[test]
-fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
+fn sealed_request_frame_is_admitted_then_opened_by_its_projector() {
     let invite = InviteSecretFact::new([33; 32]);
-    let invite_fact = Fact::new(
-        FactScope::Local,
-        10,
-        invite_layout::encode_fact(&invite).expect("invite"),
-    );
     let endpoint = local_endpoint();
     let initiator_ephemeral_private = [59; 32];
     let mut request = BootstrapRequestFact {
@@ -322,7 +341,7 @@ fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
         invite_fact_id: [57; 32],
         bootstrap_hash: invite.bootstrap_hash,
         invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-        invite_secret_fact_id: invite_fact.id,
+        invite_secret_fact_id: [60; 32],
         initiator_ephemeral_secret_fact_id: [58; 32],
         initiator_ephemeral_public_key: crypto::x25519_public_key(&initiator_ephemeral_private),
         from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
@@ -337,26 +356,32 @@ fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
     let frame = request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
         .expect("seal request");
 
-    // No envelope fact: the handler opens the sealed frame inline with the local
-    // endpoint secret and admits the recovered request fact plus its receipt.
-    let store = store_with_endpoint(&endpoint);
+    // The boundary admits the sealed bytes as an ephemeral fact plus an
+    // observation; it does no unsealing itself (no store needed).
     let output = ReceiveNetworkFrameHandler::new()
-        .handle(
-            &receive_intent(frame.clone()),
-            &HandlerContext::new().with_store(&store),
-        )
-        .expect("receive request");
+        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .expect("receive sealed request");
+    assert_eq!(output.facts.len(), 1, "frame observation");
+    assert_eq!(output.ephemeral_facts.len(), 1, "sealed frame fact");
+    let sealed_fact = output.ephemeral_facts[0].clone();
+    assert_eq!(sealed_fact.bytes, frame);
 
-    assert!(output.ephemeral_facts.is_empty());
-    assert!(output.intents.is_empty());
-    assert_eq!(output.facts.len(), 2);
-    assert!(output.facts.iter().any(|fact| fact.bytes == request_bytes));
-    let receipt_fact = output
+    // Its projector unseals with the local endpoint secret from context and emits
+    // the recovered request fact plus its receipt.
+    let context = ProjectionContext::from_matches(vec![
+        observation_match(&sealed_fact),
+        local_endpoint_match(sealed_fact.id, &endpoint),
+    ]);
+    let opened = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
+        .project(&sealed_fact, &context)
+        .expect("open sealed request");
+    assert!(opened.effects.facts.iter().any(|fact| fact.bytes == request_bytes));
+    let receipt_fact = opened
+        .effects
         .facts
         .iter()
         .find(|fact| {
-            fact.body().first().copied()
-                == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
+            fact.body().first().copied() == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
         })
         .expect("receipt fact");
     let receipt = fact_receipt_layout::decode_fact(receipt_fact.body()).expect("decode receipt");
@@ -365,9 +390,7 @@ fn receive_handler_opens_sealed_request_to_durable_request_and_receipt() {
 }
 
 #[test]
-fn receive_handler_without_local_endpoint_retries_sealed_request() {
-    // Opening needs the local endpoint secret; with none present the handler
-    // leaves the intent queued for retry rather than dropping the frame.
+fn sealed_request_projector_parks_without_local_endpoint() {
     let endpoint = local_endpoint();
     let initiator_ephemeral_private = [59; 32];
     let invite = InviteSecretFact::new([33; 32]);
@@ -392,20 +415,24 @@ fn receive_handler_without_local_endpoint_retries_sealed_request() {
     let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
     let frame = request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
         .expect("seal request");
-    let empty = Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        network::SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-    ])
-    .expect("store");
 
-    let err = ReceiveNetworkFrameHandler::new()
-        .handle(
-            &receive_intent(frame),
-            &HandlerContext::new().with_store(&empty),
-        )
-        .expect_err("missing local endpoint retries");
-    assert!(topo::core::intents::retry_intent_reason(&err).is_some());
+    let output = ReceiveNetworkFrameHandler::new()
+        .handle(&receive_intent(frame), &HandlerContext::new())
+        .expect("receive sealed request");
+    let sealed_fact = output.ephemeral_facts[0].clone();
+
+    // The unseal key is a context need: without the local endpoint in context the
+    // projector parks (needs auth_local_endpoint) and emits no durable facts —
+    // there is no handler-level retry.
+    let context = ProjectionContext::from_matches(vec![observation_match(&sealed_fact)]);
+    let parked = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
+        .project(&sealed_fact, &context)
+        .expect("project parks");
+    assert!(parked.effects.facts.is_empty());
+    assert!(parked
+        .needs
+        .iter()
+        .any(|need| need.role.as_str() == "auth_local_endpoint"));
 }
 
 #[test]
@@ -478,23 +505,27 @@ fn receive_handler_opens_sealed_response_to_durable_response_and_receipt() {
         response_transit::seal_connection_response(&response_bytes, &responder_ephemeral_private)
             .expect("seal response");
 
-    let store = store_with_endpoint(&endpoint);
     let output = ReceiveNetworkFrameHandler::new()
-        .handle(
-            &receive_intent(frame.clone()),
-            &HandlerContext::new().with_store(&store),
-        )
-        .expect("receive response");
+        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
+        .expect("receive sealed response");
+    assert_eq!(output.ephemeral_facts.len(), 1);
+    let sealed_fact = output.ephemeral_facts[0].clone();
+    assert_eq!(sealed_fact.bytes, frame);
 
-    assert!(output.ephemeral_facts.is_empty());
-    assert_eq!(output.facts.len(), 2);
-    assert!(output.facts.iter().any(|fact| fact.bytes == response_bytes));
-    let receipt_fact = output
+    let context = ProjectionContext::from_matches(vec![
+        observation_match(&sealed_fact),
+        local_endpoint_match(sealed_fact.id, &endpoint),
+    ]);
+    let opened = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
+        .project(&sealed_fact, &context)
+        .expect("open sealed response");
+    assert!(opened.effects.facts.iter().any(|fact| fact.bytes == response_bytes));
+    let receipt_fact = opened
+        .effects
         .facts
         .iter()
         .find(|fact| {
-            fact.body().first().copied()
-                == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
+            fact.body().first().copied() == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
         })
         .expect("receipt fact");
     let receipt = fact_receipt_layout::decode_fact(receipt_fact.body()).expect("decode receipt");
@@ -667,17 +698,4 @@ fn local_endpoint() -> EndpointFact {
         signing_public_key: crypto::ed25519_public_key(&signing_secret),
         signing_secret,
     }
-}
-
-fn store_with_endpoint(endpoint: &EndpointFact) -> Store {
-    let store = Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        network::SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-    ])
-    .expect("store");
-    store
-        .insert_table_rows(endpoint_rows::endpoint_rows(endpoint))
-        .expect("seed local endpoint");
-    store
 }
