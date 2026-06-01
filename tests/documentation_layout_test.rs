@@ -342,48 +342,6 @@ fn protocol_versioning_design_is_local_and_poc10_specific() {
 }
 
 #[test]
-fn protocol_versioning_doc_surfaces_current_audit_gaps_first() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let note = source_text(&root.join("docs/research/protocol-versioning.md"));
-    let normalized = normalize_whitespace(&note);
-
-    assert!(
-        note.starts_with("# Protocol Versioning\n\n## Audit Notes To Resolve"),
-        "protocol-versioning.md should put unresolved audit notes at the top"
-    );
-
-    for required in [
-        "These are unresolved issues from a review of this note",
-        "Replay versus active ceiling",
-        "deterministic over `(retained facts, trusted time, active ceiling)`",
-        "Ceiling over version ranges",
-        "compute the highest common supported version from the intersection instead",
-        "Facts versus transport wrappers",
-        "Fact tags version routed fact semantics",
-        "Validator and lens boundary",
-        "Signed historical facts cannot be converted into new signed facts unless their signer signs again",
-        "A validator returns typed validated data or invalid",
-        "Durable facts only",
-        "Ephemeral transport/session prompts, live network frames, queued operational intents",
-        "Unsupported input boundary",
-        "There is no quarantine-by-tag path",
-        "Read-model changes",
-        "Authority rows are stricter",
-        "Trusted time proof",
-        "signed lower-bound observations plus staleness self-quarantine",
-        "Stale Part II references",
-        "the printed manifest struct omits `platform`",
-        "Ephemeral versus durable protocol prompts",
-        "sync `compare`/`have_id`/`need_id`",
-    ] {
-        assert!(
-            normalized.contains(required),
-            "protocol versioning audit notes are missing {required:?}"
-        );
-    }
-}
-
-#[test]
 fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let note = source_text(&root.join("docs/research/poc10-replay-intent-shape.md"));

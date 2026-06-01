@@ -1,58 +1,5 @@
 # Protocol Versioning
 
-## Audit Notes To Resolve
-
-These are unresolved issues from a review of this note. Resolve them before
-treating the design or the test matrix below as implementation-ready.
-
-- **Replay versus active ceiling.** The document currently says replay is
-  ceiling-independent, but render-at-ceiling requires replay to be deterministic
-  over `(retained facts, trusted time, active ceiling)`. Above-ceiling facts are
-  not production inputs in the minimal policy, and must not project, display, or
-  feed sync indexes.
-- **Ceiling over version ranges.** `ceiling = min(supported_protocol.end())` is
-  safe only if every still-usable release supports every protocol version from
-  the product floor through its `end()`. If ranges can have different starts,
-  compute the highest common supported version from the intersection instead.
-- **Facts versus transport wrappers.** Distinguish routed durable facts from
-  wire/session wrappers. Fact tags version routed fact semantics. `TRNS`, sealed
-  bootstrap request/response bytes, and other carriers may have independent
-  wire-version bytes and should not be described as ordinary routed facts unless
-  they are in `FACT_ROUTES`.
-- **Validator and lens boundary.** Signed historical facts cannot be converted
-  into new signed facts unless their signer signs again. Split fact handling into
-  permanent version validators/readers, scope-owned ceiling lenses, and ceiling
-  projectors. A validator returns typed validated data or invalid; it does not
-  park, quarantine, or perform context requirement checks. A lens consumes typed
-  validated data or typed semantic data and produces the next semantic version;
-  it must not parse raw bytes, invent missing authority/data, or bypass the old
-  signature domain.
-- **Durable facts only.** Lens machinery is for retained durable facts whose
-  historical signed bytes must replay into the current ceiling model. Ephemeral
-  transport/session prompts, live network frames, queued operational intents,
-  and diagnostic retained bytes do not get lenses unless they are also durable
-  protocol facts.
-- **Unsupported input boundary.** There is no quarantine-by-tag path in the
-  minimal policy. Unknown, unsupported, or above-ceiling bytes are not parsed as
-  shareable facts and are not forwarded. If retained for diagnostics, retention
-  is local-only and outside the protocol truth path.
-- **Read-model changes.** Invisible storage/index/schema changes may be free, but
-  user-visible row content, query semantics, ordering, aggregation, and filters
-  are rendering changes and need ceiling treatment. Authority rows are stricter:
-  a new derivation must not grant, revoke, or widen authority from old facts.
-- **Trusted time proof.** Do not rely on a fleet-wide signed-time stream stalling
-  "together". Different devices can hold different last signed observations. The
-  safety argument should rely on signed lower-bound observations plus staleness
-  self-quarantine.
-- **Stale Part II references.** The test matrix contains old line-number
-  references and a few assertions copied from earlier drafts, including claims
-  that the printed manifest struct omits `platform`. Refresh these references
-  after the model above is corrected.
-- **Ephemeral versus durable protocol prompts.** The durable boundary for
-  bootstrap/connection requests and for sync `compare`/`have_id`/`need_id`
-  remains open. Decide which prompts are session-only and which are retained
-  facts before using them as versioning test anchors.
-
 Single authoritative note: the model and phased implementation plan (Part I), then the exhaustive test matrix (Part II). Builds on `poc10-replay-intent-shape.md` (the replay runtime, a prerequisite).
 
 ## Status and scope
@@ -99,7 +46,10 @@ first-class fact validators, scope-owned ceiling lenses, and
   tag-versions.** `protocol 7 = protocol 6 + {message:2, file:3}`. It is
   platform-neutral. Per-platform semver maps onto it through a fleet-wide
   signed manifest. The **ceiling** is the minimum protocol version supported by
-  every still-usable release, across all platforms.
+  every still-usable release, across all platforms. Because durable-fact support
+  is left-anchored at `[1, head]` (validators-forever), `min(supported_protocol
+  .end())` is exactly the ceiling; the version-range *intersection* concern
+  applies only to transport carriers, which have a moving floor.
 - **Two uniformity invariants:**
   - *Visibility* (emission): any shared action emitted under the ceiling is
     admissible by every supported client.
@@ -187,14 +137,14 @@ That is past the blocker's own `expires_at`, so it has already self-disabled
 signed time does not guess it is pre-expiry; it self-quarantines under the `S`
 rule and stops participating, which is the safe direction.
 
-Two reassurances fall out of the lower-bound property. A fresh install whose
-embedded time is stale computes a low (conservative) ceiling and/or
-self-quarantines until it refreshes — never an over-optimistic ceiling that would
-emit C too early. And if the provider's signed-time stream stalls fleet-wide,
-every device's trusted time stalls *together* (no divergence), so the ceiling
-advance is merely delayed — conservative, never unsafe. The single residual
-assumption is exactly that `S + P` stays within the chosen `M`; the separate case
-where `expires_at` itself is moved is the grace-window caveat below.
+The argument is **per-device**, with no appeal to devices staying in lockstep. A
+fresh install whose embedded time is stale computes a low (conservative) ceiling
+and/or self-quarantines until it refreshes — never an over-optimistic ceiling
+that would emit C too early. A device that cannot refresh simply stays behind and
+conservative, independent of what any other device holds; safety never relies on
+a fleet-wide signed-time stream advancing *together*. The single residual
+assumption is that `S + P` stays within the chosen `M`; the separate case where
+`expires_at` itself is moved is the grace-window caveat below.
 
 Security-deprecation is the deliberate exception: a `must_update` canary removes
 a release from the still-usable set early, so the invariant stops protecting that
@@ -323,6 +273,36 @@ trusted to the AEAD/DH primitive, not to poc-10.
   validated data or invalid bytes. Projectors, not validators, express missing
   context, authority requirements, parking, purge rules, and reproject needs.
 
+### Context integrity (core-enforced)
+
+An authority audit of the current code found authority is already sound — every
+authorization decision derives from context facts and their transitive validity
+back to a root (workspace creation / root admin / invite secret), re-derived on
+every replay, never from a read-model row, a store query, ambient state, CLI
+preflight, or network metadata. Two structural guarantees should move into core
+so projectors can *rely* on them instead of re-checking, and one threat must be
+closed:
+
+- **Payload identity is a core guarantee.** Core builds a matched context's
+  payload by loading the fact at `offer.owner` from the content-addressed store,
+  so `payload.id == offer.owner` holds by construction. Enforce it once at match
+  construction (produce no match if the owner fact does not load) and delete the
+  checked/unchecked accessor split, so every projector gets one always-safe
+  payload. The only check that stays projector-side is the **typed decode**
+  (`payload_as::<C>`) — "is this the fact *type* I expected?" — which core cannot
+  do generically.
+- **Scope is pinned to the owning fact (core).** `FactScope` is unhashed
+  admission metadata the emitter currently sets freely, and the emission gate
+  (`enforce_owner_is_self`) pins only `owner`. Extend it to reject any emitted
+  offer/need whose `scope` is not the projecting fact's scope, so a fact can
+  never publish context into a **foreign workspace** partition. For "own scope"
+  to be trustworthy on received facts, **admission derives a shared fact's scope
+  from its own signed `workspace_id`**, never from a sender/transport label.
+- **Two threats, two locks.** *Another workspace offering context* → the scope
+  pin plus signed-scope derivation. *Another fact type by mistake* → role
+  namespacing (versions of a family share a stable role; distinct families do
+  not) plus the projector's typed decode, which fails on a foreign tag.
+
 ### Phase 4 — Directory layout and version buckets
 
 - A new incompatible fact version is a sibling `_vN/` directory (original stays
@@ -409,6 +389,34 @@ for the current semantic contract. Security fixes land at the smallest layer:
 malformed old bytes are handled in validators, unsafe representation mapping in
 lenses, unsafe interpretation in projectors or policy facts, and bad derived
 state by replaying with the fixed projector.
+
+### Durable vs ephemeral facts
+
+The validator/lens/projector pipeline above is the **durable** path; most
+connection and sync traffic is **ephemeral** and takes a shorter one. The split
+is by retention: a fact is durable iff it must survive a wipe and replay.
+
+- **Durable** (full pipeline; ceiling-gated; validators-forever; lensed;
+  replayed): all `content::*` and `auth::*` facts, plus the durable connection
+  state — `connection_response`, `connection_close`, `fact_receipt`, and the
+  persisted connection secret.
+- **Ephemeral** (validator + projector only — one-shot live via the
+  `ProjectionSource::Ephemeral` path, which cannot emit durable offers; **no
+  lens, no replay**; transport-versioned by pairwise negotiation, never
+  ceiling-gated): `sync::{compare,have_id,need_id,range_request,shared_fact}`,
+  the bootstrap request/response handshake, frames, and the transient handshake
+  key. An ephemeral `_vN/` bucket therefore carries `validate.rs` + `project.rs`
+  and **no `lens.rs`** — there is no retained prior version to translate.
+
+**Invariant — durable depends only on durable.** A durable fact's
+validator/lens/projector may not take an ephemeral fact as a causal dependency:
+ephemeral facts are not retained, so replay would dangle. `connection_response`
+is therefore self-contained — it does not reference the ephemeral request it
+answered. A `GUARD` test enforces this.
+
+`connection_request` is **deferred**: its retention is being reworked on another
+branch. Classify it by the same rule when it lands — durable (full pipeline) if
+it must survive replay, otherwise ephemeral.
 
 ### Phase 5 — Rendering uniformity
 
@@ -523,6 +531,18 @@ by a mocked ordering assertion (`C`-bucket in Part II below
   so replay is deterministic and the choice is observable.
 - **Purge before reconnect.** Local purge/retirement work completes before the
   runtime reconnects, so a peer never receives material a purge fact retired.
+
+### Time-driven effects use trusted time
+
+A time-driven destructive effect — disappearing-message expiry, retention purge,
+cover-horizon retire — is driven by the **persisted trusted-time lower bound**
+(the same signed lower bound as the ceiling) and re-derived on replay as a
+replayable semantic time wake. It must **not** be gated by the operator-settable
+logical clock, which is not a fact, not synced, and not replay-stable. Because a
+lower bound can never overstate time, premature purge is impossible (a
+fast-forwarded clock cannot mass-delete), and a stale device merely *delays*
+expiry (conservative), never purges early. The logical clock stays for live
+operational scheduling only, never for a replay-relevant destructive decision.
 
 ## 3. Test matrix
 
