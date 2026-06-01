@@ -5,6 +5,7 @@
 //! Frame facts contain only wire bytes; this family supplies the receive
 //! context needed before those bytes may be opened.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

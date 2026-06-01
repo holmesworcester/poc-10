@@ -40,7 +40,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
 use crate::core::effects::PipelineEffects;
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{Intent, RowMutation};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -384,9 +384,11 @@ impl ProjectionOutput {
 
 /// The protocol-facing projection entry point.
 ///
-/// Implement this when the projector wants to own decoding itself. Otherwise,
-/// prefer `FactCodec` plus `TypedProjector` so byte layout stays next to the
-/// fact module that owns it.
+/// Implement `Projector::project` as a small call through
+/// `project_authenticated::<ModuleAuthenticator, _>()`, then put interpretation
+/// in `AuthenticatedProjector::project_authenticated`. The family authenticator
+/// (`authenticate.rs`) decodes and authenticates the primary bytes first, so the
+/// projector starts from an `AuthenticatedFact` and never parses raw bytes.
 pub trait Projector {
     fn project(&self, fact: &Fact, context: &ProjectionContext)
         -> Result<ProjectionOutput, String>;
@@ -480,32 +482,158 @@ pub trait FactCodec {
     fn decode_fact(fact: &Fact) -> Result<Self::Payload, String>;
 }
 
-/// Projector implementation after core has decoded the input fact.
+// ----- Fact authentication: the pre-projection layer -----
+//
+// An authenticator turns one fact's primary bytes into an `AuthenticatedFact`:
+// it proves the bytes are canonical for the family and cryptographically
+// authentic at the fact boundary, nothing more. It is not a validity check.
+// Authority, relationships, deletion, retention, and materialization stay in
+// the projector, which begins where the authenticator leaves off. See
+// `docs/research/fact-validators.md`.
+
+/// A decoded fact whose primary bytes are proven canonical and authentic.
 ///
-/// A projector should spend its body on admission policy: scope checks,
-/// context proof checks, offers, rows, and emitted intents. Byte decoding stays
-/// in the codec selected by the `Projector` entry point.
-pub trait TypedProjector<C: FactCodec> {
-    fn project_typed(
+/// Only a family `Authenticator` constructs this value, so holding one is the
+/// proof: the content id matches `hash(bytes)`, and any fact-boundary signature
+/// or container envelope verified. It is an in-memory view — not a new signed
+/// fact — that borrows the source fact and owns its decoded payload. A projector
+/// reads the payload and the source fact through it and never touches raw bytes.
+pub struct AuthenticatedFact<'a, T> {
+    fact: &'a Fact,
+    payload: T,
+}
+
+impl<'a, T> AuthenticatedFact<'a, T> {
+    /// Wrap a decoded payload as authenticated.
+    ///
+    /// Call this only after the family authenticator has proven canonical bytes
+    /// and fact-boundary authenticity; constructing it asserts that proof.
+    pub fn new(fact: &'a Fact, payload: T) -> Self {
+        Self { fact, payload }
+    }
+
+    /// Content id of the authenticated fact.
+    pub fn id(&self) -> FactId {
+        self.fact.id
+    }
+
+    /// Admission scope of the source fact.
+    pub fn scope(&self) -> &FactScope {
+        &self.fact.scope
+    }
+
+    /// The source fact, for sync sharing and id-owned context.
+    pub fn fact(&self) -> &Fact {
+        self.fact
+    }
+
+    /// The decoded, authenticated payload.
+    pub fn payload(&self) -> &T {
+        &self.payload
+    }
+
+    /// Split into the borrowed source fact and the owned payload.
+    ///
+    /// The fact reference keeps the original borrow, so a projector can bind
+    /// `let (fact, payload) = authenticated.into_parts();` and read both.
+    pub fn into_parts(self) -> (&'a Fact, T) {
+        (self.fact, self.payload)
+    }
+}
+
+/// Outcome of authenticating one fact's primary bytes.
+///
+/// `NeedsAuthentication` carries the narrow cryptographic context the
+/// authenticator is waiting on — a verifier key, or a connection/endpoint
+/// secret needed to prove or open this fact boundary. It is not an authority
+/// proof and is a distinct concern from the projector's normal context needs,
+/// even though core schedules both through the same standing-need machinery.
+pub enum Authentication<'a, T> {
+    Authenticated(AuthenticatedFact<'a, T>),
+    NeedsAuthentication(ContextNeed),
+    Invalid(String),
+}
+
+impl<'a, T> Authentication<'a, T> {
+    /// Map a context-free authentication result into an outcome.
+    ///
+    /// The common case: an authenticator that needs no external key can run its
+    /// numbered checks with `?` and hand the `Result` here — `Ok` authenticates,
+    /// `Err` rejects. Authenticators that park on a verifier key build the
+    /// `NeedsAuthentication` arm directly instead.
+    pub fn from_result(fact: &'a Fact, result: Result<T, String>) -> Self {
+        match result {
+            Ok(payload) => Authentication::Authenticated(AuthenticatedFact::new(fact, payload)),
+            Err(error) => Authentication::Invalid(error),
+        }
+    }
+}
+
+/// Family authenticator: primary bytes to an authenticated typed fact.
+///
+/// Implementations live in each family's `authenticate.rs` and reuse the family
+/// `FactCodec` decoder plus `layout::verify_signature`. They do decode +
+/// id-check + intrinsic field rules + the fact-boundary cryptographic proof, and
+/// nothing context-semantic. A context-free authenticator ignores `context`; a
+/// carrier authenticator reads only the narrow crypto context it parks on.
+pub trait Authenticator {
+    type Authenticated;
+
+    fn authenticate<'a>(
+        fact: &'a Fact,
+        context: &ProjectionContext,
+    ) -> Authentication<'a, Self::Authenticated>;
+}
+
+/// Projector implementation after core has authenticated the input fact.
+///
+/// The body begins at the CONTEXT section: authority and relationship proofs,
+/// deletion, retention, and materialization. Primary decoding and authentication
+/// already happened in the family authenticator, so the projector never parses
+/// or verifies its own primary bytes.
+pub trait AuthenticatedProjector<A: Authenticator> {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        payload: C::Payload,
+        authenticated: AuthenticatedFact<'_, A::Authenticated>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String>;
 }
 
-/// Decode a fact through `C` and call the typed projector implementation.
-pub fn project_typed<C, P>(
+/// Authenticate a fact through `A`, then project it.
+///
+/// `NeedsAuthentication` becomes a standing context need so core re-runs this
+/// path once the crypto context appears; the projector does not run until the
+/// fact authenticates. `Invalid` rejects the fact through the same error path a
+/// failed `verify_signature` takes today.
+pub fn project_authenticated<A, P>(
     projector: &P,
     fact: &Fact,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String>
 where
-    C: FactCodec,
-    P: TypedProjector<C>,
+    A: Authenticator,
+    P: AuthenticatedProjector<A>,
 {
-    let payload = C::decode_fact(fact)?;
-    projector.project_typed(fact, payload, context)
+    match A::authenticate(fact, context) {
+        Authentication::Authenticated(authenticated) => {
+            projector.project_authenticated(authenticated, context)
+        }
+        Authentication::NeedsAuthentication(need) => Ok(ProjectionOutput::new().need(need)),
+        Authentication::Invalid(error) => Err(error),
+    }
+}
+
+/// Check a fact's content id against its own bytes.
+///
+/// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally
+/// holds. An authenticator re-checks it anyway so authentication is a
+/// self-contained proof over raw bytes — the property fuzzing relies on.
+pub fn verify_fact_id(fact: &Fact) -> Result<(), String> {
+    if fact.id == crate::core::facts::fact_id(&fact.bytes) {
+        Ok(())
+    } else {
+        Err("fact id does not match fact bytes".to_string())
+    }
 }
 
 #[cfg(test)]

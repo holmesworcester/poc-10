@@ -442,7 +442,8 @@ fn process_pending_fact(
     progress: &mut ProjectionProgress,
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<(), String> {
-    let effects = crate::core::perf_profile::measure_result("projection_prepare_effects", || {
+    let fact_id = pending_fact.fact_id;
+    let effects = match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
         prepare_projection_effects(
             projector,
             pending_fact,
@@ -450,7 +451,18 @@ fn process_pending_fact(
             allowed_tables,
             intent_policy,
         )
-    })?;
+    }) {
+        Ok(effects) => effects,
+        Err(_rejection) => {
+            // Ephemeral input rejected by projection/authentication: drop the
+            // transient input so one bad input never halts the drain. Ephemeral
+            // facts are never durable, so there is nothing to purge or keep.
+            store
+                .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
+                .map_err(|err| format!("drop rejected ephemeral projection input: {err}"))?;
+            return Ok(());
+        }
+    };
     let suppressed_intents =
         crate::core::perf_profile::measure_result("projection_commit_effects", || {
             commit_projection_effects(store, &effects, projector, allowed_tables, intent_policy)
@@ -469,10 +481,22 @@ fn process_pending_fact_in_tx(
     progress: &mut ProjectionProgress,
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> rusqlite::Result<()> {
-    let effects = crate::core::perf_profile::measure_result("projection_prepare_effects", || {
+    let fact_id = pending_fact.fact_id;
+    let effects = match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
         prepare_projection_effects(projector, pending_fact, tx, allowed_tables, intent_policy)
-    })
-    .map_err(sqlite_string_error)?;
+    }) {
+        Ok(effects) => effects,
+        Err(_rejection) => {
+            // Projection or authentication rejected this one fact. Preparation
+            // writes no rows, so there is nothing to roll back: isolate the fact
+            // and continue, so a single bad fact never aborts the rest of the
+            // batch. Infrastructure failures arise only in load/commit below and
+            // still propagate. (`isolate_rejected_durable_fact_in_tx` decides
+            // whether the fact is purged or kept.)
+            isolate_rejected_durable_fact_in_tx(tx, fact_id, projector)?;
+            return Ok(());
+        }
+    };
     let suppressed_intents =
         crate::core::perf_profile::measure_result("projection_commit_effects", || {
             commit_projection_effects_in_tx(
@@ -488,6 +512,61 @@ fn process_pending_fact_in_tx(
     progress.projected += 1;
     progress.status.progressed = true;
     Ok(())
+}
+
+/// Isolate a durable fact whose projection or authentication was rejected.
+///
+/// The batch-safety fix: a single rejected fact must not abort projection of the
+/// rest of the chunk. We then classify the rejection by re-projecting the fact
+/// over an *empty* context — a side-effect-free probe that separates the two
+/// kinds of failure, because the projector runs the authenticator first:
+///
+/// - **Fails without context** (re-project errors): the failure is context-free
+///   — a bad signature, id, intrinsic field, or scope. The bytes are not
+///   admissible protocol data, so purge the fact, the same way beyond-ceiling
+///   bytes are dropped.
+/// - **Otherwise** (re-project succeeds — it just parks on a need): the fact
+///   authenticates and is well-formed; the original rejection came from
+///   *inconsistent context*. Keep the fact and remove only its
+///   pending-projection marker so the drain does not retry it. Such a fact is
+///   kept as evidence: versioning needs different lenses and versions to
+///   interpret an incorrect fact the same way, and purging would destroy the
+///   test subject.
+fn isolate_rejected_durable_fact_in_tx(
+    tx: &Store,
+    fact_id: FactId,
+    projector: &(impl Projector + ?Sized),
+) -> rusqlite::Result<()> {
+    if durable_fact_fails_without_context(tx, fact_id, projector) {
+        purge_fact_in_tx(tx, fact_id)?;
+        return Ok(());
+    }
+    tx.conn().execute(
+        "DELETE FROM pending_projection WHERE owner = ?1",
+        params![fact_id.as_slice()],
+    )?;
+    Ok(())
+}
+
+/// Probe whether a durable fact fails projection for context-free reasons.
+///
+/// Re-projects the fact against an empty context. The projector authenticates
+/// first (signature, id, intrinsic fields) and then checks scope before any
+/// context lookup, so a context-free failure (inauthentic or structurally
+/// malformed) errors here, while a fact that only depends on missing context
+/// parks on a need and returns `Ok`. Pure: projection has no side effects.
+fn durable_fact_fails_without_context(
+    tx: &Store,
+    fact_id: FactId,
+    projector: &(impl Projector + ?Sized),
+) -> bool {
+    match persisted_fact(tx, &fact_id) {
+        Ok(Some(fact)) => projector
+            .project(&fact, &ProjectionContext::default())
+            .is_err(),
+        // Already gone, or unreadable: nothing to purge — just clear the marker.
+        _ => false,
+    }
 }
 
 /// Run the protocol projector for one fact and split its output.
@@ -1316,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_batch_projection_rolls_back_earlier_fact_when_later_fact_fails() {
+    fn durable_batch_isolates_a_failed_fact_without_rolling_back_the_batch() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1328,7 +1407,9 @@ mod tests {
             2
         );
 
-        let err = drain_pending_projection(
+        // One fact failing projection no longer aborts the batch: it is isolated
+        // and the rest commit.
+        let progress = drain_pending_projection(
             &RollbackBatchProjector {
                 offered_id: offered.id,
                 failing_id: failing.id,
@@ -1339,12 +1420,61 @@ mod tests {
             &[],
             2,
         )
-        .expect_err("later projection failure should rollback the batch");
+        .expect("a failed fact must not abort the batch");
 
-        assert!(err.contains("batch projection failed"), "{err}");
-        assert_eq!(pending_projection_count(&store, offered.id), 1);
-        assert_eq!(pending_projection_count(&store, failing.id), 1);
-        assert_eq!(context_edge_count(&store, offered.id), 0);
+        // The healthy fact committed — its neighbor's failure did not roll it back.
+        assert_eq!(progress.projected, 1);
+        assert_eq!(pending_projection_count(&store, offered.id), 0);
+        assert!(context_edge_count(&store, offered.id) > 0);
+
+        // The failing fact fails regardless of context (context-free), so it is
+        // purged: not retried and its bytes dropped.
+        assert_eq!(pending_projection_count(&store, failing.id), 0);
+        assert!(
+            crate::core::fact_store::persisted_fact(&store, &failing.id)
+                .expect("load failing fact")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn durable_batch_keeps_a_context_inconsistent_fact_as_evidence() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let offered = Fact::new(FactScope::Global, 1, b"inconsistent-offer".to_vec());
+        let failing = Fact::new(FactScope::Global, 2, b"inconsistent-dependent".to_vec());
+        assert_eq!(
+            submit_facts_to_store(&store, vec![offered.clone(), failing.clone()])
+                .expect("submit pending facts"),
+            2
+        );
+
+        let progress = drain_pending_projection(
+            &ContextInconsistentProjector {
+                offered_id: offered.id,
+                failing_id: failing.id,
+                role: Role::new("inconsistent_dep").unwrap(),
+                key: ContextKey::from_bytes(b"inconsistent-key"),
+            },
+            &store,
+            &[],
+            2,
+        )
+        .expect("a context-inconsistent fact must not abort the batch");
+
+        assert_eq!(progress.projected, 1);
+        assert_eq!(pending_projection_count(&store, offered.id), 0);
+
+        // The failing fact authenticates (it parks when probed with empty
+        // context), so the rejection was inconsistent *context*: it is kept as
+        // evidence (bytes retained) and just not retried (pending cleared).
+        assert_eq!(pending_projection_count(&store, failing.id), 0);
+        assert!(
+            crate::core::fact_store::persisted_fact(&store, &failing.id)
+                .expect("load failing fact")
+                .is_some()
+        );
     }
 
     #[test]
@@ -1884,6 +2014,48 @@ mod tests {
             }
             if fact.id == self.failing_id {
                 return Err("batch projection failed".to_string());
+            }
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    /// `failing_id` authenticates fine (it parks when its context is absent) but
+    /// errors once its dependency context is present — an authentic fact with
+    /// inconsistent context.
+    struct ContextInconsistentProjector {
+        offered_id: FactId,
+        failing_id: FactId,
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for ContextInconsistentProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.offered_id {
+                return Ok(ProjectionOutput::new().offer(ContextOffer {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    start_key: self.key.clone(),
+                    end_key: self.key.clone(),
+                }));
+            }
+            if fact.id == self.failing_id {
+                let need = ContextNeed {
+                    owner: fact.id,
+                    role: self.role.clone(),
+                    scope: fact.scope.clone(),
+                    start_key: self.key.clone(),
+                    end_key: self.key.clone(),
+                };
+                if context.payload_for(&need).is_some() {
+                    return Err("context inconsistent".to_string());
+                }
+                return Ok(ProjectionOutput::new().need(need));
             }
             Ok(ProjectionOutput::new())
         }

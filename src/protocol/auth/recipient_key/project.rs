@@ -8,7 +8,8 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
@@ -35,17 +36,19 @@ impl Projector for RecipientKeyProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::RecipientKeyAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for RecipientKeyProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::RecipientKeyAuthenticator> for RecipientKeyProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        recipient: RecipientKeyFact,
+        authenticated: AuthenticatedFact<'_, RecipientKeyFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, recipient) = authenticated.into_parts();
         recipient_key(fact, context, recipient)
     }
 }
@@ -58,13 +61,6 @@ fn recipient_key(
     // 1. Structural.
     let scope = crate::protocol::auth::workspace::scope(recipient.workspace_id);
     require_fact_scope(fact, &scope)?;
-    if recipient.previous_recipient_key_id == fact.id {
-        return Err(
-            "recipient key cannot supersede itself (previous_recipient_key_id == fact_id)"
-                .to_string(),
-        );
-    }
-    super::layout::verify_signature(&recipient)?;
 
     // 2. Context: signer, supersession, and previous-key validation.
     let signer_need = ContextNeed::range(
@@ -171,7 +167,6 @@ fn validate_previous_recipient_key(
     let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
         "recipient key supersession previous dependency is not a recipient key".to_string()
     })?;
-    super::layout::verify_signature(&previous)?;
     if previous.workspace_id != recipient.workspace_id {
         return Err(
             "recipient key supersession previous_recipient_key workspace does not match"
@@ -194,7 +189,6 @@ fn validate_recipient_signer(
 ) -> Result<(), String> {
     let signer = endpoint_shared::decode_fact_payload(signer_fact.body())
         .map_err(|_| "recipient key signer context must be endpoint_shared".to_string())?;
-    endpoint_shared::layout::verify_signature(&signer)?;
     if signer.workspace_id != recipient.workspace_id {
         return Err("recipient key signer workspace mismatch".to_string());
     }

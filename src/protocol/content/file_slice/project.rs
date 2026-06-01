@@ -17,7 +17,8 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::content::file;
@@ -48,21 +49,24 @@ impl Projector for ContentFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ContentFileSliceAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ContentFileSliceProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ContentFileSliceAuthenticator>
+    for ContentFileSliceProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        slice: super::fact::ContentFileSliceFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ContentFileSliceFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, slice) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
-        super::layout::verify_signature(&slice)?;
 
         // 2. Context and deletion gates.
         let file_need = crate::core::context::ContextNeed::range(
@@ -82,7 +86,6 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             file::decode_fact_payload,
         )
         .map_err(|_| "file slice parent context is not a content file".to_string())?;
-        file::layout::verify_signature(&file)?;
         if parent.scope != scope {
             return Err("file slice parent scope does not match slice".to_string());
         }
@@ -117,7 +120,6 @@ impl TypedProjector<super::Codec> for ContentFileSliceProjector {
             "file slice message parent",
             message::decode_fact_payload,
         )?;
-        message::layout::verify_signature(&parent_message)?;
         if parent_message.workspace_id != slice.workspace_id {
             return Err("file slice message parent workspace does not match slice".to_string());
         }
@@ -272,7 +274,6 @@ fn validate_file_deletion(
     let deletion = file_deletion::decode_fact_payload(payload.body()).map_err(|_| {
         "file slice parent deletion context is not a content file deletion".to_string()
     })?;
-    file_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice parent deletion workspace does not match slice".to_string());
     }
@@ -301,7 +302,6 @@ fn validate_message_deletion(
         "file slice message parent deletion",
         message_deletion::decode_fact_payload,
     )?;
-    message_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice message deletion workspace does not match slice".to_string());
     }

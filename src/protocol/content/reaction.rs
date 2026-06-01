@@ -5,6 +5,7 @@
 //! publishing reaction rows. Keep reaction payload layout and admission here;
 //! message projection only provides the parent context that reactions require.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

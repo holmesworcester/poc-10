@@ -9,6 +9,7 @@
 //! coordinates. Change the target secret projectors for target-specific cleanup
 //! and validation.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

@@ -7,6 +7,7 @@
 //! here keep the `disappearing-*` CLI surface while message projection consumes
 //! the resulting policy and self-purges expired facts.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod create;

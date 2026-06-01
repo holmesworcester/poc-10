@@ -8,7 +8,8 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -26,17 +27,23 @@ impl Projector for SyncRangeRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::SyncRangeRequestAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for SyncRangeRequestProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::SyncRangeRequestAuthenticator>
+    for SyncRangeRequestProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        request: super::fact::SyncRangeRequestFact,
+        authenticated: AuthenticatedFact<'_, super::fact::SyncRangeRequestFact>,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, request) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
         require_fact_scope(fact, &scope)?;

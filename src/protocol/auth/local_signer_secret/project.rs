@@ -9,7 +9,8 @@
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use super::fact::LocalSignerSecretFact;
@@ -29,18 +30,22 @@ impl Projector for LocalSignerSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::LocalSignerSecretAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for LocalSignerSecretProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::LocalSignerSecretAuthenticator>
+    for LocalSignerSecretProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        secret: LocalSignerSecretFact,
+        authenticated: AuthenticatedFact<'_, LocalSignerSecretFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, secret) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("local signer secret fact must have local scope".to_string());
         }

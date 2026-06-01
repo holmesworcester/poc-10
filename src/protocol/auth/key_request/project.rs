@@ -8,7 +8,8 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
@@ -37,17 +38,19 @@ impl Projector for KeyRequestProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::KeyRequestAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for KeyRequestProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::KeyRequestAuthenticator> for KeyRequestProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        request: KeyRequestFact,
+        authenticated: AuthenticatedFact<'_, KeyRequestFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, request) = authenticated.into_parts();
         key_request(fact, context, request)
     }
 }
@@ -57,10 +60,9 @@ fn key_request(
     projection_context: &ProjectionContext,
     request: KeyRequestFact,
 ) -> Result<ProjectionOutput, String> {
-    // 1. Structural.
+    // 1. Scope.
     let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
-    super::layout::verify_signature(&request)?;
 
     // 2. Context: requester signer, recipient, frontier, and wrap-source needs.
     let requester_need = ContextNeed::range(
@@ -110,7 +112,6 @@ fn key_request(
             return Err("key request recipient context payload id mismatch".to_string());
         }
         let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
-        recipient_key::layout::verify_signature(&recipient)?;
         if recipient.workspace_id != request.workspace_id {
             return Err("key request recipient workspace mismatch".to_string());
         }
@@ -121,7 +122,6 @@ fn key_request(
             return Err("key request frontier context payload id mismatch".to_string());
         }
         let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
-        removal_frontier::layout::verify_signature(&frontier)?;
         if frontier.workspace_id != request.workspace_id {
             return Err("key request frontier workspace mismatch".to_string());
         }
@@ -161,7 +161,6 @@ fn validate_requester_signer(
 ) -> Result<(), String> {
     let signer = endpoint_shared::decode_fact_payload(requester_fact.body())
         .map_err(|_| "key request requester context must be endpoint_shared".to_string())?;
-    endpoint_shared::layout::verify_signature(&signer)?;
     if signer.workspace_id != request.workspace_id {
         return Err("key request requester workspace mismatch".to_string());
     }

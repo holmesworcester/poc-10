@@ -5,6 +5,7 @@
 //! `connection_frame_observation` context before opening the frame and emitting
 //! durable child facts plus receipts.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

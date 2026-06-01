@@ -11,7 +11,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::user_invite;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
@@ -33,31 +34,21 @@ impl Projector for UserProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::UserAuthenticator, _>(self, fact, context)
     }
 }
 
-impl TypedProjector<super::Codec> for UserProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::UserAuthenticator> for UserProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        user: super::fact::UserFact,
+        authenticated: AuthenticatedFact<'_, super::fact::UserFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, user) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user fact must have global scope".to_string());
         }
-        if user.workspace_id == [0; 32] {
-            return Err("user workspace_id must not be empty".to_string());
-        }
-        if user.public_key == [0; 32] {
-            return Err("user public_key must not be empty".to_string());
-        }
-        if user.username.as_str().trim().is_empty() {
-            return Err("username must not be empty".to_string());
-        }
-        super::layout::verify_signature(&user)?;
 
         // 2. Authority.
         let invite_need = crate::core::context::ContextNeed::range(
@@ -75,7 +66,6 @@ impl TypedProjector<super::Codec> for UserProjector {
         }
         let invite = user_invite::decode_fact_payload(invite_fact.body())
             .map_err(|_| "user signer context must be a user_invite fact".to_string())?;
-        user_invite::layout::verify_signature(&invite)?;
         if invite.workspace_id != user.workspace_id {
             return Err("user workspace does not match user_invite workspace".to_string());
         }

@@ -10,6 +10,7 @@
 //! this family for receipt bytes, receive-path vocabulary, or receipt context
 //! offers.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

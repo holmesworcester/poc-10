@@ -8,7 +8,8 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
@@ -31,77 +32,74 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::RemovalFrontierAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for RemovalFrontierProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::RemovalFrontierAuthenticator>
+    for RemovalFrontierProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        frontier: RemovalFrontierFact,
+        authenticated: AuthenticatedFact<'_, RemovalFrontierFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        removal_frontier(fact, context, frontier)
+        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // signer signature. Scope is interpretation.
+        let (fact, frontier) = authenticated.into_parts();
+        // 1. Scope.
+        let scope = crate::protocol::auth::workspace::scope(frontier.workspace_id);
+        require_fact_scope(fact, &scope)?;
+
+        // 2. Authority.
+        let owner_signer_need = ContextNeed::range(
+            fact.id,
+            "content_signer",
+            scope.clone(),
+            frontier.owner_endpoint_id,
+            frontier.owner_endpoint_id,
+        );
+        let local_signer_need = ContextNeed::range(
+            fact.id,
+            "local_signer_secret",
+            scope.clone(),
+            frontier.owner_endpoint_id,
+            frontier.owner_endpoint_id,
+        );
+        let waiting = ProjectionOutput::new()
+            .need(owner_signer_need.clone())
+            .need(local_signer_need.clone());
+        let context_have = match (
+            context.payload_for(&owner_signer_need),
+            context.payload_for(&local_signer_need),
+        ) {
+            (Some(owner_fact), _) => {
+                validate_frontier_endpoint_shared_owner(owner_fact, &frontier)?;
+                context_have_from_needs(context, [&owner_signer_need])
+            }
+            (None, Some(owner_fact)) => {
+                validate_frontier_local_owner(owner_fact, &frontier)?;
+                Vec::new()
+            }
+            (None, None) => return Ok(waiting),
+        };
+
+        // 3. Materialize.
+        Ok(share_fact_with_sync(
+            waiting.offer(ContextOffer::range(
+                fact.id,
+                "auth_removal_frontier",
+                scope,
+                fact.id,
+                fact.id,
+            )),
+            frontier.workspace_id,
+            fact,
+            context_have,
+        ))
     }
-}
-
-fn removal_frontier(
-    fact: &Fact,
-    context: &ProjectionContext,
-    frontier: RemovalFrontierFact,
-) -> Result<ProjectionOutput, String> {
-    // 1. Structural.
-    let scope = crate::protocol::auth::workspace::scope(frontier.workspace_id);
-    require_fact_scope(fact, &scope)?;
-    super::layout::verify_signature(&frontier)?;
-
-    // 2. Authority.
-    let owner_signer_need = ContextNeed::range(
-        fact.id,
-        "content_signer",
-        scope.clone(),
-        frontier.owner_endpoint_id,
-        frontier.owner_endpoint_id,
-    );
-    let local_signer_need = ContextNeed::range(
-        fact.id,
-        "local_signer_secret",
-        scope.clone(),
-        frontier.owner_endpoint_id,
-        frontier.owner_endpoint_id,
-    );
-    let waiting = ProjectionOutput::new()
-        .need(owner_signer_need.clone())
-        .need(local_signer_need.clone());
-    let context_have = match (
-        context.payload_for(&owner_signer_need),
-        context.payload_for(&local_signer_need),
-    ) {
-        (Some(owner_fact), _) => {
-            validate_frontier_endpoint_shared_owner(owner_fact, &frontier)?;
-            context_have_from_needs(context, [&owner_signer_need])
-        }
-        (None, Some(owner_fact)) => {
-            validate_frontier_local_owner(owner_fact, &frontier)?;
-            Vec::new()
-        }
-        (None, None) => return Ok(waiting),
-    };
-
-    // 3. Materialize.
-    Ok(share_fact_with_sync(
-        waiting.offer(ContextOffer::range(
-            fact.id,
-            "auth_removal_frontier",
-            scope,
-            fact.id,
-            fact.id,
-        )),
-        frontier.workspace_id,
-        fact,
-        context_have,
-    ))
 }
 
 fn validate_frontier_endpoint_shared_owner(
@@ -110,7 +108,6 @@ fn validate_frontier_endpoint_shared_owner(
 ) -> Result<(), String> {
     let owner = auth::endpoint_shared::decode_fact_payload(owner_fact.body())
         .map_err(|_| "removal frontier owner context must be endpoint_shared".to_string())?;
-    auth::endpoint_shared::layout::verify_signature(&owner)?;
     if owner.workspace_id != frontier.workspace_id {
         return Err("removal frontier owner workspace mismatch".to_string());
     }

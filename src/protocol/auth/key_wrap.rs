@@ -10,6 +10,7 @@
 //! signer/recipient/frontier context and emits unwrap work when local recipient
 //! material is present.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod create;

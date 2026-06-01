@@ -5,6 +5,7 @@
 //! flows. This module owns user-invite bytes and admission; device invites and
 //! accepted membership are separate fact families.
 
+pub mod authenticate;
 pub mod commands;
 pub mod create;
 pub mod fact;

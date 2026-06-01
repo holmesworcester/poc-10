@@ -9,7 +9,8 @@
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::sync::send_needed_fact_id::{send_needed_fact_id_intent, SendNeededFactId};
 
@@ -30,18 +31,19 @@ impl Projector for SyncHaveIdProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::SyncHaveIdAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for SyncHaveIdProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::SyncHaveIdAuthenticator> for SyncHaveIdProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        have: super::fact::SyncHaveIdFact,
+        authenticated: AuthenticatedFact<'_, super::fact::SyncHaveIdFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, have) = authenticated.into_parts();
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .row_mutation(RowMutation::PutRow(sync_have_id_row(fact.id, &have)?))

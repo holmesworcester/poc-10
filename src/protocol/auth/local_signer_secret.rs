@@ -5,6 +5,7 @@
 //! shareable envelope, and its only projection output is local signer context
 //! for commands and projectors that need signing authority.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

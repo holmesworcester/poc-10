@@ -420,7 +420,15 @@ fn target_projectors_document_policy_narratives() {
         if !production.contains("//! POLICY.") {
             missing.push("`//! POLICY.`");
         }
-        if !production.contains("// 1.") {
+        // With primary authentication in `authenticate.rs`, a projector body
+        // starts at whatever section it actually owns: scope/context (`// 2.`)
+        // or, for a minimal projector that only writes rows, materialize
+        // (`// 3.`). Any numbered body marker satisfies "policy mirrored in the
+        // body"; require at least one.
+        if !production.contains("// 1.")
+            && !production.contains("// 2.")
+            && !production.contains("// 3.")
+        {
             missing.push("numbered projector body markers");
         }
         if !missing.is_empty() {
@@ -436,37 +444,76 @@ fn target_projectors_document_policy_narratives() {
 }
 
 #[test]
-fn target_projectors_route_primary_decode_through_core_typed_adapter() {
+fn target_projectors_authenticate_primary_through_core_before_projecting() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut offenders = Vec::new();
+    let mut missing_delegation = Vec::new();
+    let mut missing_module = Vec::new();
 
     for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
         if !production.contains("impl Projector for") {
+            // A project.rs that owns no projector (shared coordinate helpers,
+            // e.g. content/purge) is not a routed fact family.
             continue;
         }
 
-        let mut missing = Vec::new();
-        if !production.contains("project_typed::<super::Codec, _>(self, fact,")
-            && !production.contains("project_typed::<super::fact::Codec, _>(self, fact,")
-        {
-            missing.push("Projector::project core typed-adapter delegation");
+        // Primary decode + authentication belong to the family authenticator,
+        // which core runs before the projector. Every fact-module projector
+        // delegates `Projector::project` to
+        // `project_authenticated::<super::authenticate::_, _>()` and implements
+        // `AuthenticatedProjector<super::authenticate::_>`, so it starts from an
+        // already-authenticated fact and never parses its own primary bytes.
+        let routes_authenticated =
+            production.contains("project_authenticated::<super::authenticate::")
+                && production.contains("impl AuthenticatedProjector<super::authenticate::");
+        if !routes_authenticated {
+            missing_delegation.push(relative.clone());
         }
-        if !production.contains("impl TypedProjector<super::Codec>")
-            && !production.contains("impl TypedProjector<super::fact::Codec>")
-        {
-            missing.push("TypedProjector<super::Codec> implementation");
+
+        // The family it delegates to must actually exist.
+        if !path.with_file_name("authenticate.rs").is_file() {
+            missing_module.push(relative);
         }
-        if !missing.is_empty() {
-            offenders.push(format!("{relative} missing {}", missing.join(" and ")));
+    }
+
+    assert!(
+        missing_delegation.is_empty(),
+        "every fact-module projector must delegate Projector::project to \
+         project_authenticated::<super::authenticate::_, _>() and implement \
+         AuthenticatedProjector<super::authenticate::_>, so core authenticates the primary \
+         fact before projection and the projector never parses its own bytes:\n{}",
+        missing_delegation.join("\n")
+    );
+    assert!(
+        missing_module.is_empty(),
+        "every routed fact family must own an authenticate.rs (decode + id-check + signature + \
+         intrinsic field rules) beside its project.rs:\n{}",
+        missing_module.join("\n")
+    );
+}
+
+#[test]
+fn target_projectors_do_not_verify_signatures() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in fact_family_files_named(root, "project.rs") {
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        if production.contains("verify_signature") {
+            offenders.push(path.strip_prefix(root).unwrap().display().to_string());
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "fact-module projectors should let core own primary decode timing: Projector::project delegates to project_typed::<super::Codec, _>(), while the owning module codec decodes bytes into typed policy input:\n{}",
+        "projectors must not verify signatures. The primary fact's signature is proven by the \
+         family authenticate.rs, and any fact a projector reads from context was authenticated \
+         before it could offer that context — so its authenticity is guaranteed. A projector \
+         decodes context facts for their fields and proves relationships, but never re-verifies \
+         a signature:\n{}",
         offenders.join("\n")
     );
 }
@@ -1114,9 +1161,12 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 9] = [
+const STANDARD_FAMILY_FILES: [&str; 10] = [
     "fact.rs",
     "layout.rs",
+    // Primary-fact authentication: decode + id-check + fact-boundary signature
+    // or container opening + intrinsic field rules, ahead of projection.
+    "authenticate.rs",
     "project.rs",
     "rows.rs",
     "queries.rs",

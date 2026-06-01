@@ -4,6 +4,7 @@
 //! key. Projection ties it to its frontier and publishes wrap-source and
 //! secret-coverage offers.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

@@ -56,8 +56,8 @@ in `src/core` or `src/protocol`.
   matchers, projection contracts, intents, handler dispatch, store, wire,
   crypto, network queues, TCP, clock, and schema declarations.
 - `src/protocol/<scope>/<fact_family>/` owns fact shape, fixed wire layout,
-  command constructors, projection, rows, queries, and context helpers for one
-  fact family.
+  primary-fact authentication (`authenticate.rs`), command constructors,
+  projection, rows, queries, and context helpers for one fact family.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
@@ -106,9 +106,22 @@ explicitly archived or the user asks for history.
 
 ## Projectors
 
-- Projectors do protocol validation, not IO.
+- Projectors interpret an already-authenticated fact in context; they do not
+  authenticate and do not do IO. Primary decode, the fact-id check, the
+  fact-boundary signature, and intrinsic single-fact field rules belong to the
+  family `authenticate.rs`; core runs it before the projector, so a projector
+  receives an `AuthenticatedFact` and never parses raw primary bytes.
+- Projectors do not verify signatures. The primary fact's signature is proven by
+  its authenticator, and any fact reached through context was authenticated
+  before it could offer that context, so its authenticity is guaranteed. A
+  projector decodes a context fact through the owning module's typed helper to
+  read its fields and prove relationships, but never re-verifies its signature.
+- Scope is interpretation, not authentication: the projector checks the fact's
+  admission scope, because scope is unsigned local metadata, not part of the
+  authenticated bytes.
 - Projectors may use `core::crypto` when encryption or decryption is pure over
-  the fact and supplied context.
+  the fact and supplied context. Decrypting a payload with a secret from context
+  is materialization, not authentication.
 - Projectors must not query the store, call handlers, call other projectors,
   submit facts, open network sockets, read clocks, mutate process-local state,
   or perform broad scans.
@@ -127,12 +140,18 @@ explicitly archived or the user asks for history.
 
 Non-trivial projectors should make their proof shape obvious to a reviewer:
 
-1. Start with a numbered top-of-file policy that names structural admission,
-   authority/context proof, materialization, and purge behavior.
+1. Authenticate in `authenticate.rs`: a numbered policy (layout, fact id,
+   signature, intrinsic field rules) that returns an `AuthenticatedFact`. Keep
+   its shape uniform and reviewable; it owns no context, authority, or rows.
 2. Implement `Projector::project()` as a small call through
-   `core::projectors::project_typed::<ModuleCodec, _>()`.
-3. Put the real proof in `TypedProjector<ModuleCodec>::project_typed()` with
-   matching `// 1.`, `// 2.` section markers.
+   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()`.
+3. Put the real proof in
+   `AuthenticatedProjector<ModuleAuthenticator>::project_authenticated()`,
+   binding `let (fact, payload) = authenticated.into_parts();` and beginning at
+   the section it owns — scope/context (`// 2.`) or, for a minimal projector that
+   only writes rows, materialize (`// 3.`) — with matching numbered markers. The
+   top-of-file policy still names every section; the structural/authentication
+   ones now live in `authenticate.rs`.
 4. Name every security-sensitive context need in a small struct or local
    binding. Avoid positional `needs[0]` contracts.
 5. Split real authority branches into path-specific functions whose names say
@@ -172,16 +191,21 @@ through the `ProjectionContext` helper anchored to the need they emitted.
 
 ### Typed Facts And Foreign Context
 
-Core persists facts as opaque bytes, but primary projector input should be
-decoded through the typed adapter in `core::projectors`. The owning fact module
-supplies a small `FactCodec`; `project_typed()` receives the decoded payload.
-Do not call a raw layout decoder on the primary fact except inside the module
-codec.
+Core persists facts as opaque bytes. The owning fact module supplies a small
+`FactCodec`; its `authenticate.rs` decodes through that codec, checks the id and
+the signature, and produces an `AuthenticatedFact`. Core runs the authenticator
+before the projector, so `project_authenticated()` receives the typed,
+authenticated payload. Do not call a raw layout decoder on the primary fact
+outside the module codec, and do not decode or authenticate the primary fact in
+the projector.
 
 Foreign context fact bytes are different. A projector should not import another
 fact module's raw layout codec. It should call a module-owned typed helper that
 keeps wire formatting centralized inside the owning fact module while letting
-projector policy read as typed facts and named witnesses.
+projector policy read as typed facts and named witnesses. It trusts the
+authenticity of any fact it reaches through context — that fact was
+authenticated before it could offer the context — so it decodes for fields and
+proves relationships, but never re-verifies the signature.
 
 ### Parking And Errors
 

@@ -11,6 +11,7 @@
 //! close-context coordinates; change the target projectors for target-specific
 //! cleanup.
 
+pub mod authenticate;
 pub mod commands;
 pub mod fact;
 pub mod layout;

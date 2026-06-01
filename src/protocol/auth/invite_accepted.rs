@@ -6,6 +6,7 @@
 //! here create the local facts needed to accept an invite; invite creation stays
 //! in `auth::invite`.
 
+pub mod authenticate;
 pub mod commands;
 pub mod fact;
 pub mod layout;

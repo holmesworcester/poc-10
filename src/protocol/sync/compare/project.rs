@@ -10,7 +10,8 @@
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::sync::send_compare_response::{
     send_sync_compare_response_intent, SendSyncCompareResponse,
@@ -33,18 +34,19 @@ impl Projector for SyncCompareProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::SyncCompareAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for SyncCompareProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::SyncCompareAuthenticator> for SyncCompareProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        compare: super::fact::SyncCompareFact,
+        authenticated: AuthenticatedFact<'_, super::fact::SyncCompareFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, compare) = authenticated.into_parts();
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .row_mutation(RowMutation::PutRow(sync_compare_row(fact.id, &compare)?))

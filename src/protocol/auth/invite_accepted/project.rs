@@ -11,7 +11,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::invite;
 
@@ -32,28 +33,24 @@ impl Projector for InviteAcceptedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::InviteAcceptedAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for InviteAcceptedProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::InviteAcceptedAuthenticator>
+    for InviteAcceptedProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        accepted: super::fact::InviteAcceptedFact,
+        authenticated: AuthenticatedFact<'_, super::fact::InviteAcceptedFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, accepted) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("invite_accepted fact must have local scope".to_string());
-        }
-        if accepted.workspace_id == [0; 32]
-            || accepted.invite_fact_id == [0; 32]
-            || accepted.invite_secret_fact_id == [0; 32]
-            || accepted.bootstrap_hash == [0; 32]
-            || accepted.accepted_endpoint_id == [0; 32]
-        {
-            return Err("invite_accepted fact has empty fact id field".to_string());
         }
 
         // 2. Context.

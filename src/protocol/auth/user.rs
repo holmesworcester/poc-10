@@ -6,6 +6,7 @@
 //! naming and admission policy here; endpoint/device facts represent concrete
 //! devices for a user.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod create;

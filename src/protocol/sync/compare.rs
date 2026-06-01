@@ -6,6 +6,7 @@
 //! fact-id sends when a range is small enough. This module owns the negentropy
 //! planning surface for sync.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

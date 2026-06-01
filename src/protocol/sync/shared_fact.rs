@@ -6,6 +6,7 @@
 //! The index is connection-scoped sharing policy; it does not change the
 //! validity of the underlying facts.
 
+pub mod authenticate;
 pub mod cli;
 pub mod fact;
 pub mod layout;

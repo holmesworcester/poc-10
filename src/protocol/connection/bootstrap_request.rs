@@ -10,6 +10,7 @@
 //! request row materialization, and request admission policy. Response creation,
 //! frame sending, and socket IO belong to the downstream connection modules.
 
+pub mod authenticate;
 pub mod commands;
 pub mod create;
 pub mod fact;

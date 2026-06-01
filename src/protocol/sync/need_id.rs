@@ -5,6 +5,7 @@
 //! work to send the fact when this store has it. The requested payload remains
 //! validated by its owning fact family after receipt.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

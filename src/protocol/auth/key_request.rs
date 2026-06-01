@@ -4,6 +4,7 @@
 //! recipient key. Projection validates requester/responder context and emits
 //! create-key-wrap work.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

@@ -13,7 +13,8 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, user, user_invite, workspace};
@@ -36,31 +37,23 @@ impl Projector for DeviceInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::DeviceInviteAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for DeviceInviteProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::DeviceInviteAuthenticator> for DeviceInviteProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        device_invite: DeviceInviteFact,
+        authenticated: AuthenticatedFact<'_, DeviceInviteFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, device_invite) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Global {
             return Err("device_invite fact must have global scope".to_string());
         }
-        if device_invite.workspace_id == [0; 32] {
-            return Err("device_invite fact has empty workspace_id".to_string());
-        }
-        if device_invite.user_authority_fact_id == [0; 32] {
-            return Err("device_invite fact has empty user_authority_fact_id".to_string());
-        }
-        if device_invite.public_key == [0; 32] {
-            return Err("device_invite fact has empty public_key".to_string());
-        }
-        super::layout::verify_signature(&device_invite)?;
 
         // 2. Authority.
         //
@@ -104,7 +97,6 @@ fn project_user_signed(
     }
     let user = user::decode_fact_payload(user_fact.body())
         .map_err(|_| "device_invite user signer payload is invalid".to_string())?;
-    user::layout::verify_signature(&user)?;
     if invite.signer_public_key != user.public_key {
         return Err("device_invite signer public key does not match user".to_string());
     }
@@ -120,7 +112,6 @@ fn project_user_signed(
     }
     let user_invite = user_invite::decode_fact_payload(user_invite_fact.body())
         .map_err(|_| "device_invite user_invite context is not a user_invite fact".to_string())?;
-    user_invite::layout::verify_signature(&user_invite)?;
     if user_invite.workspace_id != invite.workspace_id {
         return Err("device_invite user_invite belongs to a different workspace".to_string());
     }
@@ -154,7 +145,6 @@ fn project_endpoint_signed(
     }
     let signer = endpoint_shared::decode_fact_payload(signer_fact.body())
         .map_err(|_| "device_invite endpoint_shared signer payload is invalid".to_string())?;
-    endpoint_shared::layout::verify_signature(&signer)?;
     if invite.signer_public_key != signer.signing_public_key {
         return Err(
             "device_invite signer public key does not match endpoint_shared signing key"

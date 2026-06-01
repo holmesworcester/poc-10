@@ -17,7 +17,8 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TimeWake, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -85,21 +86,30 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ContentMessageAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ContentMessageProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ContentMessageAuthenticator>
+    for ContentMessageProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        message: super::fact::ContentMessageFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ContentMessageFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // author signature. Scope is interpretation, not authentication — it
+        // gates on unsigned admission metadata — so it is checked here, behind
+        // the lens and the single ceiling projector, where the workspace-id
+        // shape and this rule can evolve.
+        let (fact, message) = authenticated.into_parts();
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
-        require_fact_scope(fact, &scope)?;
-        super::layout::verify_signature(&message)?;
+        if fact.scope != scope {
+            return Err("content message fact scope does not match body workspace".to_string());
+        }
 
         // 2. Context and deletion gates.
         let signer_need = crate::core::context::ContextNeed::range(
@@ -323,7 +333,6 @@ fn validate_message_deletion(
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
     if let Ok(deletion) = message_deletion::decode_fact_payload(payload.body()) {
-        message_deletion::layout::verify_signature(&deletion)?;
         if deletion.workspace_id != workspace_id {
             return Err("message deletion workspace does not match message".to_string());
         }
@@ -548,14 +557,6 @@ fn author_deletion_output(
         message_id,
         message.created_at_ms,
     )
-}
-
-fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {
-    if &fact.scope == expected {
-        Ok(())
-    } else {
-        Err("content message fact scope does not match body workspace".to_string())
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

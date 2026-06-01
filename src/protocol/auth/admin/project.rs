@@ -13,7 +13,8 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::user;
@@ -21,7 +22,6 @@ use crate::protocol::auth::workspace;
 use crate::protocol::auth::workspace::fact::WorkspaceFact;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::layout;
 use super::rows::admin_row;
 
 #[derive(Debug, Clone, Default)]
@@ -39,34 +39,23 @@ impl Projector for AdminProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::AdminAuthenticator, _>(self, fact, context)
     }
 }
 
-impl TypedProjector<super::Codec> for AdminProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::AdminAuthenticator> for AdminProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        admin: AdminFact,
+        authenticated: AuthenticatedFact<'_, AdminFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes, the signer
+        // signature, and non-zero selector fields. Scope is interpretation.
+        let (fact, admin) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Global {
             return Err("admin fact must have global scope".to_string());
         }
-        if admin.workspace_id == [0u8; 32] {
-            return Err("admin workspace_id must not be zero".to_string());
-        }
-        if admin.public_key == [0u8; 32] {
-            return Err("admin public_key must not be zero".to_string());
-        }
-        if admin.authority_fact_id == [0u8; 32] {
-            return Err("admin authority_fact_id must not be zero".to_string());
-        }
-        if admin.user_fact_id == [0u8; 32] {
-            return Err("admin user_fact_id must not be zero".to_string());
-        }
-        layout::verify_signature(&admin)?;
 
         // 2. Authority.
         //
@@ -236,7 +225,6 @@ fn decode_workspace_context(
     }
     let workspace = workspace::decode_fact_payload(workspace_fact.body())
         .map_err(|_| "admin workspace dependency must be a workspace fact".to_string())?;
-    workspace::layout::verify_signature(&workspace)?;
     Ok(workspace)
 }
 
@@ -271,12 +259,10 @@ fn materialized_output(
 
 fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {
     let admin = super::decode_fact_payload(fact.body())?;
-    layout::verify_signature(&admin)?;
     Ok(admin)
 }
 
 fn decode_user_payload(fact: &Fact) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
     let user = user::decode_fact_payload(fact.body())?;
-    user::layout::verify_signature(&user)?;
     Ok(user)
 }

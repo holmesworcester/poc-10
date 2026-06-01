@@ -6,6 +6,7 @@
 //! Message, reaction, file, and slice projectors keep matching needs and delete
 //! their own rows plus their own fact bytes when this context arrives.
 
+pub mod authenticate;
 pub mod commands;
 pub mod create;
 pub mod fact;

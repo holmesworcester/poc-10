@@ -11,7 +11,8 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use std::collections::BTreeSet;
 
@@ -32,17 +33,23 @@ impl Projector for SyncSharedFactProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::SyncSharedFactAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for SyncSharedFactProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::SyncSharedFactAuthenticator>
+    for SyncSharedFactProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        shared: super::fact::SharedFact,
+        authenticated: AuthenticatedFact<'_, super::fact::SharedFact>,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, shared) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(shared.workspace_id);
         require_fact_scope(fact, &scope)?;

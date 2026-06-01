@@ -13,7 +13,8 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
@@ -227,17 +228,21 @@ impl Projector for LocalHistoryNodeSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::LocalHistoryNodeSecretAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for LocalHistoryNodeSecretProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::LocalHistoryNodeSecretAuthenticator>
+    for LocalHistoryNodeSecretProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        node: LocalHistoryNodeSecretFact,
+        authenticated: AuthenticatedFact<'_, LocalHistoryNodeSecretFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, node) = authenticated.into_parts();
         project_local_history_node_secret(fact, context, node)
     }
 }

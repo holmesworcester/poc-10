@@ -7,6 +7,7 @@
 //! machinery live in `project`; other content facts depend on message context
 //! rather than duplicating message authority rules.
 
+pub mod authenticate;
 pub mod cli;
 pub mod create;
 pub mod fact;

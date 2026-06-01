@@ -11,7 +11,8 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::{local_history_node_secret, local_key_secret};
 
@@ -64,18 +65,22 @@ impl Projector for LocalSecretRetirementProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::LocalSecretRetirementAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for LocalSecretRetirementProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::LocalSecretRetirementAuthenticator>
+    for LocalSecretRetirementProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        retirement: LocalSecretRetirementFact,
+        authenticated: AuthenticatedFact<'_, LocalSecretRetirementFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, retirement) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("local secret retirement fact must have local scope".to_string());
         }

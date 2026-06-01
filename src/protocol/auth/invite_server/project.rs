@@ -13,7 +13,8 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::invite_server::fact::InviteServerFact;
 use crate::protocol::auth::{admin, endpoint_shared, workspace};
@@ -36,31 +37,23 @@ impl Projector for InviteServerProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::InviteServerAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for InviteServerProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::InviteServerAuthenticator> for InviteServerProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        invite_server: InviteServerFact,
+        authenticated: AuthenticatedFact<'_, InviteServerFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, invite_server) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Global {
             return Err("invite_server fact must have global scope".to_string());
         }
-        if invite_server.workspace_id == [0; 32] {
-            return Err("invite_server fact has empty workspace_id".to_string());
-        }
-        if invite_server.authority_fact_id == [0; 32] {
-            return Err("invite_server fact has empty authority_fact_id".to_string());
-        }
-        if invite_server.public_key == [0; 32] {
-            return Err("invite_server fact has empty public_key".to_string());
-        }
-        super::layout::verify_signature(&invite_server)?;
 
         // 2. Authority.
         //
@@ -96,7 +89,6 @@ fn project_workspace_signed(
     }
     let workspace = workspace::decode_fact_payload(workspace_fact.body())
         .map_err(|_| "invite_server authority is not a workspace fact".to_string())?;
-    workspace::layout::verify_signature(&workspace)?;
     if workspace.public_key != invite.signer_public_key {
         return Err(
             "signed invite_server signer key does not match workspace public key".to_string(),
@@ -126,7 +118,6 @@ fn project_endpoint_signed(
     }
     let endpoint = endpoint_shared::decode_fact_payload(endpoint_fact.body())
         .map_err(|_| "invite_server signer must be workspace or endpoint_shared".to_string())?;
-    endpoint_shared::layout::verify_signature(&endpoint)?;
     if endpoint.signing_public_key != invite.signer_public_key {
         return Err(
             "signed invite_server signer key does not match endpoint_shared signing key"
@@ -241,6 +232,5 @@ fn decode_admin_payload(
     fact: &Fact,
 ) -> Result<crate::protocol::auth::admin::fact::AdminFact, String> {
     let admin = admin::decode_fact_payload(fact.body())?;
-    admin::layout::verify_signature(&admin)?;
     Ok(admin)
 }

@@ -6,6 +6,7 @@
 //! workspaces; local membership helpers expose this store's capabilities for
 //! command contexts.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod create;

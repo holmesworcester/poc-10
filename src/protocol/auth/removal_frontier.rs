@@ -4,6 +4,7 @@
 //! endpoint. Projection validates owner authority and publishes frontier context
 //! that local secrets, key requests, and key wraps depend on.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

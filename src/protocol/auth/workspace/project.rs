@@ -10,7 +10,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
@@ -31,22 +32,23 @@ impl Projector for WorkspaceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::WorkspaceAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for WorkspaceProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::WorkspaceAuthenticator> for WorkspaceProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        workspace: super::fact::WorkspaceFact,
+        authenticated: AuthenticatedFact<'_, super::fact::WorkspaceFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, workspace) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
-        super::layout::verify_signature(&workspace)?;
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()

@@ -11,6 +11,7 @@
 //! sending and sync fact selection use the materialized connection but do not
 //! define it.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

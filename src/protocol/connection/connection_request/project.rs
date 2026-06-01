@@ -29,7 +29,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::{endpoint, endpoint_shared, workspace};
@@ -40,7 +41,6 @@ use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::fact_receipt;
 use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
 
-use super::create::validate_endpoint_signature;
 use super::fact::ConnectionRequestFact;
 use super::rows::connection_request_row;
 
@@ -115,28 +115,34 @@ impl Projector for ConnectionRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::ConnectionRequestAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionRequestProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
+    for ConnectionRequestProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        request: ConnectionRequestFact,
+        authenticated: AuthenticatedFact<'_, ConnectionRequestFact>,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes, the
+        // non-empty selectors, and the endpoint signature against the initiator's
+        // membership key. Scope and membership are interpretation.
+        let (fact, request) = authenticated.into_parts();
+        // 1. Scope.
         if !matches!(fact.scope, FactScope::Local | FactScope::Global) {
             return Err("membership connection request fact must be local or global".to_string());
         }
-        validate_request_fields(&request)?;
-        if request.from_endpoint == request.to_endpoint {
-            return Err("membership connection request endpoints must differ".to_string());
-        }
 
-        // 2. Membership signature proof (both branches): the initiator's
-        // endpoint_shared binds its endpoint and signing key.
+        // 2. Membership proof (both branches): the initiator's endpoint_shared
+        // binds its endpoint to this workspace. The endpoint signature itself was
+        // verified during authentication.
         let shared_need = endpoint_shared_need(fact.id, request.initiator_endpoint_shared_id);
         let Some(shared_ctx) = projection_context.payload_for(&shared_need) else {
             return Ok(waiting_output([shared_need]));
@@ -159,7 +165,6 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
                 "membership connection request endpoint_shared does not bind the sender".to_string(),
             );
         }
-        validate_endpoint_signature(&request, &initiator_shared.signing_public_key)?;
         let workspace_id = initiator_shared.workspace_id;
 
         if fact.scope == FactScope::Local {
@@ -340,33 +345,6 @@ impl TypedProjector<super::Codec> for ConnectionRequestProjector {
         // 4. Materialize received request and schedule response creation.
         received_materialized_output(fact.id, &request, receive.id)
     }
-}
-
-fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String> {
-    if request.from_endpoint == [0; 32] {
-        return Err("membership connection request from_endpoint cannot be empty".to_string());
-    }
-    if request.to_endpoint == [0; 32] {
-        return Err("membership connection request to_endpoint cannot be empty".to_string());
-    }
-    if request.initiator_endpoint_shared_id == [0; 32] {
-        return Err(
-            "membership connection request initiator_endpoint_shared_id cannot be empty".to_string(),
-        );
-    }
-    if request.initiator_ephemeral_secret_fact_id == [0; 32] {
-        return Err(
-            "membership connection request initiator_ephemeral_secret_fact_id cannot be empty"
-                .to_string(),
-        );
-    }
-    if request.initiator_ephemeral_public_key == [0; 32] {
-        return Err(
-            "membership connection request initiator_ephemeral_public_key cannot be empty"
-                .to_string(),
-        );
-    }
-    Ok(())
 }
 
 fn endpoint_shared_need(

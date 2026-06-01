@@ -11,7 +11,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::user;
@@ -39,21 +40,24 @@ impl Projector for ContentFileDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ContentFileDeletionAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ContentFileDeletionProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ContentFileDeletionAuthenticator>
+    for ContentFileDeletionProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        deletion: super::fact::ContentFileDeletionFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ContentFileDeletionFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, deletion) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
-        super::layout::verify_signature(&deletion)?;
 
         // 2. Authority.
         let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
@@ -200,7 +204,6 @@ fn validate_target_file(
         file::decode_fact_payload,
     )
     .map_err(|_| "file deletion target context must be a content file".to_string())?;
-    file::layout::verify_signature(&target)?;
     if target.workspace_id != deletion.workspace_id {
         return Err("file deletion target workspace does not match deletion".to_string());
     }
@@ -228,7 +231,6 @@ fn validate_parent_message(
         message::decode_fact_payload,
     )
     .map_err(|_| "file deletion parent context must be a content message".to_string())?;
-    message::layout::verify_signature(&parent)?;
     if parent.workspace_id != target.workspace_id {
         return Err("file deletion parent workspace does not match file".to_string());
     }

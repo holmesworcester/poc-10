@@ -11,7 +11,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use super::rows::invite_secret_row;
@@ -31,18 +32,20 @@ impl Projector for InviteSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::InviteSecretAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for InviteSecretProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::InviteSecretAuthenticator> for InviteSecretProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        invite_secret: super::fact::InviteSecretFact,
+        authenticated: AuthenticatedFact<'_, super::fact::InviteSecretFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        let (fact, invite_secret) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("invite_secret fact must have local scope".to_string());
         }

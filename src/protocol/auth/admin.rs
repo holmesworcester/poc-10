@@ -6,6 +6,7 @@
 //! authorization in this module; downstream modules should ask for admin
 //! context rather than rechecking grant history.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod create;

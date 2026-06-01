@@ -5,6 +5,7 @@
 //! connection requests and acceptance flows. Keep secret layout and invite
 //! command helpers here; accepted membership facts live in `invite_accepted`.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod fact;

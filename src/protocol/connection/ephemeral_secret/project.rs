@@ -19,11 +19,11 @@
 //! Request and response projectors own the context checks that consume this
 //! offer.
 
-use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use super::rows::{
@@ -47,23 +47,26 @@ impl Projector for ConnectionEphemeralSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ConnectionEphemeralSecretAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionEphemeralSecretProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ConnectionEphemeralSecretAuthenticator>
+    for ConnectionEphemeralSecretProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        secret: super::fact::ConnectionEphemeralSecretFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ConnectionEphemeralSecretFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes and that
+        // the public key re-derives from the private key. Scope is interpretation.
+        let (fact, secret) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("connection ephemeral secret fact must have local scope".to_string());
-        }
-        if crypto::x25519_public_key(&secret.ephemeral_private_key) != secret.ephemeral_public_key {
-            return Err("connection ephemeral public key does not match private key".to_string());
         }
 
         // 2. Close gate.

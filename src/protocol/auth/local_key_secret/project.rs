@@ -8,7 +8,8 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
@@ -34,17 +35,21 @@ impl Projector for LocalKeySecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::LocalKeySecretAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for LocalKeySecretProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::LocalKeySecretAuthenticator>
+    for LocalKeySecretProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        secret: LocalKeySecretFact,
+        authenticated: AuthenticatedFact<'_, LocalKeySecretFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, secret) = authenticated.into_parts();
         project_local_key_secret(fact, context, secret)
     }
 }

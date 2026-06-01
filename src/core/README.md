@@ -199,10 +199,12 @@ use core syntax and contracts, but core must not import their semantic rules.
   normal command output by default. It is for runtime profiling, not protocol
   measurement semantics.
 - `projectors.rs`: projection contract from one fact plus matched context to
-  deterministic output. It defines `Projector`, `TypedProjector`,
-  `ProjectionContext`, `ProjectionOutput`, time wakes, self-purge, and typed
-  decode adapters. It enforces the owner rule: a projector emits replacement
-  context and time wakes for the fact being projected.
+  deterministic output. It defines `Projector`, the `Authenticator` /
+  `AuthenticatedProjector` pre-projection layer (`AuthenticatedFact`,
+  `Authentication`, `project_authenticated`, `verify_fact_id`), `FactCodec`,
+  `ProjectionContext`, `ProjectionOutput`, time wakes, and self-purge. It
+  enforces the owner rule: a projector emits replacement context and time wakes
+  for the fact being projected, starting from an already-authenticated fact.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command effects, drains
   projection and intent queues, admits due time wakes, filters command-safe

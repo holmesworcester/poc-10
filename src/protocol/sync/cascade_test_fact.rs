@@ -5,6 +5,7 @@
 //! general protocol authority layer. Commands generate and replay them; rows
 //! stage dependency state; projection publishes completion context.
 
+pub mod authenticate;
 pub mod cli;
 pub mod commands;
 pub mod fact;

@@ -6,6 +6,7 @@
 //! signer context that content, admin, connection, and auth projectors
 //! rely on.
 
+pub mod authenticate;
 pub mod cli;
 pub mod create;
 pub mod fact;

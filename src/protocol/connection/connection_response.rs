@@ -8,6 +8,7 @@
 //! `connection_response` context other modules rely on. The secret is derived
 //! from Diffie-Hellman only; no invite material is involved.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

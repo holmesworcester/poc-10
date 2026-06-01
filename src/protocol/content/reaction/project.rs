@@ -12,7 +12,8 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -38,21 +39,24 @@ impl Projector for ContentReactionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ContentReactionAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ContentReactionProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ContentReactionAuthenticator>
+    for ContentReactionProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        reaction: super::fact::ContentReactionFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ContentReactionFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, reaction) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
-        super::layout::verify_signature(&reaction)?;
 
         // 2. Context and deletion gates.
         let signer_need = project::signer_need(fact.id, reaction.workspace_id, reaction.signer_id);
@@ -259,7 +263,6 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion = message_deletion::decode_fact_payload(payload.body())
         .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
-    message_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
     }
@@ -298,7 +301,6 @@ fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMe
         message::decode_fact_payload,
     )
     .map_err(|_| format!("{label} context is not a content message"))?;
-    message::layout::verify_signature(&message)?;
     Ok(TargetMessage {
         workspace_id: message.workspace_id,
         frontier_id: message.frontier_id,

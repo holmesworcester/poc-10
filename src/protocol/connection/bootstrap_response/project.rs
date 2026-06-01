@@ -25,7 +25,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::invite;
@@ -56,27 +57,28 @@ impl Projector for BootstrapResponseProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::BootstrapResponseAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for BootstrapResponseProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::BootstrapResponseAuthenticator>
+    for BootstrapResponseProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        response: BootstrapResponseFact,
+        authenticated: AuthenticatedFact<'_, BootstrapResponseFact>,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // intrinsic response fields. Scope is interpretation.
+        let (fact, response) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("connection response fact must have local scope".to_string());
-        }
-        validate_response_fields(&response)?;
-        if response.from_endpoint == response.to_endpoint {
-            return Err("connection response endpoints must differ".to_string());
-        }
-        if response.request_id == fact.id {
-            return Err("connection response cannot answer itself".to_string());
         }
 
         // 2. Close gate.
@@ -286,43 +288,6 @@ impl TypedProjector<super::Codec> for BootstrapResponseProjector {
 enum SeedSync {
     None,
     Immediate,
-}
-
-fn validate_response_fields(response: &BootstrapResponseFact) -> Result<(), String> {
-    if response.from_endpoint == [0; 32] {
-        return Err("connection response from_endpoint cannot be empty".to_string());
-    }
-    if response.to_endpoint == [0; 32] {
-        return Err("connection response to_endpoint cannot be empty".to_string());
-    }
-    if response.request_id == [0; 32] {
-        return Err("connection response request_id cannot be empty".to_string());
-    }
-    if response.invite_secret_fact_id == [0; 32] {
-        return Err("connection response invite_secret_fact_id cannot be empty".to_string());
-    }
-    if response.initiator_ephemeral_secret_fact_id == [0; 32] {
-        return Err(
-            "connection response initiator_ephemeral_secret_fact_id cannot be empty".to_string(),
-        );
-    }
-    if response.responder_ephemeral_secret_fact_id == [0; 32] {
-        return Err(
-            "connection response responder_ephemeral_secret_fact_id cannot be empty".to_string(),
-        );
-    }
-    if response.responder_ephemeral_public_key == [0; 32] {
-        return Err(
-            "connection response responder_ephemeral_public_key cannot be empty".to_string(),
-        );
-    }
-    if response.handshake_hash == [0; 32] {
-        return Err("connection response handshake_hash cannot be empty".to_string());
-    }
-    if response.connection_secret == [0; 32] {
-        return Err("connection response connection_secret cannot be empty".to_string());
-    }
-    Ok(())
 }
 
 fn validate_request_response(

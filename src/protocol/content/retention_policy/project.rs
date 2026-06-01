@@ -13,7 +13,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::content::message;
@@ -39,30 +40,23 @@ impl Projector for RetentionPolicyProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::RetentionPolicyAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for RetentionPolicyProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::RetentionPolicyAuthenticator>
+    for RetentionPolicyProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        policy: RetentionPolicyFact,
+        authenticated: AuthenticatedFact<'_, RetentionPolicyFact>,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
-        if policy.ttl_minutes == 0 {
-            return Err("retention policy ttl_minutes must be non-zero".to_string());
-        }
-        if policy.created_at_ms == 0 {
-            return Err("retention policy created_at_ms must be non-zero".to_string());
-        }
-        if policy.scope_kind == super::fact::SCOPE_KIND_WORKSPACE
-            && policy.scope_id != policy.workspace_id
-        {
-            return Err("retention policy workspace-scope id must match workspace_id".to_string());
-        }
-        super::layout::verify_signature(&policy)?;
+        let (fact, policy) = authenticated.into_parts();
 
         // 2. Authority and predecessor context.
         let bootstrap_root =
@@ -234,7 +228,6 @@ fn validate_previous(previous_fact: &Fact, policy: &RetentionPolicyFact) -> Resu
     let previous = super::decode_fact_payload(&previous_fact.bytes).map_err(|_| {
         "retention policy previous context must be a retention policy fact".to_string()
     })?;
-    super::layout::verify_signature(&previous)?;
     if previous.workspace_id != policy.workspace_id
         || previous.scope_kind != policy.scope_kind
         || previous.scope_id != policy.scope_id

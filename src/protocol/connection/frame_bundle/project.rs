@@ -12,7 +12,8 @@
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use super::create;
@@ -33,17 +34,21 @@ impl Projector for ConnectionFrameBundleProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ConnectionFrameBundleAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionFrameBundleProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ConnectionFrameBundleAuthenticator>
+    for ConnectionFrameBundleProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        input: ConnectionFrameBundleFact,
+        authenticated: AuthenticatedFact<'_, ConnectionFrameBundleFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, input) = authenticated.into_parts();
         // 1. Structural.
         // 2. Context.
         // 3. Materialize.

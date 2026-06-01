@@ -14,7 +14,8 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::connection::bootstrap_response as response;
@@ -75,23 +76,26 @@ impl Projector for ConnectionCloseProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ConnectionCloseAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionCloseProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ConnectionCloseAuthenticator>
+    for ConnectionCloseProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        close: super::fact::ConnectionCloseFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ConnectionCloseFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // non-empty connection id. Scope is interpretation.
+        let (fact, close) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("connection close fact must have local scope".to_string());
-        }
-        if close.connection_id == [0; 32] {
-            return Err("connection close connection_id cannot be empty".to_string());
         }
 
         // 2. Context.

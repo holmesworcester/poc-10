@@ -10,7 +10,8 @@
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -28,22 +29,21 @@ impl Projector for CascadeTestFactProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::CascadeTestFactAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for CascadeTestFactProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::CascadeTestFactAuthenticator>
+    for CascadeTestFactProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        decoded: super::fact::CascadeTestFact,
+        authenticated: AuthenticatedFact<'_, super::fact::CascadeTestFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
-        if decoded.timestamp != fact.timestamp {
-            return Err("cascade fact timestamp does not match fact timestamp".to_string());
-        }
-
+        let (fact, decoded) = authenticated.into_parts();
         // 2. Context.
         let mut output = ProjectionOutput::new();
         for dependency_id in decoded.dependencies.iter() {

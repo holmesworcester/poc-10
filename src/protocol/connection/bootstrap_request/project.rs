@@ -28,7 +28,8 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::{endpoint, invite};
@@ -86,24 +87,28 @@ impl Projector for BootstrapRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::BootstrapRequestAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for BootstrapRequestProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::BootstrapRequestAuthenticator>
+    for BootstrapRequestProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        request: BootstrapRequestFact,
+        authenticated: AuthenticatedFact<'_, BootstrapRequestFact>,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // intrinsic request fields. Scope is interpretation.
+        let (fact, request) = authenticated.into_parts();
+        // 1. Scope.
         if !matches!(fact.scope, FactScope::Local | FactScope::Global) {
             return Err("connection request fact must be local or global".to_string());
-        }
-        validate_request_fields(&request)?;
-        if request.from_endpoint == request.to_endpoint {
-            return Err("connection request endpoints must differ".to_string());
         }
 
         // 2. Shared invite context.
@@ -248,35 +253,6 @@ impl TypedProjector<super::Codec> for BootstrapRequestProjector {
         // 3. Materialize received request and schedule response creation.
         received_materialized_output(fact.id, &request, receive.id)
     }
-}
-
-fn validate_request_fields(request: &BootstrapRequestFact) -> Result<(), String> {
-    if request.from_endpoint == [0; 32] {
-        return Err("connection request from_endpoint cannot be empty".to_string());
-    }
-    if request.to_endpoint == [0; 32] {
-        return Err("connection request to_endpoint cannot be empty".to_string());
-    }
-    if request.invite_fact_id == [0; 32] {
-        return Err("connection request invite_fact_id cannot be empty".to_string());
-    }
-    if request.bootstrap_hash == [0; 32] {
-        return Err("connection request bootstrap_hash cannot be empty".to_string());
-    }
-    if request.invite_secret_fact_id == [0; 32] {
-        return Err("connection request invite_secret_fact_id cannot be empty".to_string());
-    }
-    if request.initiator_ephemeral_secret_fact_id == [0; 32] {
-        return Err(
-            "connection request initiator_ephemeral_secret_fact_id cannot be empty".to_string(),
-        );
-    }
-    if request.initiator_ephemeral_public_key == [0; 32] {
-        return Err(
-            "connection request initiator_ephemeral_public_key cannot be empty".to_string(),
-        );
-    }
-    Ok(())
 }
 
 fn materialized_output(

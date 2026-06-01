@@ -13,7 +13,8 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
@@ -37,34 +38,28 @@ impl Projector for EndpointSharedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::EndpointSharedAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for EndpointSharedProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::EndpointSharedAuthenticator>
+    for EndpointSharedProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        shared: super::fact::EndpointSharedFact,
+        authenticated: AuthenticatedFact<'_, super::fact::EndpointSharedFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes, the
+        // signer signature, and intrinsic fields. Scope is interpretation, not
+        // authentication, so it is checked here, behind the lens and ceiling
+        // projector.
+        let (fact, shared) = authenticated.into_parts();
         if fact.scope != FactScope::Global {
             return Err("endpoint shared fact must have global scope".to_string());
         }
-        if shared.endpoint_id.iter().all(|byte| *byte == 0) {
-            return Err("endpoint_shared endpoint_id cannot be empty".to_string());
-        }
-        if shared.signing_public_key.iter().all(|byte| *byte == 0) {
-            return Err("endpoint_shared signing_public_key cannot be empty".to_string());
-        }
-        if shared.workspace_id.iter().all(|byte| *byte == 0) {
-            return Err("endpoint_shared workspace_id cannot be empty".to_string());
-        }
-        if shared.device_name.as_bytes().contains(&0) {
-            return Err("endpoint device name cannot contain NUL".to_string());
-        }
-        super::layout::verify_signature(&shared)?;
 
         // 2. Authority.
         let authority_need = authority_need(fact, &shared, shared.signer_id);
@@ -140,7 +135,6 @@ fn has_valid_authority(
         let invite = device_invite::decode_fact_payload(authority_fact.body()).map_err(|_| {
             "endpoint_shared dependency is not a signed endpoint invite".to_string()
         })?;
-        device_invite::layout::verify_signature(&invite)?;
         if invite.public_key != shared.signer_public_key {
             return Err(
                 "endpoint_shared signer public key does not match device_invite".to_string(),
@@ -157,7 +151,6 @@ fn has_valid_authority(
 
     let invite_server = invite_server::decode_fact_payload(authority_fact.body())
         .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
-    invite_server::layout::verify_signature(&invite_server)?;
     if invite_server.workspace_id != shared.workspace_id {
         return Err("endpoint_shared workspace does not match invite_server".to_string());
     }

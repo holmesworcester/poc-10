@@ -5,6 +5,7 @@
 //! publishes wrap-source and secret-coverage offers. This family also owns the
 //! secret-coverage coordinate scheme consumed by content-message projection.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

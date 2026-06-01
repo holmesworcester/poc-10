@@ -4,6 +4,7 @@
 //! auth key material. Projection validates supersession and emits proactive
 //! key-wrap work.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;

@@ -11,6 +11,7 @@
 //! context offers change; connection requests and responses own how the secret
 //! is consumed.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

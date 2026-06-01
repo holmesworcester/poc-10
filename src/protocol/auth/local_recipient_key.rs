@@ -4,6 +4,7 @@
 //! wraps. Projection proves it matches the shared recipient fact and self-purges
 //! when the recipient key is superseded.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

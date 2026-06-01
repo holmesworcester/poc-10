@@ -12,7 +12,8 @@ use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret;
@@ -448,7 +449,6 @@ pub(crate) fn matching_signer_public_key(
         let Ok(endpoint) = auth::endpoint_shared::decode_fact_payload(payload.body()) else {
             continue;
         };
-        auth::endpoint_shared::layout::verify_signature(&endpoint)?;
         if endpoint.endpoint_id.as_slice() == need.start_key.as_bytes() {
             return Ok(Some(endpoint.signing_public_key));
         }
@@ -534,17 +534,17 @@ impl Projector for KeyWrapProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::KeyWrapAuthenticator, _>(self, fact, context)
     }
 }
 
-impl TypedProjector<super::Codec> for KeyWrapProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::KeyWrapAuthenticator> for KeyWrapProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        wrap: KeyWrapFact,
+        authenticated: AuthenticatedFact<'_, KeyWrapFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, wrap) = authenticated.into_parts();
         key_wrap(fact, context, wrap)
     }
 }
@@ -609,7 +609,6 @@ fn key_wrap(
         return Err("key wrap recipient context payload id mismatch".to_string());
     }
     let recipient = recipient_key::decode_fact_payload(&recipient_fact.bytes)?;
-    recipient_key::layout::verify_signature(&recipient)?;
     if recipient.workspace_id != wrap.workspace_id {
         return Err("key wrap recipient key workspace does not match wrap".to_string());
     }
@@ -618,7 +617,6 @@ fn key_wrap(
         return Err("key wrap frontier context payload id mismatch".to_string());
     }
     let frontier = removal_frontier::decode_fact_payload(&frontier_fact.bytes)?;
-    removal_frontier::layout::verify_signature(&frontier)?;
     if frontier.workspace_id != wrap.workspace_id {
         return Err("key wrap removal frontier workspace does not match wrap".to_string());
     }

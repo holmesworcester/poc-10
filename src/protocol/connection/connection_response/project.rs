@@ -28,7 +28,8 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::connection::bootstrap_response::rows::{
@@ -60,27 +61,28 @@ impl Projector for ConnectionResponseProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, projection_context)
+        project_authenticated::<super::authenticate::ConnectionResponseAuthenticator, _>(
+            self,
+            fact,
+            projection_context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionResponseProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator>
+    for ConnectionResponseProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        response: ConnectionResponseFact,
+        authenticated: AuthenticatedFact<'_, ConnectionResponseFact>,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Structural.
+        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // intrinsic response fields. Scope is interpretation.
+        let (fact, response) = authenticated.into_parts();
+        // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("membership connection response fact must have local scope".to_string());
-        }
-        validate_response_fields(&response)?;
-        if response.from_endpoint == response.to_endpoint {
-            return Err("membership connection response endpoints must differ".to_string());
-        }
-        if response.request_id == fact.id {
-            return Err("membership connection response cannot answer itself".to_string());
         }
 
         // 2. Close gate.
@@ -267,43 +269,6 @@ fn ephemeral_need(owner: [u8; 32], secret_id: [u8; 32]) -> crate::core::context:
         secret_id,
         secret_id,
     )
-}
-
-fn validate_response_fields(response: &ConnectionResponseFact) -> Result<(), String> {
-    if response.from_endpoint == [0; 32] {
-        return Err("membership connection response from_endpoint cannot be empty".to_string());
-    }
-    if response.to_endpoint == [0; 32] {
-        return Err("membership connection response to_endpoint cannot be empty".to_string());
-    }
-    if response.request_id == [0; 32] {
-        return Err("membership connection response request_id cannot be empty".to_string());
-    }
-    if response.initiator_ephemeral_secret_fact_id == [0; 32] {
-        return Err(
-            "membership connection response initiator_ephemeral_secret_fact_id cannot be empty"
-                .to_string(),
-        );
-    }
-    if response.responder_ephemeral_secret_fact_id == [0; 32] {
-        return Err(
-            "membership connection response responder_ephemeral_secret_fact_id cannot be empty"
-                .to_string(),
-        );
-    }
-    if response.responder_ephemeral_public_key == [0; 32] {
-        return Err(
-            "membership connection response responder_ephemeral_public_key cannot be empty"
-                .to_string(),
-        );
-    }
-    if response.handshake_hash == [0; 32] {
-        return Err("membership connection response handshake_hash cannot be empty".to_string());
-    }
-    if response.connection_secret == [0; 32] {
-        return Err("membership connection response connection_secret cannot be empty".to_string());
-    }
-    Ok(())
 }
 
 fn validate_request_response(

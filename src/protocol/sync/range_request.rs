@@ -5,6 +5,7 @@
 //! This module owns the range-request bytes; compare creation decides how to
 //! respond to mismatched summaries.
 
+pub mod authenticate;
 pub mod fact;
 pub mod layout;
 pub mod project;

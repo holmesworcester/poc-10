@@ -11,7 +11,8 @@
 use crate::core::context::ContextOffer;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use super::fact::ConnectionFrameObservationFact;
@@ -31,17 +32,21 @@ impl Projector for ConnectionFrameObservationProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ConnectionFrameObservationAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ConnectionFrameObservationProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ConnectionFrameObservationAuthenticator>
+    for ConnectionFrameObservationProjector
+{
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        observed: ConnectionFrameObservationFact,
+        authenticated: AuthenticatedFact<'_, ConnectionFrameObservationFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, observed) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("connection frame observation must have local scope".to_string());

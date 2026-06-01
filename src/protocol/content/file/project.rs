@@ -13,7 +13,8 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::projectors::{
-    project_typed, ProjectionContext, ProjectionOutput, Projector, TypedProjector,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    ProjectionOutput, Projector,
 };
 
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -24,9 +25,7 @@ use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
-use super::fact::MAX_FILE_BYTES;
 use super::rows::{content_file_row, FILE_KEY_COLUMNS, FILE_ROWS};
-use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileProjector;
@@ -43,22 +42,22 @@ impl Projector for ContentFileProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_typed::<super::Codec, _>(self, fact, context)
+        project_authenticated::<super::authenticate::ContentFileAuthenticator, _>(
+            self, fact, context,
+        )
     }
 }
 
-impl TypedProjector<super::Codec> for ContentFileProjector {
-    fn project_typed(
+impl AuthenticatedProjector<super::authenticate::ContentFileAuthenticator> for ContentFileProjector {
+    fn project_authenticated(
         &self,
-        fact: &Fact,
-        file: super::fact::ContentFileFact,
+        authenticated: AuthenticatedFact<'_, super::fact::ContentFileFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
+        let (fact, file) = authenticated.into_parts();
         // 1. Structural.
-        validate_file_fields(&file)?;
         let scope = crate::protocol::auth::workspace::scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
-        super::layout::verify_signature(&file)?;
 
         // 2. Context and deletion gates.
         let signer_need = project::signer_need(fact.id, file.workspace_id, file.signer_id);
@@ -244,50 +243,6 @@ fn content_file_delete(workspace_id: FactId, file_fact_id: FactId) -> TableDelet
     }
 }
 
-fn validate_file_fields(file: &super::fact::ContentFileFact) -> Result<(), String> {
-    validate_id("file workspace_id", &file.workspace_id)?;
-    validate_id("file message_id", &file.message_id)?;
-    validate_id("file author_user_id", &file.author_user_id)?;
-    validate_id("file file_id", &file.file_id)?;
-    if file.blob_bytes > MAX_FILE_BYTES {
-        return Err("file size exceeds the 10 GiB limit".to_string());
-    }
-    if file.blob_bytes == 0 {
-        if file.total_slices != 0 {
-            return Err("zero-byte file must declare zero slices".to_string());
-        }
-        return Ok(());
-    }
-    if file.total_slices == 0 {
-        return Err("non-empty file must declare at least one slice".to_string());
-    }
-    if file.slice_bytes == 0 {
-        return Err("non-empty file must declare a slice budget".to_string());
-    }
-    if file.slice_bytes != FILE_SLICE_PLAINTEXT_BYTES as u32 {
-        return Err("file slice budget must match the fixed file-slice slot".to_string());
-    }
-    let expected: u32 = file
-        .blob_bytes
-        .div_ceil(file.slice_bytes as u64)
-        .try_into()
-        .map_err(|_| "slice count overflows u32".to_string())?;
-    if file.total_slices != expected {
-        return Err(format!(
-            "total_slices {} does not match blob_bytes / slice_bytes ceiling {}",
-            file.total_slices, expected
-        ));
-    }
-    Ok(())
-}
-
-fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
-    if id.iter().all(|byte| *byte == 0) {
-        return Err(format!("{name} cannot be empty"));
-    }
-    Ok(())
-}
-
 fn parent_message_context<'a>(
     payload: &'a Fact,
     expected_scope: &FactScope,
@@ -335,7 +290,6 @@ fn validate_file_deletion(
 ) -> Result<(), String> {
     let deletion = file_deletion::decode_fact_payload(payload.body())
         .map_err(|_| "file deletion context is not a content file deletion".to_string())?;
-    file_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("file deletion workspace does not match file".to_string());
     }
@@ -358,7 +312,6 @@ fn validate_message_deletion(
 ) -> Result<(), String> {
     let deletion = message_deletion::decode_fact_payload(payload.body())
         .map_err(|_| "parent deletion context is not a content message deletion".to_string())?;
-    message_deletion::layout::verify_signature(&deletion)?;
     if deletion.workspace_id != workspace_id {
         return Err("parent deletion workspace does not match file".to_string());
     }
@@ -397,7 +350,6 @@ fn decode_parent_message_payload(payload: &Fact, label: &str) -> Result<ParentMe
         message::decode_fact_payload,
     )
     .map_err(|_| format!("{label} context is not a content message"))?;
-    message::layout::verify_signature(&message)?;
     Ok(ParentMessage {
         workspace_id: message.workspace_id,
         frontier_id: message.frontier_id,
@@ -420,6 +372,7 @@ mod tests {
     use crate::protocol::content::file::fact::{
         ContentFileFact, SealedMetadata, FILE_ROOT_HASH_BYTES,
     };
+    use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
     fn valid_file() -> ContentFileFact {
         ContentFileFact {
@@ -444,7 +397,8 @@ mod tests {
         let mut file = valid_file();
         file.slice_bytes = 1_024;
 
-        let err = validate_file_fields(&file).expect_err("reject non-standard slice budget");
+        let err = super::super::authenticate::validate_file_fields(&file)
+            .expect_err("reject non-standard slice budget");
 
         assert!(
             err.contains("fixed file-slice slot"),

@@ -11,6 +11,7 @@
 //! request admission policy. It carries no invite material. Response creation,
 //! frame sending, and socket IO belong to the downstream connection modules.
 
+pub mod authenticate;
 pub mod commands;
 pub mod create;
 pub mod fact;

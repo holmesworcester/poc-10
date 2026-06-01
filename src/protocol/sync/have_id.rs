@@ -6,6 +6,7 @@
 //! stored facts; it does not validate the advertised fact's own protocol
 //! semantics.
 
+pub mod authenticate;
 pub mod create;
 pub mod fact;
 pub mod layout;
