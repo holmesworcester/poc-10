@@ -362,6 +362,8 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "`AuthenticatedFact<T>`",
         "`NeedsAuthentication(AuthenticationNeed)`",
         "Signatures, encryption, and container facts",
+        "Verifier key placement is a fact-version choice",
+        "Do not make embedded public keys mandatory",
         "The inner facts are admitted back through the normal authenticate/project pipeline",
         "Purge, deletion, retention, and all materialization effects stay projector-owned",
     ] {
@@ -381,6 +383,8 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "Known-route authentication",
         "`Authenticated(AuthenticatedFact<T>)`",
         "`NeedsAuthentication(AuthenticationNeed)`",
+        "A fact version chooses whether verifier key material is embedded or referenced",
+        "trade self-contained verification against public-key size without changing projector semantics",
         "the projector materializes the recovered inner fact bytes and receipts",
         "Those inner facts then re-enter the normal authenticate/project pipeline by their own tags",
     ] {

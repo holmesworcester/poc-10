@@ -277,7 +277,10 @@ trusted to the AEAD/DH primitive, not to poc-10.
   returns typed authenticated data, invalid bytes, or a narrow authentication
   need for verifier/opening context. Projectors, not authenticators, express
   semantic context, authority requirements, parking, purge rules, and reproject
-  needs.
+  needs. A fact version chooses whether verifier key material is embedded or
+  referenced; the runtime contract must support `NeedsAuthentication` either way
+  so future versions can trade self-contained verification against public-key
+  size without changing projector semantics.
 
 ### Context integrity (core-enforced)
 

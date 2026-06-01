@@ -114,6 +114,12 @@ Not every cryptographic check belongs in the same place.
 - **Facts whose verifier key is external.** The authenticator may park on a
   narrow verifier-key need, then verify the signature once the key is present.
   That key's presence is not authority; authority stays in the projector.
+  Verifier key placement is a fact-version choice: a family may embed the public
+  key when self-contained verification is worth the bytes, or it may carry a
+  compact key reference and rely on `NeedsAuthentication` when key material is
+  found through context. Do not make embedded public keys mandatory. The need
+  model keeps the authenticator interface stable across schemes with very
+  different public-key sizes, including post-quantum signatures.
 - **Encrypted carrier facts.** Connection `frame_*` and sealed handshake frames
   are containers. Their outer bytes are authenticated/opened by AEAD using
   connection or endpoint context, and opening yields inner canonical fact bytes.
