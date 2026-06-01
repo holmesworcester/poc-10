@@ -101,6 +101,28 @@ validate and project, without changing the validators.
 - Foreign context is still read through module-owned typed helpers, never another
   module's raw layout codec — unchanged by this refactor.
 
+## Readability and structure
+
+The validator and the re-typed projector must be **highly readable** and follow
+the project documentation guidelines (`RULES.md` — *Documentation Style*,
+*Projector Style*, *In-Line Documentation*). This is a deliverable, not a nicety:
+a split whose structure a reviewer cannot follow is not done.
+
+- Each `validate.rs` opens with a **numbered top-of-file policy** listing, in
+  order, what it checks — layout / tag, fact id, signature / domain, then each
+  intrinsic field rule — with matching `// 1.` `// 2.` markers in the body (the
+  shape projectors already use). A reviewer reads the header and sees exactly what
+  makes a fact authentic.
+- Each re-typed `project.rs` policy now **starts at the CONTEXT section** (its
+  STRUCTURAL section moved to the validator) and reads as context → authority →
+  materialize only: security-sensitive context named in structs / bindings (no
+  positional `needs[0]`), authority branches in path-specific functions, rows via
+  module-owned helpers.
+- The split must be legible to a maintainer asking *"where does authentication
+  happen, and where does interpretation happen?"* — validators authenticate,
+  projectors interpret; inline comments attach to invariants, ownership, and
+  security conditions, and never narrate obvious code.
+
 ## Scope — complete in one pass
 
 This is **one cohesive change covering every routed fact family** — finish it in
@@ -118,6 +140,17 @@ Per family (order: `auth` → `connection` → `content` → `sync`):
    begins at section 2 (CONTEXT).
 3. Register the `ValidatorRoute` so core runs the validator before projection.
 4. Add the per-family validator pure-unit tests and the boundary guardrail.
+
+**Model cases first — readability checkpoint.** Before propagating the pattern
+across every family, build the validator + re-typed projector for **a few
+especially complex cases** — a signed + encrypted content fact
+(`content::message`), an authority-heavy auth fact (`auth::endpoint_shared` or
+`auth::key_wrap`), and a container / frame fact (`connection::frame_*`, whose
+validator authenticates the AEAD envelope) — and **review their readability and
+structure with the maintainer.** Only after that sign-off, complete the remaining
+families to the agreed template. The model cases set the readability bar and shake
+out the hard shapes (encrypted payloads, authority proofs, container facts) before
+mass production.
 
 Then, in the **same** change, do the cross-cutting *Align docs and rules* work
 below. Nothing here depends on the versioning work.
@@ -179,12 +212,19 @@ Complete — in one pass — when **all** of the following hold:
   validator.
 - `RULES.md`, the boundary tests, and the affected docs are aligned (above) — no
   doc or rule still says projectors validate.
+- **Readability bar met.** Every `validate.rs` and re-typed `project.rs` follows
+  the guidelines above — numbered policy header; RULES *Documentation* /
+  *Projector Style*; comments on invariants, not obvious code.
+- **Model cases reviewed.** The validator + projector for the complex exemplars
+  were built and their readability / structure **reviewed and signed off with the
+  maintainer** before the remaining families were completed.
 - **Behaviour is unchanged.** This is a pure refactor: validation relocates, but
   the accept / reject / project outcome for every fact is identical. The full
   `cargo build` and test suite are green.
 
-Hand-off note: this is a **single deliverable**. An agent assigned it should land
-the entire split *plus* the doc/rule alignment together, not a subset.
+Hand-off note: this is a **single deliverable with one mid-way checkpoint** —
+build the model cases, get the readability sign-off, then complete the entire
+split *plus* the doc/rule alignment together, not a subset.
 
 ## Relationship to protocol versioning
 
