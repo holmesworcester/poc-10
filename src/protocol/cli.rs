@@ -26,11 +26,12 @@ use crate::core::command_context::{
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::daemon;
+use crate::core::replay::{ReplayOrder, ReplayReport, StateSummary};
 use crate::core::runtime::Runtime;
 use crate::protocol::connection;
 use crate::protocol::sync;
 use crate::protocol::{auth, content};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const COMMAND_SETTLE_ROUNDS: usize = 4;
 const COMMAND_SETTLE_LIMIT: usize = 4096;
@@ -721,6 +722,157 @@ pub(crate) fn content_count(
 pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let observed_max = max_cli_timestamp(ctx.runtime().store())?;
     clock::run_cli(ctx.runtime().store(), args, observed_max)
+}
+
+// Replay diagnostics.
+//
+// These commands exercise the core replay entry point and the deterministic
+// state summary without requiring an actual upgrade. `replay` rebuilds derived
+// state in place; `state-summary` hashes replay-relevant state; `replay-check`
+// proves replay idempotence and projection-order independence on scratch copies;
+// `intent-registry` lists each route's replay/recurring/command-excluded policy.
+
+pub const REPLAY_USAGE: &str = "replay [--reverse | --scramble --seed N]";
+pub const STATE_SUMMARY_USAGE: &str = "state-summary";
+pub const REPLAY_CHECK_USAGE: &str = "replay-check";
+pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
+
+pub(crate) fn replay(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    let order = parse_replay_order(args)?;
+    let report = ctx
+        .runtime_mut()
+        .replay(crate::protocol::app::REPLAYABLE_DAEMON_TIME_WAKES, order)?;
+    Ok(replay_report_output(order, &report))
+}
+
+pub(crate) fn state_summary(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, STATE_SUMMARY_USAGE)?;
+    let summary = ctx.runtime().state_summary()?;
+    Ok(state_summary_output(&summary))
+}
+
+pub(crate) fn replay_check(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, REPLAY_CHECK_USAGE)?;
+    let db = ctx.db_path("replay-check")?.clone();
+    let scratch = scratch_dir_for(&db);
+    std::fs::create_dir_all(&scratch)
+        .map_err(|err| format!("create replay-check scratch dir: {err}"))?;
+    let result = ctx
+        .runtime()
+        .replay_check(&scratch, crate::protocol::app::REPLAYABLE_DAEMON_TIME_WAKES);
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(replay_check_output(&result?))
+}
+
+pub(crate) fn intent_registry(
+    ctx: &mut MatchCliContext,
+    args: CliArgs<'_>,
+) -> Result<CliOutput, String> {
+    args.require_len(0, INTENT_REGISTRY_USAGE)?;
+    let excluded = ctx.runtime().command_excluded_handlers();
+    let routes = ctx.runtime().handler_routes();
+    let mut lines = vec![format!("routes: {}", routes.len())];
+    for route in routes {
+        // The three policy questions that drive dispatch: may replay run this,
+        // is it a recurring loop, and may a synchronous command run it.
+        lines.push(format!(
+            "route_{}: kind={} replay={} recurring={} command_excluded={}",
+            route.name,
+            route.intent_kind,
+            route.runs_during_replay,
+            route.recurrence.is_some(),
+            excluded.contains(&route.name),
+        ));
+    }
+    Ok(CliOutput::lines(lines))
+}
+
+fn replay_check_output(report: &crate::core::replay::ReplayCheckReport) -> CliOutput {
+    let mut lines = vec![
+        format!("ok: {}", report.mismatched.is_empty()),
+        format!("passes: {}", report.passes.len()),
+        format!("state_hash: {}", encode_hex_32(&report.canonical_hash)),
+        format!("mismatched_passes: {}", report.mismatched.len()),
+    ];
+    for pass in &report.passes {
+        for diff in &pass.area_diffs {
+            lines.push(format!("diff_{}_{}", pass.name, diff));
+        }
+    }
+    CliOutput::lines(lines)
+}
+
+fn parse_replay_order(args: CliArgs<'_>) -> Result<ReplayOrder, String> {
+    match args.values() {
+        [] => Ok(ReplayOrder::Canonical),
+        [flag] if flag == "--reverse" => Ok(ReplayOrder::Reverse),
+        [scramble, seed_flag, seed] if scramble == "--scramble" && seed_flag == "--seed" => {
+            let seed = seed.parse::<u64>().map_err(|_| REPLAY_USAGE.to_string())?;
+            Ok(ReplayOrder::Scramble { seed })
+        }
+        _ => Err(REPLAY_USAGE.to_string()),
+    }
+}
+
+fn replay_order_label(order: ReplayOrder) -> String {
+    match order {
+        ReplayOrder::Canonical => "canonical".to_string(),
+        ReplayOrder::Reverse => "reverse".to_string(),
+        ReplayOrder::Scramble { seed } => format!("scramble:{seed}"),
+    }
+}
+
+fn replay_report_output(order: ReplayOrder, report: &ReplayReport) -> CliOutput {
+    CliOutput::lines(vec![
+        format!("order: {}", replay_order_label(order)),
+        format!(
+            "dropped_durable_intents: {}",
+            report.dropped_durable_intents
+        ),
+        format!("dropped_local_intents: {}", report.dropped_local_intents),
+        format!("wiped_tables: {}", report.wiped_tables),
+        format!("retained_facts: {}", report.retained_facts),
+        format!("projected_facts: {}", report.projected_facts),
+        format!("emitted_facts: {}", report.emitted_facts),
+        format!("purged_facts: {}", report.purged_facts),
+        format!("semantic_time_wakes: {}", report.semantic_time_wakes),
+        format!("standing_time_wakes: {}", report.standing_time_wakes),
+        format!("replay_allowed_intents: {}", report.replay_allowed_intents),
+        format!("context_edges: {}", report.context_edges),
+        format!("row_mutations: {}", report.row_mutations),
+        format!(
+            "suppressed_live_only_work: {}",
+            report.suppressed_live_only_work
+        ),
+        format!("network_rows: {}", report.network_rows),
+    ])
+}
+
+fn state_summary_output(summary: &StateSummary) -> CliOutput {
+    let mut lines = vec![
+        format!("state_hash: {}", encode_hex_32(&summary.state_hash)),
+        format!("areas: {}", summary.areas.len()),
+    ];
+    for area in &summary.areas {
+        lines.push(format!(
+            "area_{}: {} {}",
+            area.area,
+            area.count,
+            encode_hex_32(&area.hash)
+        ));
+    }
+    CliOutput::lines(lines)
+}
+
+fn scratch_dir_for(db: &Path) -> PathBuf {
+    let parent = db.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!(".topo-replay-check-{}", std::process::id()))
 }
 
 fn next_cli_timestamp(runtime: &Runtime) -> Result<u64, String> {

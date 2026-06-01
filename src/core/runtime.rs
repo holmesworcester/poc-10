@@ -297,6 +297,20 @@ impl Runtime {
         stored + local
     }
 
+    /// Borrow the declared handler routes, including replay and recurrence
+    /// metadata, for registry diagnostics.
+    pub fn handler_routes(&self) -> &'static [HandlerRoute] {
+        self.description.handlers
+    }
+
+    /// Borrow the handler route names a synchronous command must not run.
+    ///
+    /// These are the daemon/live transport handlers; the intent-registry
+    /// diagnostic reports this as the `command_excluded` policy answer.
+    pub fn command_excluded_handlers(&self) -> &'static [&'static str] {
+        self.description.command_excluded_handlers
+    }
+
     /// Build the narrow command context for a user-facing command.
     pub fn command_context<'a>(
         &'a self,
@@ -489,6 +503,85 @@ impl Runtime {
             end_inclusive,
             limit,
         )
+    }
+
+    /// Run the replay entry point against this runtime's store.
+    ///
+    /// Replay drops queued intents, wipes derived state, and reprojects retained
+    /// facts to a fixpoint using only replay-allowed handler routes. The caller
+    /// supplies the replayable semantic time-wake timelines; replay must not run
+    /// network IO, recurring schedules, or operational wall-clock decisions.
+    pub fn replay(
+        &mut self,
+        replay_time_wakes: &[crate::core::daemon::DaemonTimeWake],
+        order: crate::core::replay::ReplayOrder,
+    ) -> Result<crate::core::replay::ReplayReport, String> {
+        crate::core::replay::run_replay(
+            &self.store,
+            self.projector.as_ref(),
+            self.description.handlers,
+            self.description.row_mutation_tables,
+            replay_time_wakes,
+            order,
+        )
+    }
+
+    /// Compute the canonical, order-independent digest of replay-relevant state.
+    pub fn state_summary(&self) -> Result<crate::core::replay::StateSummary, String> {
+        crate::core::replay::state_summary(&self.store)
+    }
+
+    /// Write a standalone snapshot of this runtime's store to `path`.
+    pub fn snapshot_to(&self, path: &Path) -> Result<(), String> {
+        self.store.backup_into(path)
+    }
+
+    /// Prove replay idempotence and projection-order independence on scratch
+    /// copies of this runtime's store.
+    ///
+    /// Snapshots the live store, then runs the canonical, idempotent, reverse,
+    /// and scrambled replay plans against independent scratch databases and
+    /// compares their state digests. The live store is never mutated. Scratch
+    /// runtimes are opened here in core so protocol CLI hosts never open a store
+    /// themselves.
+    pub fn replay_check(
+        &self,
+        scratch_dir: &Path,
+        replay_time_wakes: &[crate::core::daemon::DaemonTimeWake],
+    ) -> Result<crate::core::replay::ReplayCheckReport, String> {
+        use crate::core::replay::ReplayOrder;
+
+        let snapshot = scratch_dir.join("snapshot.db");
+        self.snapshot_to(&snapshot)?;
+
+        // Each plan is a sequence of replay orders run on one scratch copy.
+        // `idempotent` runs canonical replay twice to prove a second replay over
+        // already-replayed state changes nothing.
+        let plans: &[(&str, &[ReplayOrder])] = &[
+            ("canonical", &[ReplayOrder::Canonical]),
+            (
+                "idempotent",
+                &[ReplayOrder::Canonical, ReplayOrder::Canonical],
+            ),
+            ("reverse", &[ReplayOrder::Reverse]),
+            ("scramble-1", &[ReplayOrder::Scramble { seed: 1 }]),
+            ("scramble-2", &[ReplayOrder::Scramble { seed: 2 }]),
+            ("scramble-7", &[ReplayOrder::Scramble { seed: 7 }]),
+        ];
+
+        let mut summaries = Vec::with_capacity(plans.len());
+        for (name, orders) in plans {
+            let path = scratch_dir.join(format!("{name}.db"));
+            std::fs::copy(&snapshot, &path)
+                .map_err(|err| format!("copy replay-check snapshot for {name}: {err}"))?;
+            let mut runtime = Runtime::open_disk(self.description, &path)?;
+            for order in *orders {
+                runtime.replay(replay_time_wakes, *order)?;
+            }
+            summaries.push(((*name).to_string(), runtime.state_summary()?));
+        }
+
+        Ok(crate::core::replay::compare_replay_passes(summaries))
     }
 }
 

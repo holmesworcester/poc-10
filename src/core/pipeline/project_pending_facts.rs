@@ -37,8 +37,10 @@
 //! projector's shared effects. If scheduling or projection atomicity changes,
 //! make that change here rather than in individual protocol projectors.
 
-use super::commit_effects::validate_pipeline_effects;
-use super::commit_effects::{commit_pipeline_effects_in_tx, sqlite_string_error};
+use super::commit_effects::{
+    commit_pipeline_effects_in_tx, sqlite_string_error, suppress_disallowed_intents,
+    validate_pipeline_effects, IntentAdmissionPolicy,
+};
 use super::context::{
     insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
     stored_matching_context, wake_context_matches_in_tx,
@@ -166,6 +168,8 @@ pub(crate) fn commit_projected_context_offers(
 pub(crate) struct ProjectionProgress {
     /// Number of facts that completed projection.
     pub(crate) projected: usize,
+    /// Follow-up intents emitted by projection but suppressed by the current mode.
+    pub(crate) suppressed_intents: usize,
     /// Whether the pass made progress or hit a retry.
     pub(crate) status: WorkStatus,
 }
@@ -174,6 +178,7 @@ impl ProjectionProgress {
     /// Accumulate another projection progress report.
     pub(super) fn merge(&mut self, other: Self) {
         self.projected += other.projected;
+        self.suppressed_intents += other.suppressed_intents;
         self.status.merge(other.status);
     }
 }
@@ -251,6 +256,39 @@ pub(crate) fn drain_pending_projection(
     allowed_tables: &[TableName],
     limit: usize,
 ) -> Result<ProjectionProgress, String> {
+    drain_pending_projection_with_policy(
+        projector,
+        store,
+        allowed_tables,
+        limit,
+        IntentAdmissionPolicy::All,
+    )
+}
+
+/// Drive fact projection, recording only follow-up intents allowed by `allowed_intent_kinds`.
+pub(crate) fn drain_pending_projection_filtering_intents(
+    projector: &(impl Projector + ?Sized),
+    store: &Store,
+    allowed_tables: &[TableName],
+    limit: usize,
+    allowed_intent_kinds: &[&'static str],
+) -> Result<ProjectionProgress, String> {
+    drain_pending_projection_with_policy(
+        projector,
+        store,
+        allowed_tables,
+        limit,
+        IntentAdmissionPolicy::AllowKinds(allowed_intent_kinds),
+    )
+}
+
+fn drain_pending_projection_with_policy(
+    projector: &(impl Projector + ?Sized),
+    store: &Store,
+    allowed_tables: &[TableName],
+    limit: usize,
+    intent_policy: IntentAdmissionPolicy<'_>,
+) -> Result<ProjectionProgress, String> {
     let mut total = ProjectionProgress::default();
 
     loop {
@@ -263,6 +301,7 @@ pub(crate) fn drain_pending_projection(
             store,
             allowed_tables,
             limit - total.projected,
+            intent_policy,
         )?;
         let projected_facts = projection_report.projected > 0;
         total.merge(projection_report);
@@ -292,6 +331,7 @@ fn process_pending_projection_batch(
     store: &Store,
     allowed_tables: &[TableName],
     limit: usize,
+    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<ProjectionProgress, String> {
     let mut progress = ProjectionProgress::default();
 
@@ -309,6 +349,7 @@ fn process_pending_projection_batch(
             store,
             allowed_tables,
             &durable_fact_ids[..chunk_len],
+            intent_policy,
         )?;
         progress.merge(durable_progress);
     }
@@ -338,6 +379,7 @@ fn process_pending_projection_batch(
                 store,
                 allowed_tables,
                 &mut progress,
+                intent_policy,
             )?;
         }
     }
@@ -355,6 +397,7 @@ fn process_durable_projection_chunk(
     store: &Store,
     allowed_tables: &[TableName],
     fact_ids: &[FactId],
+    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<ProjectionProgress, String> {
     crate::core::perf_profile::measure_result("projection_batch_transaction", || {
         store
@@ -377,6 +420,7 @@ fn process_durable_projection_chunk(
                             tx,
                             allowed_tables,
                             &mut progress,
+                            intent_policy,
                         )?;
                     }
                     Ok(progress)
@@ -396,13 +440,22 @@ fn process_pending_fact(
     store: &Store,
     allowed_tables: &[TableName],
     progress: &mut ProjectionProgress,
+    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<(), String> {
     let effects = crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-        prepare_projection_effects(projector, pending_fact, store, allowed_tables)
+        prepare_projection_effects(
+            projector,
+            pending_fact,
+            store,
+            allowed_tables,
+            intent_policy,
+        )
     })?;
-    crate::core::perf_profile::measure_result("projection_commit_effects", || {
-        commit_projection_effects(store, &effects, projector, allowed_tables)
-    })?;
+    let suppressed_intents =
+        crate::core::perf_profile::measure_result("projection_commit_effects", || {
+            commit_projection_effects(store, &effects, projector, allowed_tables, intent_policy)
+        })?;
+    progress.suppressed_intents += suppressed_intents;
     progress.projected += 1;
     progress.status.progressed = true;
     Ok(())
@@ -414,14 +467,24 @@ fn process_pending_fact_in_tx(
     tx: &Store,
     allowed_tables: &[TableName],
     progress: &mut ProjectionProgress,
+    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> rusqlite::Result<()> {
     let effects = crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-        prepare_projection_effects(projector, pending_fact, tx, allowed_tables)
+        prepare_projection_effects(projector, pending_fact, tx, allowed_tables, intent_policy)
     })
     .map_err(sqlite_string_error)?;
-    crate::core::perf_profile::measure_result("projection_commit_effects", || {
-        commit_projection_effects_in_tx(tx, &effects, projector, allowed_tables, 0)
-    })?;
+    let suppressed_intents =
+        crate::core::perf_profile::measure_result("projection_commit_effects", || {
+            commit_projection_effects_in_tx(
+                tx,
+                &effects,
+                projector,
+                allowed_tables,
+                intent_policy,
+                0,
+            )
+        })?;
+    progress.suppressed_intents += suppressed_intents;
     progress.projected += 1;
     progress.status.progressed = true;
     Ok(())
@@ -445,6 +508,7 @@ fn prepare_projection_effects(
     pending_fact: PendingFact,
     store: &Store,
     allowed_tables: &[TableName],
+    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<ProjectionEffects, String> {
     let PendingFact {
         source,
@@ -460,14 +524,18 @@ fn prepare_projection_effects(
         &mut projection_context,
         store,
         allowed_tables,
+        intent_policy,
     )?;
+    let mut pipeline = run.pipeline;
+    let suppressed_intents = suppress_disallowed_intents(&mut pipeline, intent_policy);
     Ok(ProjectionEffects {
         source,
         fact_id,
         next_context: run.context,
         next_time_wakes: run.time_wakes,
         context_delta: run.context_delta,
-        pipeline: run.pipeline,
+        pipeline,
+        suppressed_intents,
     })
 }
 
@@ -478,6 +546,7 @@ fn run_projection_to_context_fixed_point(
     projection_context: &mut ProjectionContext,
     store: &Store,
     allowed_tables: &[TableName],
+    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<ProjectionRun, String> {
     for _ in 0..PROJECTION_CONTEXT_FIXPOINT_LIMIT {
         let run = crate::core::perf_profile::measure_result("projection_projector_cpu", || {
@@ -489,7 +558,9 @@ fn run_projection_to_context_fixed_point(
             )
         })?;
         crate::core::perf_profile::measure_result("projection_validate_effects", || {
-            validate_pipeline_effects(&run.pipeline, allowed_tables)
+            let mut validation_pipeline = run.pipeline.clone();
+            suppress_disallowed_intents(&mut validation_pipeline, intent_policy);
+            validate_pipeline_effects(&validation_pipeline, allowed_tables)
         })?;
 
         let matched_context = crate::core::perf_profile::measure_result(
@@ -515,6 +586,7 @@ struct ProjectionEffects {
     next_time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
     pipeline: PipelineEffects,
+    suppressed_intents: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -556,13 +628,22 @@ fn commit_projection_effects(
     effects: &ProjectionEffects,
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
-) -> Result<(), String> {
+    intent_policy: IntentAdmissionPolicy<'_>,
+) -> Result<usize, String> {
     store
         .write_transaction(|tx| {
-            crate::core::perf_profile::measure_result("projection_commit_tx_body", || {
-                commit_projection_effects_in_tx(tx, effects, projector, allowed_tables, 0)
-            })?;
-            Ok(())
+            let suppressed_intents =
+                crate::core::perf_profile::measure_result("projection_commit_tx_body", || {
+                    commit_projection_effects_in_tx(
+                        tx,
+                        effects,
+                        projector,
+                        allowed_tables,
+                        intent_policy,
+                        0,
+                    )
+                })?;
+            Ok(suppressed_intents)
         })
         .map_err(|err| format!("commit projection effects: {err}"))
 }
@@ -574,8 +655,9 @@ fn commit_projection_effects_in_tx(
     effects: &ProjectionEffects,
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
+    intent_policy: IntentAdmissionPolicy<'_>,
     depth: usize,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     match effects.source {
         ProjectionSource::Durable => {
             crate::core::perf_profile::measure_result("projection_clear_pending", || {
@@ -609,15 +691,18 @@ fn commit_projection_effects_in_tx(
         }
     }
 
-    crate::core::perf_profile::measure_result("projection_commit_pipeline_effects", || {
-        commit_projector_pipeline_effects_in_tx(
-            tx,
-            projector,
-            allowed_tables,
-            &effects.pipeline,
-            depth,
-        )
-    })
+    let child_suppressed =
+        crate::core::perf_profile::measure_result("projection_commit_pipeline_effects", || {
+            commit_projector_pipeline_effects_in_tx(
+                tx,
+                projector,
+                allowed_tables,
+                &effects.pipeline,
+                intent_policy,
+                depth,
+            )
+        })?;
+    Ok(effects.suppressed_intents + child_suppressed)
 }
 
 fn validate_ephemeral_projection(effects: &ProjectionEffects) -> Result<(), String> {
@@ -650,22 +735,31 @@ fn commit_projector_pipeline_effects_in_tx(
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     pipeline: &PipelineEffects,
+    intent_policy: IntentAdmissionPolicy<'_>,
     depth: usize,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     if depth >= CHILD_PROJECTION_DEPTH_LIMIT {
         return Err(sqlite_string_error(format!(
             "child fact projection exceeded depth limit {CHILD_PROJECTION_DEPTH_LIMIT}"
         )));
     }
 
+    let mut suppressed_intents = 0usize;
     for fact in &pipeline.facts {
-        project_child_fact_in_tx(tx, projector, allowed_tables, fact, depth + 1)?;
+        suppressed_intents += project_child_fact_in_tx(
+            tx,
+            projector,
+            allowed_tables,
+            fact,
+            intent_policy,
+            depth + 1,
+        )?;
     }
 
     let mut residual = pipeline.clone();
     residual.facts.clear();
     commit_pipeline_effects_in_tx(tx, &residual, allowed_tables)?;
-    Ok(())
+    Ok(suppressed_intents)
 }
 
 fn project_child_fact_in_tx(
@@ -673,17 +767,25 @@ fn project_child_fact_in_tx(
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     fact: &Fact,
+    intent_policy: IntentAdmissionPolicy<'_>,
     depth: usize,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     if !insert_fact_and_pending_in_tx(tx, fact)? {
-        return Ok(());
+        return Ok(0);
     }
     let pending = load_pending_fact(tx, ProjectionSource::Durable, fact.id)
         .map_err(sqlite_string_error)?
         .ok_or_else(|| sqlite_string_error("inserted child fact did not load".to_string()))?;
-    let effects = prepare_projection_effects(projector, pending, tx, allowed_tables)
+    let effects = prepare_projection_effects(projector, pending, tx, allowed_tables, intent_policy)
         .map_err(sqlite_string_error)?;
-    commit_projection_effects_in_tx(tx, &effects, projector, allowed_tables, depth)
+    commit_projection_effects_in_tx(
+        tx,
+        &effects,
+        projector,
+        allowed_tables,
+        intent_policy,
+        depth,
+    )
 }
 
 /// Clear due time ranges after the owner consumes them.
@@ -1112,8 +1214,14 @@ mod tests {
             previous_context: ContextSet::new(),
             projection_context: ProjectionContext::default(),
         };
-        let effects = prepare_projection_effects(&projector, pending, &store, &[])
-            .expect("prepare projection");
+        let effects = prepare_projection_effects(
+            &projector,
+            pending,
+            &store,
+            &[],
+            IntentAdmissionPolicy::All,
+        )
+        .expect("prepare projection");
 
         assert!(effects.next_context.needs.is_empty());
         assert!(effects.context_delta.is_empty());
@@ -1154,8 +1262,14 @@ mod tests {
             role: role.clone(),
             key,
         };
-        let effects = prepare_projection_effects(&projector, pending, &store, &[])
-            .expect("prepare projection");
+        let effects = prepare_projection_effects(
+            &projector,
+            pending,
+            &store,
+            &[],
+            IntentAdmissionPolicy::All,
+        )
+        .expect("prepare projection");
 
         assert!(effects.next_context.needs.is_empty());
         assert_eq!(effects.pipeline.intents.len(), 1);
@@ -1261,9 +1375,14 @@ mod tests {
             previous_context: ContextSet::new(),
             projection_context: ProjectionContext::default(),
         };
-        let effects =
-            prepare_projection_effects(&WatchNeedProjector { role, key }, pending, &store, &[])
-                .expect("prepare projection");
+        let effects = prepare_projection_effects(
+            &WatchNeedProjector { role, key },
+            pending,
+            &store,
+            &[],
+            IntentAdmissionPolicy::All,
+        )
+        .expect("prepare projection");
 
         assert_eq!(effects.next_context.needs.len(), 1);
         assert_eq!(effects.context_delta.added_needs.len(), 1);
@@ -1305,6 +1424,7 @@ mod tests {
             pending,
             &store,
             &[],
+            IntentAdmissionPolicy::All,
         ) {
             Ok(_) => panic!("projection should hit fixed-point bound"),
             Err(err) => err,

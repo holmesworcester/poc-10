@@ -74,6 +74,36 @@ use std::collections::BTreeMap;
 
 use super::dispatch::{record_intent_in_table_in_tx, record_intent_in_tx};
 
+/// Which follow-up intents may be recorded by this commit path.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum IntentAdmissionPolicy<'a> {
+    /// Normal runtime behavior: record every emitted intent.
+    All,
+    /// Replay behavior: record only intents whose handlers are replay-allowed.
+    AllowKinds(&'a [&'static str]),
+}
+
+impl IntentAdmissionPolicy<'_> {
+    fn allows(self, intent: &Intent) -> bool {
+        match self {
+            Self::All => true,
+            Self::AllowKinds(kinds) => kinds.contains(&intent.kind.as_str()),
+        }
+    }
+}
+
+/// Remove intents that are not admissible in the current runtime mode.
+pub(super) fn suppress_disallowed_intents(
+    effects: &mut PipelineEffects,
+    policy: IntentAdmissionPolicy<'_>,
+) -> usize {
+    let durable_before = effects.intents.len();
+    effects.intents.retain(|intent| policy.allows(intent));
+    let local_before = effects.local_intents.len();
+    effects.local_intents.retain(|intent| policy.allows(intent));
+    (durable_before - effects.intents.len()) + (local_before - effects.local_intents.len())
+}
+
 /// Counts of newly inserted follow-up work after an effect commit.
 ///
 /// These counts are not a full change report. Purges, row mutations, and

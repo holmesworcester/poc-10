@@ -33,7 +33,10 @@ use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
-use super::commit_effects::{commit_pipeline_effects_in_tx, validate_pipeline_effects};
+use super::commit_effects::{
+    commit_pipeline_effects_in_tx, suppress_disallowed_intents, validate_pipeline_effects,
+    IntentAdmissionPolicy,
+};
 use super::WorkStatus;
 
 /// Queue durable idempotent handler work.
@@ -87,14 +90,52 @@ pub(crate) fn dispatch_queued_intent(
     allowed_tables: &[TableName],
     queued: QueuedIntent,
 ) -> Result<WorkStatus, String> {
+    Ok(dispatch_queued_intent_with_policy(
+        handler,
+        store,
+        allowed_tables,
+        queued,
+        IntentAdmissionPolicy::All,
+    )?
+    .status)
+}
+
+/// Run one claimed intent while suppressing inadmissible follow-up intents.
+pub(crate) fn dispatch_queued_intent_filtering_intents(
+    handler: &(impl IntentHandler + ?Sized),
+    store: &Store,
+    allowed_tables: &[TableName],
+    queued: QueuedIntent,
+    allowed_followup_kinds: &[&'static str],
+) -> Result<IntentDispatchReport, String> {
+    dispatch_queued_intent_with_policy(
+        handler,
+        store,
+        allowed_tables,
+        queued,
+        IntentAdmissionPolicy::AllowKinds(allowed_followup_kinds),
+    )
+}
+
+fn dispatch_queued_intent_with_policy(
+    handler: &(impl IntentHandler + ?Sized),
+    store: &Store,
+    allowed_tables: &[TableName],
+    queued: QueuedIntent,
+    intent_policy: IntentAdmissionPolicy<'_>,
+) -> Result<IntentDispatchReport, String> {
     let mut status = WorkStatus::idle();
     let context = load_handler_context(store, handler, &queued.intent)?;
-    let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
+    let Some(mut output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
         if status.retried && queued.table == LOCAL_INTENTS {
             rotate_local_retry_to_tail(store, &queued.intent)?;
         }
-        return Ok(status);
+        return Ok(IntentDispatchReport {
+            status,
+            suppressed_intents: 0,
+        });
     };
+    let mut suppressed_intents = suppress_disallowed_intents(&mut output, intent_policy);
     validate_pipeline_effects(&output, allowed_tables)?;
     let handled = HandledIntent {
         table: queued.table,
@@ -102,7 +143,13 @@ pub(crate) fn dispatch_queued_intent(
         idempotence_key: &queued.intent.key,
     };
     status.progressed = commit_handler_output(store, handled, &output, allowed_tables)?;
-    Ok(status)
+    if !status.progressed {
+        suppressed_intents = 0;
+    }
+    Ok(IntentDispatchReport {
+        status,
+        suppressed_intents,
+    })
 }
 
 /// Return the first queued intent matching a declared handler route.
@@ -232,6 +279,11 @@ pub(crate) struct QueuedIntent {
     /// Queue table from which this row was claimed.
     pub(crate) table: TableName,
     pub(crate) intent: Intent,
+}
+
+pub(crate) struct IntentDispatchReport {
+    pub(crate) status: WorkStatus,
+    pub(crate) suppressed_intents: usize,
 }
 
 #[derive(Debug, Clone, Copy)]

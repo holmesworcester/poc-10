@@ -514,6 +514,16 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("clock", crate::core::clock::CLOCK_USAGE, clock),
     cli_command!("count", auth::workspace::cli::COUNT_USAGE, count),
+    // Replay diagnostics: rebuild derived state, hash replay-relevant state, and
+    // prove replay idempotence/order-independence on scratch copies.
+    cli_command!("replay", command::REPLAY_USAGE, replay),
+    cli_command!("state-summary", command::STATE_SUMMARY_USAGE, state_summary),
+    cli_command!("replay-check", command::REPLAY_CHECK_USAGE, replay_check),
+    cli_command!(
+        "intent-registry",
+        command::INTENT_REGISTRY_USAGE,
+        intent_registry
+    ),
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[

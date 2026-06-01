@@ -197,6 +197,24 @@ impl Store {
         Ok(Self { conn, row_tables })
     }
 
+    /// Write a standalone, consistent copy of this store to `path`.
+    ///
+    /// `VACUUM INTO` produces a single self-contained database file with no WAL
+    /// or SHM sidecar, so callers can copy or open the snapshot independently.
+    /// Used by replay diagnostics to run replay on scratch databases without
+    /// mutating the live store. The path is interpolated as a SQL string literal
+    /// because `VACUUM INTO` does not accept bound parameters; embedded quotes are
+    /// escaped.
+    pub fn backup_into(&self, path: &Path) -> Result<(), String> {
+        let target = path
+            .to_str()
+            .ok_or_else(|| "snapshot path is not valid UTF-8".to_string())?
+            .replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{target}'"))
+            .map_err(|err| format!("snapshot store: {err}"))
+    }
+
     fn row_table_name(&self, table: TableName) -> rusqlite::Result<String> {
         if !self.row_tables.contains(&table) {
             return Err(store_error(format!(
