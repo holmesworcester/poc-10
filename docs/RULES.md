@@ -262,6 +262,26 @@ them with exact connection context. Network handlers move opaque bytes through
 core queues; connection frame projectors and handlers decide whether the bytes
 name a request, response, receipt, bundle, or shared fact.
 
+### Fact Sealing
+
+Sealing is a property of the fact type, not a runtime mode. Every connection
+fact that travels on the wire — `bootstrap_request`, `connection_request`, the
+connection (response) fact, and the established frame facts — owns its own
+sealing end to end, in its own modules. There is no seal-mode discriminator and
+no separate envelope or transit-wrapper fact in another module.
+
+- `create.rs` seals a fact when it generates it: sealing is wrapping, and
+  wrapping is `create.rs`'s job. Handshake facts are sealed asymmetrically to
+  the recipient endpoint; established frames are sealed with the
+  `connection_secret`.
+- Unsealing is a context need. A receiver opens a sealed connection fact in that
+  fact's own projector, which declares a context need for its unseal key —
+  `auth_local_endpoint` (the local endpoint secret) for handshake facts,
+  `connection_response` (the `connection_secret`) for established frames — and
+  unseals from it, exactly as the established-frame projector already does. The
+  receive boundary admits the typed wire bytes and does no unsealing itself;
+  there is no inline unseal handler and no key plumbing at the boundary.
+
 ## Forward Secrecy Requires Recipient Key Rotation On Root Loss
 
 When a deletion, expiry, or floor advance makes a frontier root unavailable for

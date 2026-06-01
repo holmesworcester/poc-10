@@ -145,19 +145,20 @@ fn connection_readme_separates_sealed_transport_from_fact_dependencies() {
     let readme_path = root.join("src/protocol/connection/README.md");
     let readme = fs::read_to_string(&readme_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", readme_path.display()));
+    let normalized = normalize_whitespace(&readme);
 
     for required in [
-        "sealed request bytes (not a fact)",
-        "sealed response bytes (not a fact)",
+        "each connection wire fact seals itself in its own layout",
+        "seals a fact for transit when it is generated",
         "inbound responder transport observation",
         "inbound responder dependency graph",
         "needs connection_fact_receipt(request)",
         "create_bootstrap_response(request, invite_secret, receipt)",
-        "The sealed request/response bytes are transport observations",
-        "there is no envelope fact",
+        "a receiving projector unseals it with the key from a context need",
+        "no seal-mode and no separate envelope fact",
     ] {
         assert!(
-            readme.contains(required),
+            normalized.contains(required),
             "connection README should distinguish sealed transport from the fact dependency graph: missing {required:?}"
         );
     }

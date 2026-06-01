@@ -24,9 +24,9 @@ than one polymorphic request:
   Diffie-Hellman only — no invite material — so membership connections survive
   invite-link expiry.
 
-Neither path uses a transport envelope: the request/response facts *are* the
-wire payload, sealed only in transit (`transit.rs`) and opened inline by the
-receive handler into the same canonical fact. Both `*_response` facts are "the
+Neither path uses a separate envelope fact: each wire fact seals itself in its
+own layout, and the receiving projector unseals it with the key from a context
+need rather than the receive handler unsealing inline. Both `*_response` facts are "the
 connection" and write the same shared connection-row table keyed by connection
 id, so established frames and sync treat the two kinds identically.
 
@@ -111,10 +111,10 @@ Local facts remain local. Ephemeral secrets, connection responses, close facts,
 receive receipts, established frame wrappers, and local endpoint/private auth
 facts are rejected by frame sendability checks.
 
-First-contact handshake frames carry no wrapper fact: `receive_network_frame`
-opens the sealed request/response bytes inline with the local endpoint secret
-(preserving origin and local receive time on the emitted `fact_receipt`) and
-admits the semantic request/response fact directly.
+First-contact handshake facts seal themselves to the recipient endpoint:
+`receive_network_frame` admits the typed wire bytes, and the request/response
+projector unseals them with the local endpoint secret from `auth_local_endpoint`
+context (origin and local receive time recorded on the emitted `fact_receipt`).
 
 Receipts are observational evidence. They do not authorize a request, response,
 or child fact by themselves. The target projector validates that the receipt
@@ -128,11 +128,11 @@ facts.
 ## Intent Handlers
 
 `receive_network_frame` is the inbound socket boundary. It has no input facts.
-It normalizes origin metadata and classifies the raw frame as a sealed request,
-a sealed response, or an established connection frame. Sealed request/response
-frames are opened inline with the local endpoint secret and admitted as the
-recovered request/response fact plus a `fact_receipt`; established frames are
-staged for their frame projector. There is no separate envelope fact.
+It normalizes origin metadata and admits the typed wire bytes as their fact; it
+does no unsealing itself. Each sealed request/response/frame fact is unsealed by
+its own projector, which gets the key from a context need (`auth_local_endpoint`
+for handshake facts, `connection_response` for established frames). There is no
+separate envelope fact and no inline unseal at the boundary.
 
 `send_bootstrap_connection_request` sends a sealed pre-connection request. It
 loads the request and initiator ephemeral secret, proves the secret matches the
@@ -245,18 +245,19 @@ close {
 }
 ```
 
-### Sealed handshake transport (no envelope fact)
+### Fact sealing (each fact seals itself; unseal is a context need)
 
-A request or response fact *is* the wire payload before a connection secret
-exists: there is no separate envelope fact. `request::transit` seals a request
-fact's canonical bytes initiator-ephemeral → responder-endpoint, and
-`response::transit` seals a response fact responder-ephemeral →
-initiator-endpoint. The seal header (sealed type tag, version, ephemeral public
-key, nonce) is transport-only. On receipt, `receive_network_frame` opens the
-sealed frame inline with the local endpoint secret and admits the recovered
-`request`/`response` fact plus a `fact_receipt`; opening is transport decoding,
-not protocol validation. Established frames (below) are sealed with the
-connection secret instead and never use this endpoint-key seal.
+Sealing is a property of the fact type, not a runtime mode: each connection wire
+fact seals itself in its own layout, and there is no seal-mode and no separate
+envelope fact. `create.rs` seals a fact for transit when it is generated —
+handshake facts (`bootstrap_request`, `connection_request`, the connection
+response) are sealed asymmetrically to the recipient endpoint, and established
+frames are sealed with the connection secret. On receipt the typed wire bytes
+are admitted and a receiving projector unseals it with the key from a context
+need — `auth_local_endpoint` (the local endpoint secret) for handshake facts,
+`connection_response` (the connection secret) for established frames — exactly as
+the established-frame projector already opens frames. The receive boundary admits
+the bytes and does no unsealing itself; there is no inline unseal.
 
 ### `fact_receipt` (tag 164)
 
@@ -337,13 +338,13 @@ outbound initiator dependency graph:
     -> local request
        needs connection_response_for_request until answered
        time wake -> send_bootstrap_connection_request
-       network output: sealed bootstrap request bytes (not a fact)
+       network output: sealed bootstrap request bytes
 
 inbound responder transport observation:
-  remote sealed request bytes (not a fact)
+  remote sealed request bytes
     -> receive_network_frame local intent
-    -> opens inline with local endpoint secret
-    -> request + fact_receipt (no envelope fact)
+    -> projector unseals via auth_local_endpoint context
+    -> request + fact_receipt
 
 inbound responder dependency graph:
   request
@@ -359,13 +360,13 @@ inbound responder dependency graph:
     -> responder ephemeral_secret + local response (committed first)
   local bootstrap_response projector
     -> send_bootstrap_connection_response intent
-    -> network output: sealed response bytes (not a fact)
+    -> network output: sealed response bytes
 
 inbound initiator transport observation:
-  remote sealed response bytes (not a fact)
+  remote sealed response bytes
     -> receive_network_frame local intent
-    -> opens inline with local endpoint secret
-    -> response + fact_receipt (no envelope fact)
+    -> projector unseals via auth_local_endpoint context
+    -> response + fact_receipt
 
 inbound initiator dependency graph:
   response
@@ -386,10 +387,9 @@ established connection transfer:
        open to child facts + fact_receipts
 ```
 
-The sealed request/response bytes are transport observations, not facts in the
-dependency graph: there is no envelope fact. `receive_network_frame` opens them
-inline with the local endpoint secret and admits the semantic `request`,
-`response`, and `fact_receipt` facts, which carry the dependency edges used by
+Each handshake fact seals itself in its own layout; the receiving projector
+unseals it with the key from a context need (`auth_local_endpoint`). The
+`request`, `response`, and `fact_receipt` facts then carry the dependency edges used by
 request and response projection. The connection response fact is the connection
 id; sync and network send handlers treat that id as the routing key, while
 semantic child validation stays with auth, content, and sync projectors.
