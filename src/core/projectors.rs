@@ -403,6 +403,15 @@ pub struct FactRoute {
     /// Effective fact tag routed to this projector function.
     pub tag: u8,
     pub projector: ProjectorFn,
+    /// Whether a from-scratch replay re-projects this fact type. `true` for
+    /// durable protocol truth (membership, content, keys, learned addresses)
+    /// that must rebuild deterministically. `false` for durable facts whose
+    /// projection materializes live session state — connection requests and the
+    /// connection itself — which a rebuild must not resurrect: the fact is kept
+    /// on disk but replay skips it, so its session rows are wiped and not
+    /// rebuilt. This is the projector-route analog of a handler route's
+    /// `runs_during_replay`.
+    pub replayed: bool,
 }
 
 /// Route for envelope facts whose outer tag is not the semantic fact tag.

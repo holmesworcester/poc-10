@@ -222,3 +222,51 @@ fn replay_classification_marks_only_deterministic_rebuild_handlers() {
         }
     }
 }
+
+#[test]
+fn only_connection_transport_facts_are_not_replayed() {
+    use topo::protocol::connection;
+
+    // Durable facts whose projection materializes live session state — the
+    // handshake request and the connection itself — must be retained but not
+    // re-projected on replay, so a rebuild never resurrects a dead connection.
+    // Everything else is durable truth that replay rebuilds deterministically.
+    let not_replayed: BTreeSet<u8> = MATCH_RUNTIME
+        .fact_routes
+        .iter()
+        .filter(|route| !route.replayed)
+        .map(|route| route.tag)
+        .collect();
+    let expected: BTreeSet<u8> = [
+        connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST,
+        connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE,
+        connection::connection_request::layout::TYPE_CONNECTION_REQUEST,
+        connection::connection_response::layout::TYPE_CONNECTION_RESPONSE,
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        not_replayed, expected,
+        "only the connection request/response handshake facts may be not-replayed"
+    );
+
+    // Truth facts — including the connection fact receipt that carries the
+    // durable learned address — must stay replayed.
+    let replayed: BTreeSet<u8> = MATCH_RUNTIME
+        .fact_routes
+        .iter()
+        .filter(|route| route.replayed)
+        .map(|route| route.tag)
+        .collect();
+    for truth_tag in [
+        connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT,
+        topo::protocol::auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED,
+        topo::protocol::content::message::layout::TYPE_CONTENT_MESSAGE,
+        topo::protocol::auth::key_wrap::layout::TYPE_KEY_WRAP,
+    ] {
+        assert!(
+            replayed.contains(&truth_tag),
+            "durable truth fact tag {truth_tag} must be replayed"
+        );
+    }
+}

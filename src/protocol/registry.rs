@@ -601,27 +601,36 @@ macro_rules! projector_route {
     };
 }
 
+// Each route may end with `, not_replayed` to mark a durable fact whose
+// projection materializes live session state (connection requests and the
+// connection itself). A from-scratch replay skips those: the fact stays on disk
+// but its session rows are wiped and not rebuilt, so replay never resurrects a
+// dead connection. Omitting the marker means the fact is durable protocol truth
+// that replay rebuilds deterministically.
 macro_rules! projector_routes {
-    ($($name:ident => $tag:path, $projector:path;)+) => {
+    ($($name:ident => $tag:path, $projector:path $(, $replay:ident)? ;)+) => {
         $(projector_route!($name, $projector);)+
 
-        const FACT_ROUTES: &[FactRoute] = &[
+        pub(crate) const FACT_ROUTES: &[FactRoute] = &[
             $(FactRoute {
                 tag: $tag,
                 projector: $name,
+                replayed: projector_routes!(@replayed $($replay)?),
             },)+
         ];
     };
+    (@replayed) => { true };
+    (@replayed not_replayed) => { false };
 }
 
 projector_routes! {
     project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
     project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
-    project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector;
-    project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector;
-    project_connection_request => connection::connection_request::layout::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector;
-    project_connection_response => connection::connection_response::layout::TYPE_CONNECTION_RESPONSE, connection::connection_response::project::ConnectionResponseProjector;
+    project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector, not_replayed;
+    project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector, not_replayed;
+    project_connection_request => connection::connection_request::layout::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector, not_replayed;
+    project_connection_response => connection::connection_response::layout::TYPE_CONNECTION_RESPONSE, connection::connection_response::project::ConnectionResponseProjector, not_replayed;
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;

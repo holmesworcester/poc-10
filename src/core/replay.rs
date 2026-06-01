@@ -36,7 +36,7 @@ use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::intents::IntentHandler;
 use crate::core::pipeline;
-use crate::core::projectors::Projector;
+use crate::core::projectors::{FactRoute, Projector};
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{quoted_identifier_list, quoted_table_name_str, Store, TableName};
 use rusqlite::types::ValueRef;
@@ -233,6 +233,7 @@ pub fn run_replay(
     store: &Store,
     projector: &dyn Projector,
     routes: &'static [HandlerRoute],
+    fact_routes: &[FactRoute],
     allowed_tables: &[TableName],
     replay_time_wakes: &[DaemonTimeWake],
     order: ReplayOrder,
@@ -244,6 +245,15 @@ pub fn run_replay(
     };
     let facts_before = fact_id_set(store)?;
 
+    // Fact types whose projection is live session state, not durable truth, are
+    // retained on disk but never re-projected: replay wipes their session rows
+    // and does not rebuild them, so a rebuild never resurrects a dead connection.
+    let not_replayed_tags: Vec<u8> = fact_routes
+        .iter()
+        .filter(|route| !route.replayed)
+        .map(|route| route.tag)
+        .collect();
+
     report.wiped_tables = wipe_derived_state(store)?;
     report.retained_facts = table_count(store, "facts")?;
 
@@ -251,11 +261,11 @@ pub fn run_replay(
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
-            mark_all_pending(store)?;
+            mark_all_pending(store, &not_replayed_tags)?;
             drive.fixpoint(&mut counters)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
-            for fact_id in ordered_fact_ids(store, order)? {
+            for fact_id in ordered_fact_ids(store, order, &not_replayed_tags)? {
                 mark_one_pending(store, &fact_id)?;
                 drive.fixpoint(&mut counters)?;
             }
@@ -488,15 +498,40 @@ fn wipe_derived_state(store: &Store) -> Result<usize, String> {
 }
 
 /// Mark every retained fact pending for projection in one statement.
-fn mark_all_pending(store: &Store) -> Result<(), String> {
+fn mark_all_pending(store: &Store, not_replayed_tags: &[u8]) -> Result<(), String> {
+    let sql = format!(
+        "INSERT OR IGNORE INTO pending_projection (owner) \
+         SELECT id FROM facts{}",
+        not_replayed_tag_filter(not_replayed_tags, "WHERE", "bytes")
+    );
     store
         .conn()
         .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner) SELECT id FROM facts",
-            [],
+            &sql,
+            rusqlite::params_from_iter(tag_blob_params(not_replayed_tags)),
         )
         .map(|_| ())
         .map_err(|err| format!("mark retained facts pending: {err}"))
+}
+
+/// SQL fragment excluding facts whose first byte (type tag) is not replayed.
+///
+/// `bytes_column` is the qualified bytes column (`bytes` or `f.bytes`). Returns
+/// an empty string when nothing is excluded, so the base query is unchanged for
+/// runtimes with no not-replayed fact types.
+fn not_replayed_tag_filter(not_replayed_tags: &[u8], keyword: &str, bytes_column: &str) -> String {
+    if not_replayed_tags.is_empty() {
+        return String::new();
+    }
+    let placeholders = (1..=not_replayed_tags.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" {keyword} substr({bytes_column}, 1, 1) NOT IN ({placeholders})")
+}
+
+fn tag_blob_params(not_replayed_tags: &[u8]) -> Vec<Vec<u8>> {
+    not_replayed_tags.iter().map(|tag| vec![*tag]).collect()
 }
 
 /// Mark one retained fact pending for projection.
@@ -512,20 +547,30 @@ fn mark_one_pending(store: &Store, fact_id: &FactId) -> Result<(), String> {
 }
 
 /// Compute the fact admission order for the requested replay order.
-fn ordered_fact_ids(store: &Store, order: ReplayOrder) -> Result<Vec<FactId>, String> {
+fn ordered_fact_ids(
+    store: &Store,
+    order: ReplayOrder,
+    not_replayed_tags: &[u8],
+) -> Result<Vec<FactId>, String> {
     // Canonical admission order: received_at then fact id, matching the pending
-    // projection batch ordering used in normal operation.
+    // projection batch ordering used in normal operation. Not-replayed fact
+    // types are excluded so a rebuild never re-projects live session facts.
+    let sql = format!(
+        "SELECT f.id
+         FROM facts f
+         JOIN local_fact_admissions m ON m.fact_id = f.id{}
+         ORDER BY m.received_at, f.id",
+        not_replayed_tag_filter(not_replayed_tags, "WHERE", "f.bytes")
+    );
     let mut stmt = store
         .conn()
-        .prepare(
-            "SELECT f.id
-             FROM facts f
-             JOIN local_fact_admissions m ON m.fact_id = f.id
-             ORDER BY m.received_at, f.id",
-        )
+        .prepare(&sql)
         .map_err(|err| format!("load canonical fact order: {err}"))?;
     let rows = stmt
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .query_map(
+            rusqlite::params_from_iter(tag_blob_params(not_replayed_tags)),
+            |row| row.get::<_, Vec<u8>>(0),
+        )
         .map_err(|err| format!("load canonical fact order: {err}"))?;
     let mut canonical = Vec::new();
     for row in rows {

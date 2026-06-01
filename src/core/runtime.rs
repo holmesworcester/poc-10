@@ -27,7 +27,7 @@ use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::pipeline;
-use crate::core::projectors::{Projector, Timeline};
+use crate::core::projectors::{FactRoute, Projector, Timeline};
 use crate::core::schema::{
     CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
 };
@@ -53,6 +53,10 @@ pub struct RuntimeDescription {
     pub row_mutation_tables: &'static [TableName],
     /// Factory for the projector router.
     pub projector: ProjectorFactory,
+    /// Per-fact-type projector routes, including each type's replay decision.
+    /// Replay reads `replayed` to skip facts whose projection is live session
+    /// state (connection requests and connections) rather than durable truth.
+    pub fact_routes: &'static [FactRoute],
     /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
     /// Handler route names a synchronous command should not run.
@@ -520,6 +524,7 @@ impl Runtime {
             &self.store,
             self.projector.as_ref(),
             self.description.handlers,
+            self.description.fact_routes,
             self.description.row_mutation_tables,
             replay_time_wakes,
             order,
@@ -661,6 +666,7 @@ mod tests {
         schema_sources: &[],
         row_mutation_tables: &[],
         projector: noop_projector,
+        fact_routes: &[],
         handlers: &[],
         command_excluded_handlers: &[],
     };

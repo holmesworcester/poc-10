@@ -8,7 +8,7 @@
 use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
-use topo::core::projectors::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::projectors::{FactRoute, ProjectionContext, ProjectionOutput, Projector};
 use topo::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
 use topo::core::store::SchemaSource;
 
@@ -120,16 +120,41 @@ const HANDLERS: &[HandlerRoute] = &[
 
 const SCHEMA_SOURCES: &[SchemaSource] = &[topo::core::network::SCHEMA_SOURCE];
 
+// The test fact has type tag 99; the router projector ignores the tag, so
+// fact_routes only carries the replay decision the replay engine reads.
+const FACT_TAG: u8 = 99;
+
+fn route_projector(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
+    TestProjector.project(fact, context)
+}
+
 const RUNTIME: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
     row_mutation_tables: &[],
     projector: test_projector,
+    // No not-replayed types: every fact replays, preserving the suppression
+    // tests' behavior.
+    fact_routes: &[],
+    handlers: HANDLERS,
+    command_excluded_handlers: &[],
+};
+
+const RUNTIME_NOT_REPLAYED: RuntimeDescription = RuntimeDescription {
+    schema_sources: SCHEMA_SOURCES,
+    row_mutation_tables: &[],
+    projector: test_projector,
+    // Tag 99 is a durable, not-replayed fact: kept on disk, skipped by replay.
+    fact_routes: &[FactRoute {
+        tag: FACT_TAG,
+        projector: route_projector,
+        replayed: false,
+    }],
     handlers: HANDLERS,
     command_excluded_handlers: &[],
 };
 
 fn fact() -> Fact {
-    Fact::new(FactScope::Global, 1, vec![99])
+    Fact::new(FactScope::Global, 1, vec![FACT_TAG])
 }
 
 #[test]
@@ -167,4 +192,27 @@ fn replay_suppresses_non_replayable_projector_and_handler_intents() {
         0,
         "suppressed replay work must not remain queued after the barrier"
     );
+}
+
+#[test]
+fn replay_retains_but_does_not_reproject_not_replayed_facts() {
+    let mut runtime = Runtime::open_memory(&RUNTIME_NOT_REPLAYED).expect("runtime");
+    runtime.submit_fact(fact());
+
+    let report = runtime
+        .replay(&[], topo::core::replay::ReplayOrder::Canonical)
+        .expect("replay");
+
+    // The fact stays on disk (durable) but its projection — live session state —
+    // is skipped, so it emits nothing and rebuilds no derived rows.
+    assert_eq!(
+        report.retained_facts, 1,
+        "a not-replayed fact is still retained durably"
+    );
+    assert_eq!(
+        report.projected_facts, 0,
+        "a not-replayed fact must not be re-projected on replay"
+    );
+    assert_eq!(report.replay_allowed_intents, 0);
+    assert_eq!(runtime.pending_intent_count(), 0);
 }
