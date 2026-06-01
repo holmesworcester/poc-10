@@ -166,3 +166,59 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
         );
     }
 }
+
+#[test]
+fn replay_classification_marks_only_deterministic_rebuild_handlers() {
+    // Replay-enabled handlers must be deterministic fact/row rebuild work over
+    // retained facts. Exactly the three rebuild handlers may run during replay;
+    // everything else (network IO, send packaging, live response/seed work) is
+    // rebuilt after the barrier and must stay replay=false. Adding a route that
+    // flips this set should fail here, not silently replay live-only work.
+    let replayable = MATCH_RUNTIME
+        .handlers
+        .iter()
+        .filter(|route| route.runs_during_replay)
+        .map(|route| route.name)
+        .collect::<BTreeSet<_>>();
+    let expected: BTreeSet<&str> = ["create_key_wrap", "share_fact_with_sync", "unwrap_key_wrap"]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        replayable, expected,
+        "only deterministic rebuild handlers may run during replay"
+    );
+
+    for live_only in [
+        "send_bootstrap_connection_request",
+        "send_bootstrap_connection_response",
+        "create_bootstrap_response",
+        "send_connection_request",
+        "send_connection_response",
+        "create_connection_response",
+        "send_network_frame",
+        "receive_network_frame",
+        "send_facts_on_connection",
+    ] {
+        let route = MATCH_RUNTIME
+            .handlers
+            .iter()
+            .find(|route| route.name == live_only)
+            .unwrap_or_else(|| panic!("missing route {live_only}"));
+        assert!(
+            !route.runs_during_replay,
+            "live-only handler {live_only} must not run during replay"
+        );
+    }
+
+    // A recurring schedule is live-only operational repetition by definition, so
+    // a route carrying one must never be dispatched during replay.
+    for route in MATCH_RUNTIME.handlers.iter() {
+        if route.recurrence.is_some() {
+            assert!(
+                !route.runs_during_replay,
+                "recurring route {} must not run during replay",
+                route.name
+            );
+        }
+    }
+}

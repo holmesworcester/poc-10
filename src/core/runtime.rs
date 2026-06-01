@@ -62,11 +62,49 @@ pub struct RuntimeDescription {
 /// Factory for one protocol intent handler.
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 
+/// Build the current intent for a recurring operational loop.
+///
+/// The daemon calls this while the process is online to mint one tick of live
+/// work. Returning `Ok(None)` means there is nothing to do this tick. The
+/// builder reads the store the same way a handler reads its inputs; it must not
+/// depend on persisted scheduler rows, because recurring schedules are
+/// in-memory only and never replayed.
+pub type RecurringIntentBuilder = fn(&Store) -> Result<Option<Intent>, String>;
+
+/// In-memory schedule for a live-only recurring operational intent.
+///
+/// Recurring intents are not durable state. The daemon installs these schedules
+/// at startup, after replay has finished, and fires them on a fixed cadence
+/// while the process runs. There is nothing to wipe on upgrade and nothing to
+/// replay: operational repetition belongs here, not in durable time wakes or
+/// projectors.
+#[derive(Debug, Clone, Copy)]
+pub struct RecurringIntentSpec {
+    /// Cadence between successive fires once the loop is running.
+    pub interval_ms: u64,
+    /// Delay from daemon startup before the first fire.
+    pub initial_delay_ms: u64,
+    /// Build this tick's intent from current store state, or `None` to skip.
+    pub build_intent: RecurringIntentBuilder,
+}
+
 /// One handler route in the protocol registry.
 ///
 /// `name` is a human-facing route name used for exclusion lists. `intent_kind`
 /// is the queue routing key that selects this handler for both durable and
 /// ephemeral intents.
+///
+/// `runs_during_replay` answers one question: if this intent is emitted while
+/// replay is rebuilding facts and rows, may core record and dispatch it before
+/// the replay barrier finishes? Replay-enabled handlers must be deterministic
+/// rebuild work over retained facts: no network IO, no fresh randomness, no
+/// process-global mutable state, and no operational wall-clock decisions. Every
+/// route declares this flag explicitly so adding a route forces a conscious
+/// replay decision.
+///
+/// `recurrence` marks live-only operational repetition. A route with a
+/// recurrence is installed as an in-memory daemon schedule and must not run
+/// during replay.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
     /// Human-facing route name used for exclusion lists.
@@ -75,6 +113,10 @@ pub struct HandlerRoute {
     pub intent_kind: &'static str,
     /// Handler factory.
     pub factory: HandlerFactory,
+    /// Whether core may dispatch this intent before the replay barrier finishes.
+    pub runs_during_replay: bool,
+    /// Live-only recurring schedule installed by the daemon, if any.
+    pub recurrence: Option<RecurringIntentSpec>,
 }
 
 /// Instantiated handlers for one runtime pass.
