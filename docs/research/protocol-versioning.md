@@ -5,9 +5,11 @@ Single authoritative note: the model and phased implementation plan (Part I), th
 ## Status and scope
 
 This is the authoritative, consolidated plan for protocol versioning in poc-10.
-It builds on the replay runtime specified in `poc10-replay-intent-shape.md`,
-which is a prerequisite; its exhaustive test matrix lives in the companion
-Part II below.
+It builds on two prerequisites that land first: the replay runtime
+(`poc10-replay-intent-shape.md`) and the **fact-validator split**
+(`fact-validators.md`) — the bottom of the `validate → lens → project` pipeline,
+specced and shippable on its own before any ceiling/lens work. Its exhaustive
+test matrix lives in Part II below.
 
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
@@ -390,33 +392,53 @@ malformed old bytes are handled in validators, unsafe representation mapping in
 lenses, unsafe interpretation in projectors or policy facts, and bad derived
 state by replaying with the fixed projector.
 
-### Durable vs ephemeral facts
+### Fact durability and replay classes
 
-The validator/lens/projector pipeline above is the **durable** path; most
-connection and sync traffic is **ephemeral** and takes a shorter one. The split
-is by retention: a fact is durable iff it must survive a wipe and replay.
+Durability and replay are **two axes**, not one: *retained* (the bytes survive a
+wipe) and *replay-projected* (re-fed through `validate → lens → project` on an
+upgrade wipe to rebuild derived state). That gives three classes:
 
-- **Durable** (full pipeline; ceiling-gated; validators-forever; lensed;
-  replayed): all `content::*` and `auth::*` facts, plus the durable connection
-  state — `connection_response`, `connection_close`, `fact_receipt`, and the
-  persisted connection secret.
-- **Ephemeral** (validator + projector only — one-shot live via the
-  `ProjectionSource::Ephemeral` path, which cannot emit durable offers; **no
-  lens, no replay**; transport-versioned by pairwise negotiation, never
-  ceiling-gated): `sync::{compare,have_id,need_id,range_request,shared_fact}`,
-  the bootstrap request/response handshake, frames, and the transient handshake
-  key. An ephemeral `_vN/` bucket therefore carries `validate.rs` + `project.rs`
-  and **no `lens.rs`** — there is no retained prior version to translate.
+- **Replay-durable** (retained + replay-projected) — the shared event log:
+  `content::*`, `auth::*`. Kept **forever** (source of truth), lensed to the
+  ceiling, re-projected on every replay. **Has a `lens.rs`.**
+- **Local-durable** (retained + **not** replay-projected) — persistent local /
+  operational state: `connection::request`, `connection::response`, and the
+  persisted connection secret. Validated on receipt and projected **live once**;
+  persists across normal restarts; but **excluded from the upgrade
+  replay-projection**, because their projection is live-session-coupled —
+  re-projecting a `connection_response` after a wipe would resurrect a dead
+  session (rematerialize its row, emit seed work). **No `lens.rs`** (never
+  replayed ⇒ never lensed). GC-eligible once the session closes (not
+  kept-forever); after a wipe they may carry no derived state until live
+  maintenance rebuilds connections fresh.
+- **Ephemeral** (not retained) — one-shot live projection, discarded:
+  `sync::{compare,have_id,need_id,range_request,shared_fact}`, frames, and the
+  transient handshake key. Projected via `ProjectionSource::Ephemeral` (cannot
+  emit durable offers). **No `lens.rs`.**
 
-**Invariant — durable depends only on durable.** A durable fact's
-validator/lens/projector may not take an ephemeral fact as a causal dependency:
-ephemeral facts are not retained, so replay would dangle. `connection_response`
-is therefore self-contained — it does not reference the ephemeral request it
-answered. A `GUARD` test enforces this.
+So **a fact has a `lens.rs` iff it is replay-projected** — only replay-durable
+facts are lensed; local-durable and ephemeral both skip it. The non-replayed
+classes' `_vN/` buckets carry `validate.rs` + `project.rs` and no `lens.rs`.
 
-`connection_request` is **deferred**: its retention is being reworked on another
-branch. Classify it by the same rule when it lands — durable (full pipeline) if
-it must survive replay, otherwise ephemeral.
+This **replaces the connection-retirement-before-replay dance**: because
+`connection::request`/`response` are local-durable (not replay-projected), the
+wipe simply does not re-project them — no dead-session resurrection, and no need
+to commit `connection_close` / upgrade-retirement facts to neutralize them during
+replay.
+
+**Invariant — the replay graph is closed.** A replay-projected fact may depend
+(causally or for context) only on other replay-projected facts. Local-durable and
+ephemeral facts may depend on replay-durable facts, but nothing replay-projected
+may depend on them — else replay would dangle on state it does not rebuild.
+(`connection_response` self-contained is the special case.) A `GUARD` test
+enforces this.
+
+**In code:** the family/route carries a replay class
+(`ReplayDurable | LocalDurable | Ephemeral`); the wipe-and-replay entry point
+marks only `ReplayDurable` facts pending for projection. The class is orthogonal
+to `FactScope` — a `Local` secret is `ReplayDurable` (deterministically recreated
+on replay) while a `Local` `connection_response` is `LocalDurable` — so it is an
+explicit marker, not derived from scope.
 
 ### Phase 5 — Rendering uniformity
 
@@ -449,9 +471,11 @@ it must survive replay, otherwise ephemeral.
   frame cannot become ceiling-active until that frame is sub-floor or the fact
   has an old-frame-compatible chunking path (the `file_slice` precedent —
   chunk, don't grow the frame).
-- **Connection retirement before replay.** Commit `connection_close` /
-  upgrade-retirement facts for pre-upgrade `connection_response` facts so rebuilt
-  sync indexes do not live-tail over retired sessions.
+- **Connections are local-durable, so not replay-projected.** The wipe does not
+  re-project `connection::request`/`response` (see *Fact durability and replay
+  classes*), so rebuilt sync indexes never live-tail over a dead pre-upgrade
+  session — no `connection_close` / upgrade-retirement fact is needed to
+  neutralize them during replay. After the barrier, peers re-handshake fresh.
 
 ### Phase 7 — Manifest discipline and guardrails
 
