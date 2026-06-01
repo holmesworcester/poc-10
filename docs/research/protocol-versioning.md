@@ -1,5 +1,52 @@
 # Protocol Versioning
 
+## Audit Notes To Resolve
+
+These are unresolved issues from a review of this note. Resolve them before
+treating the design or the test matrix below as implementation-ready.
+
+- **Replay versus quarantine.** The document currently says replay is
+  ceiling-independent, but quarantine and render-at-ceiling require replay to be
+  deterministic over `(retained facts, trusted time, active ceiling)`.
+  Above-ceiling facts may be retained, but they must not project, display, or
+  feed sync indexes until their tag is ceiling-active and authorization
+  validates.
+- **Ceiling over version ranges.** `ceiling = min(supported_protocol.end())` is
+  safe only if every still-usable release supports every protocol version from
+  the product floor through its `end()`. If ranges can have different starts,
+  compute the highest common supported version from the intersection instead.
+- **Facts versus transport wrappers.** Distinguish routed durable facts from
+  wire/session wrappers. Fact tags version routed fact semantics. `TRNS`, sealed
+  bootstrap request/response bytes, and other carriers may have independent
+  wire-version bytes and should not be described as ordinary routed facts unless
+  they are in `FACT_ROUTES`.
+- **Validator and lens boundary.** Signed historical facts cannot be converted
+  into new signed facts unless their signer signs again. Split fact handling into
+  permanent version validators/readers, scope-owned ceiling lenses, and ceiling
+  projectors. A lens consumes already-validated historical evidence and produces
+  a provenance-preserving ceiling claim; it must not parse raw bytes, invent
+  missing authority/data, or bypass the old signature domain.
+- **Quarantine boundary.** Unknown or above-ceiling received bytes cannot be
+  parsed for workspace, authority, purge semantics, or shareability. Quarantine
+  must be local-only, connection- or audience-scoped, quota-bounded, not shared
+  onward, and activated only after route support plus authorization validation.
+- **Read-model changes.** Invisible storage/index/schema changes may be free, but
+  user-visible row content, query semantics, ordering, aggregation, and filters
+  are rendering changes and need ceiling treatment. Authority rows are stricter:
+  a new derivation must not grant, revoke, or widen authority from old facts.
+- **Trusted time proof.** Do not rely on a fleet-wide signed-time stream stalling
+  "together". Different devices can hold different last signed observations. The
+  safety argument should rely on signed lower-bound observations plus staleness
+  self-quarantine.
+- **Stale Part II references.** The test matrix contains old line-number
+  references and a few assertions copied from earlier drafts, including claims
+  that the printed manifest struct omits `platform`. Refresh these references
+  after the model above is corrected.
+- **Ephemeral versus durable protocol prompts.** The durable boundary for
+  bootstrap/connection requests and for sync `compare`/`have_id`/`need_id`
+  remains open. Decide which prompts are session-only and which are retained
+  facts before using them as versioning test anchors.
+
 Single authoritative note: the model and phased implementation plan (Part I), then the exhaustive test matrix (Part II). Builds on `poc10-replay-intent-shape.md` (the replay runtime, a prerequisite).
 
 ## Status and scope
@@ -25,7 +72,8 @@ the plan reuses:
   in `core/network.rs`.
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
-routes, a release manifest, trusted time, the wipe-and-replay entry point, and
+routes, a release manifest, trusted time, the wipe-and-replay entry point,
+first-class fact validators, scope-owned ceiling lenses, and
 `runs_during_replay` / `intro_version` on routes.
 
 ## 1. Summary — the model in one breath
@@ -36,11 +84,11 @@ routes, a release manifest, trusted time, the wipe-and-replay entry point, and
   cleartext key hint plus AEAD ciphertext, and whose projector decrypts and
   **emits the inner content facts**. The only non-fact layer is core's TCP
   framing (length prefix + heartbeat), which is protocol-neutral substrate.
-- **One versioning knob: the fact tag.** An incompatible wire shape is a new
-  tag, a new kept-forever projector, and a sibling `_vN/` directory — uniformly
-  in every scope. No internal version bytes for routed facts. The `TRNS` magic
-  is a socket-level recognizer for the framing substrate, not a fact-versioning
-  device.
+- **One versioning knob: the fact tag.** An incompatible durable fact shape is a
+  new tag, a kept-forever validator/reader, a scope-owned lens edge toward the
+  active ceiling model, and a sibling `_vN/` directory. No internal version bytes
+  for routed facts. The `TRNS` magic is a socket-level recognizer for the
+  framing substrate, not a fact-versioning device.
 - **One coordination number: the protocol version, defined as a named bundle of
   tag-versions.** `protocol 7 = protocol 6 + {message:2, file:3}`. It is
   platform-neutral. Per-platform semver maps onto it through a fleet-wide
@@ -53,16 +101,18 @@ routes, a release manifest, trusted time, the wipe-and-replay entry point, and
     `(retained facts, protocol version)` — identical across every supported
     client and platform. Clients render **at the ceiling, not their head**; only
     presentation chrome is platform-local.
-- **Readers forever; transport lives in `[floor, head]`.** Old fact
-  readers/projectors are kept forever because retained history must always
-  replay. Old transport formats are kept only while some still-usable release
-  speaks them; once every speaker has expired (**sub-floor**) — or a format is
-  unsafe — the format is dropped. **Expired / sub-floor peers are out**: no
-  recovery responder. Updating is the app-store/updater's job; local data is
-  safe regardless because it replays after update.
-- **Replay is deterministic and ceiling-independent.** Wipe and replay rebuilds
-  derived state from retained facts, each through the historical adapter keyed
-  by the fact's own tag, regardless of the current ceiling.
+- **Validators forever; transport lives in `[floor, head]`.** Old fact
+  validators/readers are kept forever because retained signed history must
+  always validate as historical evidence. Old transport formats are kept only
+  while some still-usable release speaks them; once every speaker has expired
+  (**sub-floor**) — or a format is unsafe — the format is dropped. **Expired /
+  sub-floor peers are out**: no recovery responder. Updating is the
+  app-store/updater's job; local data is safe regardless because it replays after
+  update.
+- **Replay validates, lenses, then projects.** Wipe and replay rebuilds derived
+  state from retained facts by routing bytes to their historical validator,
+  translating valid evidence through the scope-owned lens graph to the active
+  ceiling contract, and running the ceiling projector.
 
 Invariants stated precisely:
 
@@ -74,11 +124,12 @@ Invariants stated precisely:
 3. **Ceiling monotonicity.** The ceiling never decreases: a production release
    must support every ceiling-active capability (the no-regression gate), and
    expiry only removes constraints.
-4. **Replay determinism.** Given the same retained facts and the same trusted
-   time, replay produces the same state regardless of admission order, and
-   recreates only facts that are deterministic functions of retained facts.
-5. **Keep-forever readers, floor-bounded transport.** No retained fact ever
-   loses its reader. No transport format is answered below the floor.
+4. **Replay determinism.** Given the same retained facts, trusted time, and
+   active ceiling, replay produces the same state regardless of admission order,
+   and recreates only facts that are deterministic functions of retained facts.
+5. **Keep-forever validators, floor-bounded transport.** No retained fact ever
+   loses the validator/reader for its original signed bytes. No transport format
+   is answered below the floor.
 6. **Safety floor.** A fact version or transport format is removed before
    natural expiry only when it is unsafe.
 
@@ -237,10 +288,11 @@ trusted to the AEAD/DH primitive, not to poc-10.
 
 ### Phase 2 — Route gating (`intro_version` on every route)
 
-- `FactRoute` gains `intro_version: u32`. `registry::protocol_projector()` builds
-  a **ceiling-filtered** `RouterProjector` containing only routes with
-  `intro_version <= ceiling`, recomputed when trusted time or the manifest
-  changes.
+- `FactRoute` gains `intro_version: u32`, a validator/reader entry, a source
+  semantic node, and a scope-owned lens path into the active ceiling node.
+  `registry::protocol_projector()` builds a **ceiling-filtered** projection
+  pipeline containing only routes with `intro_version <= ceiling`, recomputed
+  when trusted time or the manifest changes.
 - `HandlerRoute` gains `intro_version` (and `runs_during_replay` from Phase 0).
 - `CliCommand` registration becomes a stable name mapped to a **version-tagged
   list** of run fns: `name -> [(intro 0, run_v1), (intro 7, run_v2)]`. The
@@ -266,8 +318,17 @@ trusted to the AEAD/DH primitive, not to poc-10.
 
 - A new incompatible fact version is a sibling `_vN/` directory (original stays
   unsuffixed; never renamed). The **bucket holds the deltas**:
-  - `layout.rs` / `fact.rs` / `project.rs`: always present per version; kept
-    forever; routed by tag.
+  - `layout.rs` / `fact.rs` / `validate.rs`: always present per version; kept
+    forever; routed by tag. The validator parses raw bytes, computes/checks the
+    fact id, verifies the signature/domain, enforces intrinsic layout rules, and
+    emits typed historical evidence.
+  - `lens.rs`: present when this version is not already the ceiling semantic
+    shape. The lens consumes only validated evidence plus validated context /
+    policy, never raw bytes, and emits a provenance-preserving ceiling input or
+    an explicit park/quarantine/weak claim.
+  - `project.rs`: owned by the active ceiling semantic node; it consumes ceiling
+    inputs, not arbitrary historical layouts. An old `project.rs` may be kept
+    only when the old projector is itself the clearest implementation of a lens.
   - `create.rs`: always present per version; selected by ceiling through a
     version-neutral constructor entry (so the old CLI need not be edited to reach
     the new constructor).
@@ -279,6 +340,45 @@ trusted to the AEAD/DH primitive, not to poc-10.
 - Lineage lives in data and the registry, not the tree: a `supersedes_*` field /
   context offer plus the `intro_version` index. Shared field codecs are reached
   through a module-owned typed helper, never another module's raw layout codec.
+
+### Phase 4a — Scope-owned ceiling lenses
+
+The projection pipeline is:
+
+```text
+raw retained fact bytes
+  -> tag route
+  -> version validator / reader
+  -> valid historical evidence
+  -> scope-owned lens graph path to the active ceiling semantic contract
+  -> ceiling projector
+  -> rows, context offers, replayable intents
+```
+
+The lens graph is per scope. Nodes are semantic contract versions, and edges are
+deterministic, replay-pure transforms. Linear evolution can be a chain
+(`v0 -> v1 -> v2`); branched evolution is allowed only when the release manifest
+or scope registry declares one canonical path from each retained source node to
+the active ceiling node. Cross-scope projectors should depend on semantic
+contracts, not raw foreign fact layouts: content may require
+`auth.endpoint_authority@ceiling`, while auth owns how `endpoint_shared_v0`,
+`endpoint_shared_v1`, revocations, purge facts, and policy facts prove or fail
+that contract.
+
+A lens does not create a new signed fact. The original signature remains over
+the original bytes and domain; the lens output carries provenance pointing back
+to the signed source fact ids and policy/context facts that justify the ceiling
+claim. If old evidence cannot honestly prove the ceiling contract, the lens must
+emit an explicit weaker/default value, park, quarantine, or require a new fact.
+It must not invent authority, silently widen access, expose data hidden by a
+ceiling policy, or reinterpret old facts by accident.
+
+This replaces "keep every old projector forever" with a narrower obligation:
+keep every old validator/reader forever, keep lens graph paths for retained
+historical evidence to the active ceiling model, and keep the ceiling projector
+for the current semantic contract. Security fixes land at the smallest layer:
+malformed old bytes are handled in validators, unsafe interpretation in lenses
+or policy facts, and bad derived state by replaying with the fixed projector.
 
 ### Phase 5 — Rendering uniformity
 
@@ -341,7 +441,10 @@ Plaintext usernames are the worked example. `auth::user` carries a plaintext
 usually hold only their endpoint signing key (proven by `auth::endpoint_shared`),
 not the original invite key, so a normal device cannot reissue the same
 `auth::user` shape. The fix is a new ceiling-gated profile fact — a new tag in a
-sibling bucket (Phase 4), not a same-shaped rewrite. Illustrative shape:
+sibling bucket (Phase 4), not a same-shaped rewrite. The old `auth::user`
+validator still proves membership authority from the old signature, while the
+auth lens to the ceiling profile model refuses to use the plaintext field as a
+display claim once the policy says it is unsafe. Illustrative shape:
 
 ```text
 auth::user_profile_v2 {
@@ -360,9 +463,9 @@ fact and the signer `auth_endpoint_shared` fact, and admits only when both are i
 the same workspace, `endpoint_shared.user_authority_fact_id == subject_user_id`,
 and the signer key matches the endpoint_shared row. It may replace display data
 only — never membership, admin authority, the original user key, or the subject
-id. The old `auth::user` adapter keeps emitting authority identity without
-materializing plaintext into display rows; a policy fact can hide or quarantine
-old plaintext names; live devices publish encrypted profile facts
+id. The old `auth::user` validator plus lens keeps emitting authority identity
+without materializing plaintext into display rows; a policy fact can hide or
+quarantine old plaintext names; live devices publish encrypted profile facts
 opportunistically. Purging the raw plaintext bytes first needs an
 authority-preserving replacement or tombstone — authority anchors are not freely
 purgeable — or content naming `author_user_id == auth::user.id` loses its context
