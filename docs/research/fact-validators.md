@@ -4,9 +4,9 @@
 
 A **land-first** refactor: make fact authentication a first-class per-family
 layer, separate from projection. It is independent of protocol versioning — it
-needs no ceiling, lens, release manifest, or trusted time — and should ship
+needs no ceiling, adapter, release manifest, or trusted time — and should ship
 **before** that work. The protocol-versioning plan (`protocol-versioning.md`)
-builds on this layer (its `authenticate → lens → project` pipeline reuses these
+builds on this layer (its `authenticate → adapt → project` pipeline reuses these
 authenticators unchanged), but the split is useful on its own today.
 
 **Status: landed (changes 1 and 2).** Change 1: every routed fact family has an
@@ -15,8 +15,8 @@ signatures; the old `project_typed` / `TypedProjector` path is removed; the full
 suite is green and behaviour is unchanged. Change 2 (the behaviour-changing
 follow-on — per-fact projection isolation + purge/keep classification) is
 described under *Error isolation and purge* below and also landed. The immediate
-next structural step is the core-managed staged route runner: authenticate by
-tag, pass through an identity lens slot, then project.
+next structural step is the core-managed staged route runner: decode by tag,
+authenticate primary facts, pass through an identity adapt slot, then project.
 
 This note was originally named "fact validators." The design insight is that the
 pre-projector layer should not claim full protocol validity. It proves that a
@@ -58,9 +58,9 @@ Why land it first:
   canonical facts).
 - It removes raw-byte parsing from projectors, a clean boundary a guardrail can
   enforce.
-- It is the bottom of the eventual `authenticate → lens → project` pipeline, but
+- It is the bottom of the eventual `authenticate → adapt → project` pipeline, but
   it stands alone: the projector consumes an authenticated fact instead of raw
-  bytes. Lenses and ceilings come later and do not block this.
+  bytes. Adapters and ceilings come later and do not block this.
 
 ## The contract
 
@@ -91,7 +91,7 @@ An authenticator **does not**:
 
 - check the fact's admission scope — scope is unsigned local admission metadata,
   not part of the authenticated bytes, so the scope check is projector
-  interpretation. Keeping it there (behind the lens and the ceiling projector)
+  interpretation. Keeping it there (behind the adapter and the ceiling projector)
   lets the workspace-id shape and the rule itself evolve;
 - check semantic authority that requires other facts (signer / author /
   membership / admin / invite / endpoint proofs);
@@ -140,7 +140,7 @@ Not every cryptographic check belongs in the same place.
   inauthentic. The projector opens the container with that context and
   materializes the opened inner facts plus receipts; it must not re-authenticate
   or project the children. The inner facts are admitted back through the normal
-  `authenticate -> lens -> project` pipeline on their own. (Decode is already
+  `authenticate -> adapt -> project` pipeline on their own. (Decode is already
   separated from projectors via `FactCodec`, so a carrier needs no opener
   relocation; `NeedsAuthentication` is for an external *verifier key*, not for a
   context-keyed AEAD open whose failure is silent.)
@@ -182,9 +182,9 @@ As built, an authentication need is carried on the *same* standing-need channel
 as a projection need (core runs the authenticator inside the projection call via
 `project_authenticated`, and `NeedsAuthentication` becomes a standing need that
 re-wakes the same path). The two surfaces are distinct in ownership and meaning;
-a separate authentication stage — core authenticating by tag before lensing and
+a separate authentication stage — core authenticating by tag before adapting and
 projection — is the immediate next versioning-prep step, even before real
-non-identity lenses or a ceiling exist.
+non-identity adapters or a ceiling exist.
 
 Purge, deletion, retention, and all materialization effects stay projector-owned.
 A purge fact may be authentic forever, but whether a target observes it, removes
@@ -202,9 +202,9 @@ rows, retracts sync sharing, or calls `purge_self` is target interpretation.
   (scope + context + materialize). `FactCodec` stays (the authenticator decodes
   through it); `verify_fact_id` is the shared id check.
 
-This is precisely the bottom of the versioning pipeline `authenticate → lens →
-project`. There is **no lens** in this landing: the projector consumes the
-authenticated fact directly, at head. Lenses and the ceiling are added later,
+This is precisely the bottom of the versioning pipeline `authenticate → adapt →
+project`. There is **no adapter** in this landing: the projector consumes the
+authenticated fact directly, at head. Adapters and the ceiling are added later,
 between authenticate and project, without changing the authenticators.
 
 ### Next step: staged core pipeline
@@ -214,28 +214,53 @@ hoist the composition into core as a per-tag `FactRoute` runner:
 
 ```text
 raw fact bytes
+  -> decode (inside authenticate for primary admission)
   -> authenticator
-  -> identity lens stub (or real lens chain after a version split)
+  -> identity adapt stub (or real adapt chain after a version split)
   -> projector
 ```
 
 Core owns the stage boundaries and the wake queues. `AuthenticationNeed` wakes
 authentication; projector context needs, offers, and time wakes wake projection
-for an already authenticated and lensed fact. The route is still typed inside the
-protocol: the protocol route owns the concrete `T`, semantic value, lens
-function, and projector, while core sees only "tag 50 has this authenticator,
-this lens slot, and this projector."
+for an already authenticated and adapted fact. The route is still typed inside the
+protocol: the protocol route owns the concrete `T`, its `decode`, `authenticate`,
+`adapt`, and `project` functions, while core sees only "tag 50 has this decoder,
+this authenticator, this adapt slot, and this projector."
 
 Projectors stop invoking `project_authenticated` themselves once this lands.
 That helper either becomes route-runner logic or disappears. Context payloads
-requested by projectors are authenticated and lensed before they are handed to
-the projector, so needs/offers keep matching on stable role/scope/range
-coordinates while payload shape adapts to the active ceiling.
+requested by projectors are decoded and adapted before they are handed to the
+projector; they are not re-authenticated by the consumer path. Their offer exists
+only because the owner already passed its own route, so needs/offers keep
+matching on stable role/scope/range coordinates while payload shape adapts to the
+active ceiling.
+
+The first implementation substep is to build model family shapes before the
+fan-out. Pick a small representative set — for example a signed/encrypted
+content family, an external-verifier authentication-need family, a container
+frame family, and a deterministic handler-authored sync/auth family — and write
+the full directory/file shape for each. Review the file names, top-of-file
+policies, route declarations, and test style before migrating every family.
 
 ## Directory and registry
 
-- Each fact family gains `authenticate.rs`, owning the `Authenticator`. It reuses
-  the family's existing `layout.rs` / `FactCodec` decoder and `verify_signature`.
+- The target fact-family role files are:
+  - `encode.rs` — typed fact to canonical wire bytes, plus signing/transcript
+    byte helpers. This is serialization, not semantic construction.
+  - `decode.rs` — canonical bytes or `Fact` to typed source value, with tag,
+    length, padding, and enum checks, but no id or signature proof.
+  - `author.rs` — command/context/keys to a typed fact or `Fact`; encryption,
+    signing input selection, deterministic nonces, retention checks, and
+    ceiling-selected local creation live here. This replaces fact-family
+    `create.rs` in the target shape; non-family intent names such as
+    `create_key_wrap` may keep their established command names.
+  - `authenticate.rs` — `decode` + id check + fact-boundary cryptographic proof
+    + intrinsic field rules, returning `Authenticated`, `NeedsAuthentication`,
+    or `Invalid`.
+  - `adapt.rs` — typed source value to the active semantic value; identity for
+    current families, non-identity for version splits.
+  - `project.rs` — active semantic value plus context to rows, needs, offers,
+    time wakes, intents, emitted facts, and purge.
 - `project.rs` drops primary decode + signature; the projector implements
   `AuthenticatedProjector` (binds `let (fact, payload) = authenticated.into_parts()`)
   and begins at scope + context. Scope stays in the projector (interpretation).
@@ -245,9 +270,9 @@ coordinates while payload shape adapts to the active ceiling.
   the projector. There is no separate runtime `tag → authenticator` table yet;
   completeness ("every routed family has an `authenticate.rs` and delegates to
   it") is enforced by a guardrail. The next home is a staged `FactRoute` —
-  core authenticating by tag at *admission*, running the route's lens slot, and
-  then projecting. It should land before real lenses and before ceiling logic:
-  every current family gets an identity lens slot.
+  core authenticating by tag at *admission*, running the route's adapt slot, and
+  then projecting. It should land before real adapters and before ceiling logic:
+  every current family gets an identity adapt slot.
 - Foreign context is still read through module-owned typed helpers, never another
   module's raw layout codec — and a projector **never re-verifies a context
   fact's signature**: that fact was authenticated before it could offer the
@@ -377,7 +402,7 @@ Complete — in one pass — when **all** of the following hold:
 - Every routed fact family has an `authenticate.rs` and delegates to it via
   `project_authenticated`; a guardrail fails if a routed family lacks either.
   The next route-runner change replaces that per-projector delegation with a
-  core-owned `FactRoute` that carries the authenticator, identity lens slot, and
+  core-owned `FactRoute` that carries the authenticator, identity adapt slot, and
   projector for the tag.
 - Authenticator pure-unit tests (accept canonical; reject the full malformed set:
   wrong tag / length / trailing / padding / enum, bad signature, wrong domain, id
@@ -432,7 +457,7 @@ poisoning the drain. Change 2 fixes the root cause:
   - **Otherwise** (re-project parks) → the fact authenticates and is well-formed;
     the original rejection came from inconsistent *context*. **Keep** the fact and
     clear only its pending marker so it is not retried. It is evidence: versioning
-    needs different lenses and versions to interpret an incorrect fact the same
+    needs different adapters and versions to interpret an incorrect fact the same
     way, and purging would destroy the test subject.
 
 Ephemeral inputs have no purge/keep choice: a rejected ephemeral input is simply
@@ -445,11 +470,12 @@ tag at admission and keeps unsupported but wire-admitted bytes pending.
 ## Relationship to protocol versioning
 
 This is the prerequisite layer — call it **Phase 0.5**, landing before any of the
-versioning phases. The versioning plan's `authenticate → lens → project`
-pipeline reuses these authenticators unchanged; the first route lens is an
-identity stub, and non-identity lenses, the ceiling, the release manifest, and
+versioning phases. The versioning plan's `authenticate → adapt → project`
+pipeline reuses these authenticators unchanged; the first route adapter is an
+identity stub, and non-identity adapters, the ceiling, the release manifest, and
 trusted time come afterward and do not block this landing.
-"Authenticators forever" (a versioning invariant) begins here: once a family has
-an `authenticate.rs`, that authenticator is kept for every version of the family,
-so old signed bytes always authenticate as historical evidence. Full contextual
-validity remains the ceiling projector's job after lensing.
+"Decoders/authenticators forever" (a versioning invariant) begins here: once a
+family has `decode.rs` and `authenticate.rs`, those components are kept for
+every version of the family, so old signed bytes always decode and authenticate
+as historical evidence. Full contextual validity remains the ceiling projector's
+job after adapting.

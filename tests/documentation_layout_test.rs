@@ -353,7 +353,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
     let versioning_note = source_text(&root.join("docs/research/protocol-versioning.md"));
     let normalized_authenticator = normalize_whitespace(&authenticator_note);
     let normalized_versioning = normalize_whitespace(&versioning_note);
-    let pipeline = format!("authenticate {} lens {} project", '\u{2192}', '\u{2192}');
+    let pipeline = format!("authenticate {} adapt {} project", '\u{2192}', '\u{2192}');
 
     for required in [
         "# Fact Authenticators",
@@ -364,15 +364,20 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "Signatures, encryption, and container facts",
         "Verifier key placement is a fact-version choice",
         "Do not make embedded public keys mandatory",
-        "The inner facts are admitted back through the normal `authenticate -> lens -> project` pipeline",
+        "The inner facts are admitted back through the normal `authenticate -> adapt -> project` pipeline",
         "Purge, deletion, retention, and all materialization effects stay projector-owned",
         "immediate next structural step is the core-managed staged route runner",
-        "identity lens slot",
+        "identity adapt slot",
         "Next step: staged core pipeline",
+        "`encode.rs`",
+        "`decode.rs`",
+        "`author.rs`",
+        "`adapt.rs`",
         "Core owns the stage boundaries and the wake queues",
         "`AuthenticationNeed` wakes authentication",
         "protocol route owns the concrete `T`",
-        "Context payloads requested by projectors are authenticated and lensed",
+        "Context payloads requested by projectors are decoded and adapted",
+        "first implementation substep is to build model family shapes",
     ] {
         assert!(
             normalized_authenticator.contains(required),
@@ -381,7 +386,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
     }
     assert!(
         normalized_authenticator.contains(&pipeline),
-        "fact authenticator note should name the authenticate/lens/project pipeline"
+        "fact authenticator note should name the authenticate/adapt/project pipeline"
     );
 
     for required in [
@@ -389,9 +394,11 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "There is no core-managed staged `FactRoute` runner yet",
         "Staged routes, then route gating",
         "The first implementation step in this phase is the staged `FactRoute` runner",
-        "identity lens slot for every existing family",
-        "Core runs `authenticate -> lens -> project` as three labelled stages",
-        "Core can know that tag 50 uses a particular authenticator, lens path, and projector",
+        "Before the broad fan-out, build model family examples",
+        "`encode.rs`, `decode.rs`, `author.rs`",
+        "identity adapt slot for every existing family",
+        "Core runs `authenticate -> adapt -> project` as three labelled stages",
+        "Core can know that tag 50 uses a particular decoder, authenticator, adapt path, author, and projector",
         "Known-route authentication",
         "Projectors stop invoking `project_authenticated` themselves",
         "`Authenticated(AuthenticatedFact<T>)`",
@@ -404,12 +411,13 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "Pending is syncable and waiting",
         "pending ingress",
         "not active protocol truth",
-        "Context payloads are lensed too",
+        "Context payloads are adapted too",
         "needs and offers match on stable role/scope/range coordinates",
-        "run that owner fact through its own `authenticate -> lens` path",
+        "route-owned `decode -> adapt` path",
+        "without re-verifying context signatures",
         "receives context payloads in the semantic version it expects at the active ceiling",
         "the projector materializes the recovered inner fact bytes and receipts",
-        "Those inner facts then re-enter the normal `authenticate -> lens -> project` pipeline by their own tags",
+        "Those inner facts then re-enter the normal `authenticate -> adapt -> project` pipeline by their own tags",
     ] {
         assert!(
             normalized_versioning.contains(required),
@@ -418,7 +426,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
     }
     assert!(
         normalized_versioning.contains(&pipeline),
-        "protocol versioning note should name the authenticate/lens/project pipeline"
+        "protocol versioning note should name the authenticate/adapt/project pipeline"
     );
 }
 

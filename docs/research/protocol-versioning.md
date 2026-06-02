@@ -7,8 +7,8 @@ Single authoritative note: the model and phased implementation plan (Part I), th
 This is the authoritative, consolidated plan for protocol versioning in poc-10.
 It starts from two landed prerequisites: the replay runtime
 (`poc10-replay-intent-shape.md`) and the **fact-authenticator split**
-(`fact-validators.md`) — the bottom of the `authenticate → lens → project`
-pipeline, landed before any ceiling/lens work. Its exhaustive test matrix lives
+(`fact-validators.md`) — the bottom of the `authenticate → adapt → project`
+pipeline, landed before any ceiling/adapter work. Its exhaustive test matrix lives
 in Part II below.
 
 Most machinery described here is unbuilt today. What already exists, and what
@@ -33,9 +33,10 @@ the plan reuses:
   in `core/network.rs`.
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
-routes, a release manifest, trusted time, scope-owned ceiling lenses,
+routes, a release manifest, trusted time, scope-owned ceiling adapters,
 `intro_version` on routes/handlers/commands, a core-owned per-tag route that
-runs `authenticate -> lens -> project` as separate stages, and the pending
+runs `authenticate -> adapt -> project` as separate stages for primary facts,
+derives context payloads through `decode -> adapt`, and the pending
 admission state for wire-admitted bytes that cannot yet become active facts.
 
 ## 1. Summary — the model in one breath
@@ -48,7 +49,7 @@ admission state for wire-admitted bytes that cannot yet become active facts.
   normal pipeline by their own tags. The only non-fact layer is core's TCP
   framing (length prefix + heartbeat), which is protocol-neutral substrate.
 - **One versioning knob: the fact tag.** An incompatible durable fact shape is a
-  new tag, a kept-forever authenticator/reader, a scope-owned lens edge toward
+  new tag, kept-forever decoder/authenticator functions, a scope-owned adapt edge toward
   the active ceiling model, and a sibling `_vN/` directory. No internal version
   bytes for routed facts. The `TRNS` magic is a socket-level recognizer for the
   framing substrate, not a fact-versioning device.
@@ -67,18 +68,18 @@ admission state for wire-admitted bytes that cannot yet become active facts.
     `(retained facts, protocol version)` — identical across every supported
     client and platform. Clients render **at the ceiling, not their head**; only
     presentation chrome is platform-local.
-- **Authenticators forever; transport lives in `[floor, head]`.** Old fact
-  authenticators/readers are kept forever because retained signed history must
+- **Decoders/authenticators forever; transport lives in `[floor, head]`.** Old fact
+  decoders and authenticators are kept forever because retained signed history must
   always authenticate as historical evidence. Old transport formats are kept only
   while some still-usable release speaks them; once every speaker has expired
   (**sub-floor**) — or a format is unsafe — the format is dropped. **Expired /
   sub-floor peers are out**: no recovery responder. Updating is the
   app-store/updater's job; local data is safe regardless because it replays after
   update.
-- **Replay authenticates, lenses, then projects.** Wipe and replay rebuilds
+- **Replay authenticates, adapts, then projects.** Wipe and replay rebuilds
   derived state from retained facts by routing bytes to their historical
   authenticator, translating typed authenticated facts through the scope-owned
-  lens chain to the active ceiling semantic type, and running the ceiling
+  adapt chain to the active ceiling semantic type, and running the ceiling
   projector. Core owns these route stages; the protocol route owns the concrete
   typed fact and semantic values for that tag.
 - **Pending before active.** Bytes that make it through transport/frame opening
@@ -101,8 +102,8 @@ Invariants stated precisely:
 4. **Replay determinism.** Given the same retained facts, trusted time, and
    active ceiling, replay produces the same state regardless of admission order,
    and recreates only facts that are deterministic functions of retained facts.
-5. **Keep-forever authenticators, floor-bounded transport.** No retained fact
-   ever loses the authenticator/reader for its original signed bytes. No
+5. **Keep-forever decoders/authenticators, floor-bounded transport.** No retained fact
+   ever loses the decoder/authenticator for its original signed bytes. No
    transport format is answered below the floor.
 6. **Safety floor.** A fact version or transport format is removed before
    natural expiry only when it is unsafe.
@@ -263,27 +264,38 @@ trusted to the AEAD/DH primitive, not to poc-10.
 ### Phase 2 — Staged routes, then route gating
 
 The first implementation step in this phase is the staged `FactRoute` runner. It
-should land before real lenses, manifests, trusted time, or ceiling filtering:
-current behavior is preserved by registering an identity lens slot for every
-existing family. That gives core ownership of the `authenticate -> lens ->
-project` pipeline now, so later versioning work fills in non-identity lens edges
+should land before real adapters, manifests, trusted time, or ceiling filtering:
+current behavior is preserved by registering an identity adapt slot for every
+existing family. That gives core ownership of the `authenticate -> adapt ->
+project` pipeline now, so later versioning work fills in non-identity adapt edges
 and ceiling filters instead of moving the projector boundary again.
 
+Before the broad fan-out, build model family examples for the target file shape
+and review them. The examples should cover the main family styles — a
+signed/encrypted content fact, a fact with an external verifier-key
+`AuthenticationNeed`, a container frame fact, and a deterministic
+handler-authored sync/auth fact. Each model should include the target files
+(`encode.rs`, `decode.rs`, `author.rs` when the family locally authors facts,
+`authenticate.rs`, identity `adapt.rs`, and `project.rs`), top-of-file policies,
+route declarations, and focused tests. Once those examples settle, migrate the
+remaining families mechanically.
+
 - `FactRoute` becomes the core-owned staged pipeline for one tag: `tag`,
-  `intro_version: u32`, `replayed`, authenticator/reader, source semantic node,
-  lens path, and projector.
-- Core runs `authenticate -> lens -> project` as three labelled stages.
+  `intro_version: u32`, `replayed`, decoder, authenticator, adapt path, author
+  entry when local creation exists, and projector.
+- Core runs `authenticate -> adapt -> project` as three labelled stages.
   `AuthenticationNeed` parks/wakes the authentication stage; projector
   context/time needs park/wake the projection stage for an already authenticated
-  and lensed fact. A future lens need would park/wake the lens stage, but the
-  identity lens stub has no needs.
+  and adapted fact. A future adapt need would park/wake the adapt stage, but the
+  identity adapt stub has no needs.
 - `registry::protocol_projector()` builds a **ceiling-filtered** route runner
   containing only routes with `intro_version <= ceiling`, recomputed when
   trusted time or the manifest changes.
 - The route is typed inside protocol-owned functions and opaque to core. Core can
-  know that tag 50 uses a particular authenticator, lens path, and projector
-  without importing `ContentMessageFact`; the route-owned stage functions enforce
-  that the authenticated type, semantic type, and projector agree.
+  know that tag 50 uses a particular decoder, authenticator, adapt path, author,
+  and projector without importing `ContentMessageFact`; the route-owned stage
+  functions enforce that the decoded type, authenticated type, adapted semantic
+  type, author output, and projector agree.
 - `HandlerRoute` gains `intro_version`; `runs_during_replay` is already present.
 - `CliCommand` registration becomes a stable name mapped to a **version-tagged
   list** of run fns: `name -> [(intro 0, run_v1), (intro 7, run_v2)]`. The
@@ -311,7 +323,7 @@ and ceiling filters instead of moving the projector boundary again.
   negentropy by id/bytes so supported peers can avoid download loops during
   ceiling skew. They are still inert locally. When the manifest/ceiling changes,
   verifier/opening context arrives, or the binary updates to know the tag, the
-  pending bytes re-enter the normal `authenticate -> lens -> project` admission
+  pending bytes re-enter the normal `authenticate -> adapt -> project` admission
   path. If they then authenticate and are ceiling-active, they become active
   facts and project normally; if they fail authentication or remain unsupported,
   they stay pending or are rejected according to the admission result.
@@ -332,7 +344,7 @@ and ceiling filters instead of moving the projector boundary again.
   `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or
   `NeedsAuthentication(AuthenticationNeed)` for verifier/opening context.
   Projectors stop invoking `project_authenticated` themselves; that composition
-  becomes route-runner logic around the typed authenticator, lens, and projector.
+  becomes route-runner logic around the typed authenticator, adapt, and projector.
   Projectors, not authenticators, express semantic context, authority
   requirements, parking, purge rules, and reproject needs. A fact version
   chooses whether verifier key material is embedded or referenced; the runtime
@@ -355,9 +367,10 @@ closed:
   so `payload.id == offer.owner` holds by construction. Enforce it once at match
   construction (produce no match if the owner fact does not load) and delete the
   checked/unchecked accessor split, so every projector gets one always-safe
-  payload. The only check that stays projector-side is the **typed decode**
-  (`payload_as::<C>`) — "is this the fact *type* I expected?" — which core cannot
-  do generically.
+  payload. After the staged route lands, core derives the matched owner's
+  payload shape through that owner's route-owned `decode -> adapt` path. This is
+  a decoder path, not the authentication gate: the offer exists only because the
+  owner fact already passed its own primary route.
 - **Scope is pinned to the owning fact (core).** `FactScope` is unhashed
   admission metadata the emitter currently sets freely, and the emission gate
   (`enforce_owner_is_self`) pins only `owner`. Extend it to reject any emitted
@@ -374,109 +387,118 @@ closed:
 
 - A new incompatible fact version is a sibling `_vN/` directory (original stays
   unsuffixed; never renamed). The **bucket holds the deltas**:
-  - `layout.rs` / `fact.rs` / `authenticate.rs`: always present per version;
-    kept forever; routed by tag. The authenticator parses raw bytes,
-    computes/checks the fact id, verifies the fact-boundary cryptographic proof
-    (usually signature/domain, sometimes a container AEAD opening), enforces
-    intrinsic layout rules, and emits a typed authenticated fact. Its result
-    shape is `Authenticated(AuthenticatedFact<T>)`,
-    `NeedsAuthentication(AuthenticationNeed)`, or
-    `Invalid(AuthenticationError)`.
-  - `semantic.rs`: the in-memory typed value this version's projector consumes.
-    It is not a durable fact. It carries source fact ids and provenance because
-    the value is derived from signed bytes, not signed itself.
-  - `lens.rs`: present for `vN` when `N > 0`. In the linear default, `vN/lens.rs`
-    converts `vN-1::semantic` into `vN::semantic`. Existing unsuffixed families
-    still register an identity lens slot in their `FactRoute`; a file appears
-    only when a non-identity conversion exists. A lens never parses raw bytes,
-    queries context, parks, holds pending ingress, or performs authorization checks.
+  - `fact.rs`: the typed source value for this durable wire shape. It is not a
+    durable fact by itself; it carries source ids/provenance when the active
+    semantic value needs them.
+  - `encode.rs`: typed source value to canonical wire bytes, plus transcript or
+    signing-byte helpers. This replaces the encoding half of today's `layout.rs`.
+  - `decode.rs`: canonical wire bytes or `Fact` to typed source value. It checks
+    tag, length, padding, enum values, and canonical field shapes, but it does
+    not check fact id or signatures. This replaces the decoding half of today's
+    `layout.rs`.
+  - `author.rs`: local semantic construction: command/context/keys to a typed
+    value or `Fact`, including encryption, deterministic nonces, signing input
+    selection, and policy checks. This replaces fact-family `create.rs`; names
+    of non-family intents/handlers may remain `create_*`.
+  - `authenticate.rs`: always present per version, kept forever, and routed by
+    tag. It calls `decode`, computes/checks the fact id, verifies the
+    fact-boundary cryptographic proof (usually signature/domain, sometimes a
+    container AEAD opening), enforces intrinsic layout rules, and emits a typed
+    authenticated fact. Its result shape is
+    `Authenticated(AuthenticatedFact<T>)`, `NeedsAuthentication(AuthenticationNeed)`,
+    or `Invalid(AuthenticationError)`.
+  - `adapt.rs`: always represented in the route; existing unsuffixed families
+    start with an identity adapter. In the linear default, `vN/adapt.rs` converts
+    `vN-1::fact` into `vN::fact` or the active semantic value. An adapter never
+    parses raw bytes, queries context, parks, holds pending ingress, or performs
+    authorization checks.
   - `project.rs`: owned by the active ceiling semantic node; it consumes that
-    version's `semantic.rs` type, checks context/authority/purge requirements,
+    version's adapted semantic type, checks context/authority/purge requirements,
     and emits rows, context offers, and replayable intents. An old `project.rs`
     may be kept only when the old projector is itself the clearest
-    implementation of a lens.
-  - `create.rs`: always present per version; selected by ceiling through a
-    version-neutral constructor entry (so the old CLI need not be edited to reach
-    the new constructor).
+    implementation of an adapter.
   - `cli.rs`: present **only when the input surface changes**; selected by
     ceiling; absent ⇒ reuse previous. Its absence asserts that the prior parser's
-    collected parameters fully determine the new constructor's required inputs.
+    collected parameters fully determine the new `author.rs` entry's required
+    inputs.
   - `rows.rs` / `queries.rs`: shared at head; a v2 fact projects into the current
     row shape (ceiling-era rows). A genuinely new table is the rare exception.
 - Lineage lives in data and the registry, not the tree: a `supersedes_*` field /
   context offer plus the `intro_version` index. Shared field codecs are reached
   through a module-owned typed helper, never another module's raw layout codec.
 
-### Phase 4a — Scope-owned ceiling lenses
+### Phase 4a — Scope-owned ceiling adapters
 
-Scope-owned lenses apply to retained **durable facts**. They are not a general
+Scope-owned adapters apply to retained **durable facts**. They are not a general
 conversion layer for ephemeral transport/session prompts, live network frames,
 queued operational intents, or local diagnostic bytes. Those surfaces are either
 current-runtime work or transport compatibility, and are handled by their own
 floor/negotiation/retry rules.
 
-The projection pipeline is:
+The projection pipeline for primary facts is:
 
 ```text
 raw retained fact bytes
   -> tag route
-  -> version authenticator / reader
+  -> version authenticator
   -> typed authenticated fact
-  -> source semantic type
-  -> scope-owned lens chain to the active ceiling semantic type
+  -> source typed value
+  -> scope-owned adapter chain to the active ceiling semantic value
   -> ceiling projector
   -> rows, context offers, replayable intents
 ```
 
-The lens chain is per scope. Nodes are semantic Rust types, not durable facts.
-The default convention is linear: `vN/lens.rs` converts `vN-1::semantic` to
-`vN::semantic`. Replay to ceiling v2 runs `v0 authenticate -> v0 semantic ->
-v1/lens.rs -> v1 semantic -> v2/lens.rs -> v2 semantic -> v2/project.rs`.
+The adapter chain is per scope. Nodes are Rust value types, usually the family
+`fact.rs` type for that version, not durable facts. The default convention is
+linear: `vN/adapt.rs` converts the `vN-1` source value to the `vN` source value
+or active semantic value. Replay to ceiling v2 runs `v0 authenticate -> v0 value
+-> v1/adapt.rs -> v1 value -> v2/adapt.rs -> v2 value -> v2/project.rs`.
 Branched evolution or shortcuts are allowed only after renaming the edge
 explicitly, for example `v2/from_v0.rs`, and declaring the canonical path in the
 scope registry. A shortcut must be tested equivalent to the chain it replaces.
 
-A lens does not create a new signed fact. The original signature remains over
+An adapter does not create a new signed fact. The original signature remains over
 the original bytes and domain; the semantic output carries provenance pointing
 back to the signed source fact ids. If the old semantic type lacks data required
 by the next semantic type, the next type must represent that absence explicitly
 (`Unknown`, `NotPresent`, weaker capability, etc.) or the change needs a new
-durable fact. The lens must not invent authority, silently widen access, expose
-data hidden by a ceiling policy, or reinterpret old facts by accident.
-An authority lens may only preserve or narrow authority relative to the previous
+durable fact. The adapter must not invent authority, silently widen access,
+expose data hidden by a ceiling policy, or reinterpret old facts by accident.
+An authority adapter may only preserve or narrow authority relative to the previous
 authenticated semantic value. Any authority widening requires a new durable
 authority fact and normal projector/context validation; it cannot be introduced
-by a lens.
+by an adapter.
 
 Projectors still own context. Cross-scope projectors should depend on semantic
 contracts, not raw foreign fact layouts: content may require
 `auth.endpoint_authority@ceiling`, while auth owns how its durable facts and
-lens chain produce the ceiling auth semantic type. The auth projector then checks
+adapter chain produce the ceiling auth semantic type. The auth projector then checks
 workspace membership, revocations, purge facts, and policy facts, and it parks or
 rejects according to normal context rules.
 
-Context payloads are lensed too. A projector's needs and offers match on stable
-role/scope/range coordinates, but any matched owner fact is supplied to the
-projector only after core has run that owner fact through its own
-`authenticate -> lens` path. The consuming projector receives context payloads in
-the semantic version it expects at the active ceiling, not the raw historical
-layout that happened to satisfy the offer. This keeps version adaptation out of
-projectors: a ceiling-v2 content projector that needs an auth context sees the
-auth ceiling-v2 semantic value, even if the retained auth fact was authored as
-v0 and reached that value through the auth lens chain.
+Context payloads are adapted too, but they do not re-enter the authentication
+gate. A projector's needs and offers match on stable role/scope/range
+coordinates. For a matched offer, core loads the owner fact and derives the
+payload through that owner's route-owned `decode -> adapt` path. The consuming
+projector receives context payloads in the semantic version it expects at the
+active ceiling, not the raw historical layout that happened to satisfy the
+offer. This keeps version adaptation out of projectors without re-verifying
+context signatures: a ceiling-v2 content projector that needs an auth context
+sees the auth ceiling-v2 semantic value, even if the retained auth fact was
+authored as v0 and reached that value through the auth adapt chain.
 
 This replaces "keep every old projector forever" with a narrower obligation:
-keep every old authenticator/reader forever, keep the linear lens chain for
+keep every old decoder/authenticator forever, keep the linear adapter chain for
 retained durable facts to the active ceiling semantic type, and keep the ceiling
 projector for the current semantic contract. Security fixes land at the smallest
 layer: malformed old bytes are handled in authenticators, unsafe representation
-mapping in lenses, unsafe interpretation in projectors or policy facts, and bad
+mapping in adapters, unsafe interpretation in projectors or policy facts, and bad
 derived state by replaying with the fixed projector.
 
 ### Fact durability and replay classes
 
 Durability and replay are **two axes**, not one: *retained* (the bytes survive a
-wipe) and *replay-projected* (re-fed through `authenticate → lens → project` on
+wipe) and *replay-projected* (re-fed through `authenticate → adapt → project` on
 an upgrade wipe to rebuild derived state). The current code represents the
 second axis with `FactRoute.replayed: bool`.
 
@@ -485,22 +507,26 @@ second axis with `FactRoute.replayed: bool`.
   history, deterministic sync rows such as `sync::shared_fact`,
   `sync::compare`, and `sync::range_request`, connection lifecycle/receipt/frame
   records, local secrets that are deterministic replay inputs, and the cascade
-  test fact. Future versioned families in this class carry `authenticate.rs`,
-  `lens.rs`, and `project.rs`.
+  test fact. Future versioned families in this class carry `decode.rs`,
+  `authenticate.rs`, `adapt.rs`, and `project.rs`, plus `encode.rs`/`author.rs`
+  when the family can be locally authored.
 - **Retained but not replay-projected** (`replayed == false`) — facts kept in the
   store but deliberately excluded from upgrade replay. Today this set is exactly
   six tags, pinned by a registry guardrail: bootstrap request/response,
   connection request/response, and sync have/need. These families carry
-  `authenticate.rs` + `project.rs`, and no `lens.rs`.
+  `decode.rs` + `authenticate.rs` + `project.rs`; they may register an identity
+  adapter, but need no physical `adapt.rs` file until a non-identity conversion
+  is useful.
 - **Pending / non-protocol input** — raw network bytes before they have become
   a fact, live-only queued work, daemon schedules, and wire-admitted bytes held
   pending because the local runtime cannot yet authenticate, decrypt, or
   ceiling-admit them. Pending bytes are retained/syncable as bytes, but are not
-  replay-projected and do not have a lens until they re-enter admission and
+  replay-projected and do not have an adapter until they re-enter admission and
   become active facts.
 
-So **a fact has a `lens.rs` iff it is replay-projected**. Non-replayed families'
-`_vN/` buckets carry `authenticate.rs` + `project.rs` and no `lens.rs`.
+So replay-projected families carry a real or identity `adapt.rs` entry.
+Non-replayed families may register an identity adapter in the route but do not
+need a physical `adapt.rs` file until a non-identity conversion is useful.
 
 This **replaces the connection-retirement-before-replay dance** for
 non-replayed connection establishment facts: the wipe simply does not re-project
@@ -539,7 +565,7 @@ scope.
   the key hint. The carrier authenticator/opener proves and opens the frame
   boundary with connection context; the projector materializes the recovered
   inner fact bytes and receipts. Those inner facts then re-enter the normal
-  `authenticate -> lens -> project` pipeline by their own tags. The `TRNS` 4-byte magic is a
+  `authenticate -> adapt -> project` pipeline by their own tags. The `TRNS` 4-byte magic is a
   stream recognizer owned by the framing substrate (`core/network.rs`), not a
   fact-version device.
 - **Negotiate up** between capable peers (highest common frame version inside the
@@ -563,7 +589,7 @@ scope.
 
 - Adding or changing a fact family requires a manifest entry naming: the tag,
   its `intro_version`, the blocking non-capable releases and their expiries (per
-  platform), the kept old authenticators/readers, the lens chain to the active
+  platform), the kept old decoders/authenticators, the adapter chain to the active
   ceiling semantic type, the security-deprecation policy, the replay output, and
   the tests below.
 - **No-regression gate.** A production release whose `supported_protocol` does
@@ -588,7 +614,7 @@ not the original invite key, so a normal device cannot reissue the same
 `auth::user` shape. The fix is a new ceiling-gated profile fact — a new tag in a
 sibling bucket (Phase 4), not a same-shaped rewrite. The old `auth::user`
 authenticator still proves the old signed bytes are authentic, while the auth
-lens/projector path preserves membership authority and refuses to use the
+adapt/projector path preserves membership authority and refuses to use the
 plaintext field as a display claim once the policy says it is unsafe.
 Illustrative shape:
 
@@ -609,7 +635,7 @@ fact and the signer `auth_endpoint_shared` fact, and admits only when both are i
 the same workspace, `endpoint_shared.user_authority_fact_id == subject_user_id`,
 and the signer key matches the endpoint_shared row. It may replace display data
 only — never membership, admin authority, the original user key, or the subject
-id. The old `auth::user` authenticator plus lens keeps emitting authenticated
+id. The old `auth::user` authenticator plus adapt keeps emitting authenticated
 membership identity without materializing plaintext into display rows; a policy
 fact can hide or suppress old plaintext names; live devices publish encrypted
 profile facts opportunistically. Purging the raw plaintext bytes first needs an
@@ -1220,7 +1246,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 ### TIME-29 — pending above-ceiling input activates on next wipe+replay once the ceiling rises  `replay-cli`
 - **Setup:** (proposed) client previously retained a wire-admitted fact with a future tag as pending; client subsequently leaves blocked mode AND ceiling rises (e.g. blocking release expired) to cover that tag.
 - **Action:** raise ceiling, then wipe+replay.
-- **Expect:** the pending bytes re-enter `authenticate -> lens -> project`, route to the tag's kept-forever adapter, and project if authentication and semantic context succeed. No network resend is required for bytes already retained as pending.
+- **Expect:** the pending bytes re-enter `authenticate -> adapt -> project`, route to the tag's kept-forever adapter, and project if authentication and semantic context succeed. No network resend is required for bytes already retained as pending.
 - **Defends:** ADMISSION pending activation after ceiling rise; INVARIANT 4 (replay determinism over retained facts only).
 - **Refs:** ADMISSION model; ceiling-filtered routing by own tag; design rules 4/5.
 
@@ -1542,10 +1568,10 @@ lock: (a) `FactRoute { tag, projector, replayed }` carries no `intro_version`;
 (b) `RouterProjector` is not ceiling-filtered — it dispatches every registered
 tag unconditionally; (c) authentication is currently composed into projection
 with `project_authenticated`, with no core-managed route runner that treats
-authentication, lensing, and projection as separate stages. Versioning adds an
+authentication, adapting, and projection as separate stages. Versioning adds an
 admission gate ahead of projection: wire-invalid input drops; wire-admitted
 unknown or above-ceiling bytes become pending; and ceiling-active known tags
-authenticate by tag, pass through the route's lens slot, then project. Tests below
+authenticate by tag, pass through the route's adapt slot, then project. Tests below
 that assert pending ingress and ceiling-filtering are
 RED against the current tree and define the target
 behavior; tests that assert global tag uniqueness / registry shape are GREEN
@@ -1591,7 +1617,7 @@ versioning assertions against a future ceiling still start RED.
 ### ROUTE-05 — received above-ceiling fact becomes PENDING before projection  `projector-unit`
 - **Setup:** Router over `FACT_ROUTES` with a ceiling filter applied. Ceiling C. Build a fact whose first byte is a tag T with `V(T) > C` — model this with a tag that the ceiling-filtered router treats as inactive (e.g. a future `message:2` tag, or a registered tag deliberately marked intro_version > C).
 - **Action:** Deliver the fact through the receive/admission path before projection.
-- **Expect:** The fact is retained as pending bytes before authenticator/lens/projector dispatch: NO row mutations, NO emitted inner facts, NO display, NOT counted, NO authority, NO purge effect. It may be indexed by id/bytes for negentropy, but it is not an active validated fact. This must not surface as a user-facing projector error.
+- **Expect:** The fact is retained as pending bytes before authenticator/adapt/projector dispatch: NO row mutations, NO emitted inner facts, NO display, NOT counted, NO authority, NO purge effect. It may be indexed by id/bytes for negentropy, but it is not an active validated fact. This must not surface as a user-facing projector error.
 - **Defends:** ADMISSION — received above-ceiling input is pending: syncable and waiting, but not active protocol truth.
 - **Refs:** future ceiling admission gate before `RouterProjector::project`; current unknown-tag projection error is the implementation gap the gate avoids for wire-admitted future input.
 
@@ -1769,26 +1795,27 @@ versioning assertions against a future ceiling still start RED.
 - **Expect:** (a) is a normal admitted fact with whatever durable fact-log status its family normally has. (b) is retained pending, with no read-model rows and no `ProjectionOutput` bookkeeping. Pending is not silently collapsed into "projected with no rows".
 - **Defends:** ADMISSION mechanism — above-ceiling input is syncable pending bytes, not an active no-op projection.
 - **Refs:** future admission gate; `ProjectionOutput` remains projection-only.
-## 5. Constructors (create) across new/old x scope
+## 5. Authors (`author.rs`) across new/old x scope
 
-Scope of this cluster: the *constructor* (the `create.rs` / fact-builder layer that
-emits a brand-new local fact). Under the consolidated model a constructor is
-version-bucketed: `layout/fact/project/create per version (kept forever, routed by
-tag)`. The version-neutral entry (the CLI run fn / intent handler) must dispatch to
-the **ceiling-appropriate** `create.rs`, never the binary's head. Local creation of
-an above-ceiling fact is **REFUSED** (admission rule). Deterministic constructors
-(`auth::key_wrap::create::create_key_wrap_fact`, `sync::need_id::create::fact`,
-`sync::compare::create::start_compare_fact`) must reproduce identical bytes on
-replay (invariant 4).
+Scope of this cluster: the *author* layer (`author.rs` in the target shape; often
+today's `create.rs` or a fact-builder plus `layout::encode_fact`) that emits a
+brand-new local fact. Under the consolidated model local authoring is
+version-bucketed: `fact/encode/decode/author/authenticate/adapt/project` per
+version as needed. The version-neutral entry (the CLI run fn / intent handler)
+must dispatch to the **ceiling-appropriate** `author.rs`, never the binary's
+head. Local creation of an above-ceiling fact is **REFUSED** (admission rule).
+Deterministic authors (`auth::key_wrap::create::create_key_wrap_fact` today,
+`sync::need_id::create::fact` today, `sync::compare::create::start_compare_fact`
+today) must reproduce identical bytes on replay (invariant 4).
 
 Grounding note: today every family has a single live constructor (one `create.rs`
-or one `fact.rs`+`layout::encode_fact` builder) and exactly one tag in `FACT_ROUTES`.
-These tests describe the behavior a *second* bucket version (e.g. `message:2`,
-`file:3`) must exhibit and the regressions the current single-version code would
-show if a newer binary naively emitted its head. Where a family has no `create.rs`
-today (reaction, file, file_slice, have_id, recipient_key) the constructor is the
-`FamilyFact` struct + `layout::encode_fact`; the "ceiling-appropriate create"
-contract still applies to whichever `_vN` builder is selected.
+or one `fact.rs` + `layout::encode_fact` builder) and exactly one tag in
+`FACT_ROUTES`. These tests describe the behavior a *second* bucket version (e.g.
+`message:2`, `file:3`) must exhibit and the regressions the current
+single-version code would show if a newer binary naively emitted its head. Where
+a family has no `create.rs` today (reaction, file, file_slice, have_id,
+recipient_key), the target role is still `author.rs`; the current implementation
+uses the `FamilyFact` struct + `layout::encode_fact` as that authoring path.
 
 Invariants referenced: (1) VISIBILITY, (2) RENDERING UNIFORMITY, (3) CEILING
 MONOTONICITY, (4) REPLAY DETERMINISM, (5) READERS FOREVER / TRANSPORT [floor,head],
