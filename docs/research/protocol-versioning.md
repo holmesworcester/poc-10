@@ -432,6 +432,16 @@ lens chain produce the ceiling auth semantic type. The auth projector then check
 workspace membership, revocations, purge facts, and policy facts, and it parks or
 rejects according to normal context rules.
 
+Context payloads are lensed too. A projector's needs and offers match on stable
+role/scope/range coordinates, but any matched owner fact is supplied to the
+projector only after core has run that owner fact through its own
+`authenticate -> lens` path. The consuming projector receives context payloads in
+the semantic version it expects at the active ceiling, not the raw historical
+layout that happened to satisfy the offer. This keeps version adaptation out of
+projectors: a ceiling-v2 content projector that needs an auth context sees the
+auth ceiling-v2 semantic value, even if the retained auth fact was authored as
+v0 and reached that value through the auth lens chain.
+
 This replaces "keep every old projector forever" with a narrower obligation:
 keep every old authenticator/reader forever, keep the linear lens chain for
 retained durable facts to the active ceiling semantic type, and keep the ceiling

@@ -392,6 +392,10 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "Pending is syncable and waiting",
         "pending ingress",
         "not active protocol truth",
+        "Context payloads are lensed too",
+        "needs and offers match on stable role/scope/range coordinates",
+        "run that owner fact through its own `authenticate -> lens` path",
+        "receives context payloads in the semantic version it expects at the active ceiling",
         "the projector materializes the recovered inner fact bytes and receipts",
         "Those inner facts then re-enter the normal authenticate/project pipeline by their own tags",
     ] {
