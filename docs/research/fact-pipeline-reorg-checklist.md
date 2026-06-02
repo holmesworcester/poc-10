@@ -40,6 +40,12 @@ WRITE:  cli → command → author → encode → authenticate(self-check) → a
   `rows.rs`/`queries.rs` (shared at head), `cli.rs` (only when input surface
   changes).
 
+**Doc style (apply across the fan-out):** each file's `//!` doc says, narratively
+and for a human reader, *what the file is for and does* — not defensive
+"does not / must not" jargon aimed at an LLM. The "what it does NOT do" boundaries
+live once in `docs/RULES.md` (it now has a `## CLI` section alongside `## Commands`).
+Confirmed on `content/message` cli.rs + commands.rs; project.rs approved as-is.
+
 ## Phase 0 — Core pipeline (additive, behavior-preserving)  ✅ DONE
 
 - [x] `Adapter` trait (`type Source; type Semantic; fn adapt`) + `IdentityAdapter<T>` in `core/projectors.rs`.
@@ -71,9 +77,13 @@ still allowed for the 42 un-migrated families). In `poc10_intent_cleanliness_tes
 - [x] `target_projectors_authenticate_primary_*` accepts `project_adapted::<` + `super::adapt::` + `super::authenticate::` (multi-line) OR the old `project_authenticated::<super::authenticate::`.
 - [x] `target_row_layouts_do_not_emit_context_or_intents` bans `RowMutation` (the effect wrapper) instead of `TableDelete` — rows.rs builds insert AND keyed-delete payloads, project emits the RowMutation.
 - [x] all 55 intent-cleanliness guardrails green.
-- [ ] STILL TODO: add `author.rs` may-not-ref `CommandContext`/`Store`/`Runtime` guardrail (new — enforces author⊥commands).
-- [ ] STILL TODO: guardrail that `decode.rs` has no signature/id check; `encode.rs` owns transcripts.
+- [x] `target_authors_do_not_read_the_runtime` — author.rs may not contain `CommandContext`/`Store`/`Runtime` (enforces author⊥commands). **Landed before the fan-out** so parallel agents can't drift.
+- [x] `target_decoders_do_not_check_id_or_signatures` — decode.rs may not contain `verify_fact_id`/`verify_signature`/`ed25519_verify`/`ed25519_sign` (id/sig belong in authenticate.rs). **Landed before the fan-out.**
+- Note: these substring guardrails double as narrative-doc enforcers — a defensive doc that *names* the banned type to say "does not use X" trips them, so file docs stay "what it does." RULES.md now states both boundaries (Commands section).
+- [ ] (optional later) guardrail that `encode.rs` owns the transcripts.
 - [ ] verify `tests/documentation_layout_test.rs` (updated by agent doc commits — re-run after model work).
+
+**Doc-style convention is now enforced + documented:** narrative file docs (what the file does); the "does not do" boundaries live in `docs/RULES.md` (`## CLI`, `## Commands` author⊥commands + decode⊥authenticate). The numbered `// 1./2./3.` projector body markers are retired (they referenced a numbered top-level doc that is now narrative); `target_projectors_document_policy_narratives` no longer requires them.
 
 ## Phase 3 — Fan out remaining 39 families (workflow; after models reviewed)
 

@@ -416,20 +416,12 @@ fn target_projectors_document_policy_narratives() {
             continue;
         }
 
+        // The projector documents what it does in its module doc. Body comments
+        // are plain prose describing each block, not numbered references back to
+        // the doc (the doc is narrative, not a numbered list).
         let mut missing = Vec::new();
         if !production.contains("//! POLICY.") {
             missing.push("`//! POLICY.`");
-        }
-        // With primary authentication in `authenticate.rs`, a projector body
-        // starts at whatever section it actually owns: scope/context (`// 2.`)
-        // or, for a minimal projector that only writes rows, materialize
-        // (`// 3.`). Any numbered body marker satisfies "policy mirrored in the
-        // body"; require at least one.
-        if !production.contains("// 1.")
-            && !production.contains("// 2.")
-            && !production.contains("// 3.")
-        {
-            missing.push("numbered projector body markers");
         }
         if !missing.is_empty() {
             offenders.push(format!("{relative} missing {}", missing.join(" and ")));
@@ -438,7 +430,7 @@ fn target_projectors_document_policy_narratives() {
 
     assert!(
         offenders.is_empty(),
-        "fact-module projectors should document their admission policy inline and mirror it in numbered body sections:\n{}",
+        "fact-module projectors should document what they do in their `//! POLICY.` module doc:\n{}",
         offenders.join("\n")
     );
 }
@@ -627,6 +619,59 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
     assert!(
         offenders.is_empty(),
         "temporary protocol context.rs helper files are not the context source of truth; range encoders and candidate validation belong beside their domain, while ProjectionContext inspection belongs in project.rs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_authors_do_not_read_the_runtime() {
+    // author.rs is pure construction from an explicit snapshot; gathering runtime
+    // state is commands.rs's job. (This also keeps author.rs docs narrative — a
+    // doc that names these types to say "does not use" would trip here too.)
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in fact_family_files_named(root, "author.rs") {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        for forbidden in ["CommandContext", "Runtime", "Store"] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "author.rs is pure construction from a snapshot; reading the runtime \
+         (CommandContext/Store/Runtime) is commands.rs's job:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_decoders_do_not_check_id_or_signatures() {
+    // decode.rs turns bytes into the typed value (tag/length/shape only); id and
+    // signature proofs belong in authenticate.rs.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for path in fact_family_files_named(root, "decode.rs") {
+        let text = source_text(&path);
+        let production = production_text_before_unit_tests(&text);
+        for forbidden in ["verify_fact_id", "verify_signature", "ed25519_verify", "ed25519_sign"] {
+            if production.contains(forbidden) {
+                offenders.push(format!(
+                    "{} contains {forbidden:?}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "decode.rs turns bytes into the typed value; id and signature checks \
+         belong in authenticate.rs:\n{}",
         offenders.join("\n")
     );
 }

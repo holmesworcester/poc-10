@@ -111,14 +111,17 @@ impl AuthenticatedProjector<super::authenticate::ContentMessageAuthenticator>
         authenticated: AuthenticatedFact<'_, super::fact::ContentMessageFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 1. Scope: the fact's scope must match the workspace named in the body.
+        // Scope: the fact's scope must match the workspace named in the body.
         let (fact, message) = authenticated.into_parts();
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         if fact.scope != scope {
             return Err("content message fact scope does not match body workspace".to_string());
         }
 
-        // 2. Context and deletion gates.
+        // Collect the context this message depends on — signer, author, deletion,
+        // retention floor, and text key — and resolve it as each arrives: expiry,
+        // the retention floor, or a deletion removes the message; otherwise the
+        // signer and author are validated and the message's metadata is published.
         let signer_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_signer",
@@ -240,7 +243,8 @@ impl AuthenticatedProjector<super::authenticate::ContentMessageAuthenticator>
         };
         let text = decrypt_text(&message, secret_payload)?;
 
-        // 3. Materialize.
+        // Materialize: once the text key opens the ciphertext, write the
+        // opened-message row and offer the message as context.
         Ok(metadata_output
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,

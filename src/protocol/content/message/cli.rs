@@ -1,10 +1,11 @@
-//! CLI adapter for opened content commands and queries.
+//! The `con` message commands and queries.
 //!
-//! This file owns CLI-facing concerns for the message surface: argv parsing,
-//! selector resolution, and text formatting. Runtime draining,
-//! projection, handler dispatch, and persistence stay in the root app/runtime
-//! boundary. Local payload file reads/writes go through core helpers; they do
-//! not happen through direct `std::fs` calls here.
+//! These are the message-surface operations a person runs: send a message,
+//! generate test messages, react to one, send or save a file, delete a message,
+//! and list messages, files, or a content count. Each one parses its arguments,
+//! resolves any selector (a message or file picked by a short id prefix) to a
+//! fact id, runs the matching command or query, and formats the result for the
+//! terminal.
 
 use std::collections::BTreeMap;
 use std::path::Path;

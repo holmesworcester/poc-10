@@ -1,11 +1,11 @@
-//! Content-message authoring: pure local construction.
+//! Building a message fact from an authoring snapshot.
 //!
-//! Given a gathered authoring snapshot (capabilities, active policy, retained
-//! floor) and the message text, this derives the AEAD nonce and associated data
-//! via `encode`'s transcripts, encrypts the text, signs the canonical envelope,
-//! and encodes the fact. It is pure: it never reads `CommandContext`, the store,
-//! or the `Runtime` — `commands.rs` gathers the snapshot and calls in here. The
-//! final step self-authenticates the fact, the write pipeline's exit gate.
+//! Given a gathered snapshot — the workspace's signing and encryption
+//! capabilities, the active retention policy, and the retained floor — plus the
+//! message text, this derives the AEAD nonce and associated data via `encode`'s
+//! transcripts, encrypts the text, signs the canonical envelope, encodes the
+//! fact, and self-authenticates it (the write pipeline's exit gate).
+//! `commands.rs` gathers the snapshot and calls in here.
 
 use crate::core::command_context::{LocalEncryptionCapability, LocalSigningCapability, WorkspaceId};
 use crate::core::crypto;

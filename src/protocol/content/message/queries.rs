@@ -1,10 +1,18 @@
-//! Read-only queries over semantic message projections.
+//! Read-only queries over the message family's projected rows.
 //!
-//! Message projection splits the durable view into live opened messages,
-//! authored message rows, and tombstones. This file gathers those rows for UI,
-//! CLI, retention, and sync helpers without changing state. Keep it as the
-//! place to ask "what messages does the store expose?" rather than
-//! "should this message be admitted?"
+//! Projection materializes three kinds of row — opened (decrypted) messages,
+//! authored message metadata, and tombstones — and these functions read them
+//! back, all as pure reads:
+//!
+//!   - Display: `opened_messages` lists a workspace's readable messages,
+//!     `content_message_rows` / `content_message_row` fetch authored message
+//!     metadata, and `count_for_workspace` returns its content count.
+//!   - Lookups: `message_author_user_id` (who authored a message),
+//!     `message_exists`, and `max_created_at_ms` (the latest message timestamp).
+//!   - Retention: `retained_floor_from_tombstones` plus the tombstone tallies
+//!     (`message_tombstone_count`, `message_tombstone_count_at_or_after`,
+//!     `message_tombstone_ids_below`) that authoring and retention use to decide
+//!     which minutes are still covered.
 
 use crate::core::facts::FactId;
 use crate::core::store::Store;

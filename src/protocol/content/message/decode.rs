@@ -1,10 +1,10 @@
 //! Content-message decoding: canonical wire bytes / `Fact` → typed value, and
 //! the encrypted-slot → text recovery.
 //!
-//! This file checks tag, length, and canonical field shape and produces the
-//! typed `ContentMessageFact`. It performs no id check and no signature
-//! verification — those are `authenticate.rs`'s job. The `FactCodec` lives here
-//! so the read pipeline and context provision decode through one entry.
+//! `decode_fact` checks tag, length, and canonical field shape and produces the
+//! typed `ContentMessageFact`; `recover_text` reads message text back out of a
+//! decrypted slot. The `FactCodec` lives here so the read pipeline and context
+//! provision decode a context owner through one entry.
 
 use crate::core::facts::Fact;
 use crate::core::wire;

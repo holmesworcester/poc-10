@@ -1,9 +1,11 @@
-//! Content-message commands: the runtime entry points that author messages.
+//! Authoring messages: the `send` and `generate` operations.
 //!
-//! This is the only message-family file that reads `CommandContext`, the store,
-//! or the `Runtime`. It gathers the local authoring snapshot (signing/encryption
-//! capabilities, active policy, retained floor), then hands it to the pure
-//! `author` constructor. `cli.rs` calls these.
+//! This is where a message gets created. `send_message` and `generate_messages`
+//! read what authoring needs from local state — the workspace's signing and
+//! encryption capabilities, the active retention policy, and the retained floor
+//! — gather it into a snapshot, and hand that to `author` to build the signed,
+//! encrypted message fact(s). `ContentMessageVault` packages those local
+//! capabilities for callers that drive a command directly.
 
 use crate::core::command_context::{
     CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
