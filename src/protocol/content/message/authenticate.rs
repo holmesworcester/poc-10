@@ -2,21 +2,17 @@
 //!
 //! POLICY. Authenticating a `content_message` fact proves, over its signed bytes
 //! alone:
-//!   1. LAYOUT. The bytes decode to a canonical content-message envelope — right
-//!      tag, fixed width, valid fields — through the family codec.
+//!   1. LAYOUT. The bytes decode to a canonical content-message envelope through
+//!      `decode.rs`.
 //!   2. ID. The content id equals `hash(bytes)`.
-//!   3. SIGNATURE. The author signature verifies over the canonical public
-//!      envelope, which covers the ciphertext slot. The verifier key is embedded
-//!      in the fact, so this needs no context.
+//!   3. SIGNATURE. The author signature verifies over the canonical envelope
+//!      (`encode::signing_bytes`), using the embedded verifier key, so it needs
+//!      no context.
 //!
-//! It proves nothing else. Admission scope is unsigned local metadata, not part
-//! of these bytes, so the workspace-scope check is interpretation the projector
-//! owns — that keeps the workspace-id format, its type, and the rule itself
-//! behind the lens and the single ceiling projector, free to evolve. Decryption
-//! of the message text likewise stays in the projector: the text key is secret
-//! context and decryption yields read-model meaning. The authenticated payload
-//! is the decoded fact; the projector proves scope, signer, author, deletion,
-//! retention, and secret context and materializes rows.
+//! It proves nothing else. Admission scope, decryption, authority, and
+//! materialization are the projector's job. This authenticator is also the write
+//! pipeline's exit gate (`authenticate_authored`) — `author` self-checks every
+//! fact it builds through this same code.
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{
@@ -39,17 +35,24 @@ impl Authenticator for ContentMessageAuthenticator {
 }
 
 /// Prove a content-message fact authentic over its own bytes.
-///
-/// Context-free, so the steps chain with `?`; `authenticate` maps the result to
-/// an `Authentication` outcome.
 fn authenticate_message(fact: &Fact) -> Result<ContentMessageFact, String> {
     // 1. Layout.
-    let message = super::Codec::decode_fact(fact)?;
+    let message = super::decode::Codec::decode_fact(fact)?;
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&message)?;
+    // 3. Signature over the canonical envelope (embedded verifier key).
+    verify_signature(&message)?;
     Ok(message)
+}
+
+/// Verify the author signature over the canonical signing envelope.
+pub fn verify_signature(message: &ContentMessageFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &message.signer_public_key,
+        &super::encode::signing_bytes(message)?,
+        &message.signature,
+        "content message",
+    )
 }
 
 #[cfg(test)]
@@ -57,10 +60,10 @@ mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
     use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::protocol::content::message::encode;
     use crate::protocol::content::message::fact::{
         ContentMessageFact, MessageCiphertext, NONCE_BYTES,
     };
-    use crate::protocol::content::message::layout;
 
     use super::ContentMessageAuthenticator;
 
@@ -85,13 +88,13 @@ mod tests {
         };
         let (_, signature) = crypto::ed25519_sign_canonical(
             &PRIVATE_KEY,
-            &layout::signing_bytes(&message).expect("signing bytes"),
+            &encode::signing_bytes(&message).expect("signing bytes"),
         );
         message.signature = signature;
         Fact::new(
             crate::protocol::auth::workspace::scope(WORKSPACE_ID),
             message.created_at_ms,
-            layout::encode_fact(&message).expect("encode message"),
+            encode::encode_fact(&message).expect("encode message"),
         )
     }
 

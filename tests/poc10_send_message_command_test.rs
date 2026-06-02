@@ -15,8 +15,10 @@ use topo::core::command_context::{
 use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::content::message::create::{associated_data, recover_text, send_message};
-use topo::protocol::content::message::layout::{decode_fact, verify_signature};
+use topo::protocol::content::message::authenticate::verify_signature;
+use topo::protocol::content::message::commands::send_message;
+use topo::protocol::content::message::decode::{decode_fact, recover_text};
+use topo::protocol::content::message::encode::associated_data;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 struct FixedClock(Cell<u64>);

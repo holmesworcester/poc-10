@@ -465,9 +465,16 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
         // `project_authenticated::<super::authenticate::_, _>()` and implements
         // `AuthenticatedProjector<super::authenticate::_>`, so it starts from an
         // already-authenticated fact and never parses its own primary bytes.
-        let routes_authenticated =
-            production.contains("project_authenticated::<super::authenticate::")
-                && production.contains("impl AuthenticatedProjector<super::authenticate::");
+        // Old families delegate to `project_authenticated::<Authenticator, _>`;
+        // migrated families delegate to `project_adapted::<Authenticator, Adapter, _>`
+        // (authenticate → identity adapt → project). Either is accepted.
+        let delegates_authenticated =
+            production.contains("project_authenticated::<super::authenticate::");
+        let delegates_adapted = production.contains("project_adapted::<")
+            && production.contains("super::authenticate::")
+            && production.contains("super::adapt::");
+        let routes_authenticated = (delegates_authenticated || delegates_adapted)
+            && production.contains("impl AuthenticatedProjector<super::authenticate::");
         if !routes_authenticated {
             missing_delegation.push(relative.clone());
         }
@@ -630,6 +637,10 @@ fn target_row_layouts_do_not_emit_context_or_intents() {
     let mut offenders = Vec::new();
     for path in fact_family_files_named(root, "rows.rs") {
         let text = source_text(&path);
+        // rows.rs builds row-mutation payloads (the `TableInsert` insert builders
+        // and the keyed `TableDeleteWhere` delete builders that are their
+        // counterpart); the projector emits the wrapping `RowMutation` and core
+        // executes it. It must not do context, projection, or intent work.
         for forbidden in [
             "ContextNeed",
             "ContextOffer",
@@ -638,7 +649,7 @@ fn target_row_layouts_do_not_emit_context_or_intents() {
             "Projector",
             "Intent",
             "AtomicIntent",
-            "TableDelete",
+            "RowMutation",
         ] {
             if text.contains(forbidden) {
                 offenders.push(format!(
@@ -1161,9 +1172,15 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 10] = [
+const STANDARD_FAMILY_FILES: [&str; 14] = [
     "fact.rs",
     "layout.rs",
+    // Pipeline-stage role files (target shape): encode/decode replace layout's
+    // two halves, author replaces create, adapt is the identity version slot.
+    "encode.rs",
+    "decode.rs",
+    "author.rs",
+    "adapt.rs",
     // Primary-fact authentication: decode + id-check + fact-boundary signature
     // or container opening + intrinsic field rules, ahead of projection.
     "authenticate.rs",
@@ -1491,7 +1508,8 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let relative_key = format!("{scope}/{family}");
             let has_normal_fact_shape = family_dir.join("fact.rs").is_file()
-                && family_dir.join("layout.rs").is_file()
+                && (family_dir.join("layout.rs").is_file()
+                    || family_dir.join("decode.rs").is_file())
                 && family_dir.join("project.rs").is_file();
             if !has_normal_fact_shape
                 && !NON_FACT_SCOPE_DIR_EXCEPTIONS.contains(&relative_key.as_str())
@@ -1670,22 +1688,23 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let has_fact = family_dir.join("fact.rs").is_file();
             let has_layout = family_dir.join("layout.rs").is_file();
-            if !has_fact && !has_layout {
+            let has_decode = family_dir.join("decode.rs").is_file();
+            if !has_fact && !has_layout && !has_decode {
                 continue;
             }
 
             let relative = family_dir.strip_prefix(root).unwrap().display();
             let has_project = family_dir.join("project.rs").is_file();
-            if !has_fact || !has_layout || !has_project {
+            if !has_fact || !(has_layout || has_decode) || !has_project {
                 offenders.push(format!(
-                    "{relative} is fact-like but does not have fact.rs, layout.rs, and project.rs"
+                    "{relative} is fact-like but does not have fact.rs, a decoder (layout.rs or decode.rs), and project.rs"
                 ));
                 continue;
             }
 
-            let layout_route = format!("{scope}::{family}::layout::");
+            let tag_route = format!("=> {scope}::{family}::");
             let project_route = format!("{scope}::{family}::project::");
-            if !registry.contains(&layout_route) || !registry.contains(&project_route) {
+            if !registry.contains(&tag_route) || !registry.contains(&project_route) {
                 offenders.push(format!(
                     "{relative} is fact-like but is not registered in FACT_ROUTES"
                 ));
@@ -1716,7 +1735,8 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let fact_path = family_dir.join("fact.rs");
             let layout_path = family_dir.join("layout.rs");
-            if !fact_path.is_file() && !layout_path.is_file() {
+            let decode_path = family_dir.join("decode.rs");
+            if !fact_path.is_file() && !layout_path.is_file() && !decode_path.is_file() {
                 continue;
             }
 
@@ -1735,11 +1755,11 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
                 }
             }
 
-            let route_marker = format!("=> {scope}::{family}::layout::");
+            let route_marker = format!("{scope}::{family}::project::");
             let route_count = registry.matches(&route_marker).count();
             if route_count != 1 {
                 offenders.push(format!(
-                    "{relative} has {route_count} projector routes through its layout"
+                    "{relative} has {route_count} projector routes"
                 ));
             }
         }

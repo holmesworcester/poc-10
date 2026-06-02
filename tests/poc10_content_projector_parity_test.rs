@@ -118,7 +118,7 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
-        content::message::layout::encode_fact(&message).expect("encode message"),
+        content::message::encode::encode_fact(&message).expect("encode message"),
         message.created_at_ms,
     );
 
@@ -396,12 +396,12 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     };
     message.signature = crypto::ed25519_sign(
         &CONTENT_SIGNING_KEY,
-        &content::message::layout::signing_bytes(&message).expect("message signing bytes"),
+        &content::message::encode::signing_bytes(&message).expect("message signing bytes"),
     );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         message.created_at_ms,
-        content::message::layout::encode_fact(&message).expect("encode message"),
+        content::message::encode::encode_fact(&message).expect("encode message"),
     )
 }
 
@@ -428,7 +428,7 @@ fn unsigned_message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         message.created_at_ms,
-        content::message::layout::encode_fact(&message).expect("encode message"),
+        content::message::encode::encode_fact(&message).expect("encode message"),
     )
 }
 
@@ -501,14 +501,14 @@ fn signed_content_fact_in_workspace(
 fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, String> {
     match payload.first().copied() {
         Some(content::message::TYPE_CONTENT_MESSAGE) => {
-            let mut fact = content::message::layout::decode_fact(&payload)?;
+            let mut fact = content::message::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &content::message::layout::signing_bytes(&fact)?,
+                &content::message::encode::signing_bytes(&fact)?,
             );
-            content::message::layout::encode_fact(&fact)
+            content::message::encode::encode_fact(&fact)
         }
         Some(content::file::TYPE_CONTENT_FILE) => {
             let mut fact = content::file::layout::decode_fact(&payload)?;

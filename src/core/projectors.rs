@@ -623,6 +623,85 @@ where
     }
 }
 
+// ----- Version adaptation: the stage between authenticate and project -----
+
+/// A scope-owned version adapter: authenticated source value → active semantic
+/// value.
+///
+/// It sits between `authenticate` and `project` in the staged read pipeline.
+/// Existing (unsuffixed) families register an identity adapter; non-identity
+/// adapters arrive with version splits. An adapter never parses raw bytes,
+/// queries context, parks, or performs authorization — it is a pure value
+/// conversion.
+pub trait Adapter {
+    /// The authenticated source value (the family's current `fact.rs` type).
+    type Source;
+    /// The active ceiling semantic value handed to the projector.
+    type Semantic;
+
+    fn adapt(source: Self::Source) -> Result<Self::Semantic, String>;
+}
+
+/// Identity adapter: the authenticated source value is already the active
+/// semantic value. Every current family uses this until a version split
+/// introduces a real conversion edge.
+pub struct IdentityAdapter<T>(std::marker::PhantomData<T>);
+
+impl<T> Adapter for IdentityAdapter<T> {
+    type Source = T;
+    type Semantic = T;
+
+    fn adapt(source: T) -> Result<T, String> {
+        Ok(source)
+    }
+}
+
+/// Authenticate a fact through `A`, run it through adapter `Ad`, then project.
+///
+/// The staged read pipeline `authenticate → adapt → project`. `Ad` is the
+/// scope's identity adapter for current families (`Source == Semantic`), so this
+/// is behaviour-identical to `project_authenticated`; a version split later
+/// swaps in a non-identity adapter without touching the authenticator or the
+/// projector.
+pub fn project_adapted<A, Ad, P>(
+    projector: &P,
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<ProjectionOutput, String>
+where
+    A: Authenticator,
+    Ad: Adapter<Source = A::Authenticated, Semantic = A::Authenticated>,
+    P: AuthenticatedProjector<A>,
+{
+    match A::authenticate(fact, context) {
+        Authentication::Authenticated(authenticated) => {
+            let (fact_ref, source) = authenticated.into_parts();
+            let semantic = Ad::adapt(source)?;
+            projector.project_authenticated(AuthenticatedFact::new(fact_ref, semantic), context)
+        }
+        Authentication::NeedsAuthentication(need) => Ok(ProjectionOutput::new().need(need)),
+        Authentication::Invalid(error) => Err(error),
+    }
+}
+
+/// Self-check a freshly authored fact against its own authenticator.
+///
+/// The write pipeline's exit gate, mirroring the read pipeline's entry gate:
+/// after `author → encode`, run the family authenticator over the encoded bytes.
+/// `Authenticated` (signature verified with an embedded key) and
+/// `NeedsAuthentication` (signature awaits context the author already satisfied)
+/// both pass; only `Invalid` — a real `author`/`encode` bug — fails, loudly and
+/// synchronously, before the fact is admitted. Without this, a context-free
+/// failure would be admitted and then silently purged on the projection drain.
+pub fn authenticate_authored<A: Authenticator>(fact: &Fact) -> Result<(), String> {
+    match A::authenticate(fact, &ProjectionContext::default()) {
+        Authentication::Authenticated(_) | Authentication::NeedsAuthentication(_) => Ok(()),
+        Authentication::Invalid(error) => {
+            Err(format!("authored fact failed self-authentication: {error}"))
+        }
+    }
+}
+
 /// Check a fact's content id against its own bytes.
 ///
 /// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally

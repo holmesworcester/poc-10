@@ -1,24 +1,33 @@
 //! Semantic content-message projector.
 //!
-//! POLICY. A content_message is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
-//!      message payload with encrypted text.
-//!   2. CONTEXT. The projector records sync liveness immediately, then waits
-//!      for signer, author, deletion, retention-floor, secret, and time
-//!      context. Once signer and author validate, it publishes metadata context
-//!      for deletion. It does not publish opened message context or rows until
-//!      the encrypted text opens. Deletion, expiry, or retention context removes
-//!      this message's rows and purges this message fact.
-//!   3. MATERIALIZE. Once opened, the projector writes read-model rows and
-//!      offers semantic message context.
+//! POLICY. Turns a content message into the rows the app displays, once enough
+//! is known about it. It checks that the fact's scope matches the workspace the
+//! message names, then waits on five things and acts as each arrives:
+//!   - signer: the message was signed by a signer the workspace recognizes;
+//!   - author: the author is a real user in the workspace;
+//!   - deletion: whether a later fact deletes this message;
+//!   - retention floor: the workspace's keep-cutoff — the oldest minute still
+//!     retained, set by its retention policy;
+//!   - text key: the secret needed to decrypt the message body.
+//! With the signer and author confirmed it records the message's metadata, and
+//! it reveals the readable text only once the text key arrives.
+//!
+//! Three things make it drop the message and leave a tombstone: a deletion; the
+//! clock passing the message's own expiry minute (a self-destruct time the
+//! message carries, after which it disappears); or the message aging past the
+//! retention floor. Expiry is the message's own timer; the retention floor is
+//! the workspace's cutoff.
+//!
+//! It writes the message-metadata and opened-message rows under the workspace
+//! scope, and offers the message as context to facts that build on it.
 
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector, TimeWake,
+    project_adapted, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
+    Projector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -86,9 +95,11 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ContentMessageAuthenticator, _>(
-            self, fact, context,
-        )
+        project_adapted::<
+            super::authenticate::ContentMessageAuthenticator,
+            super::adapt::ContentMessageAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
@@ -100,11 +111,7 @@ impl AuthenticatedProjector<super::authenticate::ContentMessageAuthenticator>
         authenticated: AuthenticatedFact<'_, super::fact::ContentMessageFact>,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // Authentication (see authenticate.rs) proved canonical bytes and the
-        // author signature. Scope is interpretation, not authentication — it
-        // gates on unsigned admission metadata — so it is checked here, behind
-        // the lens and the single ceiling projector, where the workspace-id
-        // shape and this rule can evolve.
+        // 1. Scope: the fact's scope must match the workspace named in the body.
         let (fact, message) = authenticated.into_parts();
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         if fact.scope != scope {
@@ -398,7 +405,7 @@ fn decrypt_text(
     };
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &key,
-        &crate::protocol::content::message::create::associated_data(
+        &crate::protocol::content::message::encode::associated_data(
             message.workspace_id,
             message.frontier_id,
             message.minute,
@@ -406,7 +413,7 @@ fn decrypt_text(
         &message.nonce,
         &message.ciphertext,
     )?;
-    crate::protocol::content::message::create::recover_text(&plaintext)
+    super::decode::recover_text(&plaintext)
 }
 
 fn expiry_minute_reached(
@@ -483,12 +490,12 @@ fn expired_output(
                 message.author_user_id,
                 message.created_at_ms,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            .row_mutation(RowMutation::DeleteWhere(super::rows::message_row_delete(
                 CONTENT_MESSAGE_ROWS,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            .row_mutation(RowMutation::DeleteWhere(super::rows::message_row_delete(
                 OPENED_MESSAGE_ROWS,
                 message.workspace_id,
                 message_id,
@@ -513,12 +520,12 @@ fn retired_output(
                 message.author_user_id,
                 floor_minute.saturating_sub(1),
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            .row_mutation(RowMutation::DeleteWhere(super::rows::message_row_delete(
                 CONTENT_MESSAGE_ROWS,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            .row_mutation(RowMutation::DeleteWhere(super::rows::message_row_delete(
                 OPENED_MESSAGE_ROWS,
                 message.workspace_id,
                 message_id,
@@ -542,12 +549,12 @@ fn author_deletion_output(
                 message.author_user_id,
                 message.created_at_ms,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            .row_mutation(RowMutation::DeleteWhere(super::rows::message_row_delete(
                 CONTENT_MESSAGE_ROWS,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
+            .row_mutation(RowMutation::DeleteWhere(super::rows::message_row_delete(
                 OPENED_MESSAGE_ROWS,
                 message.workspace_id,
                 message_id,
@@ -654,7 +661,7 @@ mod projector_tests {
     use topo::protocol::auth::local_history_node_secret::project as coverage;
     use topo::protocol::auth::local_key_secret::{fact::LocalKeySecretFact, layout as auth_layout};
     use topo::protocol::content::message::fact::{ContentMessageFact, MessageCiphertext};
-    use topo::protocol::content::message::{layout, project, rows};
+    use topo::protocol::content::message::{encode, project, rows};
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::layout as deletion_layout;
     use topo::protocol::content::purge::project as content_purge;
@@ -803,12 +810,12 @@ mod projector_tests {
         message.expires_at_minute = message.minute + 1;
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &layout::signing_bytes(&message).expect("message signing bytes"),
+            &encode::signing_bytes(&message).expect("message signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
+            encode::encode_fact(&message).expect("encode content message"),
         );
         let context = ProjectionContext::default().with_time_ranges(vec![TimeRange {
             timeline: topo::protocol::content::message::expiration_timeline(),
@@ -952,11 +959,11 @@ mod projector_tests {
         let frontier_id = [3; 32];
         let minute = 3;
         let nonce = [7; crate::protocol::content::message::fact::NONCE_BYTES];
-        let plaintext = topo::protocol::content::message::create::pad_plaintext(text.as_bytes())
+        let plaintext = topo::protocol::content::message::encode::pad_plaintext(text.as_bytes())
             .expect("pad plaintext");
         let ciphertext = crypto::xchacha20poly1305_encrypt(
             &key,
-            &topo::protocol::content::message::create::associated_data(
+            &topo::protocol::content::message::encode::associated_data(
                 workspace_id,
                 frontier_id,
                 minute,
@@ -982,12 +989,12 @@ mod projector_tests {
         };
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &layout::signing_bytes(&message).expect("message signing bytes"),
+            &encode::signing_bytes(&message).expect("message signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
+            encode::encode_fact(&message).expect("encode content message"),
         );
         (message, fact, key)
     }

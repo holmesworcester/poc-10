@@ -634,7 +634,7 @@ projector_routes! {
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
-    project_content_message => content::message::layout::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector;
+    project_content_message => content::message::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector;
     project_content_message_deletion => content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector;
     project_content_reaction => content::reaction::layout::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector;
     project_auth_recipient_key => auth::recipient_key::layout::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector;

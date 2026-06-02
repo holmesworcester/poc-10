@@ -265,7 +265,7 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
     for truth_tag in [
         connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT,
         topo::protocol::auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED,
-        topo::protocol::content::message::layout::TYPE_CONTENT_MESSAGE,
+        topo::protocol::content::message::TYPE_CONTENT_MESSAGE,
         topo::protocol::auth::key_wrap::layout::TYPE_KEY_WRAP,
     ] {
         assert!(

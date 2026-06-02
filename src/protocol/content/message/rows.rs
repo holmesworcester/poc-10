@@ -6,7 +6,7 @@
 //! `opened_message_rows` is plaintext materialized only after local decryption.
 
 use crate::core::facts::FactId;
-use crate::core::intents::TableInsert;
+use crate::core::intents::{TableDeleteWhere, TableInsert};
 use crate::core::intents::Value;
 use crate::core::store::TableName;
 use crate::protocol::registry::read_models;
@@ -26,6 +26,23 @@ const CONTENT_MESSAGE_COLUMNS: &[&str] = read_models::CONTENT_MESSAGES.columns;
 const OPENED_MESSAGE_COLUMNS: &[&str] = read_models::OPENED_MESSAGES.columns;
 #[cfg(test)]
 const MESSAGE_TOMBSTONE_COLUMNS: &[&str] = read_models::MESSAGE_TOMBSTONES.columns;
+
+/// Builds the keyed delete for a message row in `table`. Pure value constructor
+/// used when expiry, deletion, or retention context removes the target fact.
+pub(crate) fn message_row_delete(
+    table: TableName,
+    workspace_id: FactId,
+    message_id: FactId,
+) -> TableDeleteWhere {
+    TableDeleteWhere {
+        table,
+        columns: MESSAGE_KEY_COLUMNS,
+        values: vec![
+            Value::Bytes(workspace_id.to_vec()),
+            Value::Bytes(message_id.to_vec()),
+        ],
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMessageRow {

@@ -12,6 +12,26 @@ pub const CIPHERTEXT_BYTES: usize = 128;
 pub const NONCE_BYTES: usize = 24;
 pub type MessageCiphertext = FixedSlot<CIPHERTEXT_BYTES>;
 
+// ----- Canonical wire schema (shared by encode.rs and decode.rs) -----
+
+pub const TYPE_CONTENT_MESSAGE: u8 = 50;
+
+/// Total fixed wire width of an encoded content-message fact.
+pub const CONTENT_MESSAGE_BYTES: usize = 1
+    + 32 + 8 + 32 + 32 + 32 + 32 + 32 + 8 + 32 + 8
+    + NONCE_BYTES + 4 + CIPHERTEXT_BYTES
+    + crate::core::crypto::ED25519_SIGNATURE_BYTES;
+
+/// Offset of the trailing signature field; the signing transcript zeroes it.
+pub const SIGNATURE_OFFSET: usize =
+    CONTENT_MESSAGE_BYTES - crate::core::crypto::ED25519_SIGNATURE_BYTES;
+
+// Encrypted text slot layout (plaintext is length-prefixed, then padded).
+pub const TEXT_LENGTH_PREFIX_BYTES: usize = 4;
+pub const PLAINTEXT_SLOT_BYTES: usize =
+    CIPHERTEXT_BYTES - crate::core::crypto::XCHACHA20_POLY1305_TAG_BYTES;
+pub const MAX_TEXT_BYTES: usize = PLAINTEXT_SLOT_BYTES - TEXT_LENGTH_PREFIX_BYTES;
+
 pub type WorkspaceId = FactId;
 pub type AuthorId = FactId;
 pub type FrontierId = FactId;

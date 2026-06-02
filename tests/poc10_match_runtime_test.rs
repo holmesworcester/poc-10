@@ -215,10 +215,10 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
     let minute = input.created_at_ms / 60_000;
     let nonce = [7; content_message::fact::NONCE_BYTES];
     let plaintext =
-        content_message::create::pad_plaintext(input.text.as_bytes()).expect("pad text");
+        content_message::encode::pad_plaintext(input.text.as_bytes()).expect("pad text");
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &input.key_secret,
-        &content_message::create::associated_data(input.workspace_id, input.frontier_id, minute),
+        &content_message::encode::associated_data(input.workspace_id, input.frontier_id, minute),
         &nonce,
         &plaintext,
     )
@@ -240,9 +240,9 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
     };
     body.signature = crypto::ed25519_sign(
         input.signer_private,
-        &content_message::layout::signing_bytes(&body).expect("message signing bytes"),
+        &content_message::encode::signing_bytes(&body).expect("message signing bytes"),
     );
-    let bytes = content_message::layout::encode_fact(&body).expect("encode content message");
+    let bytes = content_message::encode::encode_fact(&body).expect("encode content message");
     Fact::new(
         workspace_scope(input.workspace_id),
         input.created_at_ms,
