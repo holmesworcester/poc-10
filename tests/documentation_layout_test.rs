@@ -378,6 +378,10 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "protocol route owns the concrete `T`",
         "Context payloads requested by projectors are decoded and adapted",
         "first implementation substep is to build model family shapes",
+        "Write-side twin: command authoring pipeline",
+        "cli args -> command run fn -> author -> encode -> authenticate self-check -> admit/submit",
+        "`encode.rs` owns canonical bytes",
+        "Before a command reports success or returns a fact id",
     ] {
         assert!(
             normalized_authenticator.contains(required),
@@ -398,7 +402,10 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "`encode.rs`, `decode.rs`, `author.rs`",
         "identity adapt slot for every existing family",
         "Core runs `authenticate -> adapt -> project` as three labelled stages",
+        "Core also grows the write-side twin for commands",
+        "encode -> authenticate self-check -> admit",
         "Core can know that tag 50 uses a particular decoder, authenticator, adapt path, author, and projector",
+        "Carry-over TODO for the model-family pass",
         "Known-route authentication",
         "Projectors stop invoking `project_authenticated` themselves",
         "`Authenticated(AuthenticatedFact<T>)`",
@@ -418,6 +425,10 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "receives context payloads in the semantic version it expects at the active ceiling",
         "the projector materializes the recovered inner fact bytes and receipts",
         "Those inner facts then re-enter the normal `authenticate -> adapt -> project` pipeline by their own tags",
+        "Creation is deliberately called out because it is currently the least tidy part of the protocol boundary",
+        "Its transcript helpers produce the bytes fed to crypto",
+        "Authenticate self-check",
+        "Move crypto transcript helpers into `encode.rs`; keep actual signing, encryption, and assembly in `author.rs`",
     ] {
         assert!(
             normalized_versioning.contains(required),

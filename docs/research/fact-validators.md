@@ -242,16 +242,56 @@ frame family, and a deterministic handler-authored sync/auth family — and writ
 the full directory/file shape for each. Review the file names, top-of-file
 policies, route declarations, and test style before migrating every family.
 
+### Write-side twin: command authoring pipeline
+
+Creation is the messiest current boundary: CLI/command code, `create.rs`,
+`layout.rs`, crypto transcript helpers, final byte encoding, submission, and
+projection are often interleaved. The target write pipeline mirrors the read
+pipeline:
+
+```text
+cli args
+  -> command run fn
+  -> author
+  -> encode
+  -> authenticate self-check
+  -> admit/submit
+  -> read pipeline (`decode -> authenticate -> adapt -> project`)
+```
+
+The command run fn is the runtime boundary: parse CLI input, load the needed
+store/context/key snapshot, enforce blocked-mode and ceiling-selection policy,
+and call the ceiling-selected author. It should not handcraft wire bytes.
+
+`author.rs` performs local semantic construction: it signs, encrypts, assembles
+the typed fact, and returns the authored value plus scope/timestamp/admission
+metadata. `encode.rs` owns canonical bytes. Its "transcripts" are the
+domain-separated byte strings that cryptography consumes — deterministic nonce
+seeds, AEAD associated data, signing bytes, and final serialization. They are
+not secret material and not semantic construction. An author may call
+`encode.rs` transcript helpers during construction, then the final encode stage
+serializes the assembled typed fact.
+
+Before a command reports success or returns a fact id, the write pipeline runs
+the real family authenticator over the authored bytes. `Authenticated` admits the
+fact; `Invalid` is a synchronous author/encode bug; `NeedsAuthentication` must be
+resolved through the same authentication-need machinery (or reported as missing
+self-check context), not silently bypassed. For embedded-key signed facts this
+means re-verifying the signature just produced, which is the useful round-trip
+check that `author.rs`, `encode.rs`, `decode.rs`, and `authenticate.rs` agree on
+the canonical form.
+
 ## Directory and registry
 
 - The target fact-family role files are:
-  - `encode.rs` — typed fact to canonical wire bytes, plus signing/transcript
-    byte helpers. This is serialization, not semantic construction.
+  - `encode.rs` — typed fact to canonical wire bytes, plus transcript byte
+    helpers for nonce seeds, AEAD associated data, signing bytes, and final
+    serialization. This is byte definition, not semantic construction.
   - `decode.rs` — canonical bytes or `Fact` to typed source value, with tag,
     length, padding, and enum checks, but no id or signature proof.
-  - `author.rs` — command/context/keys to a typed fact or `Fact`; encryption,
-    signing input selection, deterministic nonces, retention checks, and
-    ceiling-selected local creation live here. This replaces fact-family
+  - `author.rs` — command/context/keys to an authored typed value; encryption,
+    signing, assembly, deterministic nonce use, retention checks, and
+    ceiling-selected local construction live here. This replaces fact-family
     `create.rs` in the target shape; non-family intent names such as
     `create_key_wrap` may keep their established command names.
   - `authenticate.rs` — `decode` + id check + fact-boundary cryptographic proof

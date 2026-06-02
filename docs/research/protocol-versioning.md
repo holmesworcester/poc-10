@@ -288,6 +288,10 @@ remaining families mechanically.
   context/time needs park/wake the projection stage for an already authenticated
   and adapted fact. A future adapt need would park/wake the adapt stage, but the
   identity adapt stub has no needs.
+- Core also grows the write-side twin for commands: `cli -> command -> author ->
+  encode -> authenticate self-check -> admit`. This is where blocked-mode,
+  ceiling-selected author dispatch, local above-ceiling refusal, returned fact
+  ids, and the handoff into the read pipeline belong.
 - `registry::protocol_projector()` builds a **ceiling-filtered** route runner
   containing only routes with `intro_version <= ceiling`, recomputed when
   trusted time or the manifest changes.
@@ -304,6 +308,11 @@ remaining families mechanically.
   unchanged.
 - Guardrail: every route (fact, handler, command) declares `intro_version`
   explicitly; a registry completeness test fails if one is omitted.
+- Carry-over TODO for the model-family pass: split the representative families
+  far enough to prove both pipelines. For each model, show command input
+  gathering, `author.rs` construction, `encode.rs` transcript/final-encode
+  helpers, the authenticate self-check before admission, and the read-side
+  `decode -> authenticate -> adapt -> project` route.
 
 ### Phase 3 — Admission, pending, and unsupported input
 
@@ -390,16 +399,17 @@ closed:
   - `fact.rs`: the typed source value for this durable wire shape. It is not a
     durable fact by itself; it carries source ids/provenance when the active
     semantic value needs them.
-  - `encode.rs`: typed source value to canonical wire bytes, plus transcript or
-    signing-byte helpers. This replaces the encoding half of today's `layout.rs`.
+  - `encode.rs`: typed source value to canonical wire bytes, plus transcript
+    helpers for nonce seeds, AEAD associated data, signing bytes, and final
+    serialization. This replaces the encoding half of today's `layout.rs`.
   - `decode.rs`: canonical wire bytes or `Fact` to typed source value. It checks
     tag, length, padding, enum values, and canonical field shapes, but it does
     not check fact id or signatures. This replaces the decoding half of today's
     `layout.rs`.
-  - `author.rs`: local semantic construction: command/context/keys to a typed
-    value or `Fact`, including encryption, deterministic nonces, signing input
-    selection, and policy checks. This replaces fact-family `create.rs`; names
-    of non-family intents/handlers may remain `create_*`.
+  - `author.rs`: local semantic construction: command/context/keys to an
+    authored typed value, including encryption, signing, assembly,
+    deterministic nonce use, and policy checks. This replaces fact-family
+    `create.rs`; names of non-family intents/handlers may remain `create_*`.
   - `authenticate.rs`: always present per version, kept forever, and routed by
     tag. It calls `decode`, computes/checks the fact id, verifies the
     fact-boundary cryptographic proof (usually signature/domain, sometimes a
@@ -1808,6 +1818,41 @@ Deterministic authors (`auth::key_wrap::create::create_key_wrap_fact` today,
 `sync::need_id::create::fact` today, `sync::compare::create::start_compare_fact`
 today) must reproduce identical bytes on replay (invariant 4).
 
+Creation is deliberately called out because it is currently the least tidy part
+of the protocol boundary. Command code, `create.rs`, `layout.rs`, crypto
+transcripts, final encoding, and `Runtime::submit_fact` often know too much
+about each other. The target write pipeline is explicit:
+
+```text
+cli args
+  -> command run fn
+  -> author
+  -> encode
+  -> authenticate self-check
+  -> admit/submit
+  -> read pipeline
+```
+
+- **Command** parses user/handler input, loads the needed store/context/key
+  snapshot, checks blocked mode, selects the ceiling bucket, and calls the
+  selected author. It does not build canonical bytes.
+- **Author** performs local semantic construction. It signs, encrypts, assembles
+  the typed fact value, chooses deterministic nonces from transcript helpers,
+  and returns an authored value plus scope/timestamp/admission metadata.
+- **Encode** owns every canonical byte string. Its transcript helpers produce the
+  bytes fed to crypto — nonce seed inputs, AEAD associated data, signing bytes,
+  and the final serialized fact. Those transcript bytes are not secrets and not
+  semantic construction; they are the byte contract that authoring, decoding,
+  and authentication share.
+- **Authenticate self-check** runs the same family authenticator over locally
+  authored bytes before the command reports success or returns a fact id.
+  `Authenticated` admits; `Invalid` is a synchronous author/encode bug;
+  `NeedsAuthentication` must resolve through the same auth-need machinery (or
+  fail/park with a clear missing-context result), never silently skip the proof.
+  For embedded-key signed facts this deliberately re-verifies the signature just
+  produced, catching mismatches between signing bytes, final encoding, decoding,
+  and verification before any bad local fact is emitted to peers.
+
 Grounding note: today every family has a single live constructor (one `create.rs`
 or one `fact.rs` + `layout::encode_fact` builder) and exactly one tag in
 `FACT_ROUTES`. These tests describe the behavior a *second* bucket version (e.g.
@@ -1821,6 +1866,20 @@ Invariants referenced: (1) VISIBILITY, (2) RENDERING UNIFORMITY, (3) CEILING
 MONOTONICITY, (4) REPLAY DETERMINISM, (5) READERS FOREVER / TRANSPORT [floor,head],
 (6) SAFETY FLOOR. Plus the ADMISSION (refuse-above-ceiling) and version-neutral
 dispatch mechanisms.
+
+Carry this TODO list forward while the model families are being built:
+
+- Model the full write pipeline for one signed/encrypted content family and one
+  deterministic handler-authored family before fan-out.
+- Move crypto transcript helpers into `encode.rs`; keep actual signing,
+  encryption, and assembly in `author.rs`.
+- Add a shared self-check helper that runs the family authenticator on authored
+  bytes before durable admission, with explicit handling for
+  `NeedsAuthentication`.
+- Add guardrails that prevent command paths and handlers from bypassing the
+  ceiling-selected author/encode/self-check boundary.
+- After the model shape is accepted, migrate remaining `create.rs` and
+  fact-builder paths mechanically instead of improvising per family.
 
 ---
 
