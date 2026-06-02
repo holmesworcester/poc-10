@@ -14,9 +14,9 @@ authenticators unchanged), but the split is useful on its own today.
 signatures; the old `project_typed` / `TypedProjector` path is removed; the full
 suite is green and behaviour is unchanged. Change 2 (the behaviour-changing
 follow-on — per-fact projection isolation + purge/keep classification) is
-described under *Error isolation and purge* below and also landed. Only the
-admission-time `AuthenticatorRoute` dispatch table (authenticate-by-tag at
-admission, for drop-at-ceiling) defers to the versioning admission gate.
+described under *Error isolation and purge* below and also landed. The immediate
+next structural step is the core-managed staged route runner: authenticate by
+tag, pass through an identity lens slot, then project.
 
 This note was originally named "fact validators." The design insight is that the
 pre-projector layer should not claim full protocol validity. It proves that a
@@ -140,7 +140,7 @@ Not every cryptographic check belongs in the same place.
   inauthentic. The projector opens the container with that context and
   materializes the opened inner facts plus receipts; it must not re-authenticate
   or project the children. The inner facts are admitted back through the normal
-  authenticate/project pipeline on their own. (Decode is already
+  `authenticate -> lens -> project` pipeline on their own. (Decode is already
   separated from projectors via `FactCodec`, so a carrier needs no opener
   relocation; `NeedsAuthentication` is for an external *verifier key*, not for a
   context-keyed AEAD open whose failure is silent.)
@@ -182,8 +182,9 @@ As built, an authentication need is carried on the *same* standing-need channel
 as a projection need (core runs the authenticator inside the projection call via
 `project_authenticated`, and `NeedsAuthentication` becomes a standing need that
 re-wakes the same path). The two surfaces are distinct in ownership and meaning;
-a separate authentication-scheduling surface — core authenticating by tag at
-*admission* — lands with the versioning admission gate, not here.
+a separate authentication stage — core authenticating by tag before lensing and
+projection — is the immediate next versioning-prep step, even before real
+non-identity lenses or a ceiling exist.
 
 Purge, deletion, retention, and all materialization effects stay projector-owned.
 A purge fact may be authentic forever, but whether a target observes it, removes
@@ -206,6 +207,31 @@ project`. There is **no lens** in this landing: the projector consumes the
 authenticated fact directly, at head. Lenses and the ceiling are added later,
 between authenticate and project, without changing the authenticators.
 
+### Next step: staged core pipeline
+
+The landed helper is the first step, not the final shape. The next change should
+hoist the composition into core as a per-tag `FactRoute` runner:
+
+```text
+raw fact bytes
+  -> authenticator
+  -> identity lens stub (or real lens chain after a version split)
+  -> projector
+```
+
+Core owns the stage boundaries and the wake queues. `AuthenticationNeed` wakes
+authentication; projector context needs, offers, and time wakes wake projection
+for an already authenticated and lensed fact. The route is still typed inside the
+protocol: the protocol route owns the concrete `T`, semantic value, lens
+function, and projector, while core sees only "tag 50 has this authenticator,
+this lens slot, and this projector."
+
+Projectors stop invoking `project_authenticated` themselves once this lands.
+That helper either becomes route-runner logic or disappears. Context payloads
+requested by projectors are authenticated and lensed before they are handed to
+the projector, so needs/offers keep matching on stable role/scope/range
+coordinates while payload shape adapts to the active ceiling.
+
 ## Directory and registry
 
 - Each fact family gains `authenticate.rs`, owning the `Authenticator`. It reuses
@@ -218,10 +244,10 @@ between authenticate and project, without changing the authenticators.
   `project_authenticated::<Authenticator,_>`, which runs the authenticator then
   the projector. There is no separate runtime `tag → authenticator` table yet;
   completeness ("every routed family has an `authenticate.rs` and delegates to
-  it") is enforced by a guardrail. A standalone `AuthenticatorRoute` dispatch
-  table — core authenticating by tag at *admission*, independent of projection —
-  is the right home for drop-at-ceiling and lands with the versioning admission
-  gate, not here.
+  it") is enforced by a guardrail. The next home is a staged `FactRoute` —
+  core authenticating by tag at *admission*, running the route's lens slot, and
+  then projecting. It should land before real lenses and before ceiling logic:
+  every current family gets an identity lens slot.
 - Foreign context is still read through module-owned typed helpers, never another
   module's raw layout codec — and a projector **never re-verifies a context
   fact's signature**: that fact was authenticated before it could offer the
@@ -329,8 +355,9 @@ authenticate their primary fact":
   (no `verify_signature` in any `project.rs`); `STANDARD_FAMILY_FILES` includes
   `authenticate.rs`; the policy-narrative guardrail accepts a materialize-only
   projector.
-- **`protocol-versioning.md`** *(pending)* — its `authenticate.rs` references
-  point here as the authority; reconcile when that doc next lands on `main`.
+- **`protocol-versioning.md`** *(done)* — its `authenticate.rs` references point
+  here as the authority and name the staged `FactRoute` runner as the next
+  versioning-prep step.
 - Any scope README or comment that still describes the projector-does-validation
   model.
 
@@ -348,9 +375,10 @@ Complete — in one pass — when **all** of the following hold:
   is guaranteed upstream); every projector implements `AuthenticatedProjector`
   over an `AuthenticatedFact<T>`. The boundary guardrails enforce this and pass.
 - Every routed fact family has an `authenticate.rs` and delegates to it via
-  `project_authenticated`; a guardrail fails if a routed family lacks either. (A
-  runtime `AuthenticatorRoute` dispatch table is deferred to the versioning
-  admission gate.)
+  `project_authenticated`; a guardrail fails if a routed family lacks either.
+  The next route-runner change replaces that per-projector delegation with a
+  core-owned `FactRoute` that carries the authenticator, identity lens slot, and
+  projector for the tag.
 - Authenticator pure-unit tests (accept canonical; reject the full malformed set:
   wrong tag / length / trailing / padding / enum, bad signature, wrong domain, id
   mismatch, out-of-range fields; park then authenticate for external verifier
@@ -411,15 +439,16 @@ Ephemeral inputs have no purge/keep choice: a rejected ephemeral input is simply
 dropped (it is never durable). This covers a fact's own preparation; commit-time
 admission of a parent's child facts stays atomic with the parent, and
 authenticating those children *before* projection is the job of the versioning
-admission gate and its `AuthenticatorRoute` dispatch table, where core
-authenticates by tag at admission and drops beyond-ceiling bytes.
+admission gate and its staged `FactRoute` runner, where core authenticates by
+tag at admission and keeps unsupported but wire-admitted bytes pending.
 
 ## Relationship to protocol versioning
 
 This is the prerequisite layer — call it **Phase 0.5**, landing before any of the
 versioning phases. The versioning plan's `authenticate → lens → project`
-pipeline reuses these authenticators unchanged; lenses, the ceiling, the release
-manifest, and trusted time come afterward and do not block this landing.
+pipeline reuses these authenticators unchanged; the first route lens is an
+identity stub, and non-identity lenses, the ceiling, the release manifest, and
+trusted time come afterward and do not block this landing.
 "Authenticators forever" (a versioning invariant) begins here: once a family has
 an `authenticate.rs`, that authenticator is kept for every version of the family,
 so old signed bytes always authenticate as historical evidence. Full contextual

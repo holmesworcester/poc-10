@@ -19,8 +19,8 @@ the plan reuses:
   `core::projectors::RouterProjector`.
 - Per-family authenticators: each routed family has `authenticate.rs`, and today
   authentication is composed into projection with
-  `project_authenticated::<Authenticator, _>`. There is no standalone runtime
-  `tag -> authenticator` admission table yet.
+  `project_authenticated::<Authenticator, _>`. There is no core-managed staged
+  `FactRoute` runner yet.
 - Replay runtime: `replay`, `state-summary`, `replay-check`,
   `intent-registry`, and `recurring-intents` are in `src`.
 - Container frame facts: `connection::{frame_small,frame_bundle,frame_file_slice}`
@@ -34,9 +34,9 @@ the plan reuses:
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
 routes, a release manifest, trusted time, scope-owned ceiling lenses,
-`intro_version` on routes/handlers/commands, an admission-time
-`AuthenticatorRoute` table keyed by tag, and the pending admission state for
-wire-admitted bytes that cannot yet become active facts.
+`intro_version` on routes/handlers/commands, a core-owned per-tag route that
+runs `authenticate -> lens -> project` as separate stages, and the pending
+admission state for wire-admitted bytes that cannot yet become active facts.
 
 ## 1. Summary — the model in one breath
 
@@ -79,7 +79,8 @@ wire-admitted bytes that cannot yet become active facts.
   derived state from retained facts by routing bytes to their historical
   authenticator, translating typed authenticated facts through the scope-owned
   lens chain to the active ceiling semantic type, and running the ceiling
-  projector.
+  projector. Core owns these route stages; the protocol route owns the concrete
+  typed fact and semantic values for that tag.
 - **Pending before active.** Bytes that make it through transport/frame opening
   from an authenticated sync peer can be retained as **pending** when the local
   runtime cannot yet authenticate, decrypt, or ceiling-admit them. Pending bytes
@@ -259,13 +260,30 @@ outside this is crypto-primitive soundness (the remaining material is
 cryptographically insufficient, not merely absent), which is out of scope —
 trusted to the AEAD/DH primitive, not to poc-10.
 
-### Phase 2 — Route gating (`intro_version` on every route)
+### Phase 2 — Staged routes, then route gating
 
-- `FactRoute` gains `intro_version: u32`, an authenticator/reader entry, a source
-  semantic node, and a scope-owned lens path into the active ceiling node.
-  `registry::protocol_projector()` builds a **ceiling-filtered** projection
-  pipeline containing only routes with `intro_version <= ceiling`, recomputed
-  when trusted time or the manifest changes.
+The first implementation step in this phase is the staged `FactRoute` runner. It
+should land before real lenses, manifests, trusted time, or ceiling filtering:
+current behavior is preserved by registering an identity lens slot for every
+existing family. That gives core ownership of the `authenticate -> lens ->
+project` pipeline now, so later versioning work fills in non-identity lens edges
+and ceiling filters instead of moving the projector boundary again.
+
+- `FactRoute` becomes the core-owned staged pipeline for one tag: `tag`,
+  `intro_version: u32`, `replayed`, authenticator/reader, source semantic node,
+  lens path, and projector.
+- Core runs `authenticate -> lens -> project` as three labelled stages.
+  `AuthenticationNeed` parks/wakes the authentication stage; projector
+  context/time needs park/wake the projection stage for an already authenticated
+  and lensed fact. A future lens need would park/wake the lens stage, but the
+  identity lens stub has no needs.
+- `registry::protocol_projector()` builds a **ceiling-filtered** route runner
+  containing only routes with `intro_version <= ceiling`, recomputed when
+  trusted time or the manifest changes.
+- The route is typed inside protocol-owned functions and opaque to core. Core can
+  know that tag 50 uses a particular authenticator, lens path, and projector
+  without importing `ContentMessageFact`; the route-owned stage functions enforce
+  that the authenticated type, semantic type, and projector agree.
 - `HandlerRoute` gains `intro_version`; `runs_during_replay` is already present.
 - `CliCommand` registration becomes a stable name mapped to a **version-tagged
   list** of run fns: `name -> [(intro 0, run_v1), (intro 7, run_v2)]`. The
@@ -306,12 +324,15 @@ trusted to the AEAD/DH primitive, not to poc-10.
   authenticated fact; projector-pending is an active fact waiting on ordinary
   context needs.
 - **Known-route authentication.** The landed implementation composes
-  authentication into projection with `project_authenticated`; versioning will
-  add an admission-time `AuthenticatorRoute` keyed by tag before lens/project.
-  Once a tag is ceiling-active and registered, core routes the raw bytes to that
-  tag's authenticator. The authenticator returns
+  authentication into projection with `project_authenticated`; the next
+  implementation step hoists that work into the core-managed `FactRoute` runner.
+  Once a tag is registered, core routes the raw bytes to that tag's authenticator
+  as the first stage. Ceiling filtering later decides which registered tags can
+  become active. The authenticator returns
   `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or
   `NeedsAuthentication(AuthenticationNeed)` for verifier/opening context.
+  Projectors stop invoking `project_authenticated` themselves; that composition
+  becomes route-runner logic around the typed authenticator, lens, and projector.
   Projectors, not authenticators, express semantic context, authority
   requirements, parking, purge rules, and reproject needs. A fact version
   chooses whether verifier key material is embedded or referenced; the runtime
@@ -365,7 +386,9 @@ closed:
     It is not a durable fact. It carries source fact ids and provenance because
     the value is derived from signed bytes, not signed itself.
   - `lens.rs`: present for `vN` when `N > 0`. In the linear default, `vN/lens.rs`
-    converts `vN-1::semantic` into `vN::semantic`. It never parses raw bytes,
+    converts `vN-1::semantic` into `vN::semantic`. Existing unsuffixed families
+    still register an identity lens slot in their `FactRoute`; a file appears
+    only when a non-identity conversion exists. A lens never parses raw bytes,
     queries context, parks, holds pending ingress, or performs authorization checks.
   - `project.rs`: owned by the active ceiling semantic node; it consumes that
     version's `semantic.rs` type, checks context/authority/purge requirements,
@@ -516,7 +539,7 @@ scope.
   the key hint. The carrier authenticator/opener proves and opens the frame
   boundary with connection context; the projector materializes the recovered
   inner fact bytes and receipts. Those inner facts then re-enter the normal
-  authenticate/project pipeline by their own tags. The `TRNS` 4-byte magic is a
+  `authenticate -> lens -> project` pipeline by their own tags. The `TRNS` 4-byte magic is a
   stream recognizer owned by the framing substrate (`core/network.rs`), not a
   fact-version device.
 - **Negotiate up** between capable peers (highest common frame version inside the
@@ -1518,11 +1541,12 @@ code has three structural gaps these tests are written to drive out and then
 lock: (a) `FactRoute { tag, projector, replayed }` carries no `intro_version`;
 (b) `RouterProjector` is not ceiling-filtered — it dispatches every registered
 tag unconditionally; (c) authentication is currently composed into projection
-with `project_authenticated`, with no standalone admission-time
-`AuthenticatorRoute` table keyed by tag. Versioning adds an admission gate ahead
-of projection: wire-invalid input drops; wire-admitted unknown or above-ceiling
-bytes become pending; and ceiling-active known tags authenticate by tag before
-lens/project. Tests below that assert pending ingress and ceiling-filtering are
+with `project_authenticated`, with no core-managed route runner that treats
+authentication, lensing, and projection as separate stages. Versioning adds an
+admission gate ahead of projection: wire-invalid input drops; wire-admitted
+unknown or above-ceiling bytes become pending; and ceiling-active known tags
+authenticate by tag, pass through the route's lens slot, then project. Tests below
+that assert pending ingress and ceiling-filtering are
 RED against the current tree and define the target
 behavior; tests that assert global tag uniqueness / registry shape are GREEN
 guardrails that extend `fact_route_tags_are_globally_unique`.
@@ -5237,7 +5261,7 @@ Skew margin = M, staleness window = S.
 - **Defends:** ADMISSION ("Pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"); (4) REPLAY DETERMINISM.
 - **Refs:** pending retention, `RouterProjector::project` (`projectors.rs:454-458`), `content::message_v2` projector, `CONTENT_MESSAGES`.
 
-### E2EX-11 — Quarantine retention guardrail: a received above-ceiling fact is RETAINED, not dropped/errored (today it ERRORS)  `guardrail`
+### E2EX-11 — Pending retention guardrail: a received above-ceiling fact is RETAINED, not dropped/errored (today it ERRORS)  `guardrail`
 - **Setup:** Ceiling 6. Feed a received fact with an unknown/above-ceiling tag (e.g. `content::message_v2`, or any intro_version-7 tag) into the projection path.
 - **Action:** Project the fact through `RouterProjector::project`.
 - **Expect (target):** The fact is PENDING — stored as opaque bytes, no projection output, not surfaced, not counted, NOT errored, NOT dropped. **Today's actual:** `Err("no target projector registered for fact tag {tag}")` at `src/core/projectors.rs:456`. This test pins the gap so the fix is observable: above-ceiling => pending, not Err.

@@ -364,8 +364,15 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "Signatures, encryption, and container facts",
         "Verifier key placement is a fact-version choice",
         "Do not make embedded public keys mandatory",
-        "The inner facts are admitted back through the normal authenticate/project pipeline",
+        "The inner facts are admitted back through the normal `authenticate -> lens -> project` pipeline",
         "Purge, deletion, retention, and all materialization effects stay projector-owned",
+        "immediate next structural step is the core-managed staged route runner",
+        "identity lens slot",
+        "Next step: staged core pipeline",
+        "Core owns the stage boundaries and the wake queues",
+        "`AuthenticationNeed` wakes authentication",
+        "protocol route owns the concrete `T`",
+        "Context payloads requested by projectors are authenticated and lensed",
     ] {
         assert!(
             normalized_authenticator.contains(required),
@@ -379,9 +386,14 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
 
     for required in [
         "fact-authenticator split",
-        "There is no standalone runtime `tag -> authenticator` admission table yet",
-        "admission-time `AuthenticatorRoute`",
+        "There is no core-managed staged `FactRoute` runner yet",
+        "Staged routes, then route gating",
+        "The first implementation step in this phase is the staged `FactRoute` runner",
+        "identity lens slot for every existing family",
+        "Core runs `authenticate -> lens -> project` as three labelled stages",
+        "Core can know that tag 50 uses a particular authenticator, lens path, and projector",
         "Known-route authentication",
+        "Projectors stop invoking `project_authenticated` themselves",
         "`Authenticated(AuthenticatedFact<T>)`",
         "`NeedsAuthentication(AuthenticationNeed)`",
         "A fact version chooses whether verifier key material is embedded or referenced",
@@ -397,7 +409,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "run that owner fact through its own `authenticate -> lens` path",
         "receives context payloads in the semantic version it expects at the active ceiling",
         "the projector materializes the recovered inner fact bytes and receipts",
-        "Those inner facts then re-enter the normal authenticate/project pipeline by their own tags",
+        "Those inner facts then re-enter the normal `authenticate -> lens -> project` pipeline by their own tags",
     ] {
         assert!(
             normalized_versioning.contains(required),
