@@ -55,15 +55,22 @@ in `src/core` or `src/protocol`.
 - `src/core/` contains protocol-neutral mechanics only: facts, context,
   matchers, projection contracts, intents, handler dispatch, store, wire,
   crypto, network queues, TCP, clock, and schema declarations.
-- `src/protocol/<scope>/<fact_family>/` owns fact shape, fixed wire layout,
-  primary-fact authentication (`authenticate.rs`), command constructors,
-  projection, rows, queries, and context helpers for one fact family.
+- `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
+  fact shape (`fact.rs`), canonical byte construction and transcripts
+  (`encode.rs`), byte parsing (`decode.rs`), primary-fact authentication
+  (`authenticate.rs`), semantic adaptation (`adapt.rs`), local authoring
+  (`author.rs`), projection, rows, queries, CLI adapters, and context helpers
+  as applicable.
+- `layout.rs` and `create.rs` are transitional names for unmigrated families.
+  In target code, byte rules move to `encode.rs` and `decode.rs`, and local
+  fact construction moves to `author.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
 - Shared command context/output types live in `src/core/command_context.rs`.
-  Concrete command constructors live in the fact module that owns the emitted
-  fact.
+  Concrete command entry points live in the fact module that owns the emitted
+  fact or primary user-visible object; pure fact construction lives in that
+  module's `author.rs`.
 - There is no `mod.rs`. Root manifest files such as `src/core.rs`,
   `src/protocol.rs`, and `src/protocol/<scope>.rs` are declaration-only.
 - Schema declarations live beside their owners in `src/core/schema.rs`,
@@ -106,16 +113,18 @@ explicitly archived or the user asks for history.
 
 ## Projectors
 
-- Projectors interpret an already-authenticated fact in context; they do not
-  authenticate and do not do IO. Primary decode, the fact-id check, the
-  fact-boundary signature, and intrinsic single-fact field rules belong to the
-  family `authenticate.rs`; core runs it before the projector, so a projector
-  receives an `AuthenticatedFact` and never parses raw primary bytes.
+- Projectors interpret an already-authenticated, adapted semantic fact in
+  context; they do not authenticate and do not do IO. Primary decode, the
+  fact-id check, the fact-boundary signature, and intrinsic single-fact field
+  rules belong to the family `authenticate.rs`. The read route runs
+  `authenticate -> adapt -> project`, so a projector receives typed fact data
+  and never parses raw primary bytes.
 - Projectors do not verify signatures. The primary fact's signature is proven by
   its authenticator, and any fact reached through context was authenticated
   before it could offer that context, so its authenticity is guaranteed. A
-  projector decodes a context fact through the owning module's typed helper to
-  read its fields and prove relationships, but never re-verifies its signature.
+  projector decodes and adapts a context fact through the owning module's typed
+  helper to read its fields and prove relationships, but never re-verifies its
+  signature.
 - Scope is interpretation, not authentication: the projector checks the fact's
   admission scope, because scope is unsigned local metadata, not part of the
   authenticated bytes.
@@ -140,18 +149,23 @@ explicitly archived or the user asks for history.
 
 Non-trivial projectors should make their proof shape obvious to a reviewer:
 
-1. Authenticate in `authenticate.rs`: a numbered policy (layout, fact id,
+1. Authenticate in `authenticate.rs`: a reviewable policy (decode, fact id,
    signature, intrinsic field rules) that returns an `AuthenticatedFact`. Keep
-   its shape uniform and reviewable; it owns no context, authority, or rows.
-2. Implement `Projector::project()` as a small call through
-   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()`.
+   its shape uniform; it owns no context, authority, or rows.
+2. Until the staged fact-route runner owns this composition, implement
+   `Projector::project()` as a small call through
+   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()` or
+   `core::projectors::project_adapted::<ModuleAuthenticator, ModuleAdapter, _>()`.
+   Once the staged runner lands, route registration owns that
+   `authenticate -> adapt -> project` call and projector files keep only the
+   typed projector body.
 3. Put the real proof in
    `AuthenticatedProjector<ModuleAuthenticator>::project_authenticated()`,
-   binding `let (fact, payload) = authenticated.into_parts();` and beginning at
-   the section it owns — scope/context (`// 2.`) or, for a minimal projector that
-   only writes rows, materialize (`// 3.`) — with matching numbered markers. The
-   top-of-file policy still names every section; the structural/authentication
-   ones now live in `authenticate.rs`.
+   binding `let (fact, payload) = authenticated.into_parts();`. Body comments
+   should explain the block they guard; do not require numbered references back
+   to the module policy. The top-of-file policy still names the projector's
+   proof shape, while structural/authentication proof lives in
+   `authenticate.rs`.
 4. Name every security-sensitive context need in a small struct or local
    binding. Avoid positional `needs[0]` contracts.
 5. Split real authority branches into path-specific functions whose names say
@@ -191,13 +205,14 @@ through the `ProjectionContext` helper anchored to the need they emitted.
 
 ### Typed Facts And Foreign Context
 
-Core persists facts as opaque bytes. The owning fact module supplies a small
-`FactCodec`; its `authenticate.rs` decodes through that codec, checks the id and
-the signature, and produces an `AuthenticatedFact`. Core runs the authenticator
-before the projector, so `project_authenticated()` receives the typed,
-authenticated payload. Do not call a raw layout decoder on the primary fact
-outside the module codec, and do not decode or authenticate the primary fact in
-the projector.
+Core persists facts as opaque canonical bytes. The owning fact module supplies a
+small `decode.rs`/`FactCodec`; its `authenticate.rs` decodes through that codec,
+checks the id and signature when the verifier material is available, enforces
+intrinsic single-fact rules, and produces an `AuthenticatedFact`. The module's
+`adapt.rs` maps that authenticated source value to the semantic fact version the
+active projector expects. Do not call a raw decoder on the primary fact outside
+the module codec, and do not decode or authenticate the primary fact in the
+projector.
 
 Foreign context fact bytes are different. A projector should not import another
 fact module's raw layout codec. It should call a module-owned typed helper that
@@ -205,7 +220,8 @@ keeps wire formatting centralized inside the owning fact module while letting
 projector policy read as typed facts and named witnesses. It trusts the
 authenticity of any fact it reaches through context — that fact was
 authenticated before it could offer the context — so it decodes for fields and
-proves relationships, but never re-verifies the signature.
+adapts to the semantic version the consuming projector expects, but never
+re-verifies the signature.
 
 ### Parking And Errors
 
@@ -245,8 +261,9 @@ Patterns to avoid in projector files:
 - Deferred handlers must be retry-safe: if required inputs or external effects
   are unavailable, return an error so the intent remains queued.
 - Handlers must not construct shared fact wire layouts inline. If a handler
-  needs to create a protocol fact, the owning event module provides a
-  `create.rs` helper.
+  needs to create a protocol fact, it calls the owning fact family's
+  `author.rs`/`encode.rs` API, or that family's transitional `create.rs` helper
+  until it is migrated.
 - Handlers must not become logic dumping grounds. They validate their intent,
   load exact inputs through handler context, perform one bounded effect, and
   return facts/intents/purges.
@@ -260,9 +277,9 @@ bounded effect, and returns `PipelineEffects`. It must be retry-safe: transient
 absence of required input or external IO returns `retry_intent`, leaving the
 queue row in place.
 
-Handlers may call deterministic `create.rs` constructors owned by the fact
-module they are emitting. They must not inline shared fact wire layouts, mutate
-projection rows directly, run projectors, or become a second command layer.
+Handlers may call deterministic authoring helpers owned by the fact module they
+are emitting. They must not inline shared fact wire layouts, mutate projection
+rows directly, run projectors, or become a second command layer.
 
 ## Wire And Schema
 
@@ -277,10 +294,13 @@ projection rows directly, run projectors, or become a second command layer.
 
 ### Wire And Codec Style
 
-Wire layouts are protocol contracts. Keep tag checks, byte lengths, enum
-validation, canonical padding, and transcript construction in the owning fact
-module's `layout.rs` or narrow typed helper. Core wire primitives supply syntax;
-the fact module supplies meaning.
+Wire layouts are protocol contracts. `decode.rs` owns tag checks, byte lengths,
+enum validation, canonical padding rejection, and typed parsing. `encode.rs`
+owns canonical final bytes plus every byte transcript used by authoring crypto:
+signing bytes, nonce seeds, AEAD associated data, and any other hash/sign/encrypt
+input. Core wire primitives supply syntax; the fact module supplies meaning.
+Unmigrated `layout.rs` files may still hold both sides, but new or migrated
+fact families split them.
 
 ## Sync And Connection Frames
 
@@ -312,10 +332,12 @@ connection (response) fact, and the established frame facts — owns its own
 sealing end to end, in its own modules. There is no seal-mode discriminator and
 no separate envelope or transit-wrapper fact in another module.
 
-- `create.rs` seals a fact when it generates it: sealing is wrapping, and
-  wrapping is `create.rs`'s job. Handshake facts are sealed asymmetrically to
-  the recipient endpoint; established frames are sealed with the
-  `connection_secret`.
+- In target fact families, `author.rs` seals a fact when it generates it, using
+  transcript helpers and final serialization from `encode.rs`: sealing is
+  wrapping, and wrapping is the authoring path's job. Handshake facts are sealed
+  asymmetrically to the recipient endpoint; established frames are sealed with
+  the `connection_secret`. Unmigrated `create.rs` files may still own this
+  boundary until they are split into `author.rs` and `encode.rs`.
 - Unsealing is a context need. A receiver opens a sealed connection fact in that
   fact's own projector, which declares a context need for its unseal key —
   `auth_local_endpoint` (the local endpoint secret) for handshake facts,
@@ -343,16 +365,50 @@ keys already observed before retirement.
 
 ## Commands
 
-- Commands are pure constructors over explicit parameters and a narrow
-  `CommandContext`.
+- Commands are the write-side runtime boundary over explicit parameters and a
+  narrow `CommandContext`.
+- In the role-file shape this splits in two: `author.rs` is pure construction
+  from an explicit snapshot and must not reference `CommandContext`, the store,
+  or the `Runtime`; `commands.rs` is the runtime entry point that gathers that
+  snapshot and calls `author`. `decode.rs` turns bytes into the typed value
+  (tag/length/shape only); id and signature checks live in `authenticate.rs`.
+- The target write pipeline is `cli -> command -> author -> encode ->
+  authenticate self-check -> admit`. `encode.rs` may be used during authoring
+  for crypto transcripts and again at the end for canonical bytes.
 - Commands may read allowed local capabilities such as signer or encryption
   secrets from the context. They must not mint capabilities unless the owning
   auth fact module explicitly owns that command.
+- Authored facts must pass the family authenticator before a command reports
+  successful admission. `Authenticated` proves the local bytes round-trip and
+  signature checks hold. `Invalid` is an author/encode bug and must fail
+  synchronously. `NeedsAuthentication` is unresolved verifier context; it must
+  be resolved through the authentication-need path, parked, or reported, not
+  silently treated as verified.
 - Commands do not write the store, drive the runtime pipeline, dispatch
   handlers, call workers, parse CLI argv, or format user output.
 - Any invariant required for accepting received/shared facts must be enforced by
-  layout decoding, projector validation, context matching, or handler
+  decoding, authentication, projector validation, context matching, or handler
   validation, not only by command preflight checks.
+
+## CLI
+
+- A family's `cli.rs` is the human-facing surface: it parses argv for that
+  family's commands and queries, resolves selectors (a fact picked by a short id
+  prefix) to ids, calls the command or query, and formats the result for the
+  terminal.
+- A command's CLI surface belongs to the most relevant fact family: the family
+  whose fact is authored, whose row is displayed, or whose user-visible object
+  is the primary object when a workflow authors several facts. Sibling fact
+  families expose narrow helper APIs for selector resolution and formatting;
+  they do not make one broad `cli.rs` a dumping ground.
+- CLI files do not drain the runtime, project facts, dispatch handlers, or
+  persist; that stays at the app/runtime boundary. File payloads are read and
+  written through core file helpers, never direct `std::fs`.
+- `src/protocol/cli.rs` is the protocol command host, not a protocol owner. It
+  may open runtime context, provide vaults, submit command output, settle
+  command-visible work, and delegate to family CLI functions. Command-specific
+  usage strings, argv parsing, selector policy, and terminal formatting belong
+  in the owning family `cli.rs`.
 
 ## Tests And Proof
 

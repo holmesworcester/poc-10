@@ -18,6 +18,7 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "ARCHITECTURE_DIAGRAMS.md",
         "docs/RULES.md",
         "docs/todo-add-verus-proofs.md",
+        "docs/todo-cli-command-ownership.md",
         "src/core/README.md",
         "src/core/pipeline/README.md",
         "src/protocol/auth/README.md",
@@ -236,6 +237,67 @@ fn rules_include_projector_style_after_projector_style_doc_was_archived() {
         assert!(
             normalized.contains(required),
             "docs/RULES.md is missing merged projector guidance {required:?}"
+        );
+    }
+}
+
+#[test]
+fn rules_document_role_files_and_cli_command_ownership() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rules = source_text(&root.join("docs/RULES.md"));
+    let normalized = normalize_whitespace(&rules);
+
+    for required in [
+        "`encode.rs`",
+        "`decode.rs`",
+        "`author.rs`",
+        "`authenticate.rs`",
+        "`adapt.rs`",
+        "`layout.rs` and `create.rs` are transitional names for unmigrated families",
+        "`authenticate -> adapt -> project`",
+        "`core::projectors::project_adapted::<ModuleAuthenticator, ModuleAdapter, _>()`",
+        "so it decodes for fields and adapts to the semantic version",
+        "`cli -> command -> author -> encode -> authenticate self-check -> admit`",
+        "`NeedsAuthentication` is unresolved verifier context",
+        "A command's CLI surface belongs to the most relevant fact family",
+        "`src/protocol/cli.rs` is the protocol command host",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "docs/RULES.md is missing role-file or CLI ownership guidance {required:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_command_ownership_todo_records_fact_family_cleanup() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let todo = source_text(&root.join("docs/todo-cli-command-ownership.md"));
+    let normalized = normalize_whitespace(&todo);
+
+    for required in [
+        "# TODO: CLI Command Ownership",
+        "each user-facing command is owned by the most relevant fact family",
+        "`src/protocol/cli.rs` stays a runtime host",
+        "If a CLI command authors one protocol fact family, that fact family owns",
+        "Selector resolution lives with the selected object",
+        "`src/protocol/content/message/cli.rs` is a bundle",
+        "`react`",
+        "`content/reaction/cli.rs`",
+        "`delete-message`",
+        "`content/message_deletion/cli.rs`",
+        "`send-file`",
+        "`content/file/cli.rs`",
+        "`connect`",
+        "`connection/connection_request/cli.rs`",
+        "`chop-now`",
+        "`auth/local_secret_retirement/cli.rs`",
+        "Update `src/protocol/registry.rs` usage paths",
+        "Keep black-box `con` CLI tests green",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "docs/todo-cli-command-ownership.md is missing cleanup detail {required:?}"
         );
     }
 }
