@@ -73,3 +73,75 @@ fn validate_request_fields(request: &BootstrapRequestFact) -> Result<(), String>
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+    use crate::protocol::connection::bootstrap_request::layout;
+
+    use super::BootstrapRequestAuthenticator;
+
+    fn canonical_fact() -> Fact {
+        let request = BootstrapRequestFact {
+            from_endpoint: [1; 32],
+            to_endpoint: [2; 32],
+            nonce: [3; 32],
+            invite_fact_id: [4; 32],
+            bootstrap_hash: [5; 32],
+            invite_signature: [6; crate::core::crypto::ED25519_SIGNATURE_BYTES],
+            invite_secret_fact_id: [7; 32],
+            initiator_ephemeral_secret_fact_id: [8; 32],
+            initiator_ephemeral_public_key: [9; 32],
+            from_listen_addr: None,
+            to_listen_addr: None,
+        };
+        let bytes = layout::encode_fact(&request).expect("encode bootstrap_request fact");
+        Fact::new(FactScope::Global, 100, bytes)
+    }
+
+    fn authenticate(fact: &Fact) -> Authentication<'_, BootstrapRequestFact> {
+        BootstrapRequestAuthenticator::authenticate(fact, &ProjectionContext::default())
+    }
+
+    fn is_invalid(fact: &Fact) -> bool {
+        matches!(authenticate(fact), Authentication::Invalid(_))
+    }
+
+    #[test]
+    fn authenticates_canonical_fact() {
+        assert!(matches!(
+            authenticate(&canonical_fact()),
+            Authentication::Authenticated(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_tag() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes[0] ^= 0xff;
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_truncated_bytes() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes.pop();
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_id_not_matching_bytes() {
+        let canonical = canonical_fact();
+        let forged = Fact {
+            id: [0; 32],
+            scope: canonical.scope.clone(),
+            timestamp: canonical.timestamp,
+            bytes: canonical.bytes.clone(),
+        };
+        assert!(is_invalid(&forged));
+    }
+}

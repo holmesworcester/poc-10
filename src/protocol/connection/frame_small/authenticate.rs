@@ -37,3 +37,70 @@ fn authenticate_frame_small(fact: &Fact) -> Result<ConnectionFrameSmallFact, Str
     verify_fact_id(fact)?;
     Ok(input)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::facts::Fact;
+    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::wire::FixedBytes;
+    use crate::protocol::connection::frame_small::create::fact_from_wire;
+    use crate::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
+    use crate::protocol::connection_frame_wire as wire;
+
+    use super::ConnectionFrameSmallAuthenticator;
+
+    fn canonical_fact() -> Fact {
+        let frame = wire::encode_frame_bytes(
+            wire::CONNECTION_FRAME_SIZE_CLASS_SMALL,
+            FixedBytes([1; 32]),
+            FixedBytes([2; 24]),
+            &[3; 32],
+        )
+        .expect("frame bytes");
+        fact_from_wire(&frame, 100).expect("connection_frame_small fact")
+    }
+
+    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFrameSmallFact> {
+        ConnectionFrameSmallAuthenticator::authenticate(fact, &ProjectionContext::default())
+    }
+
+    fn is_invalid(fact: &Fact) -> bool {
+        matches!(authenticate(fact), Authentication::Invalid(_))
+    }
+
+    #[test]
+    fn authenticates_canonical_fact() {
+        assert!(matches!(
+            authenticate(&canonical_fact()),
+            Authentication::Authenticated(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_tag() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes[0] ^= 0xff;
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_truncated_bytes() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes.pop();
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_id_not_matching_bytes() {
+        let canonical = canonical_fact();
+        let forged = Fact {
+            id: [0; 32],
+            scope: canonical.scope.clone(),
+            timestamp: canonical.timestamp,
+            bytes: canonical.bytes.clone(),
+        };
+        assert!(is_invalid(&forged));
+    }
+}

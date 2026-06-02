@@ -110,3 +110,87 @@ fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::protocol::auth::endpoint::fact::EndpointFact;
+    use crate::protocol::connection::connection_request::create::sign_request;
+    use crate::protocol::connection::connection_request::fact::ConnectionRequestFact;
+    use crate::protocol::connection::connection_request::layout;
+
+    use super::ConnectionRequestAuthenticator;
+
+    const SIGNING_SECRET: [u8; 32] = [7; 32];
+
+    fn canonical_fact() -> Fact {
+        let from_endpoint = [1; 32];
+        let mut request = ConnectionRequestFact {
+            from_endpoint,
+            to_endpoint: [2; 32],
+            nonce: [3; 32],
+            initiator_endpoint_shared_id: [4; 32],
+            initiator_ephemeral_secret_fact_id: [5; 32],
+            initiator_ephemeral_public_key: [6; 32],
+            endpoint_signature: [0; ED25519_SIGNATURE_BYTES],
+            from_listen_addr: None,
+            to_listen_addr: None,
+        };
+        let endpoint = EndpointFact {
+            endpoint: from_endpoint,
+            secret: [8; 32],
+            signing_public_key: crypto::ed25519_public_key(&SIGNING_SECRET),
+            signing_secret: SIGNING_SECRET,
+        };
+        sign_request(&mut request, &endpoint).expect("sign membership connection request");
+        let bytes = layout::encode_fact(&request).expect("encode connection_request fact");
+        Fact::new(FactScope::Global, 100, bytes)
+    }
+
+    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionRequestFact> {
+        ConnectionRequestAuthenticator::authenticate(fact, &ProjectionContext::default())
+    }
+
+    fn is_invalid(fact: &Fact) -> bool {
+        matches!(authenticate(fact), Authentication::Invalid(_))
+    }
+
+    // The membership signing key is not embedded in the request — it lives in the
+    // initiator's endpoint_shared — so a well-formed canonical request parks on
+    // that context (NeedsAuthentication) rather than authenticating outright. We
+    // assert it is NOT Invalid; the signature itself is proven once context lands.
+    #[test]
+    fn authenticates_canonical_fact() {
+        assert!(!is_invalid(&canonical_fact()));
+    }
+
+    #[test]
+    fn rejects_wrong_tag() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes[0] ^= 0xff;
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_truncated_bytes() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes.pop();
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_id_not_matching_bytes() {
+        let canonical = canonical_fact();
+        let forged = Fact {
+            id: [0; 32],
+            scope: canonical.scope.clone(),
+            timestamp: canonical.timestamp,
+            bytes: canonical.bytes.clone(),
+        };
+        assert!(is_invalid(&forged));
+    }
+}

@@ -37,3 +37,71 @@ fn authenticate_local_secret_retirement(fact: &Fact) -> Result<LocalSecretRetire
     verify_fact_id(fact)?;
     Ok(retirement)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::protocol::auth::local_secret_retirement::fact::{
+        LocalSecretRetirementFact, RETIRE_REASON_CHOP,
+    };
+    use crate::protocol::auth::local_secret_retirement::layout;
+
+    use super::LocalSecretRetirementAuthenticator;
+
+    fn canonical_fact() -> Fact {
+        let retirement = LocalSecretRetirementFact {
+            workspace_id: [1; 32],
+            target_secret_id: [2; 32],
+            reason_kind: RETIRE_REASON_CHOP,
+            floor_minute: 10,
+            created_at_ms: 123,
+        };
+        let bytes = layout::encode_fact(&retirement).expect("encode local secret retirement");
+        Fact::new(FactScope::Local, 123, bytes)
+    }
+
+    fn authenticate(fact: &Fact) -> Authentication<'_, LocalSecretRetirementFact> {
+        LocalSecretRetirementAuthenticator::authenticate(fact, &ProjectionContext::default())
+    }
+
+    fn is_invalid(fact: &Fact) -> bool {
+        matches!(authenticate(fact), Authentication::Invalid(_))
+    }
+
+    #[test]
+    fn authenticates_canonical_fact() {
+        assert!(matches!(
+            authenticate(&canonical_fact()),
+            Authentication::Authenticated(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_tag() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes[0] ^= 0xff;
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_truncated_bytes() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes.pop();
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_id_not_matching_bytes() {
+        let canonical = canonical_fact();
+        let forged = Fact {
+            id: [0; 32],
+            scope: canonical.scope.clone(),
+            timestamp: canonical.timestamp,
+            bytes: canonical.bytes.clone(),
+        };
+        assert!(is_invalid(&forged));
+    }
+}

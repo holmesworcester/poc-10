@@ -40,3 +40,66 @@ fn authenticate_close(fact: &Fact) -> Result<ConnectionCloseFact, String> {
     }
     Ok(close)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::protocol::connection::close::fact::ConnectionCloseFact;
+    use crate::protocol::connection::close::layout;
+
+    use super::ConnectionCloseAuthenticator;
+
+    fn canonical_fact() -> Fact {
+        let close = ConnectionCloseFact {
+            connection_id: [1; 32],
+            closed_at_ms: 2,
+        };
+        let bytes = layout::encode_fact(&close).expect("encode connection_close fact");
+        Fact::new(FactScope::Local, 100, bytes)
+    }
+
+    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionCloseFact> {
+        ConnectionCloseAuthenticator::authenticate(fact, &ProjectionContext::default())
+    }
+
+    fn is_invalid(fact: &Fact) -> bool {
+        matches!(authenticate(fact), Authentication::Invalid(_))
+    }
+
+    #[test]
+    fn authenticates_canonical_fact() {
+        assert!(matches!(
+            authenticate(&canonical_fact()),
+            Authentication::Authenticated(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_tag() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes[0] ^= 0xff;
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_truncated_bytes() {
+        let canonical = canonical_fact();
+        let mut bytes = canonical.bytes.clone();
+        bytes.pop();
+        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+    }
+
+    #[test]
+    fn rejects_id_not_matching_bytes() {
+        let canonical = canonical_fact();
+        let forged = Fact {
+            id: [0; 32],
+            scope: canonical.scope.clone(),
+            timestamp: canonical.timestamp,
+            bytes: canonical.bytes.clone(),
+        };
+        assert!(is_invalid(&forged));
+    }
+}
