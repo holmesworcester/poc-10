@@ -379,12 +379,19 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
 
     for required in [
         "fact-authenticator split",
-        "first-class fact authenticators",
+        "There is no standalone runtime `tag -> authenticator` admission table yet",
+        "admission-time `AuthenticatorRoute`",
         "Known-route authentication",
         "`Authenticated(AuthenticatedFact<T>)`",
         "`NeedsAuthentication(AuthenticationNeed)`",
         "A fact version chooses whether verifier key material is embedded or referenced",
         "trade self-contained verification against public-key size without changing projector semantics",
+        "Pending before active",
+        "Pending, not active truth",
+        "Wire-invalid bytes still drop",
+        "Pending is syncable and waiting",
+        "pending ingress",
+        "not active protocol truth",
         "the projector materializes the recovered inner fact bytes and receipts",
         "Those inner facts then re-enter the normal authenticate/project pipeline by their own tags",
     ] {

@@ -1,22 +1,28 @@
 # Protocol Versioning
 
-Single authoritative note: the model and phased implementation plan (Part I), then the exhaustive test matrix (Part II). Builds on `poc10-replay-intent-shape.md` (the replay runtime, a prerequisite).
+Single authoritative note: the model and phased implementation plan (Part I), then the exhaustive test matrix (Part II). Builds on the landed replay runtime and fact-authenticator split.
 
 ## Status and scope
 
 This is the authoritative, consolidated plan for protocol versioning in poc-10.
-It builds on two prerequisites that land first: the replay runtime
+It starts from two landed prerequisites: the replay runtime
 (`poc10-replay-intent-shape.md`) and the **fact-authenticator split**
 (`fact-validators.md`) — the bottom of the `authenticate → lens → project`
-pipeline, specced and shippable on its own before any ceiling/lens work. Its
-exhaustive test matrix lives in Part II below.
+pipeline, landed before any ceiling/lens work. Its exhaustive test matrix lives
+in Part II below.
 
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
 
-- Tag-routed facts: `FactRoute { tag, projector }` and the `projector_routes!`
-  table in `src/protocol/registry.rs`; dispatch in
+- Tag-routed facts: `FactRoute { tag, projector, replayed }` and the
+  `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
   `core::projectors::RouterProjector`.
+- Per-family authenticators: each routed family has `authenticate.rs`, and today
+  authentication is composed into projection with
+  `project_authenticated::<Authenticator, _>`. There is no standalone runtime
+  `tag -> authenticator` admission table yet.
+- Replay runtime: `replay`, `state-summary`, `replay-check`,
+  `intent-registry`, and `recurring-intents` are in `src`.
 - Container frame facts: `connection::{frame_small,frame_bundle,frame_file_slice}`
   (tags 168–170), produced from wire bytes by
   `connection_frame.rs::frame_fact_from_wire`.
@@ -27,9 +33,10 @@ the plan reuses:
   in `core/network.rs`.
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
-routes, a release manifest, trusted time, the wipe-and-replay entry point,
-first-class fact authenticators, scope-owned ceiling lenses, and
-`runs_during_replay` / `intro_version` on routes.
+routes, a release manifest, trusted time, scope-owned ceiling lenses,
+`intro_version` on routes/handlers/commands, an admission-time
+`AuthenticatorRoute` table keyed by tag, and the pending admission state for
+wire-admitted bytes that cannot yet become active facts.
 
 ## 1. Summary — the model in one breath
 
@@ -73,6 +80,12 @@ first-class fact authenticators, scope-owned ceiling lenses, and
   authenticator, translating typed authenticated facts through the scope-owned
   lens chain to the active ceiling semantic type, and running the ceiling
   projector.
+- **Pending before active.** Bytes that make it through transport/frame opening
+  from an authenticated sync peer can be retained as **pending** when the local
+  runtime cannot yet authenticate, decrypt, or ceiling-admit them. Pending bytes
+  are syncable evidence, not active semantic facts: no projection, read rows,
+  authority, purge effect, or local creation follows from them until they
+  re-enter admission and become active.
 
 Invariants stated precisely:
 
@@ -126,7 +139,7 @@ independently:
   `trusted_time > expires_at + M`. Because trusted time lower-bounds real time,
   this guarantees real time is genuinely past `expires_at` by more than `M`
   before C is ever emitted in production.
-- **Staleness self-quarantine `S`.** A still-usable release that has not ingested
+- **Staleness block `S`.** A still-usable release that has not ingested
   a fresh signed observation within `S` stops its own shared production until it
   refreshes. So any blocker that is *still participating* necessarily refreshed
   within the last `S`.
@@ -138,12 +151,12 @@ raises the ceiling — its `trusted_time > expires_at + M`, so real time is also
 least `(expires_at + M) − S − P`, which by the choice of `M` is `> expires_at`.
 That is past the blocker's own `expires_at`, so it has already self-disabled
 (property 3) — the danger window is empty. A blocker that *cannot* obtain fresh
-signed time does not guess it is pre-expiry; it self-quarantines under the `S`
+signed time does not guess it is pre-expiry; it enters blocked mode under the `S`
 rule and stops participating, which is the safe direction.
 
 The argument is **per-device**, with no appeal to devices staying in lockstep. A
 fresh install whose embedded time is stale computes a low (conservative) ceiling
-and/or self-quarantines until it refreshes — never an over-optimistic ceiling
+and/or enters blocked mode until it refreshes — never an over-optimistic ceiling
 that would emit C too early. A device that cannot refresh simply stays behind and
 conservative, independent of what any other device holds; safety never relies on
 a fleet-wide signed-time stream advancing *together*. The single residual
@@ -167,12 +180,12 @@ filters routes by the ceiling, wipes and replays, and stores signed
 release/time observations as local facts. Scope modules own the version
 decisions.
 
-### Phase 0 — Replay runtime (prerequisite)
+### Phase 0 — Replay runtime (landed prerequisite)
 
-Implement `poc10-replay-intent-shape.md`: the wipe-and-replay entry point,
+`poc10-replay-intent-shape.md` has landed: the wipe-and-replay entry point,
 `HandlerRoute.runs_during_replay`, recurring intents, the projection/work
-fixpoint, and the network/purge barrier. Versioning rides on top of this; it
-cannot be tested without a wipe-and-replay path.
+fixpoint, and the network/purge barrier. Versioning rides on top of this
+runtime.
 
 ### Phase 1 — Version space, manifest, trusted time
 
@@ -231,9 +244,9 @@ backdoor:
 - the replay surface from `poc10-replay-intent-shape.md` (`replay`,
   `state-summary`, `replay-check`).
 
-With these, the manifest/ceiling/quarantine/purge invariants — and the bulk of
-the handler-unit triage's `A`/`BX-M` buckets — are proven black-box instead of
-by fabricated in-process state.
+With these, the manifest/ceiling/pending/purge invariants — and the bulk
+of the handler-unit triage's `A`/`BX-M` buckets — are proven black-box instead
+of by fabricated in-process state.
 
 **Purge-completeness and forward secrecy are black-box via `purge-audit`.** The
 audit must scan every table/index/blob (fact log, derived row tables, sync
@@ -253,7 +266,7 @@ trusted to the AEAD/DH primitive, not to poc-10.
   `registry::protocol_projector()` builds a **ceiling-filtered** projection
   pipeline containing only routes with `intro_version <= ceiling`, recomputed
   when trusted time or the manifest changes.
-- `HandlerRoute` gains `intro_version` (and `runs_during_replay` from Phase 0).
+- `HandlerRoute` gains `intro_version`; `runs_during_replay` is already present.
 - `CliCommand` registration becomes a stable name mapped to a **version-tagged
   list** of run fns: `name -> [(intro 0, run_v1), (intro 7, run_v2)]`. The
   dispatcher runs the highest entry with `intro_version <= ceiling`. "Absent ⇒
@@ -262,25 +275,49 @@ trusted to the AEAD/DH primitive, not to poc-10.
 - Guardrail: every route (fact, handler, command) declares `intro_version`
   explicitly; a registry completeness test fails if one is omitted.
 
-### Phase 3 — Admission and unsupported input
+### Phase 3 — Admission, pending, and unsupported input
 
-- **No quarantine by tag.** Production clients create and admit only
-  ceiling-active fact tags. Unknown, unsupported, or above-ceiling bytes are
-  rejected as protocol input for this runtime; they are not parsed for
-  workspace, authority, purge semantics, or shareability and are not forwarded.
-  A local diagnostic store may keep opaque bytes, but that store is not protocol
-  truth and is not replay input.
+- **Pending, not active truth.** Production clients locally create only
+  ceiling-active fact tags. Received bytes that make it through the
+  connection/frame/opening boundary from an authenticated sync peer may be
+  retained as **pending** when the tag is unknown to this binary, above the local
+  ceiling, or missing authentication/decryption context. Pending bytes are not
+  active protocol truth: they are not projected, displayed, counted, used for
+  authority, used for purge, or treated as validated facts.
+- **Wire-invalid bytes still drop.** Bytes that fail transport framing, cannot
+  be opened by the active carrier, come from an unauthorized source, or are
+  otherwise malformed before a stable fact id/hash can be established are
+  dropped. Some future upgrades will not make it through the current wire/frame
+  layer at all; those bytes never become pending.
+- **Pending is syncable and waiting.** Pending bytes may participate in
+  negentropy by id/bytes so supported peers can avoid download loops during
+  ceiling skew. They are still inert locally. When the manifest/ceiling changes,
+  verifier/opening context arrives, or the binary updates to know the tag, the
+  pending bytes re-enter the normal `authenticate -> lens -> project` admission
+  path. If they then authenticate and are ceiling-active, they become active
+  facts and project normally; if they fail authentication or remain unsupported,
+  they stay pending or are rejected according to the admission result.
 - **Local creation** of an above-ceiling fact is refused at the command/admission
-  boundary.
-- **Known-route authentication.** Once a tag is ceiling-active and registered,
-  core routes the raw bytes to that tag's authenticator. The authenticator
-  returns typed authenticated data, invalid bytes, or a narrow authentication
-  need for verifier/opening context. Projectors, not authenticators, express
-  semantic context, authority requirements, parking, purge rules, and reproject
-  needs. A fact version chooses whether verifier key material is embedded or
-  referenced; the runtime contract must support `NeedsAuthentication` either way
-  so future versions can trade self-contained verification against public-key
-  size without changing projector semantics.
+  boundary. Pending is only an ingress state for bytes received from authenticated
+  sync/transport paths.
+- **Call this `pending`.** New implementation and tests should say **pending
+  facts** or, when distinguishing this from the existing projector wake queue,
+  **pending ingress**. Pending ingress is raw admitted bytes waiting to become an active
+  authenticated fact; projector-pending is an active fact waiting on ordinary
+  context needs.
+- **Known-route authentication.** The landed implementation composes
+  authentication into projection with `project_authenticated`; versioning will
+  add an admission-time `AuthenticatorRoute` keyed by tag before lens/project.
+  Once a tag is ceiling-active and registered, core routes the raw bytes to that
+  tag's authenticator. The authenticator returns
+  `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or
+  `NeedsAuthentication(AuthenticationNeed)` for verifier/opening context.
+  Projectors, not authenticators, express semantic context, authority
+  requirements, parking, purge rules, and reproject needs. A fact version
+  chooses whether verifier key material is embedded or referenced; the runtime
+  contract must support `NeedsAuthentication` either way so future versions can
+  trade self-contained verification against public-key size without changing
+  projector semantics.
 
 ### Context integrity (core-enforced)
 
@@ -329,7 +366,7 @@ closed:
     the value is derived from signed bytes, not signed itself.
   - `lens.rs`: present for `vN` when `N > 0`. In the linear default, `vN/lens.rs`
     converts `vN-1::semantic` into `vN::semantic`. It never parses raw bytes,
-    queries context, parks, quarantines, or performs authorization checks.
+    queries context, parks, holds pending ingress, or performs authorization checks.
   - `project.rs`: owned by the active ceiling semantic node; it consumes that
     version's `semantic.rs` type, checks context/authority/purge requirements,
     and emits rows, context offers, and replayable intents. An old `project.rs`
@@ -407,35 +444,35 @@ derived state by replaying with the fixed projector.
 
 Durability and replay are **two axes**, not one: *retained* (the bytes survive a
 wipe) and *replay-projected* (re-fed through `authenticate → lens → project` on
-an upgrade wipe to rebuild derived state). That gives three classes:
+an upgrade wipe to rebuild derived state). The current code represents the
+second axis with `FactRoute.replayed: bool`.
 
-- **Replay-durable** (retained + replay-projected) — the shared event log:
-  `content::*`, `auth::*`. Kept **forever** (source of truth), lensed to the
-  ceiling, re-projected on every replay. **Has a `lens.rs`.**
-- **Local-durable** (retained + **not** replay-projected) — persistent local /
-  operational state: `connection::request`, `connection::response`, and the
-  persisted connection secret. Validated on receipt and projected **live once**;
-  persists across normal restarts; but **excluded from the upgrade
-  replay-projection**, because their projection is live-session-coupled —
-  re-projecting a `connection_response` after a wipe would resurrect a dead
-  session (rematerialize its row, emit seed work). **No `lens.rs`** (never
-  replayed ⇒ never lensed). GC-eligible once the session closes (not
-  kept-forever); after a wipe they may carry no derived state until live
-  maintenance rebuilds connections fresh.
-- **Ephemeral** (not retained) — one-shot live projection, discarded:
-  `sync::{compare,have_id,need_id,range_request,shared_fact}`, frames, and the
-  transient handshake key. Projected via `ProjectionSource::Ephemeral` (cannot
-  emit durable offers). **No `lens.rs`.**
+- **Replay-projected** (`replayed == true`) — retained facts that rebuild
+  deterministic derived state on replay. This includes shared content and auth
+  history, deterministic sync rows such as `sync::shared_fact`,
+  `sync::compare`, and `sync::range_request`, connection lifecycle/receipt/frame
+  records, local secrets that are deterministic replay inputs, and the cascade
+  test fact. Future versioned families in this class carry `authenticate.rs`,
+  `lens.rs`, and `project.rs`.
+- **Retained but not replay-projected** (`replayed == false`) — facts kept in the
+  store but deliberately excluded from upgrade replay. Today this set is exactly
+  six tags, pinned by a registry guardrail: bootstrap request/response,
+  connection request/response, and sync have/need. These families carry
+  `authenticate.rs` + `project.rs`, and no `lens.rs`.
+- **Pending / non-protocol input** — raw network bytes before they have become
+  a fact, live-only queued work, daemon schedules, and wire-admitted bytes held
+  pending because the local runtime cannot yet authenticate, decrypt, or
+  ceiling-admit them. Pending bytes are retained/syncable as bytes, but are not
+  replay-projected and do not have a lens until they re-enter admission and
+  become active facts.
 
-So **a fact has a `lens.rs` iff it is replay-projected** — only replay-durable
-facts are lensed; local-durable and ephemeral both skip it. The non-replayed
-classes' `_vN/` buckets carry `authenticate.rs` + `project.rs` and no `lens.rs`.
+So **a fact has a `lens.rs` iff it is replay-projected**. Non-replayed families'
+`_vN/` buckets carry `authenticate.rs` + `project.rs` and no `lens.rs`.
 
-This **replaces the connection-retirement-before-replay dance**: because
-`connection::request`/`response` are local-durable (not replay-projected), the
-wipe simply does not re-project them — no dead-session resurrection, and no need
-to commit `connection_close` / upgrade-retirement facts to neutralize them during
-replay.
+This **replaces the connection-retirement-before-replay dance** for
+non-replayed connection establishment facts: the wipe simply does not re-project
+bootstrap/connection request/response facts, so replay does not resurrect a dead
+session from those live-session-coupled rows.
 
 **Invariant — the replay graph is closed.** A replay-projected fact may depend
 (causally or for context) only on other replay-projected facts. Local-durable and
@@ -444,12 +481,10 @@ may depend on them — else replay would dangle on state it does not rebuild.
 (`connection_response` self-contained is the special case.) A `GUARD` test
 enforces this.
 
-**In code:** the family/route carries a replay class
-(`ReplayDurable | LocalDurable | Ephemeral`); the wipe-and-replay entry point
-marks only `ReplayDurable` facts pending for projection. The class is orthogonal
-to `FactScope` — a `Local` secret is `ReplayDurable` (deterministically recreated
-on replay) while a `Local` `connection_response` is `LocalDurable` — so it is an
-explicit marker, not derived from scope.
+**In code:** the route carries `replayed: bool`; the wipe-and-replay entry point
+marks only `replayed == true` facts pending for projection. The marker is
+orthogonal to `FactScope`, so it is declared explicitly rather than derived from
+scope.
 
 ### Phase 5 — Rendering uniformity
 
@@ -507,7 +542,7 @@ explicit marker, not derived from scope.
 Security changes name the smallest unsafe surface: an **unsafe release** is
 blocked by embedded expiry or a `must_update` canary (its historical facts stay
 valid unless their fact version is also unsafe); an **unsafe fact version** is
-handled by tightening that version's adapter, quarantining affected facts, or
+handled by tightening that version's adapter, suppressing affected facts, or
 adding a durable policy fact that invalidates a bounded subset (ask live signers
 to reissue when useful, but never require universal re-signing for correctness);
 **unsafe derived state** is fixed by wipe-and-replay, with no durable migration
@@ -543,7 +578,7 @@ and the signer key matches the endpoint_shared row. It may replace display data
 only — never membership, admin authority, the original user key, or the subject
 id. The old `auth::user` authenticator plus lens keeps emitting authenticated
 membership identity without materializing plaintext into display rows; a policy
-fact can hide or quarantine old plaintext names; live devices publish encrypted
+fact can hide or suppress old plaintext names; live devices publish encrypted
 profile facts opportunistically. Purging the raw plaintext bytes first needs an
 authority-preserving replacement or tombstone — authority anchors are not freely
 purgeable — or content naming `author_user_id == auth::user.id` loses its context
@@ -596,7 +631,7 @@ guardrails for structure. Every cluster names the invariant it defends. The
 matrix is exhaustive over the cross-product of {new version, old version} ×
 {create, cli, query, projector, sync, connection} × {content, auth, connection,
 sync}; the multi-node intersection cases are the Part II "Multi-node end-to-end
-pairs" and "Platform, transition & quarantine activation" clusters.
+pairs" and "Platform, transition & pending activation" clusters.
 
 ### Handler-unit tests are not proof-of-record
 
@@ -654,10 +689,10 @@ These encode product choices, flagged so they are not silently assumed:
   replay / state-summary / replay-check surface), `guardrail`
   (registry/boundary), `property`.
 - **RED vs GREEN.** Most behavior here is unbuilt: tests that assert
-  ceiling-filtering, quarantine-not-error, version buckets, render-at-ceiling,
-  and expired-out are **RED** against the current tree and *define* the target
-  behavior. Tests that extend existing guardrails (tag uniqueness, registry
-  shape, projector purity) are **GREEN** today.
+  ceiling-filtering, pending ingress for above-ceiling bytes, version buckets,
+  render-at-ceiling, and expired-out are **RED** against the current tree and
+  *define* the target behavior. Tests that extend existing guardrails (tag
+  uniqueness, registry shape, projector purity) are **GREEN** today.
 - The six invariants are defined in Part I above §1:
   (1) visibility, (2) rendering uniformity, (3) ceiling monotonicity,
   (4) replay determinism, (5) readers-forever / transport-[floor,head],
@@ -668,17 +703,20 @@ These encode product choices, flagged so they are not silently assumed:
 This matrix is grounded in a direct read of `src`. Corrections to earlier notes,
 now reflected throughout:
 
-- `MATCH_COMMANDS` has **42** commands, not 40 (adds `test-generate-deps`,
-  `test-replay-deps-reverse`); `key-rotate-recipient` maps to run fn
+- `MATCH_COMMANDS` has **47** commands; `key-rotate-recipient` maps to run fn
   `key_recipient_rotation`.
 - The replay CLI surface (`replay`, `state-summary`, `replay-check`,
-  `intent-registry`, `recurring-intents`) is **planned / doc-only**, not yet in
-  `src`; `replay-cli` tests target that planned surface.
-- All **43** layout-bearing fact families are routed 1:1 in `FACT_ROUTES`; the
-  sealed envelope tags (46, 47) are the only declared `TYPE_*` constants not in
-  `FACT_ROUTES`.
-- The unknown-tag error is at `projectors.rs:456` (not 454).
-- All tag numbers, the 12 intent kinds, `content::purge` context-only status,
+  `intent-registry`, `recurring-intents`) is in `src`.
+- There are **43** routed fact-family `authenticate.rs` files and **47**
+  `FACT_ROUTES` entries. The four extra routed tags are sealed transit carriers:
+  sealed bootstrap request/response (46/47) and sealed connection
+  request/response (56/57).
+- The unknown-tag error is in `core/projectors.rs` at
+  `RouterProjector::project`; future versioning must gate unsupported input
+  before that projection dispatch for above-ceiling tags.
+- `HANDLER_ROUTES` has **17** routes. `runs_during_replay` and recurrence are
+  real metadata; `intro_version` is the missing versioning field.
+- All tag numbers, the handler inventory, `content::purge` context-only status,
   the absence of `auth::user_profile_v2`, and the TRNS AEAD layout were verified
   correct.
 
@@ -720,7 +758,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 > ceiling-gated capability; `connection::frame_*` carriers (tags 168/169/170)
 > for the transport-capacity coupling; `RouterProjector::project`
 > (projectors.rs:448) whose unknown-tag `Err` at projectors.rs:456 is the
-> *today* behavior the model replaces with admission/quarantine; the registry
+> *today* behavior the model replaces with admission/pending; the registry
 > `FACT_ROUTES`/`MATCH_COMMANDS` (registry.rs).
 
 ### CEIL-01 — ceiling is min over still-usable releases of supported_protocol.end() `property`
@@ -796,7 +834,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 ### CEIL-11 — no-regression scope split is per-build, not per-workspace `guardrail`
 - **Setup:** An alpha build (`1..=6`, dropping intro-7) and a production build (`1..=7`) share one workspace; ceiling == 7.
 - **Action:** Have the alpha build emit an above-its-support fact and observe the production build.
-- **Expect:** The alpha build is not added to the production still-usable set, so it does NOT pull the workspace ceiling down to 6; the production build keeps ceiling 7 and quarantines the alpha build's above-ceiling facts. The distinction is build-channel, not workspace membership.
+- **Expect:** The alpha build is not added to the production still-usable set, so it does NOT pull the workspace ceiling down to 6; the production build keeps ceiling 7 and drops/refuses the alpha build's above-ceiling facts as protocol input. The distinction is build-channel, not workspace membership.
 - **Defends:** Invariant (3); "Alpha isolation ... a property of the build, not the workspace" (doc:159-162).
 - **Refs:** "Alpha isolation" (doc:159-166).
 
@@ -908,7 +946,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 ### CEIL-27 — ceiling is computed locally and is not negotiated over the wire `guardrail`
 - **Setup:** Two peers A (manifest gives ceiling 6) and B (manifest gives ceiling 7, B has seen more recent signed deltas) connected on an authenticated session.
 - **Action:** A and B exchange facts; observe each side's effective ceiling. Provide no protocol message that sets a "negotiated ceiling".
-- **Expect:** Each client uses ITS OWN locally-computed ceiling (A=6, B=7) from manifest+trusted_time; there is no on-wire field that overrides it. B refuses to lower to A's ceiling and A refuses to raise to B's via negotiation; B's above-A's-ceiling facts are quarantined by A. "The ceiling ... is computed locally by each client ... it is not negotiated."
+- **Expect:** Each client uses ITS OWN locally-computed ceiling (A=6, B=7) from manifest+trusted_time; there is no on-wire field that overrides it. B refuses to lower to A's ceiling and A refuses to raise to B's via negotiation; A drops/refuses B's above-A's-ceiling facts until a later resend after A's ceiling rises. "The ceiling ... is computed locally by each client ... it is not negotiated."
 - **Defends:** Invariant (1); "The ceiling is computed locally by each client from the manifest and trusted time; it is not negotiated" (doc:130-131).
 - **Refs:** doc:130-131; transport vs ceiling separation (doc:103-118).
 
@@ -931,7 +969,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 > u64be` — `frame_observation/layout.rs:9-11,26-30`), a *local* receive fact, and
 > the daemon's `current_wall_clock_ms` (`app.rs:78-83`, raw `SystemTime::now()`).
 > `trusted_time`, `ReleaseManifestEntry`, `supported_protocol`, `warn_after`,
-> `expires_at`, the protocol *ceiling*, *blocked mode*, *self-quarantine*, skew
+> `expires_at`, the protocol *ceiling*, *blocked mode*, *staleness block*, skew
 > margin `M`, and staleness window `S` are **specified in
 > `docs/research/Part I above` (rules 1-3, 10) but NOT yet
 > implemented** (grep of `src/**/*.rs` finds none of these symbols; the one
@@ -962,7 +1000,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 - **Action:** `con clock set 5` then read `con clock`.
 - **Expect:** `con clock` output lines show `logical_time: 5`, `max_observed_timestamp: 1000` (or higher), and `next_timestamp: 1001` — the smaller logical value is stored but the next authored timestamp is still driven by the observed max, never `< observed_max+1`.
 - **Defends:** "trusted time only increases" semantics for the AUTHORING path — a smaller (signed/local) observation cannot pull the next-issued time below what we already observed.
-- **Refs:** `clock` command (MATCH_COMMANDS #41), `run_cli`/`apply_cli_args` (clock.rs:82-125), `next_timestamp` (76-79).
+- **Refs:** `clock` command (`MATCH_COMMANDS`), `run_cli`/`apply_cli_args` (clock.rs:82-125), `next_timestamp` (76-79).
 
 ### TIME-03 — `clock advance` accumulates monotonically and never decreases  `blackbox-cli`
 - **Setup:** built `con`, fresh store, no clock set.
@@ -1055,14 +1093,14 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 - **Defends:** model "backward clock jump beyond tolerance => blocked mode"; design rule 3 "shared production use blocks until time is plausible again."
 - **Refs:** design doc rule 3; proposed blocked-mode gate around `current_wall_clock_ms` (app.rs:78-83).
 
-### TIME-16 — STALENESS: no fresh signed observation within window S enters BLOCKED MODE (self-quarantine)  `guardrail`
+### TIME-16 — STALENESS: no fresh signed observation within window S enters BLOCKED MODE (staleness block)  `guardrail`
 - **Setup:** (proposed) last signed observation at T_last; window `S` configured; local time advances past `T_last + S` with no new signed observation.
 - **Action:** evaluate mode at `now > T_last + S`.
-- **Expect:** client SELF-QUARANTINES into BLOCKED MODE — shared production withheld — because it can no longer trust that its ceiling is current.
-- **Defends:** model "no refresh within staleness window S => blocked mode (self-quarantine)".
+- **Expect:** client enters BLOCKED MODE — shared production withheld — because it can no longer trust that its ceiling is current.
+- **Defends:** model "no refresh within staleness window S => blocked mode (staleness block)".
 - **Refs:** design doc rule 3 (trusted-time freshness); proposed staleness window `S`.
 
-### TIME-17 — a fresh signed observation within S keeps NORMAL mode (no false self-quarantine)  `guardrail`
+### TIME-17 — a fresh signed observation within S keeps NORMAL mode (no false staleness block)  `guardrail`
 - **Setup:** (proposed) last signed observation at T_last; window `S`; a NEW valid signed observation arrives at `T_last + (S/2)`.
 - **Action:** evaluate mode after the refresh.
 - **Expect:** stays NORMAL; the staleness timer resets to the new observation; shared production remains allowed.
@@ -1129,29 +1167,29 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 - **Setup:** (proposed) `con` in BLOCKED MODE; ceiling covers `content::message` (50); a peer sends a normal below-ceiling `content::message`.
 - **Action:** deliver the received frame (`receive_network_frame` intent path).
 - **Expect:** the received fact is admitted, projected, displayed, counted — blocked mode withholds OUTPUT (production create) only, not INPUT admission. `con messages`/`content-count` reflect it.
-- **Defends:** model "in blocked mode ... received-fact admit/quarantine and replay still run"; INVARIANT 1 (visibility of ceiling-active facts) holds even while blocked.
+- **Defends:** model "in blocked mode ... received-fact admission and replay still run"; INVARIANT 1 (visibility of ceiling-active facts) holds even while blocked.
 - **Refs:** `receive_network_frame` intent (HANDLER_ROUTES #12, app.rs:62-72), `content::message` projector (tag 50), `content-count`/`messages`.
 
-### TIME-27 — in BLOCKED MODE, a RECEIVED above-ceiling fact is QUARANTINED (retained opaque, not dropped, not errored)  `guardrail`
+### TIME-27 — in BLOCKED MODE, a RECEIVED above-ceiling fact becomes PENDING, not active  `guardrail`
 - **Setup:** (proposed) `con` in BLOCKED MODE; ceiling does NOT cover some future tag (e.g. proposed `message:2`); a peer sends that above-ceiling fact.
 - **Action:** deliver the received above-ceiling frame.
-- **Expect:** fact is QUARANTINED — retained as opaque bytes, unprojected, undisplayed, uncounted, NOT dropped, NOT errored. Today (RED) this instead ERRORS at `projectors.rs:456` `"no target projector registered for fact tag {tag}"`; the test asserts the desired quarantine outcome and documents the current error as the gap.
-- **Defends:** model "received-fact admit/quarantine ... still run [in blocked mode]"; ADMISSION quarantine rule; pins the projectors.rs:456 RED.
-- **Refs:** `RouterProjector::project` Err at `projectors.rs:456` (inventory §5), ADMISSION model.
+- **Expect:** if the frame opens and the sender is authorized, the bytes are retained as pending by stable id/hash: no read-model rows, no offers/needs, no forwarding as active protocol truth, and no projection. The current direct-projector unknown-tag error remains a guard; the future admission gate must prevent above-ceiling network input from becoming active protocol truth.
+- **Defends:** model "received-fact admission ... still run [in blocked mode]"; ADMISSION pending rule.
+- **Refs:** future admission gate before `RouterProjector::project`, ADMISSION model.
 
 ### TIME-28 — in BLOCKED MODE, wipe+REPLAY runs to completion and rebuilds derived state  `replay-cli`
-- **Setup:** (proposed) `con` in BLOCKED MODE with a populated store including quarantined facts.
+- **Setup:** (proposed) `con` in BLOCKED MODE with a populated store and prior above-ceiling inputs retained as pending ingress.
 - **Action:** run the wipe+replay path (today: the cascade replay surface `con test-replay-deps-reverse`; conceptually the upgrade replay).
-- **Expect:** replay completes, derived rows rebuilt deterministically; replay observes NO fresh time, sends NO frames, signs NO new shared facts (design rule 8); blocked mode does not abort replay. Quarantined facts remain quarantined unless the ceiling now covers their tag.
+- **Expect:** replay completes, derived rows rebuilt deterministically; replay observes NO fresh time, sends NO frames, signs NO new shared facts (design rule 8); blocked mode does not abort replay. Pending above-ceiling inputs stay inert unless the replay's admission ceiling/context now admits them.
 - **Defends:** model "in blocked mode ... replay still run[s]"; INVARIANT 4 (replay deterministic, ceiling-independent); design rule 8.
-- **Refs:** `test-replay-deps-reverse` -> `replay_deps_reverse` (MATCH_COMMANDS #37, sync::cascade_test_fact::cli); inventory §6 (no `con replay` subcommand exists — use the cascade command).
+- **Refs:** `replay`, `replay-check`, `state-summary`, and `test-replay-deps-reverse` replay surfaces.
 
-### TIME-29 — quarantined above-ceiling fact ACTIVATES on next wipe+replay once the ceiling rises to cover its tag  `replay-cli`
-- **Setup:** (proposed) store holds a quarantined fact with future tag; client subsequently leaves blocked mode AND ceiling rises (e.g. blocking release expired) to cover that tag.
+### TIME-29 — pending above-ceiling input activates on next wipe+replay once the ceiling rises  `replay-cli`
+- **Setup:** (proposed) client previously retained a wire-admitted fact with a future tag as pending; client subsequently leaves blocked mode AND ceiling rises (e.g. blocking release expired) to cover that tag.
 - **Action:** raise ceiling, then wipe+replay.
-- **Expect:** the previously-quarantined fact now routes to its (kept-forever) projector, projects, and becomes displayed/counted; replay is deterministic regardless of original arrival order.
-- **Defends:** model "Quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"; INVARIANT 4.
-- **Refs:** ADMISSION model; `RouterProjector` routing by own tag (projectors.rs); design rules 4/5.
+- **Expect:** the pending bytes re-enter `authenticate -> lens -> project`, route to the tag's kept-forever adapter, and project if authentication and semantic context succeed. No network resend is required for bytes already retained as pending.
+- **Defends:** ADMISSION pending activation after ceiling rise; INVARIANT 4 (replay determinism over retained facts only).
+- **Refs:** ADMISSION model; ceiling-filtered routing by own tag; design rules 4/5.
 
 ### TIME-30 — trusted_time as a LOWER BOUND gates ceiling advance with margin M: advance only at trusted_time > blocker.expires_at + M  `guardrail`
 - **Setup:** (proposed) one blocking release `R` with `expires_at = E`; skew margin `M`; `trusted_time = E + (M/2)` (past expiry but within skew margin).
@@ -1376,21 +1414,21 @@ per scope where the scope changes the answer.
 ### MAN-21 — Historical facts from a security-deprecated release stay valid (fact version still safe)  `replay-cli`
 - **Setup:** Store contains a retained `auth::user` (tag 14) fact and `content::message` (tag 50, version 1) facts that were originally written by release relX. A signed `must_update` canary later security-deprecates relX. The message:1 and user fact VERSIONS are NOT flagged unsafe.
 - **Action:** Run a wipe+replay pass.
-- **Expect:** The historical user/message facts REPLAY and re-materialize their read-model rows normally via their own tag-keyed adapters; they are NOT invalidated, quarantined, or dropped just because relX was deprecated. Deprecating a release deprecates the BINARY, not the facts it wrote.
+- **Expect:** The historical user/message facts REPLAY and re-materialize their read-model rows normally via their own tag-keyed adapters; they are NOT invalidated, pending, or dropped just because relX was deprecated. Deprecating a release deprecates the BINARY, not the facts it wrote.
 - **Defends:** Mechanism: "Historical facts from a security-deprecated release stay valid unless their fact version is unsafe"; doc "Security Changes / Unsafe release"; (5) READERS FOREVER; (4).
 - **Refs:** `auth::user` tag 14, `content::message` tag 50; wipe+replay via FACT_ROUTES adapters; `RouterProjector::project` (`src/core/projectors.rs:448`).
 
-### MAN-22 — Historical facts whose FACT VERSION is unsafe are quarantined even though the release wrote them legitimately  `replay-cli`
+### MAN-22 — Historical facts whose FACT VERSION is unsafe are suppressed even though the release wrote them legitimately  `replay-cli`
 - **Setup:** Store contains retained `content::file` (tag 54) facts written by relX. A fact-version-safety action marks `file:vK` (the version those facts use) as UNSAFE (e.g. an unsafe BAO proof format), independent of any release deprecation.
 - **Action:** Run a wipe+replay pass.
-- **Expect:** The affected `file:vK` facts are QUARANTINED/handled by the tightened `file:vK` adapter (retained as opaque, not materialized into display rows) — but facts from OTHER, safe file versions still replay. The trigger is the FACT VERSION being unsafe, NOT the release. Contrast MAN-21: there the release was deprecated but the fact version was safe -> facts stayed valid.
+- **Expect:** The affected `file:vK` facts are withheld/handled by the tightened `file:vK` adapter (retained as historical evidence, not materialized into display rows) — but facts from OTHER, safe file versions still replay. The trigger is the FACT VERSION being unsafe, NOT the release. Contrast MAN-21: there the release was deprecated but the fact version was safe -> facts stayed valid.
 - **Defends:** Mechanism: fact-version safety is orthogonal to release safety; doc "Security Changes / Unsafe fact version"; (6) SAFETY FLOOR; (5).
-- **Refs:** `content::file` tag 54; tightened/quarantining adapter; doc "Files and file slices" upgrade-path row.
+- **Refs:** `content::file` tag 54; tightened/suppressing adapter; doc "Files and file slices" upgrade-path row.
 
 ### MAN-23 — Release deprecation and fact-version deprecation are independent (matrix: 4 corners)  `property`
 - **Setup:** A retained `content::message` (tag 50) fact written by relX. Two independent flags: {relX deprecated?} x {message:1 version unsafe?}.
 - **Action:** For each of the four combinations, run wipe+replay and observe the fact's fate.
-- **Expect:** (a) release-safe + fact-safe -> fact materializes normally. (b) release-DEPRECATED + fact-safe -> fact STILL materializes (MAN-21). (c) release-safe + fact-UNSAFE -> fact quarantined (MAN-22). (d) release-DEPRECATED + fact-UNSAFE -> fact quarantined (driven by the fact-version flag, not the release). The release flag never affects fact validity; only the fact-version flag does.
+- **Expect:** (a) release-safe + fact-safe -> fact materializes normally. (b) release-DEPRECATED + fact-safe -> fact STILL materializes (MAN-21). (c) release-safe + fact-UNSAFE -> fact suppressed (MAN-22). (d) release-DEPRECATED + fact-UNSAFE -> fact suppressed (driven by the fact-version flag, not the release). The release flag never affects fact validity; only the fact-version flag does.
 - **Defends:** Mechanism: orthogonality of release safety vs fact-version safety; (5)(6).
 - **Refs:** `content::message` tag 50; release-deprecation (canary) vs fact-version-deprecation; wipe+replay.
 
@@ -1415,12 +1453,12 @@ per scope where the scope changes the answer.
 - **Defends:** Mechanism: capability reconciliation; a binary cannot be talked into admitting protocol it cannot implement; (3) no-regression gate is about real capability.
 - **Refs:** proposed `ReleaseManifestEntry.supported_protocol` RangeInclusive<u32>; embedded self-capability vs learned claim.
 
-### MAN-27 — Quarantined above-ceiling fact activates only after the ceiling rises via a legitimate expiry/canary  `replay-cli`
-- **Setup:** Ceiling = 6 (relO `6..=6` caps it). A peer delivered a `content::message` version-2 fact (a NEW tag for the incompatible wire shape) which is currently QUARANTINED (retained opaque, unprojected, uncounted; today this would hit `RouterProjector::project` Err at `src/core/projectors.rs:456` if routed prematurely).
+### MAN-27 — Pending above-ceiling input activates when the ceiling rises via expiry/canary  `replay-cli`
+- **Setup:** Ceiling = 6 (relO `6..=6` caps it). A peer delivered a `content::message` version-2 fact (a NEW tag for the incompatible wire shape), and admission retained it as pending because it was above-ceiling.
 - **Action:** Advance trusted_time past relO's `expires_at + M` (relO falls out; ceiling -> 7), then run a wipe+replay.
-- **Expect:** Now that message:2's tag is ceiling-active, the previously-quarantined fact ACTIVATES on this wipe+replay: it routes to its new kept-forever projector and materializes. Before the ceiling rose, it stayed quarantined (NOT dropped, NOT errored to the user). The activation is driven ONLY by a legitimate ceiling rise (expiry/canary against the blocker), never by the quarantined fact's own arrival.
-- **Defends:** ADMISSION: quarantined facts activate on next wipe+replay once ceiling covers their tag; (3) ceiling gates activation.
-- **Refs:** new message:2 tag + sibling `_v2/` projector in `FACT_ROUTES`; quarantine path vs `RouterProjector::project` Err@456; wipe+replay; ceiling rise from `expires_at`/canary.
+- **Expect:** Now that message:2's tag is ceiling-active, the old pending copy re-enters admission, routes to the kept-forever projector, and materializes if authentication/context succeeds. No fresh network resend is required for bytes already retained as pending.
+- **Defends:** ADMISSION: pending above-ceiling input activates only after the ceiling admits it; (3) ceiling gates activation.
+- **Refs:** new message:2 tag + sibling `_v2/` projector in `FACT_ROUTES`; pending before projection; wipe+replay; ceiling rise from `expires_at`/canary.
 
 ### MAN-28 — Manifest-driven ceiling rise is gated by carrier capacity (chunk-don't-grow)  `handler-unit`
 - **Setup:** Manifest is poised to raise the ceiling to a version that introduces a fact family whose byte size exceeds the BUNDLE carrier limit (`CONNECTION_FRAME_BUNDLE` < 64 KiB, `connection_frame_wire.rs`) that a still-usable release is limited to.
@@ -1463,33 +1501,35 @@ per scope where the scope changes the answer.
 - **Expect:** It is NOT ceiling-active, because the predicate is `intro_version <= ceiling AND every still-usable release can transport it` — the second clause fails. The fact family stays dormant in production despite `intro_version <= ceiling`. (Combines with MAN-28's carrier gate.)
 - **Defends:** Mechanism: ceiling-active iff `intro_version <= ceiling AND every still-usable release can transport it`; (1).
 - **Refs:** ceiling-active predicate; `connection_frame_wire.rs` carrier; intro_version on routes (`FACT_ROUTES` / `RouterProjector`).
-## 4. Fact routing, admission, quarantine, intro_version
+## 4. Fact routing, admission, pending, intro_version
 
-These tests defend the model's admission/quarantine/routing rules. Today's code
-has three structural gaps these tests are written to drive out and then lock:
-(a) `FactRoute { tag, projector }` (`projectors.rs:402`) carries NO
-`intro_version`; (b) `RouterProjector` (`projectors.rs:423`) is NOT
-ceiling-filtered — it dispatches every registered tag unconditionally; (c) an
-unknown / above-ceiling tag ERRORS at
-`projectors.rs:456` (`Err("no target projector registered for fact tag {tag}")`)
-instead of being quarantined. Tests below that assert quarantine, refusal, and
-ceiling-filtering are RED against `bb87049` and define the target behavior;
-tests that assert global tag uniqueness / registry shape are GREEN guardrails
-that extend `fact_route_tags_are_globally_unique` (registry.rs:717-729).
+These tests defend the model's admission/pending/routing rules. Today's
+code has three structural gaps these tests are written to drive out and then
+lock: (a) `FactRoute { tag, projector, replayed }` carries no `intro_version`;
+(b) `RouterProjector` is not ceiling-filtered — it dispatches every registered
+tag unconditionally; (c) authentication is currently composed into projection
+with `project_authenticated`, with no standalone admission-time
+`AuthenticatorRoute` table keyed by tag. Versioning adds an admission gate ahead
+of projection: wire-invalid input drops; wire-admitted unknown or above-ceiling
+bytes become pending; and ceiling-active known tags authenticate by tag before
+lens/project. Tests below that assert pending ingress and ceiling-filtering are
+RED against the current tree and define the target
+behavior; tests that assert global tag uniqueness / registry shape are GREEN
+guardrails that extend `fact_route_tags_are_globally_unique`.
 
 Conventions used below: "ceiling C" = the active protocol-version ceiling
 computed from the signed `ReleaseManifestEntry` fleet at `trusted_time`.
 "intro_version V(tag)" = the protocol version that first bundled a fact tag.
 A fact is "above-ceiling" iff `V(tag) > C`. All CLI invocations use the real
-`con` binary (`src/main.rs`); no `con replay` / `con state-summary` commands are
-used (they do not exist — inventory section 6).
+`con` binary (`src/main.rs`). Replay/status commands exist in `src`, but most
+versioning assertions against a future ceiling still start RED.
 
 ---
 
 ### ROUTE-01 — at-ceiling content::message admits, projects, and is counted  `blackbox-cli`
 - **Setup:** Single `con` node, fresh store, workspace created (`con create-workspace`). Manifest fleet yields ceiling C = the current head protocol version P_head; `V(content::message=50) <= C` (message has always been in-bundle).
 - **Action:** `con send <workspace> "hello"` then `con messages <workspace>` and `con content-count <workspace>`.
-- **Expect:** The message fact (tag 50) is admitted and persisted; `con messages` displays "hello"; `con content-count` increments by 1; exit code 0; no quarantine, no error on stderr.
+- **Expect:** The message fact (tag 50) is admitted and persisted; `con messages` displays "hello"; `con content-count` increments by 1; exit code 0; no pending state, no error on stderr.
 - **Defends:** Invariant (1) VISIBILITY — a ceiling-active fact is admissible/projectable/displayable. Baseline for ADMISSION.
 - **Refs:** `content::message` tag 50 `TYPE_CONTENT_MESSAGE`; `MATCH_COMMANDS` send/messages/content-count; `RouterProjector` route `project_content_message` (registry.rs:604); read model `content_messages`/`OPENED_MESSAGE_ROWS`.
 
@@ -1514,40 +1554,40 @@ used (they do not exist — inventory section 6).
 - **Defends:** ADMISSION granularity — refusal keyed by the FACT TAG (the versioning knob), not the scope.
 - **Refs:** VERSIONING KNOB = fact tag; `content` scope families tags 50/52/53/54/55/147; `MATCH_COMMANDS` send.
 
-### ROUTE-05 — received above-ceiling fact is QUARANTINED, not errored (regression guard vs projectors.rs:456)  `projector-unit`
+### ROUTE-05 — received above-ceiling fact becomes PENDING before projection  `projector-unit`
 - **Setup:** Router over `FACT_ROUTES` with a ceiling filter applied. Ceiling C. Build a fact whose first byte is a tag T with `V(T) > C` — model this with a tag that the ceiling-filtered router treats as inactive (e.g. a future `message:2` tag, or a registered tag deliberately marked intro_version > C).
-- **Action:** Project the fact through the ceiling-filtered `RouterProjector`.
-- **Expect:** Result is `Ok` with a QUARANTINE outcome: NO row mutations, NO emitted inner facts, NO display, NOT counted; the raw bytes are retained opaque (a quarantine record / pass-through). It MUST NOT return `Err("no target projector registered for fact tag {tag}")`. This is the explicit regression assertion against current `projectors.rs:456`.
-- **Defends:** ADMISSION — received above-ceiling fact QUARANTINED (retained opaque, unprojected/undisplayed/uncounted, NOT dropped, NOT errored).
-- **Refs:** `RouterProjector::project` (projectors.rs:448-459); the `Err` at line 456 is what this test forbids for above-ceiling tags; `ProjectionOutput`.
+- **Action:** Deliver the fact through the receive/admission path before projection.
+- **Expect:** The fact is retained as pending bytes before authenticator/lens/projector dispatch: NO row mutations, NO emitted inner facts, NO display, NOT counted, NO authority, NO purge effect. It may be indexed by id/bytes for negentropy, but it is not an active validated fact. This must not surface as a user-facing projector error.
+- **Defends:** ADMISSION — received above-ceiling input is pending: syncable and waiting, but not active protocol truth.
+- **Refs:** future ceiling admission gate before `RouterProjector::project`; current unknown-tag projection error is the implementation gap the gate avoids for wire-admitted future input.
 
-### ROUTE-06 — quarantined received fact is RETAINED in the store (not dropped)  `projector-unit`
+### ROUTE-06 — pending received fact is retained as bytes, not projected  `projector-unit`
 - **Setup:** Ceiling-filtered router, ceiling C. Receive an above-ceiling fact F (tag T, `V(T) > C`) via the receive path (`submit_fact`).
 - **Action:** After receiving, enumerate the durable fact log / store contents.
-- **Expect:** F's raw bytes are present in the durable store exactly as received (byte-for-byte); it is recorded as quarantined/opaque. It is NOT in any read-model row table, NOT in `con messages`, NOT in `con content-count`.
-- **Defends:** ADMISSION — quarantined fact NOT dropped; retained opaque.
-- **Refs:** `Runtime::submit_fact` (runtime.rs:268); durable fact log; read models in `read_models` (registry.rs:36-182) must NOT contain it.
+- **Expect:** F's raw bytes are present in the pending byte store/index exactly as received. It is NOT in any read-model row table, NOT in `con messages`, NOT in `con content-count`, and NOT active projection input until admission is retried at a ceiling/context that can accept it.
+- **Defends:** ADMISSION — pending fact bytes are retained and syncable but inert.
+- **Refs:** future pending byte store; read models in `read_models` (registry.rs:36-182) must NOT contain it.
 
-### ROUTE-07 — quarantined fact is undisplayed and uncounted across every reader  `blackbox-cli`
-- **Setup:** A node that has received an above-ceiling `content::message`-family variant (quarantined). Ceiling C below its intro_version.
+### ROUTE-07 — pending above-ceiling input is invisible across every reader  `blackbox-cli`
+- **Setup:** A node that has received a pending above-ceiling `content::message`-family variant. Ceiling C below its intro_version.
 - **Action:** Run each content reader: `con messages`, `con content-count`, `con view`, `con files`.
-- **Expect:** None of the readers surface or count the quarantined fact; outputs are identical to a node that never received it. Exit code 0 (no error surfaced to the user for a peer-sent future fact).
-- **Defends:** ADMISSION — quarantined fact undisplayed AND uncounted; Invariant (2) RENDERING UNIFORMITY (render at ceiling, withhold above-ceiling derivations).
+- **Expect:** None of the readers surface or count the pending input; outputs are identical to a node that never received it. Exit code 0 (no error surfaced to the user for a peer-sent future fact).
+- **Defends:** ADMISSION — pending input is retained but inactive; Invariant (2) RENDERING UNIFORMITY (render at ceiling, withhold above-ceiling derivations).
 - **Refs:** `MATCH_COMMANDS` messages/content-count/view/files; read models OPENED_MESSAGES/CONTENT_MESSAGES.
 
-### ROUTE-08 — quarantined fact survives wipe+replay and ACTIVATES once ceiling rises  `replay-cli`
-- **Setup:** Node holds quarantined fact F (tag T, `V(T) > C0`). Then the signed manifest fleet advances so the new ceiling C1 >= `V(T)` (every still-usable release now supports T, and `trusted_time > blocker.expires_at + M`).
-- **Action:** Perform wipe + replay (rebuild derived state from the retained fact log) at ceiling C1.
-- **Expect:** On replay, F is no longer above-ceiling; the ceiling-filtered router now has T active; F projects normally — its row mutations appear, it becomes displayed and counted. Quarantine record is consumed/cleared. State equals a node that received F natively at C1.
-- **Defends:** ADMISSION — quarantined facts ACTIVATE on next wipe+replay after ceiling rises; Invariant (4) REPLAY DETERMINISM.
+### ROUTE-08 — pending above-ceiling input activates after ceiling rises  `replay-cli`
+- **Setup:** Node receives above-ceiling fact F (tag T, `V(T) > C0`) and stores it pending. Then the signed manifest fleet advances so the new ceiling C1 >= `V(T)` (every still-usable release now supports T, and `trusted_time > blocker.expires_at + M`).
+- **Action:** Re-run admission for pending bytes, then perform wipe + replay (rebuild derived state from the retained active fact log) at ceiling C1.
+- **Expect:** F authenticates/adopts the now-active route, moves from pending to active retained fact, projects normally, and becomes displayed/counted. State equals a node that first received F natively at C1.
+- **Defends:** ADMISSION — pending input activates when ceiling/context admits it; Invariant (4) REPLAY DETERMINISM.
 - **Refs:** wipe+replay rebuild; ceiling-filtered `RouterProjector`; `FactRoute` for tag T; trusted-time gate (skew margin M).
 
-### ROUTE-09 — quarantined fact stays quarantined across replay if ceiling did NOT rise  `replay-cli`
-- **Setup:** Node holds quarantined fact F (tag T, `V(T) > C0`). Manifest unchanged; ceiling stays C0.
+### ROUTE-09 — pending input stays pending across replay if ceiling did not rise  `replay-cli`
+- **Setup:** Node received pending above-ceiling fact F (tag T, `V(T) > C0`). Manifest unchanged; ceiling stays C0.
 - **Action:** wipe + replay at ceiling C0.
-- **Expect:** F replays back into quarantine (retained opaque, unprojected, uncounted); it does NOT error and does NOT activate. Derived state identical to pre-replay (minus any genuinely deterministic recreation, of which F is not part).
-- **Defends:** ADMISSION + Invariant (4) — replay is ceiling-dependent ONLY for activation gating of above-ceiling tags; below/at ceiling is deterministic; quarantine is stable.
-- **Refs:** ceiling-filtered `RouterProjector`; replay path; `RouterProjector::project` quarantine branch.
+- **Expect:** F remains pending, unprojected, undisplayed, and uncounted. Derived state is identical to a node that never received it, except pending-byte inventory/diagnostics.
+- **Defends:** ADMISSION + Invariant (4) — pending bytes do not enter the projection graph until admitted.
+- **Refs:** ceiling-filtered admission gate; replay path; pending byte inventory.
 
 ### ROUTE-10 — replay selects the historical adapter by the fact's OWN tag, independent of current ceiling (below-ceiling tag)  `replay-cli`
 - **Setup:** Node has retained facts spanning two on-wire shapes of one family, e.g. `content::file_slice` (tag 55) plus a hypothetical successor slice tag T2. Current ceiling C >= max(V(55), V(T2)) so BOTH are active. Both old and new facts are in the log.
@@ -1566,51 +1606,51 @@ used (they do not exist — inventory section 6).
 ### ROUTE-12 — ceiling-filtered router EXCLUDES above-ceiling routes from active dispatch  `projector-unit`
 - **Setup:** Build the ceiling-filtered router with ceiling C. `FACT_ROUTES` contains a route for tag T with `V(T) > C` (registered but above-ceiling). Also a tag U with `V(U) <= C`.
 - **Action:** Inspect the active route set (or attempt dispatch of T vs U).
-- **Expect:** T is NOT in the active dispatch set: dispatching T yields quarantine (per ROUTE-05), not projection; U dispatches normally. The router's active routes == { routes with intro_version <= C }.
+- **Expect:** T is NOT in the active dispatch set: receiving T stores it pending before projection (per ROUTE-05), not projected; U dispatches normally. The router's active routes == { routes with intro_version <= C }.
 - **Defends:** "the ceiling-filtered router excludes above-ceiling routes from active dispatch"; Invariant (1)/(3).
 - **Refs:** `RouterProjector` (projectors.rs:423) gains an intro_version-aware filter over `FACT_ROUTES`; ceiling C.
 
 ### ROUTE-13 — raising the ceiling adds the route to active dispatch (monotone activation)  `projector-unit`
 - **Setup:** Ceiling C0 with tag T above-ceiling (`V(T) > C0`). Then ceiling C1 >= V(T).
 - **Action:** Build router at C0 (assert T inactive), then build at C1 (assert T active); dispatch a tag-T fact under each.
-- **Expect:** At C0: T quarantined. At C1: T projects normally. Activation is gated solely by `intro_version <= ceiling` (plus transportability), and is monotone in the ceiling.
+- **Expect:** At C0: a received T is retained pending and not projected. At C1: the pending T re-enters admission and projects normally. Activation is gated solely by `intro_version <= ceiling` (plus transportability), and is monotone in the ceiling.
 - **Defends:** Invariant (3) CEILING MONOTONICITY; "ceiling-active iff intro_version<=ceiling AND every still-usable release can transport it".
 - **Refs:** ceiling-filtered `RouterProjector`; `FactRoute` intro_version; ceiling computation.
 
-### ROUTE-14 — received fact whose tag is genuinely unknown (no route at any version) still errors  `projector-unit`
-- **Setup:** Ceiling-filtered router over `FACT_ROUTES`. Construct a fact with a first byte that is NOT any of the 43 registered tags and is NOT a declared-but-above-ceiling tag (e.g. tag 200, never registered, no intro_version).
-- **Action:** Project the fact.
-- **Expect:** Returns `Err("no target projector registered for fact tag 200")` (the legitimate `projectors.rs:456` error is preserved). Quarantine is reserved for KNOWN-but-above-ceiling tags; a truly unregistered tag is still an error. This distinguishes the two paths.
-- **Defends:** Boundary of ADMISSION — quarantine is for above-ceiling KNOWN tags only; unknown tags remain a hard error (no silent acceptance of garbage).
-- **Refs:** `RouterProjector::project` (projectors.rs:455-456); 43-tag `FACT_ROUTES`; the unknown-tag `Err`.
+### ROUTE-14 — received fact whose tag is genuinely unknown becomes pending only if wire-admitted  `projector-unit`
+- **Setup:** Ceiling-filtered router over `FACT_ROUTES`. Construct a fact with a first byte that is NOT any of the 47 registered tags and is NOT a declared-but-above-ceiling tag (e.g. tag 200, never registered, no intro_version).
+- **Action:** Deliver the bytes through the receive/admission path.
+- **Expect:** If the bytes made it through authenticated sync/transport with a stable id/hash, they are retained pending as unknown-tag bytes; they are not projected, parsed for context, or considered active truth. If the bytes are malformed or not wire-admitted, they drop. Current direct projector calls may still return the unknown-tag error; versioning's admission gate sits before that.
+- **Defends:** Boundary of ADMISSION — unknown wire-admitted bytes may wait for a future binary, but are not silently active.
+- **Refs:** future admission gate before `RouterProjector::project`; 47-route `FACT_ROUTES`; the current unknown-tag `Err` remains a direct-projector guard.
 
-### ROUTE-15 — empty fact bytes still error (not quarantined)  `projector-unit`
+### ROUTE-15 — empty fact bytes are rejected/dropped before projection  `projector-unit`
 - **Setup:** Ceiling-filtered router. A fact with zero bytes.
-- **Action:** Project the empty fact.
-- **Expect:** `Err("cannot project empty fact bytes")` (projectors.rs:435) is preserved; an empty fact is never quarantined (there is no tag to gate on).
-- **Defends:** Boundary of ADMISSION/quarantine — quarantine requires a readable tag byte.
+- **Action:** Deliver the empty bytes through the receive/admission path.
+- **Expect:** The input is rejected/dropped before projection; no rows, no fact log entry, no forwarding. Current direct projector calls may still return `Err("cannot project empty fact bytes")`; admission should prevent empty network input from becoming protocol truth.
+- **Defends:** Boundary of ADMISSION — there is no tag to gate or authenticate.
 - **Refs:** `RouterProjector::effective_tag` empty-bytes guard (projectors.rs:434-436).
 
 ### ROUTE-16 — every FactRoute declares an intro_version (registry completeness)  `guardrail`
 - **Setup:** Registry guardrail test in `registry.rs` tests module, alongside `fact_route_tags_are_globally_unique`.
 - **Action:** Iterate `FACT_ROUTES`; for each entry read its `intro_version`.
-- **Expect:** Every one of the 43 routes has a declared `intro_version` (compile-time: the `FactRoute` struct field is non-optional; runtime: each value is a sane u32, and the set of values is a subset of the protocol versions named by the bundle map). Today `FactRoute` (projectors.rs:402) has only `{tag, projector}` — this test forces adding `intro_version` and populating all 43 in `projector_routes!`.
+- **Expect:** Every one of the 47 routes has a declared `intro_version` (compile-time: the `FactRoute` struct field is non-optional; runtime: each value is a sane u32, and the set of values is a subset of the protocol versions named by the bundle map). Today `FactRoute` has `{tag, projector, replayed}` — this test forces adding `intro_version` and populating all 47 in `projector_routes!`.
 - **Defends:** "every fact route declares intro_version" — registry completeness.
-- **Refs:** `FactRoute` (projectors.rs:402); `projector_routes!` macro (registry.rs:580-637); 43 routes (registry.rs:594-636).
+- **Refs:** `FactRoute`; `projector_routes!` macro; 47 routes in `FACT_ROUTES`.
 
 ### ROUTE-17 — every HandlerRoute declares intro_version and runs_during_replay (registry completeness)  `guardrail`
-- **Setup:** Registry guardrail over `HANDLER_ROUTES` (12 routes, registry.rs:649-710).
+- **Setup:** Registry guardrail over `HANDLER_ROUTES` (17 routes).
 - **Action:** Iterate `HANDLER_ROUTES`; read each route's `intro_version` and `runs_during_replay`.
-- **Expect:** All 12 routes declare both fields (non-optional struct fields on `HandlerRoute`, runtime.rs:71). Today `HandlerRoute` is `{name, intent_kind, factory}` only — this drives adding `intro_version` and `runs_during_replay`. Network-side routes in `COMMAND_EXCLUDED_HANDLER_ROUTES` (send_bootstrap_connection_request, send_facts_on_connection, send_network_frame, receive_network_frame) should have `runs_during_replay = false`.
+- **Expect:** All 17 routes declare `intro_version`; `runs_during_replay` is already a non-optional field and remains explicitly set. Network-side routes in `COMMAND_EXCLUDED_HANDLER_ROUTES` should have `runs_during_replay = false`.
 - **Defends:** "every handler route declares intro_version"; HandlerRoute also carries runs_during_replay.
-- **Refs:** `HandlerRoute` (runtime.rs:71); `HANDLER_ROUTES` (registry.rs:649); `COMMAND_EXCLUDED_HANDLER_ROUTES` (registry.rs:512).
+- **Refs:** `HandlerRoute`; `HANDLER_ROUTES`; `COMMAND_EXCLUDED_HANDLER_ROUTES`.
 
 ### ROUTE-18 — every CliCommand declares intro_version per run-fn bucket (registry completeness)  `guardrail`
-- **Setup:** Registry guardrail over `MATCH_COMMANDS` (42 commands, registry.rs:367-510).
+- **Setup:** Registry guardrail over `MATCH_COMMANDS` (47 commands).
 - **Action:** Iterate `MATCH_COMMANDS`; for each command read its version-tagged run-fn bucket(s).
-- **Expect:** Each command maps a stable name to a list of `(intro_version, run_fn)` entries with at least one entry, each entry declaring an intro_version. Today `CliCommand` has a single bare `run` fn (registry.rs:358-363, `cli_command!` macro) — this drives the version-bucket shape. All 42 names from the inventory present (including `test-generate-deps`, `test-replay-deps-reverse`, `key-rotate-recipient -> key_recipient_rotation`).
+- **Expect:** Each command maps a stable name to a list of `(intro_version, run_fn)` entries with at least one entry, each entry declaring an intro_version. Today `CliCommand` has a single bare `run` fn — this drives the version-bucket shape. All 47 names from the inventory present, including `key-rotate-recipient -> key_recipient_rotation`.
 - **Defends:** "every cli route declares intro_version"; CliCommand = stable name -> version-tagged list of run fns.
-- **Refs:** `CliCommand` / `cli_command!` (registry.rs:356-365); `MATCH_COMMANDS` (registry.rs:367); inventory section 2 (42 commands).
+- **Refs:** `CliCommand` / `cli_command!`; `MATCH_COMMANDS`; inventory section 2 (47 commands).
 
 ### ROUTE-19 — CLI version bucket selects highest intro_version <= ceiling  `blackbox-cli`
 - **Setup:** A command whose input surface changed across versions, so it has two buckets: `(V_old, run_old)` and `(V_new, run_new)` with `V_old <= C < V_new` for ceiling C.
@@ -1629,7 +1669,7 @@ used (they do not exist — inventory section 6).
 ### ROUTE-21 — fact tags are globally unique across ALL versions of all families (extends fact_route_tags_are_globally_unique)  `guardrail`
 - **Setup:** Extend `fact_route_tags_are_globally_unique` (registry.rs:717-729) to span every version-tagged route, including future `_vN/` sibling routes (e.g. tag 50 message:1 AND a future message:2 tag must both be distinct u8s).
 - **Action:** Collect every `FactRoute.tag` across all version buckets into a set; check for duplicates; also assert no tag collides with the non-fact sealed envelope tags 46/47 or the TRNS magic's first byte usage.
-- **Expect:** All tags distinct; zero duplicates. A new wire shape MUST take a NEW tag, never reuse an old family's tag. The 43 current tags (inventory section 1 map) all distinct (already passing); the test additionally guards future additions.
+- **Expect:** All tags distinct; zero duplicates. A new wire shape MUST take a NEW tag, never reuse an old family's tag. The 47 current routed tags (inventory section 1 map) all distinct (already passing); the test additionally guards future additions.
 - **Defends:** "fact tags globally unique across all versions"; extends `fact_route_tags_are_globally_unique`; VERSIONING KNOB = new tag for incompatible shape.
 - **Refs:** `fact_route_tags_are_globally_unique` (registry.rs:717-729); full tag map (inventory section 1); sealed tags 46/47 (NOT in FACT_ROUTES).
 
@@ -1640,61 +1680,61 @@ used (they do not exist — inventory section 6).
 - **Defends:** Negative case for "fact tags globally unique"; VERSIONING KNOB correctness.
 - **Refs:** `fact_route_tags_are_globally_unique` (registry.rs:718-728); `FactRoute.tag`.
 
-### ROUTE-23 — connection frame (container fact) admits at ceiling and emits inner fact bytes; an above-ceiling INNER fact is quarantined  `projector-unit`
+### ROUTE-23 — connection frame admits at ceiling and parks an above-ceiling INNER fact as pending  `projector-unit`
 - **Setup:** Ceiling C. A `connection::frame_small` fact (tag 168, the TRNS container) whose decrypted inner bundle packs two content facts: one at-ceiling `content::message` (tag 50) and one above-ceiling inner fact (tag T, `V(T) > C`).
 - **Action:** Open and project the frame_small container fact; materialize its recovered inner fact bytes and re-submit them through the ceiling-filtered router.
-- **Expect:** The container fact admits and opens; the inner tag-50 message authenticates/projects and is counted/displayed; the inner above-ceiling fact T is QUARANTINED (retained opaque, uncounted), NOT errored. The container projection result is `Ok`. Quarantine of one inner fact does not fail the whole frame.
-- **Defends:** ADMISSION/quarantine applies to emitted inner fact bytes; Invariant (1); "connection frame is a CONTAINER FACT whose opened children re-enter authenticate/project by their own tags".
-- **Refs:** `connection::frame_small` tag 168 `project_connection_frame_small` (registry.rs:630); `connection_frame_wire.rs` inner-bundle decode; `RouterProjector` quarantine branch; tag 50.
+- **Expect:** The container fact admits and opens; the inner tag-50 message authenticates/projects and is counted/displayed; the inner above-ceiling fact T is retained pending, not counted, and not active. The container projection result is `Ok`; one pending inner fact does not fail the whole frame.
+- **Defends:** ADMISSION pending applies to emitted inner fact bytes; Invariant (1); "connection frame is a CONTAINER FACT whose opened children re-enter authenticate/project by their own tags".
+- **Refs:** `connection::frame_small` tag 168 `project_connection_frame_small`; `connection_frame_wire.rs` inner-bundle decode; ceiling admission gate; tag 50.
 
-### ROUTE-24 — connection scope: above-ceiling NEW frame variant tag is quarantined, existing frame tags still admit  `projector-unit`
+### ROUTE-24 — connection scope: above-ceiling NEW frame carrier drops if it cannot open, existing frame tags still admit  `projector-unit`
 - **Setup:** Ceiling C. `FACT_ROUTES` has the four current frame routes (168/169/170/173) all <= C, plus a future frame variant tag T_frame with `V(T_frame) > C`. Receive a T_frame fact and a frame_small (168) fact.
 - **Action:** Project both through the ceiling-filtered router.
-- **Expect:** frame_small (168) admits and decrypts; T_frame is quarantined (retained opaque, no decrypt, no inner-fact emission, no error). Per-scope axis: connection scope behaves identically to content scope for above-ceiling tags.
-- **Defends:** ADMISSION/quarantine in the CONNECTION scope; Invariant (5) (transport in [floor,head]); per-scope enumeration.
+- **Expect:** frame_small (168) admits and decrypts. T_frame drops if the current wire/frame layer cannot classify or open it; no inner facts exist locally. If a future frame's bytes can be carried by an active frame and recovered as inner fact bytes, those inner bytes use ROUTE-23 pending semantics.
+- **Defends:** TRANSPORT vs ADMISSION boundary — wire-invalid carrier bytes drop; wire-admitted inner facts can become pending.
 - **Refs:** `connection::frame_small/file_slice/bundle/observation` tags 168/169/170/173 (registry.rs:630-633); ceiling-filtered router.
 
-### ROUTE-25 — auth scope: above-ceiling auth fact (e.g. proposed user_profile_v2) is refused on local create and quarantined on receive  `projector-unit`
+### ROUTE-25 — auth scope: above-ceiling auth fact is refused on local create and pending on receive  `projector-unit`
 - **Setup:** Ceiling C below the proposed `auth::user_profile_v2` intro_version (this family does NOT exist yet — inventory section 1 confirms absent; model it as the canonical above-ceiling auth tag with a registered-but-inactive route). Existing `auth::user` (tag 14) is at/below ceiling.
 - **Action:** (a) Local: attempt to create a user_profile_v2 fact. (b) Receive: project a received user_profile_v2 fact through the ceiling-filtered router.
-- **Expect:** (a) local creation REFUSED, nothing written. (b) received fact QUARANTINED (opaque, uncounted, NOT errored). Meanwhile `auth::user` (14) admits and projects normally (e.g. `con users` lists existing users). Per-scope axis: auth behaves like content/connection.
-- **Defends:** ADMISSION refuse(local)+quarantine(received) in the AUTH scope; per-scope enumeration; Invariant (1)/(3).
+- **Expect:** (a) local creation REFUSED, nothing written. (b) received fact retained pending, with no auth rows, no authority grant, no purge effect, and no reader output. Meanwhile `auth::user` (14) admits and projects normally (e.g. `con users` lists existing users). Per-scope axis: auth behaves like content/connection.
+- **Defends:** ADMISSION refuse(local)+pending(received) in the AUTH scope; per-scope enumeration; Invariant (1)/(3).
 - **Refs:** `auth::user` tag 14 `project_user` (registry.rs:636); proposed `auth::user_profile_v2` (absent per inventory); ceiling-filtered router.
 
-### ROUTE-26 — sync scope: above-ceiling sync fact variant is quarantined; existing sync facts admit (no error on a future peer's sync message)  `projector-unit`
+### ROUTE-26 — sync scope: above-ceiling sync fact variant is pending; existing sync facts admit  `projector-unit`
 - **Setup:** Ceiling C. Existing `sync::shared_fact` (tag 162) and `sync::compare` (tag 165) at/below ceiling. A future sync variant tag T_sync with `V(T_sync) > C` arrives from a peer running a newer protocol.
 - **Action:** Project the T_sync fact and a sync::compare (165) fact through the ceiling-filtered router.
-- **Expect:** sync::compare admits and projects; T_sync is quarantined (opaque, uncounted, NOT errored). A newer peer sending a future sync message must NOT crash/err the receiver. Per-scope axis: sync behaves like the others.
-- **Defends:** ADMISSION/quarantine in the SYNC scope; Invariant (1); robustness against a newer peer; per-scope enumeration.
-- **Refs:** `sync::shared_fact` tag 162, `sync::compare` tag 165 (registry.rs:626-627); ceiling-filtered router; quarantine branch vs `projectors.rs:456`.
+- **Expect:** sync::compare admits and projects; T_sync is retained pending and not projected. A newer peer sending a future sync message must NOT crash the receiver or create active protocol truth. Per-scope axis: sync behaves like the others.
+- **Defends:** ADMISSION pending in the SYNC scope; Invariant (1); robustness against a newer peer; per-scope enumeration.
+- **Refs:** `sync::shared_fact` tag 162, `sync::compare` tag 165; ceiling-filtered admission gate.
 
-### ROUTE-27 — multinode: newer peer's above-ceiling fact arrives and is quarantined, not NACKed; activates after this node updates  `multinode-network`
+### ROUTE-27 — multinode: newer peer's above-ceiling fact arrives as pending, not active  `multinode-network`
 - **Setup:** Two `con` nodes. Node B runs a NEWER protocol head (V_b) and emits a fact at tag T with `V(T) = V_b`. Node A runs an older head; its local ceiling C_a < V(T). A and B are connected (post-bootstrap, sync running).
 - **Action:** B sends the tag-T fact to A over a `connection::frame_*`; A receives it.
-- **Expect:** A retains T as quarantined (opaque), does NOT error, does NOT drop, does NOT send a rejection that would break the connection; A's readers do not show T. After A's manifest fleet raises C_a >= V(T) and A does wipe+replay, T activates and projects (ROUTE-08 over the network).
-- **Defends:** ADMISSION end-to-end: received above-ceiling QUARANTINED not errored; Invariant (1)/(5); deferred activation.
+- **Expect:** A stores T pending, does not show it, does not project it, and does not use it for authority/purge. The connection may continue; after A's manifest fleet raises C_a >= V(T), A can re-run admission on the pending bytes without a network re-download.
+- **Defends:** ADMISSION end-to-end: received above-ceiling input is pending, syncable, and inactive until the ceiling covers it; Invariant (1)/(5).
 - **Refs:** `connection::frame_small` tag 168; `receive_network_frame` handler (registry.rs:705); `ReceiveNetworkFrameHandler`; `submit_fact` (runtime.rs:268); ceiling-filtered router.
 
-### ROUTE-28 — quarantined fact is excluded from re-sharing until activated (no premature transport)  `multinode-network`
-- **Setup:** Node A holds a quarantined above-ceiling fact F (tag T) received from newer node B. A is also connected to node X running the SAME old protocol as A (ceiling < V(T)).
+### ROUTE-28 — pending above-ceiling bytes are syncable but remain inactive  `multinode-network`
+- **Setup:** Node A received pending above-ceiling fact F (tag T) from newer node B. A is also connected to node X running the SAME old protocol as A (ceiling < V(T)).
 - **Action:** Run sync between A and X (`share_fact_with_sync` path).
-- **Expect:** A does NOT offer/share F to X while F is quarantined/above A's ceiling — F is not yet ceiling-active and X cannot transport/admit it. A shares only ceiling-active facts. (After both raise ceiling >= V(T), F becomes shareable.)
-- **Defends:** Invariant (1)/(3)/(5) — a quarantined (above-ceiling) fact is not transportable until ceiling-active; do not push facts peers cannot admit.
+- **Expect:** A may advertise/serve F's pending bytes by id if the transport can carry them, so X can also store F pending. Neither A nor X projects, displays, counts, authorizes, or purges from F while their ceiling is below T. Pending sync prevents repeated download churn without activating future semantics.
+- **Defends:** Invariant (1)/(3)/(5) — above-ceiling bytes may sync, but semantic activation is still ceiling-gated.
 - **Refs:** `share_fact_with_sync` (registry.rs:676), `ShareFactWithSyncHandler`; `sync::shared_fact` tag 162; ceiling gate on offers.
 
-### ROUTE-29 — replay re-quarantines then activates in one pass when ceiling rose between receipt and replay (ordering)  `replay-cli`
-- **Setup:** Fact log contains, in receipt order: at-ceiling facts, then an above-ceiling fact F (tag T received under C0), then more at-ceiling facts. Before replay, ceiling rises to C1 >= V(T).
+### ROUTE-29 — pending fact materializes when ceiling rises, without re-download  `replay-cli`
+- **Setup:** Node receives pending above-ceiling fact F (tag T received under C0), then the ceiling rises to C1 >= V(T).
 - **Action:** wipe + replay at C1 (forward order, then assert order-independence with a `--scramble`-style reorder of the retained log if available; otherwise reverse-order replay).
-- **Expect:** Regardless of replay order, F projects (active at C1) and the final derived state is identical: order-independent and equal to native-at-C1. No fact is left quarantined that is now ceiling-active.
-- **Defends:** Invariant (4) REPLAY DETERMINISM — order-independent; activation gating evaluated at the replay-time ceiling C1 for every retained fact.
-- **Refs:** wipe+replay; ceiling-filtered router at C1; `FactRoute` tag T. (Note: `con replay/--scramble` subcommands are doc-only per inventory section 6; use the in-process replay harness / test-only reorder.)
+- **Expect:** Admission promotes F from pending to active, then replay/projector dispatch sees the retained active fact; final derived state equals native-at-C1. Pending arrival order before activation does not affect the converged state.
+- **Defends:** Invariant (4) REPLAY DETERMINISM — order-independent over retained active facts; pending is an input queue before admission.
+- **Refs:** wipe+replay; ceiling-filtered router at C1; `FactRoute` tag T.
 
-### ROUTE-30 — quarantine outcome is distinct in ProjectionOutput from a normal empty projection  `projector-unit`
-- **Setup:** Ceiling-filtered router. Two facts: (a) a benign at-ceiling fact whose projector legitimately produces NO rows (a no-op admit), and (b) an above-ceiling quarantined fact.
-- **Action:** Project both; inspect the `ProjectionOutput` / quarantine bookkeeping.
-- **Expect:** Both return `Ok`, but they are distinguishable: (a) is a normal projection (the fact is admitted/active), (b) is recorded as QUARANTINED (opaque-retained, pending-activation flag). The store can later tell which facts to re-evaluate on ceiling rise (used by ROUTE-08). Quarantine is not silently collapsed into "projected with no rows".
-- **Defends:** ADMISSION mechanism — quarantine must be observable/recoverable so ROUTE-08 activation is possible.
-- **Refs:** `ProjectionOutput` (projectors.rs); quarantine record; `RouterProjector::project` quarantine branch.
+### ROUTE-30 — pending input is distinct from a normal empty projection  `projector-unit`
+- **Setup:** Ceiling-filtered admission/projection path. Two facts: (a) a benign at-ceiling fact whose projector legitimately produces NO rows (a no-op admit), and (b) an above-ceiling input.
+- **Action:** Deliver both through admission/projection and inspect store/read-model side effects.
+- **Expect:** (a) is a normal admitted fact with whatever durable fact-log status its family normally has. (b) is retained pending, with no read-model rows and no `ProjectionOutput` bookkeeping. Pending is not silently collapsed into "projected with no rows".
+- **Defends:** ADMISSION mechanism — above-ceiling input is syncable pending bytes, not an active no-op projection.
+- **Refs:** future admission gate; `ProjectionOutput` remains projection-only.
 ## 5. Constructors (create) across new/old x scope
 
 Scope of this cluster: the *constructor* (the `create.rs` / fact-builder layer that
@@ -1726,7 +1766,7 @@ dispatch mechanisms.
 ### CREATE-01 — content::message create at ceiling emits the ceiling tag/version  `blackbox-cli`
 - **Setup:** Single `con` binary whose head supports `message:2`. Fleet manifest pins ceiling = protocol 7, whose bundle includes `message:2` (i.e. `message:2.intro_version <= ceiling`). Trusted time fresh, not BLOCKED.
 - **Action:** `con send <workspace> "hello"` (run fn `send` -> `content::message::cli` -> `content::message::create::send_message`).
-- **Expect:** Exactly one persisted fact with first byte `TYPE_CONTENT_MESSAGE = 50` produced by the `message_v2` constructor; `con messages` displays it; `con content-count` counts it. No quarantine, no "no target projector registered" error.
+- **Expect:** Exactly one persisted fact with first byte `TYPE_CONTENT_MESSAGE = 50` produced by the `message_v2` constructor; `con messages` displays it; `con content-count` counts it. No pending, no "no target projector registered" error.
 - **Defends:** Invariant (1) VISIBILITY + ceiling-active create; version-neutral dispatch selects the ceiling create.
 - **Refs:** `protocol/content/message/create.rs::send_message`, `content/message/layout.rs::TYPE_CONTENT_MESSAGE=50`, registry `MATCH_COMMANDS` `send`, `FACT_ROUTES` tag 50.
 
@@ -1817,7 +1857,7 @@ dispatch mechanisms.
 ### CREATE-14 — auth::user_profile_v2 is a NEW family => new tag + new bucket, no editing old `auth::user`  `guardrail`
 - **Setup:** Plan introduces `auth::user_profile_v2` as a *new* fact family (confirmed absent today). It gets its own `layout.rs` with a brand-new unique tag, its own `create.rs`, its own `_vN` directory, and one new `FACT_ROUTES` entry.
 - **Action:** Add the family; run `cargo test fact_route_tags_are_globally_unique` (registry.rs 717-729) and confirm `auth::user` (tag 14) source is unchanged.
-- **Expect:** `user_profile_v2` has a distinct tag not colliding with the 43 existing tags; `FACT_ROUTES` count becomes 44; `auth::user/create.rs` and `layout.rs` are byte-identical to before (the new family is additive, not an edit of the old code).
+- **Expect:** `user_profile_v2` has a distinct tag not colliding with the 47 existing routed tags; `FACT_ROUTES` count becomes 48; `auth::user/create.rs` and `layout.rs` are byte-identical to before (the new family is additive, not an edit of the old code).
 - **Defends:** VERSIONING KNOB = fact tag: "an incompatible wire shape => a NEW tag + a NEW kept-forever projector + a sibling _vN/ directory ... No editing old code." Invariant (5) READERS FOREVER.
 - **Refs:** absence of `auth::user_profile_v2` (inventory §1), `registry.rs::FACT_ROUTES`, `fact_route_tags_are_globally_unique`.
 
@@ -2242,7 +2282,7 @@ dispatch (cli.rs:94), name-uniqueness check `validate_command_names`
 
 ### CLI-23 — every MATCH_COMMANDS name still resolves to a protocol::cli run fn  `guardrail`
 - **Setup:** The `cli_command!` macro forces `run: command::$run` to resolve in
-  `protocol::cli` (registry.rs:356-365). After adding version buckets, all 42
+  `protocol::cli` (registry.rs:356-365). After adding version buckets, all 47
   command run fns (incl. `send`, `react`, `send_file`, `delete_message`,
   `grant_admin`, `invite`, `disappearing_set`) must still resolve there.
 - **Action:** Compile/registry test that `MATCH_COMMANDS` builds and each `run`
@@ -2274,7 +2314,7 @@ dispatch (cli.rs:94), name-uniqueness check `validate_command_names`
   keyed by its own tag). No shared production is emitted by the replay path.
 - **Defends:** invariant (4) replay determinism + ceiling-independence; blocked
   mode still permits replay.
-- **Refs:** `sync::cascade_test_fact::cli` GENERATE_DEPS_USAGE/REPLAY_DEPS_REVERSE_USAGE, `MATCH_COMMANDS` (registry.rs:483-492). (Note: `con replay`/`state-summary`/`replay-check` are DOC-ONLY, not in `src`.)
+- **Refs:** `sync::cascade_test_fact::cli` GENERATE_DEPS_USAGE/REPLAY_DEPS_REVERSE_USAGE, `MATCH_COMMANDS`, and the replay/status commands in `src`.
 
 ### CLI-26 — alpha release may bind an above-ceiling run fn that production hides  `handler-unit`
 - **Setup:** `send` run-fn list `{1 -> send_v1, 3 -> send_v3}`; manifest ceiling
@@ -2288,16 +2328,17 @@ dispatch (cli.rs:94), name-uniqueness check `validate_command_names`
   capability or the new one is alpha-only; production/alpha axis on a write command.
 - **Refs:** modeled `send` run-fn list, ReleaseManifestEntry ceiling, `CliCommand`.
 
-### CLI-27 — quarantined above-ceiling fact has NO display command output until ceiling rises  `blackbox-cli`
+### CLI-27 — pending above-ceiling input has NO display command output until activation  `blackbox-cli`
 - **Setup:** Peer sends a v_next `content::message` (above ceiling) that is
-  QUARANTINED (retained opaque, unprojected, undisplayed, uncounted). Ceiling = 2.
+  retained as pending by admission. Ceiling = 2.
 - **Action:** `con --db DB messages <W>` and `con --db DB content-count <W>`.
-- **Expect:** `messages` does NOT list the quarantined fact; `content-count`
+- **Expect:** `messages` does NOT list the pending input; `content-count`
   `content_messages`/`message_facts` do NOT count it. After wipe+replay with a
-  raised ceiling that covers the tag, the SAME `messages` command now lists it.
-- **Defends:** ADMISSION quarantine (received above-ceiling fact undisplayed/
-  uncounted, activates on replay); invariant (2) render-at-ceiling.
-- **Refs:** `content::message::cli::messages`/`content_count` (cli.rs:328,371), RouterProjector unknown-tag path (projectors.rs:456).
+  raised ceiling that covers the tag, the same commands list it only if the
+  pending bytes authenticate and project.
+- **Defends:** ADMISSION pending (received above-ceiling input absent from
+  readers until active); invariant (2) render-at-ceiling.
+- **Refs:** `content::message::cli::messages`/`content_count` (cli.rs:328,371), admission gate before projector dispatch.
 
 ### CLI-28 — `react` selector + emoji length surface identical across ceilings  `blackbox-cli`
 - **Setup:** Workspace with message `#1`. Ceiling = 1 then ceiling = 2.
@@ -2471,19 +2512,19 @@ implementation must satisfy. Each is labeled in **Defends**.
 - **Defends:** INVARIANT (2)+(5): readers forever; old facts surface through the head read-model row shape.
 - **Refs:** `content/message/queries.rs:90-148` (`content_message_rows`/`content_message_row`), `content/message/rows.rs`, `core/projectors.rs:402` (FactRoute keyed by own tag).
 
-### QUERY-15 — a QUARANTINED above-ceiling fact is uncounted and undisplayed in queries  `blackbox-cli`
-- **Setup:** A received fact whose tag's intro_version > current ceiling (e.g. a hypothetical message:2 received while ceiling is at message:1). Per the model it is retained as opaque bytes, unprojected, undisplayed, uncounted. (Today it ERRORS at `projectors.rs:456` "no target projector registered" — this test pins the TARGET behavior.)
-- **Action:** With the quarantined fact in the store, run `content-count WORKSPACE_ID_HEX`, `messages WORKSPACE_ID_HEX`, and `sync-status WORKSPACE_ID_HEX`.
-- **Expect:** `content_count` does NOT include the quarantined fact in `content_messages`/`message_payload_bytes`/`max_message_timestamp`; `messages` does NOT list it; `sync-status` may track it as retained bytes but it contributes no projected/read-model row. No projector error is surfaced to the query.
-- **Defends:** INVARIANT (2) + admission model: quarantined => uncounted/undisplayed (not dropped, not errored).
-- **Refs:** `core/projectors.rs:456` (current error path to be replaced by quarantine), `content/message/queries.rs:59` (`count_for_workspace` `deleted=0` filter analog), inventory §ADMISSION.
+### QUERY-15 — pending above-ceiling input is uncounted and undisplayed in queries  `blackbox-cli`
+- **Setup:** A received fact whose tag's intro_version > current ceiling (e.g. a hypothetical message:2 received while ceiling is at message:1). Per the model admission keeps it pending before it becomes protocol truth.
+- **Action:** After delivery, run `content-count WORKSPACE_ID_HEX`, `messages WORKSPACE_ID_HEX`, and `sync-status WORKSPACE_ID_HEX`.
+- **Expect:** `content_count` does NOT include the pending input in `content_messages`/`message_payload_bytes`/`max_message_timestamp`; `messages` does NOT list it; `sync-status` may report pending bytes separately but never as active protocol rows. No projector error is surfaced to the query.
+- **Defends:** INVARIANT (2) + admission model: pending input is absent from readers until active.
+- **Refs:** future admission gate before `core/projectors.rs` dispatch, `content/message/queries.rs:59` (`count_for_workspace` `deleted=0` filter analog), inventory §ADMISSION.
 
-### QUERY-16 — quarantined fact activates in queries after wipe+replay once ceiling rises  `replay-cli`
-- **Setup:** Continue QUERY-15: the quarantined message:2 fact is retained. The fleet ceiling then rises to cover message:2's tag.
+### QUERY-16 — pending input appears in queries only after post-rise activation  `replay-cli`
+- **Setup:** Continue QUERY-15: the old message:2 copy is pending. The fleet ceiling then rises to cover message:2's tag.
 - **Action:** Raise ceiling, perform wipe+replay (rebuild derived state via each fact's own-tag historical adapter), then run `content-count` and `messages`.
-- **Expect:** The previously-quarantined fact now projects and APPEARS: `content_messages` count increments, `messages` lists it, `content-count` `max_message_timestamp` reflects it if it is newest. Activation happens exactly on the wipe+replay after the ceiling covers its tag.
-- **Defends:** INVARIANT (2)+(4): quarantined facts activate on next wipe+replay once ceiling covers the tag; replay rebuilds the now-visible read-model rows.
-- **Refs:** inventory §ADMISSION (activate on wipe+replay), `core/projectors.rs` RouterProjector, `content/message/queries.rs`.
+- **Expect:** The pending copy re-enters admission and, if it authenticates, projects and appears: `content_messages` count increments, `messages` lists it, and `content-count` `max_message_timestamp` reflects it if it is newest.
+- **Defends:** INVARIANT (2)+(4): replay rebuilds visible read-model rows from retained facts; convergence for wire-admitted future bytes does not require redownloading them.
+- **Refs:** inventory §ADMISSION (pending tradeoff), `core/projectors.rs` RouterProjector, `content/message/queries.rs`.
 
 ### QUERY-17 — replay rebuilds byte-identical query output (ceiling-independent reads)  `replay-cli`
 - **Setup:** A store with messages, reactions, files, deletions; capture `messages WORKSPACE_ID_HEX` output O1. The retained facts are all at or below ceiling.
@@ -2544,7 +2585,7 @@ implementation must satisfy. Each is labeled in **Defends**.
 ### QUERY-25 — `count` and `content-count` agree on the same facts across versions at the same ceiling  `blackbox-cli`
 - **Setup:** Two binaries at the same ceiling V (different releases/platforms), identical DB. `count` (`auth/workspace/cli.rs:158`) returns the global fact count; `content-count` returns content-message specifics.
 - **Action:** Run `count` and `content-count WORKSPACE_ID_HEX` on each binary.
-- **Expect:** `count` returns the identical integer on both; `content-count` returns identical `content_messages`/`message_payload_bytes`/`max_message_timestamp` on both. Quarantined above-ceiling facts (if any) are excluded identically by both (per QUERY-15).
+- **Expect:** `count` returns the identical integer on both; `content-count` returns identical `content_messages`/`message_payload_bytes`/`max_message_timestamp` on both. Pending above-ceiling facts (if any) are excluded identically by both (per QUERY-15).
 - **Defends:** INVARIANT (2): counting surfaces are `f(facts, ceiling)` and uniform across releases.
 - **Refs:** `auth/workspace/cli.rs:158` (`count`), `content/message/cli.rs:371,380` (`content_count`/`content_count_output`), `content/message/queries.rs:59`.
 
@@ -2709,7 +2750,7 @@ Verified grounding from `/home/holmes/poc-10/src`:
 ### PROJ-15 — replay of an old fact uses the historical adapter keyed by its own tag (ceiling-independent) `replay-cli`
 - **Setup:** Current binary, store holding facts of tags 14, 50, 135, 55 authored across several eras. Ceiling currently HIGH (covers all tags).
 - **Action:** Wipe + replay (rebuild derived state). Then drop the simulated ceiling LOW and replay again.
-- **Expect:** Each retained fact replays through the `FactRoute` keyed by its OWN first byte regardless of ceiling; derived rows are identical across the two ceilings for any tag that was admissible (ceiling-independent replay). Quarantined above-ceiling facts (if any) stay opaque/uncounted but are not dropped.
+- **Expect:** Each retained fact replays through the `FactRoute` keyed by its OWN first byte regardless of ceiling; derived rows are identical across the two ceilings for any tag that was admissible (ceiling-independent replay). Pending above-ceiling facts (if any) stay opaque/uncounted but are not dropped.
 - **Defends:** Invariant 4 (replay determinism: every retained fact replays via the historical adapter keyed by its own tag; ceiling-independent).
 - **Refs:** `RouterProjector::project` tag dispatch (projectors.rs:454-458), wipe+replay pipeline.
 
@@ -2783,11 +2824,11 @@ Verified grounding from `/home/holmes/poc-10/src`:
 - **Defends:** owner-is-self invariant for the whole `ProjectionOutput` (needs/offers/wakes), guarding the cross-fact-purge invariant's siblings.
 - **Refs:** `enforce_owner_is_self` (project_pending_facts.rs:940-963).
 
-### PROJ-26 — unknown / above-ceiling tag routes to the no-projector error (quarantine boundary today) `projector-unit`
+### PROJ-26 — direct projector call still errors on unknown tag; admission handles above-ceiling first `projector-unit`
 - **Setup:** Current binary. A received fact whose first byte is a tag with NO `FactRoute` (e.g. a future `content::message_v2` tag not yet registered, or any unregistered `u8`).
 - **Action:** Call `ProtocolProjector::project` / `RouterProjector::project` on that fact.
-- **Expect:** `Err("no target projector registered for fact tag {tag}")` (projectors.rs:456). This is the CURRENT behavior the model flags as wrong (the fact should be quarantined as opaque bytes, not errored); the test pins today's error so the future quarantine change is observable. The fact must NOT be projected by a wrong/old projector via byte coincidence.
-- **Defends:** ADMISSION quarantine boundary (today errors at projectors.rs:456) + routing is strictly by registered tag.
+- **Expect:** Direct projection returns `Err("no target projector registered for fact tag {tag}")` (projectors.rs). This guard remains correct for direct projector calls and truly unknown tags. The future admission path must reject/drop above-ceiling network input before projector dispatch so this error is not the user-facing network behavior for a known future tag.
+- **Defends:** ADMISSION boundary + routing is strictly by registered tag.
 - **Refs:** `RouterProjector::project` (projectors.rs:454-458), inventory section 5.
 
 ### PROJ-27 — a registered _vN tag activates its own NEW projector (no version byte reuse) `projector-unit`
@@ -2822,8 +2863,9 @@ Verified grounding from `/home/holmes/poc-10/src`:
 Cluster REPLAY defends INVARIANT (4) REPLAY DETERMINISM (wipe+replay rebuilds
 derived state; order-independent; ceiling-independent; recreates only
 deterministic facts) and its intersections with VERSIONING (mixed fact-tag
-versions present at replay), ADMISSION/QUARANTINE (above-ceiling quarantined
-facts survive the wipe and activate when the ceiling later covers them), the
+versions present at replay), ADMISSION pending (wire-admitted above-ceiling
+input is syncable but not active replay input until the ceiling/context admits
+it), the
 deterministic `create_key_wrap` / `unwrap_key_wrap` handlers (idempotent,
 respect purge/retirement, do not resurrect opened secrets), the `content_purged`
 CONTEXT (re-derived from retained deletion/expiry/retention facts), and the
@@ -2858,21 +2900,21 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** Run `con replay` (canonical pass: drops queued intents, wipes derived state — read-model rows, sync indexes, context edges, time_wakes, pending projection rows, ephemeral projection inputs, temp network queues — marks all retained facts pending, drains fact projection to fixpoint).
 - **Expect:** `con state-summary` after replay returns the SAME `state_hash` H0 and identical per-area counts; every read-model row is reconstructed solely from retained facts (no queued intent contributed). Replay counters report `dropped_intents>=0`, `projected_facts == retained fact count`, `blocked network/live-only work == 0`.
 - **Defends:** Invariant (4) — wipe+replay rebuilds derived state from retained facts.
-- **Refs:** planned `con replay`/`state-summary`; `core::runtime` replay entry point (doc runtime-changes 1-9); read_models OPENED_MESSAGES/CONTENT_MESSAGES/CONTENT_REACTIONS/CONTENT_FILES/FILE_SLICES (registry.rs 36-182); shipped analog `replay_deps_reverse` (`sync/cascade_test_fact/commands.rs`).
+- **Refs:** `con replay`/`state-summary`; `core::runtime` replay entry point (doc runtime-changes 1-9); read_models OPENED_MESSAGES/CONTENT_MESSAGES/CONTENT_REACTIONS/CONTENT_FILES/FILE_SLICES (registry.rs 36-182); shipped analog `replay_deps_reverse` (`sync/cascade_test_fact/commands.rs`).
 
 ### REPLAY-02 — Replay rebuilds with MIXED fact versions present (message v1 + message v2 facts) `replay-cli`
 - **Setup:** Node at a ceiling that covers BOTH `message:1` (tag 50) and a hypothetical `message:2` (new tag, sibling `content/message_v2/`, kept-forever projector). Retained store holds some v1 message facts (tag 50) AND some v2 message facts (new tag), all ceiling-active. Capture baseline `state_hash` H0.
 - **Action:** `con replay` canonical.
 - **Expect:** Each retained fact replays via the historical adapter keyed by its OWN tag (tag 50 -> v1 projector, new tag -> v2 projector); CONTENT_MESSAGES rows for both versions render at the ceiling; post-replay `state_hash == H0`. No fact is mis-routed (v2 fact never hits the v1 projector and vice versa).
 - **Defends:** Invariant (4) — every retained fact replays via the adapter keyed by its own tag; mixed versions coexist.
-- **Refs:** RouterProjector tag dispatch (`core/projectors.rs:423`, effective_tag@433); FACT_ROUTES per-tag entries; planned `con replay`; content::message layout const TYPE_CONTENT_MESSAGE=50.
+- **Refs:** RouterProjector tag dispatch (`core/projectors.rs:423`, effective_tag@433); FACT_ROUTES per-tag entries; `con replay`; content::message layout const TYPE_CONTENT_MESSAGE=50.
 
 ### REPLAY-03 — Replay is ceiling-INDEPENDENT: all retained facts replay regardless of current ceiling `replay-cli`
 - **Setup:** Node retains v1 (tag 50) and v2 (new tag) message facts that WERE ceiling-active when admitted. Now lower the effective ceiling (e.g. a manifest entry that supports only `message:1`) so v2 is below... no: keep all retained tags within historical admission but set the CURRENT ceiling so it would NOT newly admit v2. The retained v2 facts are already in the store.
 - **Action:** `con replay` canonical, then `con state-summary`.
 - **Expect:** Replay projects EVERY retained fact through its own-tag adapter irrespective of the current ceiling — the v2 facts still rebuild their rows because they are retained. Ceiling gates ADMISSION of new/received facts, not REPLAY of already-retained ones. `state_hash` matches the pre-replay summary.
 - **Defends:** Invariant (4) — ceiling-independent replay (retained facts replay via own-tag adapter regardless of ceiling).
-- **Refs:** doc invariant "ceiling-independent (every retained fact replays via the historical adapter keyed by its OWN tag)"; planned `con replay`/`state-summary`; RouterProjector `core/projectors.rs`.
+- **Refs:** doc invariant "ceiling-independent (every retained fact replays via the historical adapter keyed by its OWN tag)"; `con replay`/`state-summary`; RouterProjector `core/projectors.rs`.
 
 ### REPLAY-04 — Order-independent: canonical vs --reverse yield identical state_hash with mixed versions `replay-cli`
 - **Setup:** Node retains mixed v1 (tag 50) + v2 (new tag) message facts plus reactions, file, slices. Run `con replay` canonical, capture `state_hash` Hc.
@@ -2895,26 +2937,26 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Defends:** Invariant (4) — deterministic shuffle is reproducible per seed; final state is seed-independent.
 - **Refs:** planned `con replay --scramble --seed N`; `state-summary` `state_hash`.
 
-### REPLAY-07 — Above-ceiling quarantined fact survives the wipe (retained as opaque bytes, uncounted) `replay-cli`
-- **Setup:** Node at ceiling covering only `message:1`. Node RECEIVES an above-ceiling fact (a `message:2` new-tag fact) over sync. Per ADMISSION it is QUARANTINED: retained as opaque bytes, unprojected, undisplayed, uncounted. Capture `con content-count` (excludes quarantined) and `con state-summary`.
+### REPLAY-07 — Pending above-ceiling input survives the wipe but stays inert below ceiling `replay-cli`
+- **Setup:** Node at ceiling covering only `message:1`. Node RECEIVES an above-ceiling fact (a `message:2` new-tag fact) over sync. Per ADMISSION it is retained as pending ingress, not active protocol truth. Capture `con content-count` and `con state-summary`.
 - **Action:** `con replay` canonical (which wipes derived state then re-marks retained facts pending).
-- **Expect:** The quarantined fact is NOT dropped by the wipe (it is a retained fact); after replay it remains unprojected — no CONTENT_MESSAGES row, `con content-count` unchanged, `con messages` does not show it, `con state-summary` counts it under retained-facts but not under any read-model area. Replay does NOT error on its unknown-at-ceiling tag (it is recognized as quarantined, not routed to a missing projector).
-- **Defends:** ADMISSION/QUARANTINE — quarantined facts survive wipe, stay unprojected/uncounted across replay.
-- **Refs:** RouterProjector unknown-tag handling (`core/projectors.rs:456` "no target projector registered" — the behavior quarantine must replace); planned `con replay`/`content-count`/`messages`; doc "Local secrets are local facts... same purge and retirement rules" model.
+- **Expect:** The pending bytes are retained and syncable by id/bytes, but replay at the old ceiling does not dispatch them to the projector. No CONTENT_MESSAGES row appears, `con content-count` is unchanged, `con messages` does not show it, and `con state-summary` reports it only as pending ingress, not as an active fact.
+- **Defends:** ADMISSION pending — wire-admitted future bytes survive replay without becoming active.
+- **Refs:** future admission gate; `con replay`/`content-count`/`messages`; pending ingress tradeoff.
 
-### REPLAY-08 — Quarantined fact ACTIVATES on the next wipe+replay once ceiling rises to cover its tag `replay-cli`
-- **Setup:** Continue from REPLAY-07: a `message:2` fact is quarantined at the node (retained, unprojected). Now a fleet-wide signed manifest raises the ceiling so `message:2` is ceiling-active (its new tag is now routed/active). The v2 projector + sibling `content/message_v2/` exist (kept-forever).
+### REPLAY-08 — Pending input activates after a post-rise replay `replay-cli`
+- **Setup:** Continue from REPLAY-07: the original `message:2` copy is retained as pending. Now a fleet-wide signed manifest raises the ceiling so `message:2` is ceiling-active (its new tag is now routed/active). The v2 projector + sibling `content/message_v2/` exist (kept-forever).
 - **Action:** `con replay` canonical at the higher ceiling.
-- **Expect:** On this replay the formerly-quarantined fact is marked pending, projected via its OWN-tag adapter (the v2 projector), and produces its CONTENT_MESSAGES row; `con content-count` increases by one; `con messages` now shows it. `state_hash` changes to reflect the newly-activated row.
-- **Defends:** ADMISSION/QUARANTINE — quarantine activates on next wipe+replay when ceiling covers the tag.
-- **Refs:** doc "Quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"; planned `con replay`/`content-count`/`messages`; FACT_ROUTES new v2 entry.
+- **Expect:** Replay re-runs admission for the pending copy, authenticates it, dispatches it via its OWN-tag adapter (the v2 projector), and produces its CONTENT_MESSAGES row; `con content-count` increases by one; `con messages` now shows it.
+- **Defends:** ADMISSION pending activation — no redownload is required for retained pending bytes; retained facts replay normally once active.
+- **Refs:** pending ingress tradeoff; `con replay`/`content-count`/`messages`; FACT_ROUTES new v2 entry.
 
-### REPLAY-09 — Quarantined above-ceiling fact never errors at the projector during replay `guardrail`
-- **Setup:** Store contains a retained fact whose first-byte tag is NOT in the active FACT_ROUTES at the current ceiling (a quarantined future-version fact, e.g. an unknown content tag).
+### REPLAY-09 — Replay separates pending ingress from projector-pending facts `guardrail`
+- **Setup:** Store was exposed to above-ceiling input before the replay, and admission retained it as pending ingress.
 - **Action:** Drive the replay projection drain (`drain_pending_projection` over the retained set, the path `con replay` invokes).
-- **Expect:** The replay completes without returning `Err("no target projector registered for fact tag {tag}")`; the quarantined tag is skipped (treated as opaque/unrouted-by-ceiling) rather than aborting the whole replay. Today's behavior (hard error at `projectors.rs:456`) is the gap this guards against; the test FAILS until quarantine routing replaces the hard error during replay.
-- **Defends:** ADMISSION/QUARANTINE + Invariant (4) — replay must not abort on an above-ceiling tag.
-- **Refs:** `core/projectors.rs` `RouterProjector::project` Err@456; `core/pipeline/project_pending_facts.rs:248` `drain_pending_projection`.
+- **Expect:** The replay completes without routing the pending-ingress tag while it remains above ceiling. It is not inserted into the ordinary projector-pending queue until it authenticates and becomes an active fact.
+- **Defends:** ADMISSION pending + Invariant (4) — replay operates over active retained facts and keeps pending ingress separate until admission succeeds.
+- **Refs:** `core/pipeline/project_pending_facts.rs:248` `drain_pending_projection`.
 
 ### REPLAY-10 — create_key_wrap dispatch during replay is idempotent (no duplicate key_wrap fact) `handler-unit`
 - **Setup:** Runtime opened from `MATCH_RUNTIME` retains the recipient_key (tag 150), source secret (local_key_secret 152 or local_history_node_secret 153), and signer secret (local_signer_secret 133) facts, plus an already-created `key_wrap` fact (tag 155) produced by an earlier `create_key_wrap` dispatch.
@@ -2928,7 +2970,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** Run replay canonical, then reverse, then `--scramble --seed N`, dispatching `create_key_wrap` in each pass.
 - **Expect:** The resulting `key_wrap` fact bytes (tag 155) are identical across all passes for each source kind; the deterministic raw wrap does not depend on admission order or which pass created it. State_hash over KEY_WRAPS is equal across passes.
 - **Defends:** Invariant (4) — deterministic fact recreation is order-independent.
-- **Refs:** `auth/create_key_wrap.rs` WrapSourceKind::{FrontierRoot,HistoryNode}; `auth/key_wrap/create.rs`; planned `con replay`/`--reverse`/`--scramble`.
+- **Refs:** `auth/create_key_wrap.rs` WrapSourceKind::{FrontierRoot,HistoryNode}; `auth/key_wrap/create.rs`; `con replay`/`--reverse`/`--scramble`.
 
 ### REPLAY-12 — create_key_wrap respects a PURGED source secret: no wrap recreated for purged source `handler-unit`
 - **Setup:** Runtime previously created a `key_wrap` from a local source secret that has since been removed by a purge context (the source local secret fact was self-purged after a `local_secret_retirement` 157 / removal_frontier 151 covered it; the source fact is no longer retained).
@@ -2970,7 +3012,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** `con replay` canonical — the deletion projector re-emits the `content_purged` offer; the target message projector exact-matches its own `target_purge_key` and self-purges.
 - **Expect:** Purge context is re-derived ONLY from retained deletion facts (no surviving derived state). Both the v1-purged and v2-purged messages are absent from CONTENT_MESSAGES after replay; MESSAGE_TOMBSTONES rebuilt for both; `state_hash` matches pre-replay. Purge absence holds across versions.
 - **Defends:** Purge context re-derived from retained deletion facts defines absence across versions; Invariant (4).
-- **Refs:** `content/purge/project.rs` `target_purged_offer`/`target_purge_key`/`content_purged_role`; content::message_deletion (tag 51); read_models MESSAGE_TOMBSTONES/CONTENT_MESSAGES (registry.rs 36-182); planned `con replay`.
+- **Refs:** `content/purge/project.rs` `target_purged_offer`/`target_purge_key`/`content_purged_role`; content::message_deletion (tag 51); read_models MESSAGE_TOMBSTONES/CONTENT_MESSAGES (registry.rs 36-182); `con replay`.
 
 ### REPLAY-18 — Purge context re-derived from retained file_deletion facts (file + file_slice across versions) `projector-unit`
 - **Setup:** Retained: a `content::file` (54) with `content::file_slice` facts (55, v1), a `content::file_deletion` (53) purging them; AND a v2 file/file_slice (new tags) with its deletion. Baseline FILE_DELETIONS / CONTENT_FILES / FILE_SLICES rows.
@@ -2998,14 +3040,14 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** Inspect the replay sequence: drop intents -> wipe -> mark pending -> drain fact projection -> admit replayable time wakes -> drain replay-allowed work to fixpoint -> (barrier) -> only then start daemon / install recurring intents / resume dispatch.
 - **Expect:** No network send, no connection maintenance, no bootstrap retry, no presence refresh, no sync poll occurs before the replay barrier; replay counter "blocked network/live-only work" is reported; if any network/live-only work were attempted pre-barrier, `con replay` reports an ERROR (per doc "A replay command that causes network rows... should report an error").
 - **Defends:** Full replay + purge complete before network activity resumes; Invariant (4) barrier.
-- **Refs:** doc runtime-changes steps 1-9 (esp. step 8 "Finish all replay-required work before network activity resumes"); planned `con replay`.
+- **Refs:** doc runtime-changes steps 1-9 (esp. step 8 "Finish all replay-required work before network activity resumes"); `con replay`.
 
 ### REPLAY-22 — Network/connection-send handlers are NOT dispatched before the barrier (runs_during_replay=false) `guardrail`
 - **Setup:** `intent-registry` declares `runs_during_replay` per HANDLER_ROUTE. The four network/IO intents (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) plus `create_connection_response` and sync compare/have/need/send are `runs_during_replay = false`.
 - **Action:** Run `con intent-registry` and a `con replay` that would, if naive, re-emit these intents from retained connection/sync facts.
 - **Expect:** `intent-registry` lists `runs_during_replay=false` and network-IO=true for the four IO intents and `create_connection_response`; during `con replay` none of these handlers dispatch before the barrier; the replay drains only replay-allowed intents (`share_fact_with_sync`, `create_key_wrap`, `unwrap_key_wrap`, connection-candidate registration).
 - **Defends:** Invariant (4) barrier — replay-blind handler gating; doc Replay test "network and connection-send handlers are not dispatched before the replay barrier completes".
-- **Refs:** planned `HandlerRoute.runs_during_replay` (doc Intent Registry); HANDLER_ROUTES 12 routes; COMMAND_EXCLUDED_HANDLER_ROUTES (registry.rs 512-517); planned `con intent-registry`.
+- **Refs:** planned `HandlerRoute.runs_during_replay` (doc Intent Registry); HANDLER_ROUTES 17 routes; COMMAND_EXCLUDED_HANDLER_ROUTES (registry.rs 512-517); planned `con intent-registry`.
 
 ### REPLAY-23 — create_connection_response does NOT run during replay; rebuilt after barrier from request/response facts `guardrail`
 - **Setup:** Retained `connection::request` (42) + `connection::response` (44) facts. `con replay`.
@@ -3019,7 +3061,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** `con replay` canonical, then inspect connection-maintenance/connection rows via `con state-summary`.
 - **Expect:** Replay rebuilds connection rows reflecting the retained `connection::close` facts — closed connections stay closed; replay does NOT recreate an active live session or a bootstrap send from old `connection_request` history alone (bootstrap retries come only from post-barrier recurring `maintain_connections`). `state_hash` for the connection area matches pre-replay.
 - **Defends:** Invariant (4) + TRANSPORT "retire connections before replay"; doc Connection test "replay no longer recreates bootstrap retries from old connection_request history alone".
-- **Refs:** connection::close (45); connection::request (42)/response (44); planned `con replay`/`state-summary`; doc Connection/Bootstrap tests.
+- **Refs:** connection::close (45); connection::request (42)/response (44); `con replay`/`state-summary`; doc Connection/Bootstrap tests.
 
 ### REPLAY-25 — share_fact_with_sync runs during replay to rebuild sync-derived state across versions `handler-unit`
 - **Setup:** Retained mixed v1+v2 content facts plus `sync::shared_fact` (162) / `sync::compare` (165) / `sync::have_id` (166) / `sync::need_id` (167) derived state from prior operation. Wipe clears the sync indexes.
@@ -3033,21 +3075,21 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** `con replay` canonical.
 - **Expect:** Each v1 fact replays through the v1 reader keyed by tag 50 (NOT the v2 projector); CONTENT_MESSAGES rows render at the ceiling (Invariant 2 rendering uniformity — old projectors emit ceiling-era rows); `state_hash` matches a v1-only baseline. Old fact readers are kept forever.
 - **Defends:** Invariant (4) own-tag adapter + Invariant (5) readers forever; rendering at ceiling.
-- **Refs:** doc Invariant 5 "old fact readers kept forever"; RouterProjector tag 50 route; planned `con replay`/`state-summary`.
+- **Refs:** doc Invariant 5 "old fact readers kept forever"; RouterProjector tag 50 route; `con replay`/`state-summary`.
 
 ### REPLAY-27 — New-version (v2-only) store replays correctly when ceiling covers v2 `replay-cli`
 - **Setup:** Ceiling covers v2; store retains ONLY v2 message facts (new tag), no v1 facts; v2 projector registered, sibling `content/message_v2/`.
 - **Action:** `con replay` canonical.
 - **Expect:** Each v2 fact replays via the v2 projector keyed by its own new tag; CONTENT_MESSAGES rows built; `state_hash` matches a v2-only baseline. No v1 projector is invoked.
 - **Defends:** Invariant (4) own-tag adapter for the new version.
-- **Refs:** FACT_ROUTES v2 entry; RouterProjector; planned `con replay`/`state-summary`.
+- **Refs:** FACT_ROUTES v2 entry; RouterProjector; `con replay`/`state-summary`.
 
 ### REPLAY-28 — Idempotent replay: replay twice in a row yields identical state_hash (no drift) `replay-cli`
 - **Setup:** Node with mixed-version content + key_wrap + purge facts. Run `con replay` once, capture `state_hash` H1.
 - **Action:** Run `con replay` AGAIN immediately, capture `state_hash` H2.
 - **Expect:** `H1 == H2` exactly; the second wipe+replay drops the same intents, rebuilds the same rows, recreates the same deterministic key_wrap/unwrap facts (idempotent dedupe), and re-derives the same purge absence. No accumulation of duplicate rows or facts.
 - **Defends:** Invariant (4) — replay idempotence; doc `replay-check` "idempotent replay" pass.
-- **Refs:** planned `con replay`/`state-summary`/`replay-check`; deterministic handlers `create_key_wrap`/`unwrap_key_wrap`.
+- **Refs:** `con replay`/`state-summary`/`replay-check`; deterministic handlers `create_key_wrap`/`unwrap_key_wrap`.
 
 ### REPLAY-29 — recurring-intents/intent-registry expose maintain_connections as live-only (no durable replay state) `guardrail`
 - **Setup:** Node with retained connection/endpoint facts. Recurring operational work (`maintain_connections`, presence refresh, sync polling, bootstrap retry) is registry metadata, not durable rows.
@@ -3068,14 +3110,14 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** `con replay` (step 2 drops durable + local queued intents; later steps recreate replay-allowed work from retained facts).
 - **Expect:** Replay counter reports `dropped_intents > 0`; after replay the required sync/key-wrap work is recreated from retained facts/rows/context (replay-allowed intents re-emitted and drained to fixpoint); no live-only intent (network/bootstrap/receive) is recreated; final `state_hash` matches the converged operational state. Queued intents are NOT protocol truth.
 - **Defends:** Invariant (4); doc target invariant "Every poc-10 queued intent is droppable on upgrade".
-- **Refs:** planned `con replay`/`state-summary`; doc Target Invariants + runtime-changes step 2; `Runtime::pending_intent_count` (`core/runtime.rs:246`); `runs_during_replay` table.
+- **Refs:** `con replay`/`state-summary`; doc Target Invariants + runtime-changes step 2; `Runtime::pending_intent_count` (`core/runtime.rs:246`); `runs_during_replay` table.
 
 ### REPLAY-32 — Per-scope replay parity: each scope's read-model rebuilds to identical state_hash (auth/content/connection/sync) `replay-cli`
 - **Setup:** Node exercising all four scopes: auth (workspace 131/user 14/admin 139/key_wrap 155), content (message 50/reaction 52/file 54/slice 55/deletions 51,53/retention 147), connection (request 42/response 44/close 45/frame* 168-170,173), sync (shared_fact 162/compare 165/have 166/need 167). Capture per-area `state-summary` hashes.
 - **Action:** `con replay --reverse` and `con replay --scramble --seed 3`.
 - **Expect:** EACH scope's per-area `state_hash` is identical to the canonical baseline across reverse and scramble passes — auth rows, content rows, connection rows, and sync indexes all rebuild order-independently. No scope diverges; `replay-check` reports zero per-area divergence for all four scopes.
 - **Defends:** Invariant (4) order-independence holds per scope, not just globally.
-- **Refs:** all four scopes' read_models/rows; planned `con replay`/`state-summary`/`replay-check`; registry.rs ROW_MUTATION_TABLES (521-553).
+- **Refs:** all four scopes' read_models/rows; `con replay`/`state-summary`/`replay-check`; registry.rs ROW_MUTATION_TABLES (521-553).
 ## 10. Connection transport version: negotiate / floor / expired-out / carrier-gate / retire
 
 Grounding notes for this cluster (verified against `/home/holmes/poc-10/src`):
@@ -3171,7 +3213,7 @@ Grounding notes for this cluster (verified against `/home/holmes/poc-10/src`):
 ### CONN-09 — Established frame with an unknown SIZE-CLASS byte (future carrier tag) classifies to None and admits nothing  `handler-unit`
 - **Setup:** Established connection. Craft a TRNS frame with `version=1` but `size_class=3` (none of SMALL=0 / FILE_SLICE=1 / BUNDLE=2 — simulating a not-yet-active future carrier tag).
 - **Action:** Submit via `receive_network_frame`.
-- **Expect:** `connection_frame::classify_frame` returns `None` (the match on `header.size_class` has no arm for 3); handler hits the `None => PipelineEffects::new()` arm: no child facts, no receipts, frame retained as opaque local-receive bytes only. A peer's above-ceiling carrier is NOT projected (quarantine-shaped behavior at the carrier-class level).
+- **Expect:** `connection_frame::classify_frame` returns `None` (the match on `header.size_class` has no arm for 3); handler hits the `None => PipelineEffects::new()` arm: no child facts, no receipts, frame retained as opaque local-receive bytes only. A peer's above-ceiling carrier is NOT projected (pending-shaped behavior at the carrier-class level).
 - **Defends:** ADMISSION (received above-ceiling carrier not projected, not error-cascaded); (3) CEILING MONOTONICITY.
 - **Refs:** `connection_frame.rs:95-102` (`classify_frame` match), `connection/receive_network_frame.rs:142-159` (`None` arm).
 
@@ -3301,12 +3343,12 @@ Grounding notes for this cluster (verified against `/home/holmes/poc-10/src`):
 - **Defends:** SUBSTANCE (only non-fact layer = core TCP framing/heartbeat); (5).
 - **Refs:** `core/network.rs:678` test `empty_frame_is_tcp_heartbeat_not_protocol_input`, `read_frame`:577.
 
-### CONN-28 — Quarantined above-ceiling established frame ACTIVATES on the next wipe+replay after the ceiling rises  `replay-cli`
+### CONN-28 — Pending above-ceiling established frame ACTIVATES on the next wipe+replay after the ceiling rises  `replay-cli`
 - **Setup:** A node received (CONN-09-style) a frame with a future carrier/size-class it could not classify; it retained the opaque local-receive bytes. Later a fleet manifest update raises the ceiling to activate that carrier tag (the relevant release drops out / a release adds support).
 - **Action:** Wipe + replay after the ceiling rises (and after the new carrier projector/route is active).
-- **Expect:** On replay the previously-uncounted frame is now projected via its (now-active) tag's projector, emitting its child facts + receipts; the connection content surfaces. Quarantined transport facts activate on wipe+replay once the ceiling covers their tag — they were retained, not dropped.
-- **Defends:** ADMISSION (quarantine -> activate on replay); (4) REPLAY DETERMINISM; (1) eventual VISIBILITY.
-- **Refs:** model ADMISSION/quarantine; `core/projectors.rs` (`RouterProjector::project` per-tag), ceiling-filtered `FACT_ROUTES`, wipe+replay path.
+- **Expect:** On replay the previously-uncounted frame is now projected via its (now-active) tag's projector, emitting its child facts + receipts; the connection content surfaces. Pending transport facts activate on wipe+replay once the ceiling covers their tag — they were retained, not dropped.
+- **Defends:** ADMISSION (pending -> activate on replay); (4) REPLAY DETERMINISM; (1) eventual VISIBILITY.
+- **Refs:** model ADMISSION/pending; `core/projectors.rs` (`RouterProjector::project` per-tag), ceiling-filtered `FACT_ROUTES`, wipe+replay path.
 ## 11. Container frame facts, TRNS magic, sealed bootstrap, chunking
 
 Cluster scope: the connection-frame **container fact** pipeline. A received TCP
@@ -3683,7 +3725,7 @@ socket/stream recognizer only, NOT a routed-fact version byte.
   propagates Err; the projector's `Err(_) => Ok(ProjectionOutput::new())` arm emits
   NO durable facts for the whole frame.
 - **Defends:** Receive-side admission boundary; an unknown inner tag is not routed
-  blindly. (Contrast with the durable-quarantine path: this is the connection-frame
+  blindly. (Contrast with the durable-pending path: this is the connection-frame
   child admission allowlist, distinct from the router's no-target-projector error.)
 - **Refs:** `connection_frame.rs::admit_received_fact_bytes` (default arm, line 470),
   `project_observed_frame` (Err arm).
@@ -3765,14 +3807,13 @@ socket/stream recognizer only, NOT a routed-fact version byte.
 - **Defends:** Invariant (4) replay determinism + (5) readers-forever — the frame
   container is a transport-time artifact; the retained facts are the inner ones.
 - **Refs:** `connection_frame.rs::observed_frame_effect` (`ephemeral_fact`),
-  `project_observed_frame`, inventory section 5 (no `con replay` CLI — exercise via
-  store wipe/rebuild harness, NOT a `replay` subcommand).
+  `project_observed_frame`, inventory section 5, `con replay`.
 ## 12. Sync x versioning
 
 These tests defend that the sync subsystem treats every routed fact as OPAQUE
 bytes keyed by id, ships current-ceiling facts when the carrier can carry them,
 closes cross-version dependency context (or falls back to have/need rounds when
-the envelope cannot), QUARANTINES above-ceiling facts without breaking the
+the envelope cannot), holds above-ceiling facts pending without breaking the
 closure of in-range facts, ships old retained facts inside the CURRENT
 transport, runs negentropy range/summary over ids across mixed fact versions,
 and rebuilds shareable rows + negentropy from retained facts on replay while
@@ -3855,26 +3896,26 @@ Reference files:
 - **Defends:** Mechanism: dependency closure falls back to have/need rounds when the envelope cannot carry it. Invariant 5 (transport in [floor,head]; chunk-don't-grow).
 - **Refs:** `send_needed_fact_id.rs`, `send_requested_fact.rs`, `sync::have_id`/`sync::need_id` layouts; `connection_frame_wire.rs` size classes.
 
-### SYNC-09 — above-ceiling fact received via sync is QUARANTINED, not dropped, not erroring the in-range closure  `multinode-network`
+### SYNC-09 — above-ceiling fact received via sync becomes PENDING without erroring the in-range closure  `multinode-network`
 - **Setup:** Peer A at protocol HEAD that introduced `content::message:2` (above B's ceiling — B is an older still-usable release). A sends, in one converge, an in-range v1 fact `A1` AND an above-ceiling v2 fact `U` that `A1` does NOT depend on.
 - **Action:** B receives both facts via `send_facts_on_connection` -> connection frame -> `receive_network_frame`.
-- **Expect:** `A1` is admitted, projected, displayed, indexed in the shareable rows. `U` is RETAINED as opaque bytes (durable fact store) but unprojected/undisplayed/uncounted (`content-count` does not include it; `messages` does not show it). The presence of `U` does NOT cause B's projection of `A1` (or any in-range fact) to error. NOTE current-behavior gap: today an unknown/above-ceiling tag hits `RouterProjector::project` Err@456 "no target projector registered for fact tag {tag}" — this test asserts the quarantine target behavior and will FAIL against today's error path (records the gap).
-- **Defends:** ADMISSION invariant: received above-ceiling fact is quarantined, retained, not dropped, not errored; in-range closure intact.
-- **Refs:** `core/projectors.rs` RouterProjector unknown-tag Err@456; `connection_frame.rs` `admit_received_fact_bytes` `_ => Err("unsupported received connection::frame fact type {tag}")` (line 470).
+- **Expect:** `A1` is admitted, projected, displayed, indexed in the shareable rows. `U` is retained as pending ingress by id/bytes, not projected, not displayed, and not counted. The presence of `U` does NOT cause B's projection of `A1` (or any in-range fact) to error.
+- **Defends:** ADMISSION invariant: received above-ceiling input is pending; in-range closure intact.
+- **Refs:** future admission gate before projector dispatch; `connection_frame.rs` receive path.
 
-### SYNC-10 — quarantined fact does NOT break the closure when an in-range fact depends ONLY on in-range facts  `multinode-network`
+### SYNC-10 — pending future input does NOT break the closure when an in-range fact depends ONLY on in-range facts  `multinode-network`
 - **Setup:** Peer A sends a converge batch: in-range v1 fact `A1` whose context_have = in-range v1 fact `A0`, plus an unrelated above-ceiling v2 fact `U`. B is the older release (ceiling below v2).
 - **Action:** B converges and replays.
-- **Expect:** B materializes `A0` and `A1` fully (closure `{A0, A1}` satisfied); `U` is quarantined. The dependency-closure computation (`negentropy_context_have_for_leaf` -> `shareable_facts_for_connection_range(...,true)`) for `A1` resolves to `{A0, A1}` and never references `U`. No closure stall, no error on `A1`.
-- **Defends:** ADMISSION invariant: quarantine does not break dependency closure of in-range facts.
-- **Refs:** `shared_fact/rows.rs` `shareable_facts_for_connection_range`/`expand_fact_ids_with_context_for_connection`; quarantine retention.
+- **Expect:** B materializes `A0` and `A1` fully (closure `{A0, A1}` satisfied); `U` remains pending and inactive. The dependency-closure computation (`negentropy_context_have_for_leaf` -> `shareable_facts_for_connection_range(...,true)`) for `A1` resolves to `{A0, A1}` and never requires `U` as active context. No closure stall, no error on `A1`.
+- **Defends:** ADMISSION invariant: pending future input does not break dependency closure of in-range facts.
+- **Refs:** `shared_fact/rows.rs` `shareable_facts_for_connection_range`/`expand_fact_ids_with_context_for_connection`.
 
-### SYNC-11 — quarantined fact ACTIVATES on next wipe+replay once ceiling rises to cover its tag  `replay-cli`
-- **Setup:** B's store contains a quarantined above-ceiling fact `U` (retained opaque bytes). B is updated so its ceiling now covers `U`'s tag version (the v2 projector + sibling `_v2/` dir are present and ceiling-active).
+### SYNC-11 — pending future fact converges after post-rise replay, without re-sync  `replay-cli`
+- **Setup:** B previously retained an above-ceiling fact `U` as pending ingress. B is updated so its ceiling now covers `U`'s tag version (the v2 projector + sibling `_v2/` dir are present and ceiling-active). Peer A still retains `U`, but does not need to resend it.
 - **Action:** Run a wipe + full replay of B's retained fact log.
-- **Expect:** On replay, `U` is now routed to its (now-registered) projector and materializes into the read model exactly like a freshly-admitted fact; `content-count` / `messages` now include it. No re-fetch from a peer is needed — the bytes were retained. Replay is deterministic and ceiling-dependent only in *which projector* the historical adapter selects by tag.
-- **Defends:** ADMISSION invariant: quarantined facts activate on next wipe+replay once ceiling rises. Invariant 4 (replay via the adapter keyed by the fact's own tag).
-- **Refs:** `core/projectors.rs` RouterProjector tag routing; ADMISSION/quarantine model.
+- **Expect:** The replay re-runs admission for `U`, routes it to its now-registered projector, and materializes it into the read model exactly like any freshly admitted fact; `content-count` / `messages` now include it.
+- **Defends:** ADMISSION pending tradeoff. Invariant 4 (replay via the adapter keyed by the fact's own tag once the fact is active).
+- **Refs:** `core/projectors.rs` RouterProjector tag routing; ADMISSION pending model.
 
 ### SYNC-12 — an OLD retained v1 fact syncs inside the CURRENT transport (fact age independent of carrier version)  `multinode-network`
 - **Setup:** Peer A retains a very old v1 `content::message:1` fact `Old` created long before the current transport (frame v1 / TRNS magic). A and B negotiate UP to the current carrier (`CONNECTION_FRAME_VERSION = 1`, `frame_small`/`frame_bundle`).
@@ -3912,10 +3953,10 @@ Reference files:
 - **Refs:** `send_needed_fact_id.rs` `SendNeededFactIdHandler::handle`; `need_id::create::fact`; `core/fact_store::persisted_fact`.
 
 ### SYNC-17 — send_needed_fact_id is a no-op when the advertised id is already retained (any version)  `handler-unit`
-- **Setup:** Store already holds fact `X` (retained, could be a quarantined above-ceiling fact). A `sync::have_id` advertising `X` arrives.
+- **Setup:** Store already holds fact `X` (retained and ceiling-active when admitted). A `sync::have_id` advertising `X` arrives.
 - **Action:** Submit to `SendNeededFactIdHandler::handle`.
-- **Expect:** `persisted_fact(store, &have.fact_id)?.is_some()` is true -> returns empty `PipelineEffects::new()`; no `need_id` emitted. Retention (even of a quarantined fact) suppresses re-request — we already hold the opaque bytes regardless of whether we can project them.
-- **Defends:** ADMISSION/idempotence: quarantined-but-retained facts are not re-fetched.
+- **Expect:** `persisted_fact(store, &have.fact_id)?.is_some()` is true -> returns empty `PipelineEffects::new()`; no `need_id` emitted. Retention suppresses re-request because we already hold the bytes.
+- **Defends:** ADMISSION/idempotence: retained facts are not re-fetched.
 - **Refs:** `send_needed_fact_id.rs` early-return on `persisted_fact(...).is_some()`.
 
 ### SYNC-18 — send_requested_fact ships a need-id's target as opaque bytes only if shareable+sendable  `handler-unit`
@@ -3975,9 +4016,9 @@ Reference files:
 - **Refs:** `shared_fact/cli.rs` `parse_sync_range_args`/`SYNC_RANGE_USAGE`; `shared_fact/rows.rs` `shareable_facts_for_connection_range` (the `--with-deps` BFS).
 
 ### SYNC-26 — sync-status root fingerprint is identical across two clients at different fact-version heads holding the same ids  `blackbox-cli`
-- **Setup:** Two `con` nodes that have converged to the SAME set of fact ids. Node A is at a head that wrote some facts as v2; node B is an older release that holds the same ids (quarantining any above-ceiling ones). Restrict to the common in-range id set.
+- **Setup:** Two `con` nodes that have converged to the SAME common in-range fact ids. Node A is at a head that wrote some facts as v2; node B is an older release that drops above-ceiling v2 inputs, so the assertion restricts to the common in-range id set.
 - **Action:** Run `con sync-status` on both for the common shareable set.
-- **Expect:** `root_count` and `root_fingerprint` MATCH for the common id set (fingerprint = XOR over `(timestamp,id)`; version-independent). Quarantined above-ceiling facts on B that A counts will differ — the test scopes to the common ceiling-active set to assert equality there. Documents that fingerprint convergence is over ids, not content.
+- **Expect:** `root_count` and `root_fingerprint` MATCH for the common id set (fingerprint = XOR over `(timestamp,id)`; version-independent). Above-ceiling facts present only on A are outside this assertion until B's ceiling rises and A re-syncs them. Documents that fingerprint convergence is over ids, not content.
 - **Defends:** Invariant 2 (uniform sync read-model over ids); mechanism: negentropy across mixed versions.
 - **Refs:** `shared_fact/cli.rs` `sync_status_output`; `shared_fact/rows.rs` `sync_status`, `range_summary` fingerprinting.
 
@@ -3995,11 +4036,11 @@ Reference files:
 - **Defends:** Mechanism: a new wire shape = new tag in every scope; sync envelope tags are independent of content versions.
 - **Refs:** `registry.rs` `fact_route_tags_are_globally_unique`, `FACT_ROUTES`.
 
-### SYNC-29 — an above-ceiling shared_fact INDEX (162) is admissible even if the referenced owner is quarantined  `handler-unit`
-- **Setup:** Store where the referenced owner `U` is an above-ceiling/quarantined fact (retained opaque). An incoming `sync::shared_fact` (tag 162, a ceiling-active envelope) names `U`.
+### SYNC-29 — shared_fact INDEX (162) can name an owner id whose bytes are pending or absent locally  `handler-unit`
+- **Setup:** Store where the referenced owner `U` is above-ceiling and either pending locally or absent because it never made it through the wire/opening boundary. An incoming `sync::shared_fact` (tag 162, a ceiling-active envelope) names `U`.
 - **Action:** Project the `sync::shared_fact` via `SyncSharedFactProjector`.
-- **Expect:** The shared_fact index fact projects fine (its own tag 162 is ceiling-active) and emits a `sync_exact_fact` range offer for `U`'s id — because the projector never decodes `U`'s body. The envelope/index layer is decoupled from the carried fact's projectability. (Whether `U` then materializes depends on the ceiling, per SYNC-09/11.)
-- **Defends:** SUBSTANCE/ADMISSION: the sync envelope is a current-ceiling fact even while it references an above-ceiling content id; quarantine is at the content layer, not the index layer.
+- **Expect:** The shared_fact index fact projects fine (its own tag 162 is ceiling-active) and emits a `sync_exact_fact` range offer for `U`'s id — because the projector never decodes `U`'s body. The envelope/index layer is decoupled from whether the owner bytes are currently active, pending, or absent. If `U` is already pending locally, a later `need_id` for the same id is a no-op; if it is absent, normal sync can still request it.
+- **Defends:** SUBSTANCE/ADMISSION: the sync envelope is a current-ceiling fact even while it references a content id whose bytes are not active locally.
 - **Refs:** `sync/shared_fact/project.rs` `SyncSharedFactProjector::project_typed` (no body decode); `ContextOffer::range`.
 
 ### SYNC-30 — compare-response no-store fallback path plans purely over context facts (version-agnostic)  `handler-unit`
@@ -4032,9 +4073,9 @@ a sibling `_v2/` directory + (only if the input surface changed) a new cli
 bucket; rows/queries shared at head. These tests assert, per family and per
 {new,old} axis: (a) v1 facts replay under the v1 adapter keyed by their OWN tag
 into current rows; (b) v2 is dormant below ceiling (refused on local create,
-quarantined on receipt) and producible at/after; (c) old meaning is preserved
+pending on receipt) and producible at/after; (c) old meaning is preserved
 by the v1 projector forever; (d) unsafe encodings are handled by
-quarantine/tighten/reissue, never mass conversion.
+suppress/tighten/reissue, never mass conversion.
 
 Reference anchors used throughout: `RouterProjector::project` unknown-tag
 `Err("no target projector registered for fact tag {tag}")` (projectors.rs:456);
@@ -4059,32 +4100,32 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 1 (visibility — only ceiling-active facts are admissible); admission "local creation above ceiling refused".
 - **Refs:** registry.rs FACT_ROUTES, `content/message/cli.rs` SEND_USAGE, app.rs MATCH_PROTOCOL, runtime.rs submit_fact:268.
 
-### CONTENT-03 — message v2 received below ceiling is QUARANTINED, not errored/dropped  `handler-unit`
+### CONTENT-03 — message v2 received below ceiling is PENDING, not errored/dropped  `handler-unit`
 - **Setup:** Head build with message_v2 tag registered in a sibling dir; ceiling = N (below message_v2.intro_version). A peer delivers a wire frame carrying a message_v2 fact (tag 56).
 - **Action:** Receive the fact through the connection-frame projector path (frame decrypts and emits the inner content fact) and attempt projection.
-- **Expect:** The fact is retained as opaque bytes (present in the fact log), unprojected, undisplayed, uncounted — NOT dropped and NOT surfaced as an error to the user. (Contrast: today an unrouted tag hits `RouterProjector::project` Err at projectors.rs:456 — the quarantine path must intercept above-ceiling tags before that error.)
-- **Defends:** Admission "received above-ceiling fact quarantined"; invariant 5 (readers forever — fact kept).
+- **Expect:** The fact is retained as opaque bytes (present in the fact log), unprojected, undisplayed, uncounted — NOT dropped and NOT surfaced as an error to the user. (Contrast: today an unrouted tag hits `RouterProjector::project` Err at projectors.rs:456 — the pending path must intercept above-ceiling tags before that error.)
+- **Defends:** Admission "received above-ceiling fact pending"; invariant 5 (readers forever — fact kept).
 - **Refs:** projectors.rs:456 unknown-tag Err, RouterProjector@423, runtime.rs submit_facts:274, connection_frame_wire.rs inner-bundle decode.
 
-### CONTENT-04 — quarantined message v2 ACTIVATES on wipe+replay once ceiling rises  `replay-cli`
-- **Setup:** Store from CONTENT-03 holding the quarantined message_v2 fact. Fleet manifest updated so the oldest still-usable release supports protocol N+1; trusted_time advances past blocker.expires_at + M so ceiling rises to >= message_v2.intro_version.
+### CONTENT-04 — pending message v2 ACTIVATES on wipe+replay once ceiling rises  `replay-cli`
+- **Setup:** Store from CONTENT-03 holding the pending message_v2 fact. Fleet manifest updated so the oldest still-usable release supports protocol N+1; trusted_time advances past blocker.expires_at + M so ceiling rises to >= message_v2.intro_version.
 - **Action:** Wipe derived state and replay.
-- **Expect:** The previously-quarantined tag-56 fact now routes to `ContentMessageV2Projector` (the new kept-forever projector) and materializes a `CONTENT_MESSAGES`/`OPENED_MESSAGES` row with the richer body. v1 tag-50 facts still route to the v1 projector. Both render at the (now higher) ceiling.
-- **Defends:** Admission "quarantined facts activate on next wipe+replay once ceiling covers tag"; invariant 4 (ceiling-independent replay by own tag); invariant 2.
+- **Expect:** The previously-pending tag-56 fact now routes to `ContentMessageV2Projector` (the new kept-forever projector) and materializes a `CONTENT_MESSAGES`/`OPENED_MESSAGES` row with the richer body. v1 tag-50 facts still route to the v1 projector. Both render at the (now higher) ceiling.
+- **Defends:** Admission "pending facts activate on next wipe+replay once ceiling covers tag"; invariant 4 (ceiling-independent replay by own tag); invariant 2.
 - **Refs:** registry.rs FACT_ROUTES (sibling v2 route), projectors.rs RouterProjector, ceiling-activation rule.
 
 ### CONTENT-05 — two clients at the same protocol version render the SAME message row regardless of release  `multinode-network`
-- **Setup:** Two `con` daemons — release A (head) and release B (one prior, both still-usable) — connected, ceiling = N where message_v2 is NOT yet ceiling-active. A authored both a v1 message and (locally) holds a quarantined message_v2.
+- **Setup:** Two `con` daemons — release A (head) and release B (one prior, both still-usable) — connected, ceiling = N where message_v2 is NOT yet ceiling-active. A authored both a v1 message and (locally) holds a pending message_v2.
 - **Action:** Sync facts between A and B; on each, run `con messages` and `con view` for the shared message.
-- **Expect:** Both A and B produce identical read-model row content for the v1 message (rendered at the ceiling, not at A's head). The quarantined v2 is invisible on both. Only presentation chrome (if any) may differ.
+- **Expect:** Both A and B produce identical read-model row content for the v1 message (rendered at the ceiling, not at A's head). The pending v2 is invisible on both. Only presentation chrome (if any) may differ.
 - **Defends:** Invariant 2 (rendering uniformity — same protocol version => same row); invariant 3 (no-regression — B must support every ceiling-active capability).
 - **Refs:** sync::share_fact_with_sync handler, `content/message/queries.rs`, registry.rs read_models CONTENT_MESSAGES/OPENED_MESSAGES.
 
 ### CONTENT-06 — message edit (proposed v2 edit fact) preserves original v1 meaning under v1-only replay  `replay-cli`
 - **Setup:** Store with a v1 tag-50 message and a proposed `content::message_edit` v2 fact (new tag) that supersedes the body. Replay performed on a still-usable release whose ceiling does NOT cover the edit tag.
 - **Action:** Wipe+replay.
-- **Expect:** The original message renders with its ORIGINAL v1 body (the edit fact is quarantined/inert below ceiling); the v1 projector's meaning is unchanged. No mass-conversion of the original message into an edited form.
-- **Defends:** Invariant 5 (old fact readers kept forever; old meaning preserved); "unsafe/dormant handled by quarantine not mass conversion."
+- **Expect:** The original message renders with its ORIGINAL v1 body (the edit fact is pending/inert below ceiling); the v1 projector's meaning is unchanged. No mass-conversion of the original message into an edited form.
+- **Defends:** Invariant 5 (old fact readers kept forever; old meaning preserved); "dormant handled by pending, unsafe handled by suppression, not mass conversion."
 - **Refs:** `content/message/project.rs`, FACT_ROUTES, ceiling-active capability rule.
 
 ### CONTENT-07 — message threads (proposed v2 thread-parent field) dormant below ceiling, producible at/after  `blackbox-cli`
@@ -4115,18 +4156,18 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 1; admission local-refuse.
 - **Refs:** `content/reaction/fact.rs`, `content/message/cli.rs` REACT_USAGE line 27, admission.
 
-### CONTENT-11 — reaction v2 received below ceiling quarantined; activates on ceiling-rise replay  `handler-unit`
+### CONTENT-11 — reaction v2 received below ceiling pending; activates on ceiling-rise replay  `handler-unit`
 - **Setup:** Peer delivers a reaction_v2 fact (new tag) while local ceiling = N (below intro). Then manifest raises ceiling to N+1.
-- **Action:** Receive (quarantine), then later wipe+replay after ceiling rises.
-- **Expect:** Below ceiling: retained opaque, uncounted, not in `CONTENT_REACTIONS`, no error surfaced. After ceiling rise + replay: routes to ContentReactionV2Projector, materializes the custom-emoji reaction row. v1 tag-52 reactions still route to v1 projector.
-- **Defends:** Admission quarantine + activation; invariant 4; invariant 5.
+- **Action:** Receive (pending), then later wipe+replay after ceiling rises.
+- **Expect:** Below ceiling: pending opaque, uncounted, not in `CONTENT_REACTIONS`, no error surfaced. After ceiling rise + replay: routes to ContentReactionV2Projector, materializes the custom-emoji reaction row. v1 tag-52 reactions still route to v1 projector.
+- **Defends:** Admission pending + activation; invariant 4; invariant 5.
 - **Refs:** projectors.rs:456, FACT_ROUTES sibling reaction_v2, CONTENT_REACTIONS.
 
 ### CONTENT-12 — reaction deletion (v1 there is no delete; proposed v2 reaction-retraction) preserves prior reaction under v1 replay  `projector-unit`
 - **Setup:** v1 has no reaction-deletion fact family. Proposed v2 adds a reaction-retraction fact (new tag). Store holds a v1 reaction and a v2 retraction; replay on a still-usable release with ceiling below the retraction tag.
 - **Action:** Wipe+replay below ceiling.
-- **Expect:** v1 reaction row stays present (retraction inert/quarantined below ceiling); the v1 ContentReactionProjector meaning is unchanged. No mass-conversion of the reaction into a deleted state.
-- **Defends:** Invariant 5 (old meaning preserved); quarantine-not-convert.
+- **Expect:** v1 reaction row stays present (retraction inert/pending below ceiling); the v1 ContentReactionProjector meaning is unchanged. No mass-conversion of the reaction into a deleted state.
+- **Defends:** Invariant 5 (old meaning preserved); pending-not-convert.
 - **Refs:** `content/reaction/project.rs`, CONTENT_REACTIONS, FACT_ROUTES.
 
 ### CONTENT-13 — file v1 (tag 54) replays: descriptor + sealed_metadata + root_hash rebuild CONTENT_FILES  `replay-cli`
@@ -4150,11 +4191,11 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 1; "carrier capacity GATES ceiling activation (chunk-don't-grow)"; invariant 3.
 - **Refs:** `content/file_slice/fact.rs` FILE_SLICE_PLAINTEXT_BYTES, connection_frame_wire.rs CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES, ROUTES intro_version.
 
-### CONTENT-16 — file_slice v2 received below ceiling quarantined; v1 slices keep BAO meaning  `handler-unit`
+### CONTENT-16 — file_slice v2 received below ceiling pending; v1 slices keep BAO meaning  `handler-unit`
 - **Setup:** Peer delivers file_slice_v2 facts (new tag) while ceiling = N. Store also holds v1 tag-55 slices for the same file.
-- **Action:** Receive v2 slices (quarantine), then wipe+replay below ceiling.
-- **Expect:** v2 slices retained opaque/uncounted (not in `FILE_SLICES`, no BAO verification attempted, no error surfaced); v1 slices still verify and count. File reconstruction uses only v1 slices. After ceiling rises and replay, v2 slices route to ContentFileSliceV2Projector.
-- **Defends:** Admission quarantine; invariant 4; invariant 5.
+- **Action:** Receive v2 slices (pending), then wipe+replay below ceiling.
+- **Expect:** v2 slices pending opaque/uncounted (not in `FILE_SLICES`, no BAO verification attempted, no error surfaced); v1 slices still verify and count. File reconstruction uses only v1 slices. After ceiling rises and replay, v2 slices route to ContentFileSliceV2Projector.
+- **Defends:** Admission pending; invariant 4; invariant 5.
 - **Refs:** projectors.rs:456, FACT_ROUTES sibling file_slice_v2, FILE_SLICES.
 
 ### CONTENT-17 — file v2 (encrypted/larger sealed_metadata descriptor) dormant below, producible at/after ceiling  `blackbox-cli`
@@ -4171,11 +4212,11 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 4; invariant 2.
 - **Refs:** `content/file_deletion/layout.rs` TYPE_CONTENT_FILE_DELETION=53, ContentFileDeletionProjector registry.rs:602, read_models FILE_DELETIONS, MATCH_COMMANDS delete-file line 467.
 
-### CONTENT-19 — file_deletion v2 received below ceiling quarantined; does NOT tombstone v1 files  `handler-unit`
+### CONTENT-19 — file_deletion v2 received below ceiling pending; does NOT tombstone v1 files  `handler-unit`
 - **Setup:** Proposed `content::file_deletion_v2` (new tag, e.g. carries a deletion scope / multi-file selector). Peer delivers a v2 deletion while ceiling = N (below intro).
-- **Action:** Receive (quarantine), then wipe+replay below ceiling.
+- **Action:** Receive (pending), then wipe+replay below ceiling.
 - **Expect:** The v2 deletion is inert: target files remain live (not tombstoned), no `FILE_DELETIONS` row, no error. A v1 tag-53 deletion in the same store still tombstones its target. After ceiling rises + replay, v2 deletion activates.
-- **Defends:** Admission quarantine; quarantine-not-convert (no mass tombstoning); invariant 5.
+- **Defends:** Admission pending; pending-not-convert (no mass tombstoning); invariant 5.
 - **Refs:** projectors.rs:456, FILE_DELETIONS, FACT_ROUTES.
 
 ### CONTENT-20 — message_deletion v1 (tag 51) replays into MESSAGE_DELETIONS/MESSAGE_TOMBSTONES  `replay-cli`
@@ -4213,24 +4254,24 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 1; admission local-refuse; invariant 3 (older release must evaluate every ceiling-active policy).
 - **Refs:** `content/retention_policy/fact.rs` SCOPE_KIND_WORKSPACE/CHANNEL/THREAD, FACT_ROUTES, ceiling rule.
 
-### CONTENT-25 — retention_policy v2 received below ceiling quarantined; floor NOT tightened by inert v2  `handler-unit`
+### CONTENT-25 — retention_policy v2 received below ceiling pending; floor NOT tightened by inert v2  `handler-unit`
 - **Setup:** Peer delivers a retention_policy_v2 fact (new tag) that, if active, would tighten the floor. Local ceiling = N (below v2 intro).
-- **Action:** Receive (quarantine), then `con disappearing-status` and a wipe+replay below ceiling.
-- **Expect:** The v2 policy is inert: it does NOT enter the supersedes chain, does NOT tighten effective_floor, no error surfaced, retained opaque. Messages that would be retired by v2 stay live. After ceiling rises + replay, the v2 policy activates and the floor tightens deterministically.
-- **Defends:** Admission quarantine + activation; quarantine-not-convert; invariant 5; invariant 4.
+- **Action:** Receive (pending), then `con disappearing-status` and a wipe+replay below ceiling.
+- **Expect:** The v2 policy is inert: it does NOT enter the supersedes chain, does NOT tighten effective_floor, no error surfaced, pending opaque. Messages that would be retired by v2 stay live. After ceiling rises + replay, the v2 policy activates and the floor tightens deterministically.
+- **Defends:** Admission pending + activation; pending-not-convert; invariant 5; invariant 4.
 - **Refs:** projectors.rs:456, RetentionPolicyProjector, `content/retention_policy/queries.rs`, DISAPPEARING_STATUS.
 
 ### CONTENT-26 — disappearing-compact is a local context op, not a versioned fact — no v2 tag introduced  `guardrail`
 - **Setup:** Head build. `con disappearing-compact WORKSPACE_ID_HEX` compacts tombstones/purges via the `content::purge` CONTEXT (role `content_purged`, `content/purge/project.rs`), which has NO `layout.rs` and is NOT in `FACT_ROUTES`.
 - **Action:** Inspect `FACT_ROUTES` and the purge module; run `disappearing-compact`.
-- **Expect:** No new fact tag is produced by compaction (purge is context-only). `fact_route_tags_are_globally_unique` (registry.rs 717-729) still holds with exactly 43 routes; the compaction result is deterministically reproducible from retained facts on replay (it derives, it does not create non-deterministic facts).
+- **Expect:** No new fact tag is produced by compaction (purge is context-only). `fact_route_tags_are_globally_unique` (registry.rs 717-729) still holds with exactly 47 routes; the compaction result is deterministically reproducible from retained facts on replay (it derives, it does not create non-deterministic facts).
 - **Defends:** Invariant 4 ("recreates only deterministic facts"); model "purge is CONTEXT, NOT a fact family."
 - **Refs:** `content/purge/project.rs` content_purged_role/target_purge_key, registry.rs FACT_ROUTES + fact_route_tags_are_globally_unique, DISAPPEARING_COMPACT_USAGE.
 
 ### CONTENT-27 — disappearing-status read-model is shared at head; v1 and v2 policies render at the ceiling  `multinode-network`
-- **Setup:** Two still-usable releases connected; ceiling = N where retention_policy_v2 is NOT ceiling-active. Store holds v1 policies plus a quarantined v2.
+- **Setup:** Two still-usable releases connected; ceiling = N where retention_policy_v2 is NOT ceiling-active. Store holds v1 policies plus a pending v2.
 - **Action:** On each node run `con disappearing-status WORKSPACE_ID_HEX`.
-- **Expect:** Both nodes report identical effective_floor/current_ttl/horizon_floor computed from v1 policies at the ceiling; the quarantined v2 contributes nothing on either. Same protocol version => same status row content.
+- **Expect:** Both nodes report identical effective_floor/current_ttl/horizon_floor computed from v1 policies at the ceiling; the pending v2 contributes nothing on either. Same protocol version => same status row content.
 - **Defends:** Invariant 2 (rendering uniformity); invariant 3; "withhold a new DERIVATION of existing facts until ceiling-active."
 - **Refs:** `content/retention_policy/queries.rs`, `cli.rs` status_output, read_models retention rows.
 
@@ -4241,11 +4282,11 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 2 (surfaced meaning = f(retained facts, version)); charter "recipient never fetches URL."
 - **Refs:** proposed `content/unfurl/` sibling, FACT_ROUTES new tag, sync::share_fact_with_sync, `content/message/project.rs` view path.
 
-### CONTENT-29 — in-band unfurl below ceiling is quarantined; recipient still never fetches  `handler-unit`
+### CONTENT-29 — in-band unfurl below ceiling is pending; recipient still never fetches  `handler-unit`
 - **Setup:** Sender (head) emits an unfurl snapshot fact; recipient ceiling = N (below unfurl intro). Recipient receives the fact.
-- **Action:** Receive (quarantine), then `con view` the message, then wipe+replay below ceiling.
-- **Expect:** The unfurl fact is retained opaque/uninterpreted; `con view` shows the message WITHOUT an unfurl preview and does NOT fetch the URL as a fallback (no network egress). No error surfaced. After ceiling rises + replay, the snapshot renders — still without any URL fetch.
-- **Defends:** Admission quarantine; charter "recipient never fetches URL; replay never refetches"; invariant 5.
+- **Action:** Receive (pending), then `con view` the message, then wipe+replay below ceiling.
+- **Expect:** The unfurl fact is pending opaque/uninterpreted; `con view` shows the message WITHOUT an unfurl preview and does NOT fetch the URL as a fallback (no network egress). No error surfaced. After ceiling rises + replay, the snapshot renders — still without any URL fetch.
+- **Defends:** Admission pending; charter "recipient never fetches URL; replay never refetches"; invariant 5.
 - **Refs:** projectors.rs:456, proposed unfurl projector, view path, no-egress assertion.
 
 ### CONTENT-30 — unfurl replay NEVER refetches the URL (deterministic from snapshot)  `replay-cli`
@@ -4255,11 +4296,11 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Defends:** Invariant 4 (replay determinism, no non-deterministic recreation); charter "replay never refetches."
 - **Refs:** proposed unfurl projector, replay path, FACT_ROUTES.
 
-### CONTENT-31 — unsafe message-body encoding handled by quarantine + reissue, NOT mass conversion  `guardrail`
+### CONTENT-31 — unsafe message-body encoding handled by suppress/tighten + reissue, NOT mass conversion  `guardrail`
 - **Setup:** A message v_bad transport/encoding flagged unsafe (e.g. an unbounded body length that breaks fixed-width admission). Store holds existing v1 tag-50 messages encoded safely; the unsafe encoding is being retired below natural expiry under the safety floor.
 - **Action:** Apply the safety-floor retirement (drop the unsafe transport format) and trigger reissue/tighten.
 - **Expect:** Only the unsafe transport format is removed (invariant 6 — removed before expiry ONLY when unsafe); existing safe v1 messages are NOT rewritten/converted — they keep their tag-50 reader forever; new safe messages are reissued under a safe tag. No bulk conversion pass over the message log.
-- **Defends:** Invariant 6 (safety floor); invariant 5 (readers forever); charter "unsafe encoding handled by quarantine/tighten/reissue not mass conversion."
+- **Defends:** Invariant 6 (safety floor); invariant 5 (readers forever); charter "unsafe encoding handled by suppress/tighten/reissue not mass conversion."
 - **Refs:** `content/message/layout.rs` CONTENT_MESSAGE_BYTES fixed-width admission, FACT_ROUTES, safety-floor rule.
 
 ### CONTENT-32 — global tag uniqueness holds when every content family gains a v2 sibling  `guardrail`
@@ -4270,10 +4311,10 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Refs:** registry.rs 717-729 fact_route_tags_are_globally_unique, projector_routes! 593-624, FactRoute@402.
 
 ### CONTENT-33 — content count is computed at the ceiling (v2 facts uncounted below ceiling)  `blackbox-cli`
-- **Setup:** Store with v1 content facts plus quarantined v2 content facts (message_v2, reaction_v2). Ceiling = N (below v2 intros).
+- **Setup:** Store with v1 content facts plus pending v2 content facts (message_v2, reaction_v2). Ceiling = N (below v2 intros).
 - **Action:** Run `con content-count` and `con count`.
-- **Expect:** Counts include only ceiling-active (v1) content facts; quarantined v2 facts are uncounted. After ceiling rises to cover v2 and a wipe+replay, the counts increase to include the now-active v2 facts.
-- **Defends:** Admission "quarantined ... uncounted"; invariant 2 (count is a derivation surfaced at the ceiling).
+- **Expect:** Counts include only ceiling-active (v1) content facts; pending v2 facts are uncounted. After ceiling rises to cover v2 and a wipe+replay, the counts increase to include the now-active v2 facts.
+- **Defends:** Admission "pending ... uncounted"; invariant 2 (count is a derivation surfaced at the ceiling).
 - **Refs:** MATCH_COMMANDS content-count line 505 / count line (auth::workspace::cli), `content/message/cli.rs` content_count.
 
 ### CONTENT-34 — v1 content facts remain transportable to a still-usable older release while it speaks tag 50-55/147  `multinode-network`
@@ -4299,7 +4340,7 @@ in `src/core/projectors.rs`, and the registry in `src/protocol/registry.rs`.
 
 Convention used below: "ceiling-gated family" means a route whose
 `intro_version` exceeds the active ceiling; a local create is REFUSED and a
-received fact of that tag is QUARANTINED (retained opaque, unprojected) per the
+received fact of that tag is PENDING (pending opaque, unprojected) per the
 admission rule (`RouterProjector::project` Err path, projectors.rs:456). Where a
 {new,old} version axis and a per-scope axis apply, each is a separate test.
 
@@ -4312,17 +4353,17 @@ admission rule (`RouterProjector::project` Err path, projectors.rs:456). Where a
 - **Defends:** ADMISSION (local above-ceiling refused) + invariant (3) ceiling monotonicity — a client cannot mint membership the fleet cannot transport.
 - **Refs:** `auth::user::project::UserProjector`, registry.rs `FACT_ROUTES`, runtime.rs:268, projectors.rs:456.
 
-### AUTHZ-02 — received above-ceiling admin fact (tag 139) is quarantined, not granted  `multinode-network`
+### AUTHZ-02 — received above-ceiling admin fact (tag 139) is pending, not granted  `multinode-network`
 - **Setup:** Two nodes. Node B's ceiling is N; the `auth::admin` route on a hypothetical reissue carries `intro_version = N+1`. Node A (above-ceiling capable, alpha) sends a syntactically valid `auth::admin` fact tagged for the new shape.
 - **Action:** A shares the fact over a connection; B's `ProtocolProjector` routes it.
 - **Expect:** B retains it as opaque bytes (NOT dropped, NOT errored to the user), it is unprojected/undisplayed; no `admin` row is written; `grant-admin`-derived authority for that target does NOT appear; the actor set on B is unchanged.
-- **Defends:** ADMISSION quarantine + invariant (1)/(3) — an unsupported client must not admit a different actor set.
+- **Defends:** ADMISSION pending + invariant (1)/(3) — an unsupported client must not admit a different actor set.
 - **Refs:** `auth::admin::project::AdminProjector`, `RouterProjector` (projectors.rs:423), unknown-tag Err (projectors.rs:456).
 
-### AUTHZ-03 — quarantined authority fact ACTIVATES on wipe+replay after ceiling rises  `replay-cli`
-- **Setup:** Node B from AUTHZ-02 holding the quarantined above-ceiling `auth::admin` fact. A new signed manifest raises B's ceiling to cover `intro_version = N+1`; trusted_time advanced past `blocker.expires_at + M`.
+### AUTHZ-03 — pending authority fact ACTIVATES on wipe+replay after ceiling rises  `replay-cli`
+- **Setup:** Node B from AUTHZ-02 holding the pending above-ceiling `auth::admin` fact. A new signed manifest raises B's ceiling to cover `intro_version = N+1`; trusted_time advanced past `blocker.expires_at + M`.
 - **Action:** Wipe derived state and replay all retained facts (the historical adapter keyed by the fact's OWN tag).
-- **Expect:** The formerly quarantined admin fact now projects via its `v_{N+1}` adapter; the `admin` row materializes and the target gains admin authority — but only after the ceiling rose. The pre-rise state had NO such authority.
+- **Expect:** The formerly pending admin fact now projects via its `v_{N+1}` adapter; the `admin` row materializes and the target gains admin authority — but only after the ceiling rose. The pre-rise state had NO such authority.
 - **Defends:** ADMISSION activation-on-replay + invariant (4) replay determinism (ceiling-independent per-tag adapter).
 - **Refs:** `auth::admin::project`, version-bucket `project/v_{N+1}`, projectors.rs:489 `project_typed`.
 
@@ -4410,11 +4451,11 @@ admission rule (`RouterProjector::project` Err path, projectors.rs:456). Where a
 - **Defends:** non-purgeability for the admin authority scope.
 - **Refs:** `auth::admin::DelegatedAdminNeeds.authority`, `auth::user_invite::EndpointAdminNeeds.admin`.
 
-### AUTHZ-16 — an unsafe auth fact VERSION is quarantined/tightened while historical facts of safe versions stay valid  `replay-cli`
+### AUTHZ-16 — an unsafe auth fact VERSION is suppressed/tightened while historical facts of safe versions stay valid  `replay-cli`
 - **Setup:** Two retained `auth::endpoint_shared` facts: E_old at a SAFE historical wire version, E_bad at a version later flagged UNSAFE (security-deprecated in the manifest). Ceiling excludes the unsafe version.
 - **Action:** Wipe+replay.
-- **Expect:** E_old projects normally (row + `content_signer`/`auth_endpoint_shared` offers); E_bad is quarantined/refused (its version is unsafe) and grants NO authority. Only the unsafe version is suppressed; the safe historical version is untouched.
-- **Defends:** "unsafe auth fact version quarantined/tightened while historical facts stay valid unless that version is unsafe"; invariant (6) safety floor.
+- **Expect:** E_old projects normally (row + `content_signer`/`auth_endpoint_shared` offers); E_bad is suppressed/refused (its version is unsafe) and grants NO authority. Only the unsafe version is suppressed; the safe historical version is untouched.
+- **Defends:** "unsafe auth fact version suppressed/tightened while historical facts stay valid unless that version is unsafe"; invariant (6) safety floor.
 - **Refs:** `auth::endpoint_shared::project`, manifest security-deprecation, invariant (6).
 
 ### AUTHZ-17 — a NON-unsafe old auth version is NEVER removed before natural expiry  `guardrail`
@@ -4448,7 +4489,7 @@ admission rule (`RouterProjector::project` Err path, projectors.rs:456). Where a
 ### AUTHZ-21 — accept across versions: invite_accepted is local-scope and must match the invite_secret at ceiling  `handler-unit`
 - **Setup:** Local `auth::invite` secret fact present; build an `auth::invite_accepted` (tag 146) referencing it. Ceiling covers tag 146.
 - **Action:** Project the invite_accepted fact.
-- **Expect:** Admits only if scope==Local and `bootstrap_hash`/`workspace_id`/`invite_fact_id` all match the secret (project.rs:47-87); an above-ceiling invite_accepted reissue would instead be quarantined. No NEW authority is granted by acceptance itself (it only writes the local acceptance row).
+- **Expect:** Admits only if scope==Local and `bootstrap_hash`/`workspace_id`/`invite_fact_id` all match the secret (project.rs:47-87); an above-ceiling invite_accepted reissue would instead be pending. No NEW authority is granted by acceptance itself (it only writes the local acceptance row).
 - **Defends:** accept-path version handling; acceptance never widens authority.
 - **Refs:** `auth::invite_accepted::project::InviteAcceptedProjector` (local-only), `auth::invite::decode_fact_payload`.
 
@@ -4504,8 +4545,8 @@ admission rule (`RouterProjector::project` Err path, projectors.rs:456). Where a
 ### AUTHZ-29 — above-ceiling authority fact is NOT errored to the operator (no projectors.rs:456 crash leak)  `handler-unit`
 - **Setup:** Received `auth::endpoint_shared` fact tagged for an above-ceiling reissue (tag present in a future bucket, route not yet active at this ceiling).
 - **Action:** Feed it through `ProtocolProjector`/`RouterProjector`.
-- **Expect:** Under the quarantine model it is retained opaque and NOT surfaced as an error; it must NOT take the current "no target projector registered for fact tag" hard-Err path (projectors.rs:456) that today errors. The fact is uncounted in `content-count`/peer listings.
-- **Defends:** ADMISSION quarantine semantics vs. today's hard error; invariant (1) (an above-ceiling fact must not crash a supported client).
+- **Expect:** Under the pending model it is pending opaque and NOT surfaced as an error; it must NOT take the current "no target projector registered for fact tag" hard-Err path (projectors.rs:456) that today errors. The fact is uncounted in `content-count`/peer listings.
+- **Defends:** ADMISSION pending semantics vs. today's hard error; invariant (1) (an above-ceiling fact must not crash a supported client).
 - **Refs:** `RouterProjector::project` Err (projectors.rs:456), `connection::frame_observation` retention path.
 
 ### AUTHZ-30 — old auth transport version dropped sub-floor; expired peer gets no recovery responder  `multinode-network`
@@ -4565,18 +4606,18 @@ the cross-version ones state the expected behavior the model must preserve.
 - **Defends:** admission (local above-ceiling refused) + CEILING-ACTIVE gating of the new family; invariant 5 (old adapters retained).
 - **Refs:** `auth/create_key_wrap.rs`, `auth/key_wrap/create.rs::create_validated_key_wrap_fact`, `auth/key_wrap/_v2/` (model), `registry.rs` MATCH_COMMANDS `key-wrap`.
 
-### KEYS-03 — received above-ceiling key_wrap_v2 fact is quarantined, not errored or dropped  `handler-unit`
+### KEYS-03 — received above-ceiling key_wrap_v2 fact is pending, not errored or dropped  `handler-unit`
 - **Setup:** node at ceiling N (no `key_wrap_v2` projector route active); peer sends a `key_wrap_v2`-tagged fact (new redesign tag).
 - **Action:** the fact is received and offered to the router (`RouterProjector::project`).
-- **Expect:** the fact is RETAINED as opaque bytes (quarantined), undisplayed/uncounted/unprojected, NOT dropped and NOT surfaced as a hard error to the user. (Today the same path ERRORS at `projectors.rs:456` "no target projector registered for fact tag {tag}" — the test pins that the model must convert this to quarantine for the redesigned key family.)
-- **Defends:** admission quarantine semantics for received above-ceiling key material; invariant 1.
+- **Expect:** the fact is RETAINED as opaque bytes (pending), undisplayed/uncounted/unprojected, NOT dropped and NOT surfaced as a hard error to the user. (Today the same path ERRORS at `projectors.rs:456` "no target projector registered for fact tag {tag}" — the test pins that the model must convert this to pending for the redesigned key family.)
+- **Defends:** admission pending semantics for received above-ceiling key material; invariant 1.
 - **Refs:** `src/core/projectors.rs` (`RouterProjector::project` @423, Err @456), `auth/key_wrap/_v2/` (model).
 
-### KEYS-04 — quarantined key_wrap_v2 activates on wipe+replay once ceiling rises  `replay-cli`
-- **Setup:** node with a quarantined `key_wrap_v2` fact (from KEYS-03), then a signed manifest refresh raises the ceiling to N+1 covering the `key_wrap:2` tag.
+### KEYS-04 — pending key_wrap_v2 activates on wipe+replay once ceiling rises  `replay-cli`
+- **Setup:** node with a pending `key_wrap_v2` fact (from KEYS-03), then a signed manifest refresh raises the ceiling to N+1 covering the `key_wrap:2` tag.
 - **Action:** `con` wipe + replay (full rebuild) at the new ceiling.
-- **Expect:** the previously-quarantined `key_wrap_v2` fact now routes to the v2 projector, materializes its `key_wrap_rows` row and (if local recipient material exists) emits an `unwrap_key_wrap` intent — i.e. it activates. Every other retained fact replays via the adapter keyed by its OWN tag (150..157 via v1 projectors).
-- **Defends:** invariant 4 (replay determinism; each fact replays via its own-tag adapter) + quarantine-activation-on-ceiling-rise.
+- **Expect:** the previously-pending `key_wrap_v2` fact now routes to the v2 projector, materializes its `key_wrap_rows` row and (if local recipient material exists) emits an `unwrap_key_wrap` intent — i.e. it activates. Every other retained fact replays via the adapter keyed by its OWN tag (150..157 via v1 projectors).
+- **Defends:** invariant 4 (replay determinism; each fact replays via its own-tag adapter) + pending-activation-on-ceiling-rise.
 - **Refs:** `src/core/projectors.rs` RouterProjector, `auth/key_wrap/_v2/project.rs` (model), `auth/key_wrap/project.rs::key_wrap`.
 
 ### KEYS-05 — create_key_wrap recreates the identical deterministic wrap on replay  `replay-cli`
@@ -4834,7 +4875,7 @@ the cross-version ones state the expected behavior the model must preserve.
 
 Scope note. These are black-box `con`-binary, >=2-node scenarios that exercise the
 protocol-versioning model end to end. The versioning machinery (signed
-`ReleaseManifestEntry`, ceiling computation, quarantine of above-ceiling
+`ReleaseManifestEntry`, ceiling computation, pending of above-ceiling
 received facts, upgrade-retirement of connections before replay) is the *model
 under test* — it is NOT yet present in `/home/holmes/poc-10/src` (verified:
 `grep -rni "ceiling\|ReleaseManifest\|intro_version\|trusted_time"` matches no
@@ -4931,22 +4972,22 @@ families.
 ### E2E-10 — mixed-version sync WITH deps: new holds v2 fact + v1 anchor, old requests, closure delivers anchor  `multinode-network`
 - **Setup:** ceiling temporarily RAISED so new alice (`con_new`) has locally a `content::message:2` fact (the new wire-shape message, new tag, e.g. tag 56 under `content/message/_v2/`) whose dependency anchor is a v1 fact (`auth::workspace` 131 / `auth::user` 14 / a v1 `content::message` 50). Old bob (`con_old`) cannot project the `:2` tag. Daemons running, bob a member.
 - **Action:** `con_old --db bob sync-range <alice_endpoint> --workspace WORKSPACE --start-ms 0 --end-ms MAX --with-deps`; or alice `sync-range <bob_endpoint> ... --with-deps`.
-- **Expect:** the closure delivers every v1 anchor (workspace/user/v1-message) that old bob CAN project — bob's `content-count`/`users` reflect the anchors — while the unbundlable `:2` fact is NOT forced onto bob (or, if forwarded, lands QUARANTINED: retained opaque, uncounted, undisplayed, NO `projectors.rs:456` error). `fact_count(&bob)` rises by exactly the anchor count, not including the v2 fact's row.
-- **Defends:** (1) for the v1 anchors; admission/quarantine rule; (5) closure must not strand a still-usable peer.
-- **Refs:** `sync-range --with-deps` -> `sync_range`; `sync::shared_fact` (162)/`sync::range_request` (160); `ShareFactWithSyncHandler`/`SendRequestedFactHandler`; `RouterProjector` quarantine path.
+- **Expect:** the closure delivers every v1 anchor (workspace/user/v1-message) that old bob CAN project — bob's `content-count`/`users` reflect the anchors — while the unbundlable `:2` fact is NOT forced onto bob (or, if forwarded, lands PENDING: pending opaque, uncounted, undisplayed, NO `projectors.rs:456` error). `fact_count(&bob)` rises by exactly the anchor count, not including the v2 fact's row.
+- **Defends:** (1) for the v1 anchors; admission/pending rule; (5) closure must not strand a still-usable peer.
+- **Refs:** `sync-range --with-deps` -> `sync_range`; `sync::shared_fact` (162)/`sync::range_request` (160); `ShareFactWithSyncHandler`/`SendRequestedFactHandler`; `RouterProjector` pending path.
 
 ### E2E-11 — mixed-version sync: unbundlable v2 fact degrades to have/need, not error  `multinode-network`
 - **Setup:** same as E2E-10. Old bob receives a `sync::compare`/`have_id` advertisement that references the v2 fact id.
 - **Action:** drive a `sync-range` so bob emits `sync::need_id` (167) for ids it lacks; new alice advertises the v2 fact via `sync::have_id` (166).
-- **Expect:** because the v2 tag is above bob's ceiling, the exchange DEGRADES — bob does not `need_id` it (or receives it quarantined); the connection stays alive, no projector error; the v1 anchors still flow. The protocol falls back to have/need framing rather than crashing the carrier.
-- **Defends:** quarantine + degrade-to-have/need; (5) transport in [floor,head]; (6) safety floor (only drop if unsafe, not here).
+- **Expect:** because the v2 tag is above bob's ceiling, the exchange DEGRADES — bob does not `need_id` it (or receives it pending); the connection stays alive, no projector error; the v1 anchors still flow. The protocol falls back to have/need framing rather than crashing the carrier.
+- **Defends:** pending + degrade-to-have/need; (5) transport in [floor,head]; (6) safety floor (only drop if unsafe, not here).
 - **Refs:** `sync::compare` (165), `sync::have_id` (166), `sync::need_id` (167); `SendNeededFactIdHandler`/`SendSyncCompareResponseHandler`; `seed_connection_sync`.
 
 ### E2E-12 — mixed-version sync: bundle that mixes v1+v2 facts packs only deliverable facts for old peer  `multinode-network`
 - **Setup:** new alice has a `connection::frame_bundle` (170)-worth of facts: several v1 messages (50) plus one v2 message (56). Old bob's ceiling excludes 56.
 - **Action:** alice's `SendFactsOnConnectionHandler` packs a bundle frame to bob.
 - **Expect:** the inner bundle (`TIB1`) packed for bob contains only the tag-50 facts; the tag-56 fact is omitted (held for re-advertisement) — verified by bob's resulting `fact_count` rising by the v1 count only and bob never erroring. Frame fits `CONNECTION_FRAME_BUNDLE_FACT_SLOTS` (< 64 KiB).
-- **Defends:** (1) transportable by every still-usable release; carrier capacity gating; quarantine.
+- **Defends:** (1) transportable by every still-usable release; carrier capacity gating; pending.
 - **Refs:** `connection::frame_bundle` (170); `connection_frame_wire.rs` `encode_inner_bundle`/`INNER_BUNDLE_TAG`; `SendFactsOnConnectionHandler` (`send_facts_on_connection`).
 
 ### E2E-13 — mixed-version sync: old creates v1 anchor that new needs for its v2 fact (reverse closure)  `multinode-network`
@@ -4970,11 +5011,11 @@ families.
 - **Defends:** "retire connections before replay" (transport rule); (4) replay determinism not corrupted by in-flight frames.
 - **Refs:** `connection::close` (45) `commands.rs`/`project.rs`; `poc10_connection_close_purge_test.rs`; `bootstrap_request` (171)/`bootstrap_response` (172) re-handshake.
 
-### E2E-16 — upgrade-under-load: full replay + quarantine purge before reconnect  `multinode-network`
-- **Setup:** `alice`=`con_old` holding QUARANTINED facts (received above-ceiling `content::message:2` tag-56 bytes, retained opaque). Manifest update raises alice's ceiling to cover tag 56 at boot of `con_new`.
-- **Action:** upgrade alice: `stop` old, `start` new with the new manifest. The new boot performs wipe+replay across ALL retained facts (including the previously quarantined tag-56 bytes, now routable).
-- **Expect:** after replay, the formerly quarantined tag-56 facts ACTIVATE — they project into rows and `messages WORKSPACE` now shows the v2-derived content; `content-count` rises to include them; no `projectors.rs:456` error during replay. Reconnect to bob happens only after replay completes.
-- **Defends:** "quarantined facts activate on the next wipe+replay once ceiling rises"; (4) every retained fact replays via its own-tag adapter.
+### E2E-16 — upgrade-under-load: full replay + pending purge before reconnect  `multinode-network`
+- **Setup:** `alice`=`con_old` holding PENDING facts (received above-ceiling `content::message:2` tag-56 bytes, pending opaque). Manifest update raises alice's ceiling to cover tag 56 at boot of `con_new`.
+- **Action:** upgrade alice: `stop` old, `start` new with the new manifest. The new boot performs wipe+replay across ALL retained facts (including the previously pending tag-56 bytes, now routable).
+- **Expect:** after replay, the formerly pending tag-56 facts ACTIVATE — they project into rows and `messages WORKSPACE` now shows the v2-derived content; `content-count` rises to include them; no `projectors.rs:456` error during replay. Reconnect to bob happens only after replay completes.
+- **Defends:** "pending facts activate on the next wipe+replay once ceiling rises"; (4) every retained fact replays via its own-tag adapter.
 - **Refs:** `RouterProjector` route for tag 56 (new `_v2/` projector kept forever); `projectors.rs:456` (the error path that must NOT fire); wipe+replay; `content::message` v2.
 
 ### E2E-17 — upgrade-under-load: state_hash matches a clean rebuild after upgrade replay  `multinode-network`
@@ -5001,22 +5042,22 @@ families.
 ### E2E-20 — new creates above-ceiling fact locally is REFUSED (no leak to old peer)  `blackbox-cli`
 - **Setup:** new alice, ceiling = 6 (so `content::message:2` is above ceiling). A normal shared workspace with old bob.
 - **Action:** attempt to author the above-ceiling variant — e.g. a `send --v2`/`--profile` style flag that would mint a tag-56 fact (the proposed v2 surface), with ceiling still 6.
-- **Expect:** the command is REFUSED with a clear error; NO tag-56 fact is persisted on alice; bob never sees any tag-56 fact; alice's `content-count` unchanged. Local creation of an above-ceiling fact is refused (it does not even quarantine — quarantine is only for RECEIVED facts).
+- **Expect:** the command is REFUSED with a clear error; NO tag-56 fact is persisted on alice; bob never sees any tag-56 fact; alice's `content-count` unchanged. Local creation of an above-ceiling fact is refused (it does not even pending — pending is only for RECEIVED facts).
 - **Defends:** admission rule (local above-ceiling creation refused); (3) ceiling monotonicity gate.
 - **Refs:** `content::message` create path; ceiling-active check on create; `send`/`MATCH_COMMANDS`.
 
-### E2E-21 — received above-ceiling fact is QUARANTINED on old node, not errored or dropped  `multinode-network`
+### E2E-21 — received above-ceiling fact is PENDING on old node, not errored or dropped  `multinode-network`
 - **Setup:** new alice (ceiling raised locally so it CAN mint a tag-56 `content::message:2`) connected to old bob (ceiling 6, no tag-56 projector active). Bob a member.
 - **Action:** alice forwards the tag-56 fact to bob via sync/frame.
 - **Expect:** bob RETAINS the tag-56 bytes (its `fact_count` rises by 1) but does NOT project/display/count it (`content-count content_messages` unchanged, `messages` does not show it); bob does NOT error (`projectors.rs:456` must not fire as a hard failure); bob does NOT drop it. The connection stays alive.
-- **Defends:** quarantine rule (retained opaque, unprojected, undisplayed, uncounted, not dropped, not errored); contrast with today's `projectors.rs:456` Err.
+- **Defends:** pending rule (pending opaque, unprojected, undisplayed, uncounted, not dropped, not errored); contrast with today's `projectors.rs:456` Err.
 - **Refs:** `RouterProjector::project` unknown-tag path (`projectors.rs:456`); `fact_count` vs `content-count`; `receive_network_frame` handler.
 
-### E2E-22 — quarantined fact activates on old node after its own ceiling rises (wipe+replay)  `multinode-network`
-- **Setup:** continue from E2E-21: bob holds the quarantined tag-56 fact. A signed manifest update arrives raising bob's still-usable ceiling to cover protocol 7 (tag 56).
+### E2E-22 — pending fact activates on old node after its own ceiling rises (wipe+replay)  `multinode-network`
+- **Setup:** continue from E2E-21: bob holds the pending tag-56 fact. A signed manifest update arrives raising bob's still-usable ceiling to cover protocol 7 (tag 56).
 - **Action:** restart bob's daemon (or trigger the wipe+replay boot) with the new manifest; replay runs over all retained facts including the tag-56 bytes.
 - **Expect:** after replay bob's tag-56 fact ACTIVATES: `content-count content_messages` increases to include it and `messages WORKSPACE` now shows the v2 content. No replay error. Activation is purely local (no re-fetch from alice needed).
-- **Defends:** "quarantined facts activate on the next wipe+replay once the ceiling rises"; (4) replay via own-tag adapter; (5) readers kept forever.
+- **Defends:** "pending facts activate on the next wipe+replay once the ceiling rises"; (4) replay via own-tag adapter; (5) readers kept forever.
 - **Refs:** tag-56 `_v2/` projector (kept forever); wipe+replay boot; `content-count`/`messages`.
 
 ### E2E-23 — new<->old below ceiling: deletion (message_deletion) round-trips and tombstones identically  `multinode-network`
@@ -5088,15 +5129,15 @@ families.
 - **Expect:** new bob gains key access (`poll_for_key_access` yes); bob can then `messages WORKSPACE`/decrypt alice's content authored under that key; key_wrap fact first byte = 155. The key material is ceiling-active and round-trips across the version gap.
 - **Defends:** (1); (2); auth material transportability across releases.
 - **Refs:** `auth::key_wrap`(155)/`auth::recipient_key`(150)/`auth::removal_frontier`(151); `key-wrap`/`key-recipient`; `CreateKeyWrapHandler`/`UnwrapKeyWrapHandler`; `poll_for_key_access`.
-## 17. Platform, transition & quarantine activation
+## 17. Platform, transition & pending activation
 
-> Scope note: the ceiling/manifest/trusted-time/quarantine machinery in the
+> Scope note: the ceiling/manifest/trusted-time/pending machinery in the
 > consolidated model is **forward-looking** — `ReleaseManifestEntry`,
 > `supported_protocol`, `trusted_time`, `intro_version`, `runs_during_replay`,
-> ceiling filtering, and quarantine-retention do NOT yet exist in
+> ceiling filtering, and pending-retention do NOT yet exist in
 > `/home/holmes/poc-10/src` (verified: zero hits for `ReleaseManifestEntry`,
 > `supported_protocol`, `trusted_time`, `intro_version`, `runs_during_replay`,
-> `ceiling`-as-protocol-term, `quarantin*`). Today an above-ceiling RECEIVED fact
+> `ceiling`-as-protocol-term, `pending`-as-admission-term). Today an above-ceiling RECEIVED fact
 > ERRORS at `RouterProjector::project` (`src/core/projectors.rs:456`,
 > `"no target projector registered for fact tag {tag}"`). Each test below names
 > the real entity it must attach to (the fact tag, the `FACT_ROUTES`/`projector_routes!`
@@ -5179,18 +5220,18 @@ Skew margin = M, staleness window = S.
 - **Defends:** ADMISSION (above-ceiling-no-more once ceiling rises); CEILING TRANSITION new-binary creates v_next.
 - **Refs:** `content::message_v2` intro_version 7, `con send`, `con content-count` (run fn `content_count`).
 
-### E2EX-10 — CEILING TRANSITION: previously-QUARANTINED v_next facts ACTIVATE on the next wipe+replay  `replay-cli`
-- **Setup:** Before the transition (ceiling 6), the new binary RECEIVED a `content::message_v2` fact (intro_version 7) from an alpha/ahead peer; it was QUARANTINED — retained as opaque bytes, unprojected, undisplayed, uncounted, NOT dropped. After E2EX-07 the ceiling is now 7.
+### E2EX-10 — CEILING TRANSITION: previously-PENDING v_next facts ACTIVATE on the next wipe+replay  `replay-cli`
+- **Setup:** Before the transition (ceiling 6), the new binary RECEIVED a `content::message_v2` fact (intro_version 7) from an alpha/ahead peer; it was PENDING — retained as opaque bytes, unprojected, undisplayed, uncounted, NOT dropped. After E2EX-07 the ceiling is now 7.
 - **Action:** Run `con` wipe + replay (rebuild derived state) over the full retained fact log.
-- **Expect:** On replay the quarantined `content::message_v2` fact now routes to its tag's projector (ceiling 7 covers intro_version 7), so it ACTIVATES: it projects into `CONTENT_MESSAGES`, becomes displayable via `con messages`, and is counted by `con content-count`. No fact was lost across the quarantine window.
-- **Defends:** ADMISSION ("Quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"); (4) REPLAY DETERMINISM.
-- **Refs:** quarantine retention, `RouterProjector::project` (`projectors.rs:454-458`), `content::message_v2` projector, `CONTENT_MESSAGES`.
+- **Expect:** On replay the pending `content::message_v2` fact now routes to its tag's projector (ceiling 7 covers intro_version 7), so it ACTIVATES: it projects into `CONTENT_MESSAGES`, becomes displayable via `con messages`, and is counted by `con content-count`. No fact was lost across the pending window.
+- **Defends:** ADMISSION ("Pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"); (4) REPLAY DETERMINISM.
+- **Refs:** pending retention, `RouterProjector::project` (`projectors.rs:454-458`), `content::message_v2` projector, `CONTENT_MESSAGES`.
 
 ### E2EX-11 — Quarantine retention guardrail: a received above-ceiling fact is RETAINED, not dropped/errored (today it ERRORS)  `guardrail`
 - **Setup:** Ceiling 6. Feed a received fact with an unknown/above-ceiling tag (e.g. `content::message_v2`, or any intro_version-7 tag) into the projection path.
 - **Action:** Project the fact through `RouterProjector::project`.
-- **Expect (target):** The fact is QUARANTINED — stored as opaque bytes, no projection output, not surfaced, not counted, NOT errored, NOT dropped. **Today's actual:** `Err("no target projector registered for fact tag {tag}")` at `src/core/projectors.rs:456`. This test pins the gap so the fix is observable: above-ceiling => quarantine, not Err.
-- **Defends:** ADMISSION quarantine semantics; (5)/(6) facts not destroyed.
+- **Expect (target):** The fact is PENDING — stored as opaque bytes, no projection output, not surfaced, not counted, NOT errored, NOT dropped. **Today's actual:** `Err("no target projector registered for fact tag {tag}")` at `src/core/projectors.rs:456`. This test pins the gap so the fix is observable: above-ceiling => pending, not Err.
+- **Defends:** ADMISSION pending semantics; (5)/(6) facts not destroyed.
 - **Refs:** `src/core/projectors.rs:454-458` (unknown-tag Err), `RouterProjector`, `FactRoute`.
 
 ### E2EX-12 — Old binary is OUT after the transition: expired desktop pinned to 6 cannot create or transport  `multinode-network`
@@ -5200,26 +5241,26 @@ Skew margin = M, staleness window = S.
 - **Defends:** (5) EXPIRED/SUB-FLOOR PEERS ARE OUT; (3) ceiling computed only over still-usable releases.
 - **Refs:** `expires_at`, "no recovery responder", local-data-safe replay, ceiling = min over still-usable releases.
 
-### E2EX-13 — ALPHA above-ceiling leak: alpha at head emits v_next into a SHARED workspace; production QUARANTINES  `multinode-network`
+### E2EX-13 — ALPHA above-ceiling leak: alpha at head emits v_next into a SHARED workspace; production holds it pending  `multinode-network`
 - **Setup:** A shared workspace with two members: an ALPHA build at head (knows protocol 7, ignores the production ceiling) and a PRODUCTION build at ceiling 6 (mobile laggard still present). Alpha mints a `content::message_v2` (intro_version 7) directly into the shared workspace.
 - **Action:** The v7 fact syncs (via `share_fact_with_sync` / `connection::frame_small`) to the production peer.
-- **Expect:** Production QUARANTINES the v7 fact — retained opaque, unprojected, uncounted, undisplayed, not errored. Production's `CONTENT_MESSAGES`/`con messages` does not show it. Production keeps running at ceiling 6.
-- **Defends:** ADMISSION quarantine of a RECEIVED above-ceiling fact; (3) production does not regress to honor an alpha-only capability.
-- **Refs:** `share_fact_with_sync` HANDLER_ROUTE (`ShareFactWithSyncHandler`), `content::message_v2`, quarantine, `con messages`.
+- **Expect:** Production holds the v7 fact pending — pending opaque, unprojected, uncounted, undisplayed, not errored. Production's `CONTENT_MESSAGES`/`con messages` does not show it. Production keeps running at ceiling 6.
+- **Defends:** ADMISSION pending of a RECEIVED above-ceiling fact; (3) production does not regress to honor an alpha-only capability.
+- **Refs:** `share_fact_with_sync` HANDLER_ROUTE (`ShareFactWithSyncHandler`), `content::message_v2`, pending, `con messages`.
 
-### E2EX-14 — ALPHA leak: production keeps the DEPENDENCY CLOSURE of a quarantined v_next fact  `projector-unit`
-- **Setup:** Alpha emits a `content::message_v2` (v7) PLUS its dependencies — e.g. a `content::file` (tag 54) and `content::file_slice` (tag 55) it references, all sub-ceiling-7. Production at ceiling 6 quarantines the v2 message.
+### E2EX-14 — ALPHA leak: production keeps the DEPENDENCY CLOSURE of a pending v_next fact  `projector-unit`
+- **Setup:** Alpha emits a `content::message_v2` (v7) PLUS its dependencies — e.g. a `content::file` (tag 54) and `content::file_slice` (tag 55) it references, all sub-ceiling-7. Production at ceiling 6 holds the v2 message pending.
 - **Action:** Production receives the whole bundle and runs projection.
-- **Expect:** Production RETAINS the full dependency closure (the file/file_slice facts AND the quarantined v2 message bytes) so that a later replay at ceiling 7 can activate the v2 message with its dependencies intact. The dependencies that are themselves ceiling-active (<=6) DO project now; only the v7 message stays quarantined.
+- **Expect:** Production RETAINS the full dependency closure (the file/file_slice facts AND the pending v2 message bytes) so that a later replay at ceiling 7 can activate the v2 message with its dependencies intact. The dependencies that are themselves ceiling-active (<=6) DO project now; only the v7 message stays pending.
 - **Defends:** ADMISSION ("keeps dependency closure"); (4) REPLAY DETERMINISM needs the closure retained.
-- **Refs:** `content::file` 54, `content::file_slice` 55, `content::message_v2`, quarantine closure retention.
+- **Refs:** `content::file` 54, `content::file_slice` 55, `content::message_v2`, pending closure retention.
 
-### E2EX-15 — ALPHA leak: production ACTIVATES the quarantined v_next ONLY after the ceiling reaches v_next  `replay-cli`
-- **Setup:** Continuation of E2EX-13/14. The mobile laggard later expires (trusted_time > expires_at + M); production's ceiling rises to 7. The quarantined alpha `content::message_v2` and its closure are still retained.
+### E2EX-15 — ALPHA leak: production ACTIVATES the pending v_next ONLY after the ceiling reaches v_next  `replay-cli`
+- **Setup:** Continuation of E2EX-13/14. The mobile laggard later expires (trusted_time > expires_at + M); production's ceiling rises to 7. The pending alpha `content::message_v2` and its closure are still retained.
 - **Action:** Production runs wipe + replay.
-- **Expect:** The previously-quarantined v2 message now activates (ceiling 7 >= intro_version 7), projecting into `CONTENT_MESSAGES` together with its already-projected dependency closure. Activation happens at replay time, not at receive time, and ONLY after the ceiling crossed.
+- **Expect:** The previously-pending v2 message now activates (ceiling 7 >= intro_version 7), projecting into `CONTENT_MESSAGES` together with its already-projected dependency closure. Activation happens at replay time, not at receive time, and ONLY after the ceiling crossed.
 - **Defends:** ADMISSION ("activates only after ceiling reaches v_next"); (4) REPLAY DETERMINISM (ceiling-independent replay via the historical adapter keyed by each fact's OWN tag).
-- **Refs:** quarantine activation, `content::message_v2` projector keyed by tag, `CONTENT_MESSAGES`, ceiling = 7 post-transition.
+- **Refs:** pending activation, `content::message_v2` projector keyed by tag, `CONTENT_MESSAGES`, ceiling = 7 post-transition.
 
 ### E2EX-16 — Sub-floor peer attempts to connect and is REFUSED  `multinode-network`
 - **Setup:** Operational floor = protocol 6 (no still-usable release speaks below 6). A peer arrives speaking a sub-floor transport (protocol 5, i.e. below the floor — e.g. it offers a retired connection-frame/sealed-handshake shape).
@@ -5301,7 +5342,7 @@ Skew margin = M, staleness window = S.
 ### E2EX-27 — Ceiling-filtered router: a route whose intro_version > ceiling is INACTIVE (sub-ceiling routes active)  `projector-unit`
 - **Setup:** `RouterProjector` over `FACT_ROUTES` (`registry.rs:568` `RouterProjector::new(FACT_ROUTES, &[])`), augmented with per-route `intro_version`. Ceiling = 6. Routes for tag 50 (`content::message` v1, intro <=6) and the v7 `content::message_v2` route (intro 7) both registered.
 - **Action:** Project a tag-50 fact and a v2 fact at ceiling 6.
-- **Expect:** The tag-50 route is ACTIVE (projects normally); the v7 route is INACTIVE/ceiling-filtered (the v2 fact is quarantined, not projected). When ceiling rises to 7 the v7 route becomes active. The router selects active routes by `intro_version <= ceiling`.
+- **Expect:** The tag-50 route is ACTIVE (projects normally); the v7 route is INACTIVE/ceiling-filtered (the v2 fact is pending, not projected). When ceiling rises to 7 the v7 route becomes active. The router selects active routes by `intro_version <= ceiling`.
 - **Defends:** "The router (RouterProjector over FACT_ROUTES) is CEILING-FILTERED (only routes with intro_version<=ceiling active)."
 - **Refs:** `RouterProjector` (`projectors.rs:423-459`), `FACT_ROUTES`/`projector_routes!` (`registry.rs:584-593`), intro_version per route.
 
@@ -5313,14 +5354,14 @@ Skew margin = M, staleness window = S.
 - **Refs:** `MATCH_COMMANDS` `send` (run fn `send`, `content::message::cli`), CliCommand version-tagged run-fn list, `v_next.required_inputs ⊆ active_cli.collected_params`.
 
 ### E2EX-29 — Replay is CEILING-INDEPENDENT: same retained log replays to the same state at ceiling 6 and ceiling 7 for sub-ceiling facts  `replay-cli`
-- **Setup:** A retained log of only sub-ceiling-6 facts (no v7 facts, no quarantined facts). Two replay passes: one with ceiling pinned at 6, one at 7.
+- **Setup:** A retained log of only sub-ceiling-6 facts (no v7 facts, no pending facts). Two replay passes: one with ceiling pinned at 6, one at 7.
 - **Action:** Wipe + replay the same log at each ceiling.
-- **Expect:** Both passes rebuild identical derived state for the sub-ceiling facts — each fact replays via the historical adapter keyed by its OWN tag, independent of the ambient ceiling. (Contrast E2EX-10/15: a ceiling rise only ADDS activation of quarantined v_next facts; it never changes how sub-ceiling facts replay.)
+- **Expect:** Both passes rebuild identical derived state for the sub-ceiling facts — each fact replays via the historical adapter keyed by its OWN tag, independent of the ambient ceiling. (Contrast E2EX-10/15: a ceiling rise only ADDS activation of pending v_next facts; it never changes how sub-ceiling facts replay.)
 - **Defends:** (4) REPLAY DETERMINISM — "ceiling-independent; every retained fact replays via the historical adapter keyed by its OWN tag".
 - **Refs:** replay adapter keyed by fact tag, `FACT_ROUTES`, `RouterProjector`.
 
 ### E2EX-30 — Retire connections before replay during a ceiling transition  `handler-unit`
-- **Setup:** Mid-transition (mobile expiring). Open connections exist; a wipe+replay is about to run to activate quarantined v7 facts (E2EX-10).
+- **Setup:** Mid-transition (mobile expiring). Open connections exist; a wipe+replay is about to run to activate pending v7 facts (E2EX-10).
 - **Action:** Trigger the pre-replay connection retirement, then replay.
 - **Expect:** Connections are retired via `connection::close` (45) / upgrade-retirement facts BEFORE the replay pass; the replay does not race live frame traffic; after replay, peers re-handshake at the new ceiling (7). No half-open connection survives the ceiling change.
 - **Defends:** TRANSPORT "Retire connections (connection_close/upgrade-retirement facts) before replay"; (4) deterministic replay.
@@ -5336,7 +5377,7 @@ each carry `intro_version: u32`, `HandlerRoute` also carries
 declares per-platform `supported_protocol: RangeInclusive<u32>`. The CEILING is the
 min over still-usable releases of `supported_protocol.end()` at trusted_time. Where
 the machinery does not yet exist on the checkout (verified: `intro_version`,
-`runs_during_replay`, `ReleaseManifestEntry`, `ceiling`, `quarantine` are ALL absent
+`runs_during_replay`, `ReleaseManifestEntry`, `ceiling`, `pending` are ALL absent
 from `src/` today, and the unknown-tag path ERRORS at `projectors.rs:456`), the test
 is RED and pins the target. Each test names the exact real entity it guards.
 
@@ -5347,44 +5388,44 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ---
 
 ### GUARD-01 — every FactRoute in FACT_ROUTES declares an intro_version  `guardrail`
-- **Setup:** the assembled `FACT_ROUTES` table in `src/protocol/registry.rs` (43 entries, 1:1 with the 43 layout-bearing families) with the target `FactRoute { tag, projector, intro_version }` shape from `src/core/projectors.rs:402`.
+- **Setup:** the assembled `FACT_ROUTES` table in `src/protocol/registry.rs` (47 entries: 43 authenticated fact families plus four sealed transit carriers) with the target `FactRoute { tag, projector, replayed, intro_version }` shape from `src/core/projectors.rs:402`.
 - **Action:** iterate `FACT_ROUTES`; for each route read `route.intro_version`.
-- **Expect:** the table compiles only because every `projector_routes!` line supplies an `intro_version`; the test additionally asserts `FACT_ROUTES.len() == 43` and that every `intro_version` is a concrete `u32` (no `Option`, no default-zero sentinel) — i.e. the macro `projector_routes!` requires the field. A route lacking it fails to compile.
+- **Expect:** the table compiles only because every `projector_routes!` line supplies an `intro_version`; the test additionally asserts `FACT_ROUTES.len() == 47` and that every `intro_version` is a concrete `u32` (no `Option`, no default-zero sentinel) — i.e. the macro `projector_routes!` requires the field. A route lacking it fails to compile.
 - **Defends:** Mechanism "ROUTES carry intro_version"; underpins invariant (1) VISIBILITY and (3) CEILING MONOTONICITY (a route the ceiling cannot place is meaningless).
 - **Refs:** `src/protocol/registry.rs` `projector_routes!`/`FACT_ROUTES` (593-637), `src/core/projectors.rs:402` `FactRoute`.
 
 ### GUARD-02 — every HandlerRoute in HANDLER_ROUTES declares an intro_version  `guardrail`
-- **Setup:** the 12-entry `HANDLER_ROUTES` table (registry.rs 649-710) with target `HandlerRoute { name, intent_kind, factory, intro_version, runs_during_replay }` (runtime.rs:71).
-- **Action:** iterate `HANDLER_ROUTES`; read `route.intro_version` for each of the 12 intent kinds (`send_bootstrap_connection_request` … `receive_network_frame`).
-- **Expect:** all 12 routes carry an `intro_version`; `HANDLER_ROUTES.len() == 12`; the `handler_route!` macro forces the field so omission does not compile.
+- **Setup:** the 17-entry `HANDLER_ROUTES` table (registry.rs 711-831) with target `HandlerRoute { name, intent_kind, factory, intro_version, runs_during_replay }` (runtime.rs:71).
+- **Action:** iterate `HANDLER_ROUTES`; read `route.intro_version` for each of the 17 intent kinds (`send_bootstrap_connection_request` … `receive_network_frame`).
+- **Expect:** all 17 routes carry an `intro_version`; `HANDLER_ROUTES.len() == 17`; the `handler_route!` macro forces the field so omission does not compile.
 - **Defends:** Mechanism "ROUTES carry intro_version" for intent handlers; supports CEILING-FILTERED router (only intro_version<=ceiling handlers active).
 - **Refs:** `src/protocol/registry.rs` `HANDLER_ROUTES`/`handler_route!` (639-710), `src/core/runtime.rs:71`.
 
 ### GUARD-03 — every CliCommand in MATCH_COMMANDS declares an intro_version  `guardrail`
-- **Setup:** the 42-entry `MATCH_COMMANDS` table (registry.rs 367-510) with target `CliCommand { name, usage, help, run, intro_version }` and the per-name version-tagged run list.
-- **Action:** iterate `MATCH_COMMANDS`; read `intro_version` for each of the 42 stable names (`create-workspace` … `count`, including `test-generate-deps` and `test-replay-deps-reverse`).
-- **Expect:** all 42 commands carry an `intro_version`; `MATCH_COMMANDS.len() == 42`; the `cli_command!` macro forces the field. Asserts `key-rotate-recipient` maps to run fn `key_recipient_rotation` AND carries an `intro_version` (guards the name/fn mismatch noted in the inventory).
+- **Setup:** the 47-entry `MATCH_COMMANDS` table (registry.rs 367-526) with target `CliCommand { name, usage, help, run, intro_version }` and the per-name version-tagged run list.
+- **Action:** iterate `MATCH_COMMANDS`; read `intro_version` for each of the 47 stable names (`create-workspace` … `recurring-intents`, including `test-generate-deps` and `test-replay-deps-reverse`).
+- **Expect:** all 47 commands carry an `intro_version`; `MATCH_COMMANDS.len() == 47`; the `cli_command!` macro forces the field. Asserts `key-rotate-recipient` maps to run fn `key_recipient_rotation` AND carries an `intro_version` (guards the name/fn mismatch noted in the inventory).
 - **Defends:** Mechanism "CliCommand = stable name -> version-tagged list; ceiling selects highest intro_version<=ceiling".
 - **Refs:** `src/protocol/registry.rs` `MATCH_COMMANDS`/`cli_command!` (356-510), `src/core/cli.rs` `CliCommand`.
 
 ### GUARD-04 — every HandlerRoute declares runs_during_replay explicitly  `guardrail`
-- **Setup:** target `HandlerRoute` with `runs_during_replay: bool` (runtime.rs:71); the 12 routes.
+- **Setup:** target `HandlerRoute` with `runs_during_replay: bool` (runtime.rs:71); the 17 routes.
 - **Action:** iterate `HANDLER_ROUTES`; read `route.runs_during_replay`.
-- **Expect:** every route carries an explicit `bool` (no inferred default). The 4 names in `COMMAND_EXCLUDED_HANDLER_ROUTES` (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) — the daemon/network IO handlers — assert `runs_during_replay == false` (replay must not re-emit live network frames); the remaining 8 (e.g. `share_fact_with_sync`, `create_key_wrap`, `unwrap_key_wrap`) assert a deliberate declared value. Omitting the field does not compile.
+- **Expect:** every route carries an explicit `bool` (no inferred default). The 4 names in `COMMAND_EXCLUDED_HANDLER_ROUTES` (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) — the daemon/network IO handlers — assert `runs_during_replay == false` (replay must not re-emit live network frames); the remaining 13 (e.g. `share_fact_with_sync`, `create_key_wrap`, `unwrap_key_wrap`) assert a deliberate declared value. Omitting the field does not compile.
 - **Defends:** Invariant (4) REPLAY DETERMINISM — replay reruns only deterministic, replay-safe handlers; no live network side effects on wipe+replay.
 - **Refs:** `src/core/runtime.rs:71` `HandlerRoute`, `src/protocol/registry.rs` `COMMAND_EXCLUDED_HANDLER_ROUTES` (512-517), `HANDLER_ROUTES` (649-710).
 
 ### GUARD-05 — new auth fact family ships a complete manifest entry (auth scope)  `guardrail`
 - **Setup:** introduce the proposed `auth::user_profile_v2` family at a new `intro_version` above the ceiling (the inventory confirms it does NOT exist yet; this guard runs when it is added).
 - **Action:** load the fleet manifest source and the new family's manifest declaration; assert all six required fields per the plan doc (Part I above).
-- **Expect:** the entry names (a) the fact `tag` (a fresh `u8`, e.g. not colliding with 14/`auth::user`); (b) its `intro_version`; (c) the blocking non-capable releases AND their `expires_at`; (d) the kept-forever old adapter (`user_v1` adapter preserved); (e) the security-deprecation policy (plaintext-name quarantine policy); (f) the replay output (rows the projector emits). A family added with any field missing fails the guard.
+- **Expect:** the entry names (a) the fact `tag` (a fresh `u8`, e.g. not colliding with 14/`auth::user`); (b) its `intro_version`; (c) the blocking non-capable releases AND their `expires_at`; (d) the kept-forever old adapter (`user_v1` adapter preserved); (e) the security-deprecation policy (plaintext-name suppression policy); (f) the replay output (rows the projector emits). A family added with any field missing fails the guard.
 - **Defends:** Mechanism "Adding a fact family requires a manifest entry naming releases, blockers+expiries, old adapters, security policy, replay output."
 - **Refs:** `docs/research/Part I above` (114-140, 299-302), target `ReleaseManifestEntry`, `src/protocol/auth.rs` (scope manifest), `auth::user` (tag 14) as the superseded anchor.
 
 ### GUARD-06 — new content fact family ships a complete manifest entry (content scope)  `guardrail`
 - **Setup:** introduce a hypothetical new content fact (e.g. a new message-body encoding `content::message` v2 delta) at a new `intro_version`.
 - **Action:** assert the same six-field manifest entry for the content-scope family bucket.
-- **Expect:** entry declares tag (the existing `TYPE_CONTENT_MESSAGE=50` is reused by tag; the bucket carries the version delta), intro_version, blocking releases + expiries, the kept-forever v1 message adapter (`ContentMessageProjector`), security policy (unsafe-encoding -> quarantine/tighten), and replay output (`CONTENT_MESSAGE_ROWS`). Missing any field fails.
+- **Expect:** entry declares tag (the existing `TYPE_CONTENT_MESSAGE=50` is reused by tag; the bucket carries the version delta), intro_version, blocking releases + expiries, the kept-forever v1 message adapter (`ContentMessageProjector`), security policy (unsafe-encoding -> suppress/tighten), and replay output (`CONTENT_MESSAGE_ROWS`). Missing any field fails.
 - **Defends:** Same manifest mechanism, content scope; supports invariant (5) READERS FOREVER (v1 message reader kept).
 - **Refs:** `docs/research/Part I above` (276, 299-302), `content::message::project::ContentMessageProjector`, `registry.rs` `CONTENT_MESSAGE_ROWS`.
 
@@ -5412,7 +5453,7 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ### GUARD-10 — no production path projects an above-ceiling fact's rows  `guardrail`
 - **Setup:** ceiling C; a retained fact with tag whose `intro_version > C` (e.g. a received-but-not-yet-active fact).
 - **Action:** run projection (`ProtocolProjector::project` -> `RouterProjector`) over that fact through the production path.
-- **Expect:** the router does NOT emit read-model rows for the above-ceiling fact; it is uncounted and undisplayed. The CEILING-FILTERED router only activates routes with `intro_version<=ceiling`. (Contrast: today the unfiltered router would dispatch to the projector or error at projectors.rs:456 — the test pins the quarantine path instead.)
+- **Expect:** the router does NOT emit read-model rows for the above-ceiling fact; it is uncounted and undisplayed. The CEILING-FILTERED router only activates routes with `intro_version<=ceiling`. (Contrast: today the unfiltered router would dispatch to the projector or error at projectors.rs:456 — the test pins the pending path instead.)
 - **Defends:** ADMISSION (uncounted/undisplayed); invariant (2) RENDERING UNIFORMITY ("clients render AT THE CEILING, not their head").
 - **Refs:** `src/protocol/registry.rs:568` `RouterProjector::new(FACT_ROUTES, &[])`, `src/core/projectors.rs:448-459`.
 
@@ -5423,18 +5464,18 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 - **Defends:** ADMISSION (undisplayed/uncounted), invariant (2).
 - **Refs:** `content::message::cli` (`messages`, `view`, `files`, `content-count`), `auth::workspace::cli` (`count`), `read_models` typed tables (registry.rs 36-182).
 
-### GUARD-12 — unknown-tag projection path QUARANTINES instead of erroring  `guardrail`
+### GUARD-12 — unknown-tag projection path holds pending instead of erroring  `guardrail`
 - **Setup:** a received fact whose first byte (effective tag) matches no entry in `FACT_ROUTES` (an above-ceiling/unknown family).
 - **Action:** project it through the production projector path.
-- **Expect:** the fact is retained as opaque bytes, unprojected, undisplayed, uncounted — NOT dropped, NOT errored. Specifically the path must NOT return `Err("no target projector registered for fact tag {tag}")` (today's behavior at `src/core/projectors.rs:456`). The target replaces that hard error with a quarantine outcome.
-- **Defends:** ADMISSION "received above-ceiling fact is QUARANTINED … NOT dropped, NOT errored — today it ERRORS at projectors.rs:454".
+- **Expect:** the fact is retained as opaque bytes, unprojected, undisplayed, uncounted — NOT dropped, NOT errored. Specifically the path must NOT return `Err("no target projector registered for fact tag {tag}")` (today's behavior at `src/core/projectors.rs:456`). The target replaces that hard error with a pending outcome.
+- **Defends:** ADMISSION "received above-ceiling fact is PENDING … NOT dropped, NOT errored — today it ERRORS at projectors.rs:454".
 - **Refs:** `src/core/projectors.rs:455-457` (the `Err(format!(...))`), `RouterProjector::project`.
 
-### GUARD-13 — quarantined fact activates on next wipe+replay once ceiling rises  `replay-cli`
-- **Setup:** an above-ceiling fact quarantined under ceiling C; then a manifest change raises the ceiling to C' >= the fact's `intro_version`.
+### GUARD-13 — pending fact activates on next wipe+replay once ceiling rises  `replay-cli`
+- **Setup:** an above-ceiling fact pending under ceiling C; then a manifest change raises the ceiling to C' >= the fact's `intro_version`.
 - **Action:** perform wipe + replay (the upgrade path) and re-project all retained facts.
-- **Expect:** the formerly quarantined fact now routes to its registered projector and produces its rows; it is counted/displayed. No re-receipt over the network is required — activation comes purely from replay at the higher ceiling.
-- **Defends:** ADMISSION "Quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"; invariant (4) REPLAY DETERMINISM.
+- **Expect:** the formerly pending fact now routes to its registered projector and produces its rows; it is counted/displayed. No re-receipt over the network is required — activation comes purely from replay at the higher ceiling.
+- **Defends:** ADMISSION "Pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"; invariant (4) REPLAY DETERMINISM.
 - **Refs:** target wipe+replay path, `RouterProjector`, `FACT_ROUTES` intro_version filter.
 
 ### GUARD-14 — sibling _vN/ dir has no mod.rs (role-file convention)  `guardrail`
@@ -5489,37 +5530,37 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ### GUARD-21 — fact tag uniqueness across versions (extended uniqueness test)  `guardrail`
 - **Setup:** the assembled `FACT_ROUTES` including any new `_vN/` family routes (a new family => a NEW tag, never a reused tag).
 - **Action:** run the extended form of `fact_route_tags_are_globally_unique` over the full `FACT_ROUTES` set.
-- **Expect:** all `FactRoute.tag` values remain globally distinct after adding version families; a new family that reused an existing tag (e.g. re-using 14 or 50) is caught as a duplicate and fails. Confirms the full current set of 43 tags (2,10,14,42-45,50-55,128,129,131,133-136,139,146,147,150-157,160,162,164-173) are unique and any addition extends without collision.
+- **Expect:** all `FactRoute.tag` values remain globally distinct after adding version families; a new family that reused an existing tag (e.g. re-using 14 or 50) is caught as a duplicate and fails. Confirms the full current set of 47 routed tags (2,10,14,42-47,50-57,128,129,131,133-136,139,146,147,150-157,160,162,164-173) are unique and any addition extends without collision.
 - **Defends:** Mechanism "tag uniqueness across versions"; the versioning knob is the tag, so two families must never share one.
 - **Refs:** `src/protocol/registry.rs::fact_route_tags_are_globally_unique` (717-729), inventory full tag map.
 
-### GUARD-22 — a new family's tag must not collide with the sealed-envelope tags 46/47  `guardrail`
-- **Setup:** the sealed (non-fact) envelope tags `TYPE_SEALED_CONNECTION_REQUEST=46` and `TYPE_SEALED_CONNECTION_RESPONSE=47` (NOT in FACT_ROUTES); a new fact family added.
-- **Action:** assert the new family's routed tag is distinct from 46 and 47 (and from all 43 routed tags).
-- **Expect:** a new fact tag never reuses 46/47 even though those are absent from `FACT_ROUTES`, because the sealed frames share the socket-level recognizer space; uniqueness check spans both. New family tags also avoid the TRNS 4-byte magic and bootstrap fact 171.
+### GUARD-22 — a new family's tag must not collide with sealed transit carrier tags 46/47/56/57  `guardrail`
+- **Setup:** the sealed transit carrier tags `TYPE_SEALED_CONNECTION_REQUEST/RESPONSE=46/47/56/57` are routed through `FACT_ROUTES` even though they are not ordinary authenticated fact families; a new fact family added.
+- **Action:** assert the new family's routed tag is distinct from 46/47/56/57 and from all 47 current routed tags.
+- **Expect:** a new fact tag never reuses a sealed transit carrier tag, because the sealed frames share the socket-level recognizer space and are already represented in the route table. New family tags also avoid the TRNS 4-byte magic and bootstrap fact 171.
 - **Defends:** Mechanism "tag uniqueness across versions" extended to non-routed sealed-envelope tags.
-- **Refs:** `connection/bootstrap_request/layout.rs` (TYPE_SEALED_CONNECTION_REQUEST=46), `connection/bootstrap_response/layout.rs` (47), inventory section 1.
+- **Refs:** `connection/*/transit.rs` sealed tags 46/47/56/57, inventory section 1.
 
 ### GUARD-23 — handler route names + intent kinds stay unique across versions  `guardrail`
-- **Setup:** the 12-entry `HANDLER_ROUTES`, plus any version-added handler.
+- **Setup:** the 17-entry `HANDLER_ROUTES`, plus any version-added handler.
 - **Action:** assert handler route `name`s are unique (matches `runtime_handler_routes_are_unique...`) AND that intent-kind strings are unique across versions.
 - **Expect:** `MATCH_RUNTIME.handlers` names form a set of size == `handlers.len()`; no two routes share a `name` or `intent_kind`. A version-added handler must use a fresh route name (no silent shadow). The 4 `COMMAND_EXCLUDED_HANDLER_ROUTES` names all resolve to real routes.
 - **Defends:** Mechanism "tag/route uniqueness across versions" for handler routing; invariant (4) (deterministic dispatch).
 - **Refs:** `tests/poc10_protocol_registry_test.rs::runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit` (133-168), `registry.rs` HANDLER_ROUTES.
 
 ### GUARD-24 — CLI command names stay unique across version buckets  `guardrail`
-- **Setup:** `MATCH_COMMANDS` (42 stable names), each mapping to a version-tagged run-fn list.
+- **Setup:** `MATCH_COMMANDS` (47 stable names), each mapping to a version-tagged run-fn list.
 - **Action:** assert command `name`s are globally unique; a version bucket adds versions UNDER a stable name, never a duplicate name.
-- **Expect:** `MATCH_COMMANDS` names form a set of size == `MATCH_COMMANDS.len()` (42); adding a `_v2` run fn under `send` does NOT add a second `"send"` entry — it extends the version list of the existing stable name. Two entries with the same `name` fail.
+- **Expect:** `MATCH_COMMANDS` names form a set of size == `MATCH_COMMANDS.len()` (47); adding a `_v2` run fn under `send` does NOT add a second `"send"` entry — it extends the version list of the existing stable name. Two entries with the same `name` fail.
 - **Defends:** Mechanism "CliCommand = a stable name -> a version-tagged list of run fns"; one stable name per command.
 - **Refs:** `src/protocol/registry.rs` `MATCH_COMMANDS` (367-510), `executable_protocol_tables_name_the_target_surfaces` (22-44).
 
-### GUARD-25 — FACT_ROUTES stays 1:1 with layout-bearing families after a version add  `guardrail`
-- **Setup:** all directories under `src/protocol/{auth,connection,content,sync}` that contain a `layout.rs`, plus `FACT_ROUTES`; a new `_vN/` family with its own `layout.rs`.
-- **Action:** scan for layout-bearing dirs (count) and compare to `FACT_ROUTES.len()`; assert each layout tag appears in exactly one route and each route tag has a backing `layout.rs`.
-- **Expect:** the mapping stays 1:1 — a new `layout.rs` family without a `FACT_ROUTES` entry fails, and a route without a backing layout fails. Baseline is 43:43; a clean version add becomes 44:44. The context-only `content/purge/` (no `layout.rs`) is correctly excluded.
-- **Defends:** Structural invariant "every fact family is routed"; underpins ADMISSION/quarantine routing.
-- **Refs:** inventory section 1 (43 families = 43 routes), `src/protocol/content/purge/project.rs` (no layout), `registry.rs` FACT_ROUTES.
+### GUARD-25 — FACT_ROUTES covers every fact family plus sealed transit carriers after a version add  `guardrail`
+- **Setup:** all directories under `src/protocol/{auth,connection,content,sync}` that contain an `authenticate.rs`, plus the four sealed transit carrier routes; a new `_vN/` family with its own `authenticate.rs`.
+- **Action:** scan for authenticate-bearing dirs and sealed transit carrier tags; compare to `FACT_ROUTES.len()`; assert each family or sealed carrier tag appears in exactly one route.
+- **Expect:** the mapping stays complete — a new authenticated family without a `FACT_ROUTES` entry fails, and a non-sealed route without a backing authenticator fails. Baseline is 43 authenticated families + 4 sealed carriers = 47 routes; a clean version add becomes 44 + 4 = 48. The context-only `content/purge/` (no `authenticate.rs`) is correctly excluded.
+- **Defends:** Structural invariant "every fact family is routed"; underpins ADMISSION/pending routing.
+- **Refs:** inventory section 1 (43 authenticate.rs files, 47 routes), `src/protocol/content/purge/project.rs` (no layout/authenticate), `registry.rs` FACT_ROUTES.
 
 ### GUARD-26 — ROW_MUTATION_TABLES + SCHEMA_SOURCES extend, never shrink, on a version add  `guardrail`
 - **Setup:** baseline `ROW_MUTATION_TABLES` (31 tables, registry.rs 521-553) and `SCHEMA_SOURCES`; a new version family that emits rows.
@@ -5545,7 +5586,7 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ### GUARD-29 — CEILING-FILTERED router only activates routes with intro_version<=ceiling  `projector-unit`
 - **Setup:** a `RouterProjector` built from `FACT_ROUTES` where some routes have `intro_version > ceiling` and some `<=`; a ceiling value C from the manifest.
 - **Action:** project one fact of an at-ceiling family and one of an above-ceiling family.
-- **Expect:** the at-ceiling fact dispatches to its projector and emits rows; the above-ceiling fact is filtered (quarantined per GUARD-12), not dispatched. The active route set is exactly `{r in FACT_ROUTES : r.intro_version <= ceiling}`.
+- **Expect:** the at-ceiling fact dispatches to its projector and emits rows; the above-ceiling fact is filtered (pending per GUARD-12), not dispatched. The active route set is exactly `{r in FACT_ROUTES : r.intro_version <= ceiling}`.
 - **Defends:** Mechanism "The router (RouterProjector over FACT_ROUTES) is CEILING-FILTERED."
 - **Refs:** `src/core/projectors.rs:448-459` `RouterProjector::project`, `src/protocol/registry.rs:568`, target ceiling.
 
@@ -5562,8 +5603,8 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 
 Concrete tests closing intersection gaps the completeness pass found across clusters.
 
-### KEYS-GAP10a — chop-now (rotation R0→R1 + chop retirement) lands on the SAME wipe+replay that activates a quarantined key_wrap_v2  `replay-cli`
-- **Setup:** `con` node at ceiling N holding live key material for workspace W: `recipient_key` R0 (from `key-recipient`) with live `local_recipient_key` LR0, a `removal_frontier` F, a `local_signer_secret`, and TWO `local_key_secret` FrontierRoot sources — S_old (`created_at_ms = T_old`) and S_new (`created_at_ms = T_new`, `T_new > T_old`) — each offering `local_secret_source` and `frontier_root_wrap_source_offers` (proactive domain, keyed by `frontier_created_at_ms`). The node ALSO retains one received above-ceiling `key_wrap_v2` fact (new redesign tag), quarantined as opaque bytes per KEYS-03 (no v2 route active at N). A signed manifest refresh then raises the ceiling to N+1, covering the `key_wrap:2` tag, AND the node runs `con chop-now W FLOOR_MINUTE` — which (commands.rs:571-589) rotates R0→R1 because a previous `local_recipient_key` exists (`create_recipient_key` with `previous_recipient_key_id = R0`, so R1.`created_at_ms = T_rot`), then (commands.rs:590-613) submits a `LocalSecretRetirement{reason_kind=RETIRE_REASON_CHOP, target_secret_id}` for EVERY `local_key_secret` in W (both S_old and S_new).
+### KEYS-GAP10a — chop-now (rotation R0→R1 + chop retirement) lands on the SAME wipe+replay that activates a pending key_wrap_v2  `replay-cli`
+- **Setup:** `con` node at ceiling N holding live key material for workspace W: `recipient_key` R0 (from `key-recipient`) with live `local_recipient_key` LR0, a `removal_frontier` F, a `local_signer_secret`, and TWO `local_key_secret` FrontierRoot sources — S_old (`created_at_ms = T_old`) and S_new (`created_at_ms = T_new`, `T_new > T_old`) — each offering `local_secret_source` and `frontier_root_wrap_source_offers` (proactive domain, keyed by `frontier_created_at_ms`). The node ALSO retains one received above-ceiling `key_wrap_v2` fact (new redesign tag), pending as opaque bytes per KEYS-03 (no v2 route active at N). A signed manifest refresh then raises the ceiling to N+1, covering the `key_wrap:2` tag, AND the node runs `con chop-now W FLOOR_MINUTE` — which (commands.rs:571-589) rotates R0→R1 because a previous `local_recipient_key` exists (`create_recipient_key` with `previous_recipient_key_id = R0`, so R1.`created_at_ms = T_rot`), then (commands.rs:590-613) submits a `LocalSecretRetirement{reason_kind=RETIRE_REASON_CHOP, target_secret_id}` for EVERY `local_key_secret` in W (both S_old and S_new).
 - **Action:** `con` wipe + full replay at ceiling N+1, replaying every retained fact via the adapter keyed by its OWN tag — the v2 wrap (now routed to the v2 `KeyWrapProjector`), R0/R1 (tag 150), F (151), S_old/S_new (152), the two `local_secret_retirement` facts (157), LR0 (156) and the signer secret (133) — in arbitrary order; drive `process_all_work_until_idle`.
 - **Expect:** the three verified mechanisms compose without resurrection or divergence: (1) both `local_secret_retirement` facts project (`LocalSecretRetirementProjector`) and publish `secret_retired_offer`, so S_old and S_new each see `secret_retired_need` satisfied in `LocalKeySecretProjector` and return `purge_self(fact.id)` — neither offers `local_secret_source` or any `frontier_root_wrap_source_offers` after replay. (2) R0 is superseded by R1 (`recipient_superseded` offer at R0's id), so R0 emits NO proactive `create_key_wrap_intent`; R1 is the only live recipient and, per its rotation floor, sets `min_frontier_created_at_ms = R1.created_at_ms = T_rot`. (3) Because BOTH roots were retired (purged) in this same pass, `matching_wrap_sources_with_signer` over R1's `proactive_wrap_source_need(min = T_rot)` finds NO live wrap source → ZERO new `create_key_wrap_intent` emitted (independently of the floor, since no source survives). The activated `key_wrap_v2` fact routes to its v2 projector and materializes its row (KEYS-04), but if it would emit an `unwrap_key_wrap` intent it can only do so against still-live local recipient material — and any unwrap that re-derives a `local_key_secret` whose id matches a retired target immediately re-purges via the standing retirement context (KEYS-14/31 path), so no retired root secret is resurrected. The post-replay `con keys W` summary is identical across repeated wipe+replays (invariant 4).
 - **Defends:** the unpinned collision of redesign-activation (KEYS-04/32) × recipient rotation floor (KEYS-16/33/34) × chop-now retirement (KEYS-25/14/15/31) on one deterministic replay; forward secrecy across the seam (a v2 wrap must not revive a same-pass-retired source); invariant 4 (order- and ceiling-independent rebuild).
@@ -5582,18 +5623,18 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Expect:** R1 emits exactly ONE proactive `create_key_wrap_intent` for S_keep whose idempotence key from `create_key_wrap_key(W, F, R1, FrontierRoot-coordinate)` is IDENTICAL across both replay orders and excludes `source_fact_id`/`signer_secret_fact_id` and any request entropy (KEYS-21/36) — so the deterministic handler produces ONE byte-identical tag-155 wrap (same `sender_wrap_public_key`/`nonce`/`ciphertext` via `deterministic_wrap_info`), fact id stable across both runs. The independently-activated `key_wrap_v2` fact materializes its own v2 row via its own-tag adapter and does NOT collide with, duplicate, or alter the v1 wrap's idempotence key (distinct tag → distinct convergence domain). No duplicate wraps, no order-dependent state.
 - **Defends:** `create_key_wrap_key` idempotence still converges when v2-activation and rotation coincide (the gap's "create_key_wrap_key must still converge"); rotation floor admits exactly the post-rotation eligible source; redesign activation is additive and tag-isolated; invariants 4 + "no request entropy amplifying keys."
 - **Refs:** `auth/create_key_wrap.rs::create_key_wrap_key`, `auth/key_wrap/create.rs::{create_key_wrap_fact,deterministic_sender_wrap_secret,deterministic_nonce,deterministic_wrap_info}`, `auth/recipient_key/project.rs::recipient_key` (post-rotation `min_frontier_created_at_ms`, single eligible source), `auth/key_wrap/project.rs::{matching_wrap_sources_with_signer,wrap_source_offer_valid_for_need}`, `sync::cascade_test_fact::cli` (`test-replay-deps-reverse` for order independence), `auth/key_wrap/_v2/` (model).
-### REPLAY-GAP11a — Quarantined file_slice_v2 whose parent content::file is purged during the quarantine window parks forever (does NOT error) on activation  `replay-cli`
-- **Setup:** Node at a ceiling that covers only the v1 content families. A `content::file` (tag 54) `F` exists and is projected (CONTENT_FILES row present), authored under a parent `content::message` (tag 50). The node then RECEIVES, over sync, an above-ceiling `file_slice_v2` fact `S` (a proposed new-tag sibling of `content::file_slice` tag 55, intro_version = N+1, with the SAME `file_id` as `F`). Per ADMISSION, `S` is QUARANTINED: retained as opaque bytes, unprojected, undisplayed, uncounted — NOT routed to a missing projector (it must NOT hit the `core/projectors.rs:456` "no target projector registered" error today). WHILE `S` is quarantined, `con delete-file` is run against `F`, producing a `content::file_deletion` (tag 53). The file projector resolves its `file_deletion_need` (`content/file/project.rs:111,125`), validates the deletion, and returns `delete_file_projection(...).purge_self(fact.id)` (`content/file/project.rs:126-135`) — so `F` is removed from the retained store and its CONTENT_FILES/FILE_SLICES rows are dropped. The retained log now holds `S` (quarantined) and the `file_deletion`, but NOT `F`.
+### REPLAY-GAP11a — Pending file_slice_v2 whose parent content::file is purged during the pending window parks forever (does NOT error) on activation  `replay-cli`
+- **Setup:** Node at a ceiling that covers only the v1 content families. A `content::file` (tag 54) `F` exists and is projected (CONTENT_FILES row present), authored under a parent `content::message` (tag 50). The node then RECEIVES, over sync, an above-ceiling `file_slice_v2` fact `S` (a proposed new-tag sibling of `content::file_slice` tag 55, intro_version = N+1, with the SAME `file_id` as `F`). Per ADMISSION, `S` is PENDING: retained as opaque bytes, unprojected, undisplayed, uncounted — NOT routed to a missing projector (it must NOT hit the `core/projectors.rs:456` "no target projector registered" error today). WHILE `S` is pending, `con delete-file` is run against `F`, producing a `content::file_deletion` (tag 53). The file projector resolves its `file_deletion_need` (`content/file/project.rs:111,125`), validates the deletion, and returns `delete_file_projection(...).purge_self(fact.id)` (`content/file/project.rs:126-135`) — so `F` is removed from the retained store and its CONTENT_FILES/FILE_SLICES rows are dropped. The retained log now holds `S` (pending) and the `file_deletion`, but NOT `F`.
 - **Action:** A fleet-wide signed manifest raises the ceiling so `file_slice_v2`'s tag is ceiling-active (its kept-forever v2 projector + sibling `content/file_slice_v2/` directory are present and routed), trusted_time advances past `blocker.expires_at + M`. Then wipe derived state and replay all retained facts via the historical adapter keyed by each fact's OWN tag (the `con replay` canonical path / `drain_pending_projection`).
-- **Expect:** On this replay `S` is now routed to its v2 projector and marked pending, but its first context step is the parent-file need — the v2 projector emits a `content_file` range need on `slice.file_id` exactly as `content/file_slice/project.rs:68-77` does, then `return Ok(ProjectionOutput::new().need(file_need))` because no `content::file` payload for that `file_id` is retained (`F` was purged). The fact PARKS (PROJ-17 semantics: no row, no offer, no error) and stays parked through fixpoint — there is no retained fact that can ever satisfy the `content_file` need, so it parks FOREVER. The replay MUST complete (Invariant 4): it must NOT return `Err`, must NOT abort the whole replay, and `S` must NOT resurrect a CONTENT_FILES/FILE_SLICES row for the purged file. `con content-count` / `con files` are unchanged by `S`; `con state-summary` counts `S` under retained-facts and under "parked/pending projection", never under a read-model area; the purged `F` stays absent. The test pins that an activating quarantined fact with a purged in-range dependency degrades to a permanent harmless park, identical to a freshly-received orphan slice — NOT a hard error and NOT a half-materialized row.
-- **Defends:** ADMISSION/QUARANTINE activation-on-replay (REPLAY-08, CONTENT-04, SYNC-11) extended to the case where the activation-time dependency was purged mid-quarantine; PROJ-17 park-on-missing-anchor semantics (park, don't error) applied to a newly-activated fact; Invariant 4 (replay deterministic, ceiling-independent per-tag adapter, must not abort on a parked fact); Invariant 1 (visibility deferred/dropped, never half-projected). Guards the `projectors.rs:456` hard-error hole on the activating replay path.
-- **Refs:** `content/file_slice/project.rs:68-77` (`content_file` need + park `return Ok(...).need(file_need)`); `content/file/project.rs:111-135` (`target_purged_need` + `validate_file_deletion` + `delete_file_projection(...).purge_self(fact.id)`); `content::file_deletion` (tag 53, `delete-file` -> `content::file_deletion::cli`); `core/projectors.rs:356` `purge_self`, `:456` unknown-tag Err (the behavior quarantine/park must avoid); `core/pipeline/project_pending_facts.rs` `drain_pending_projection`; sibling tests REPLAY-08, CONTENT-04, SYNC-11; negentropy `context_have` closure `sync/shared_fact/rows.rs:280-285`.
+- **Expect:** On this replay `S` is now routed to its v2 projector and marked pending, but its first context step is the parent-file need — the v2 projector emits a `content_file` range need on `slice.file_id` exactly as `content/file_slice/project.rs:68-77` does, then `return Ok(ProjectionOutput::new().need(file_need))` because no `content::file` payload for that `file_id` is retained (`F` was purged). The fact PARKS (PROJ-17 semantics: no row, no offer, no error) and stays parked through fixpoint — there is no retained fact that can ever satisfy the `content_file` need, so it parks FOREVER. The replay MUST complete (Invariant 4): it must NOT return `Err`, must NOT abort the whole replay, and `S` must NOT resurrect a CONTENT_FILES/FILE_SLICES row for the purged file. `con content-count` / `con files` are unchanged by `S`; `con state-summary` counts `S` under retained-facts and under "parked/pending projection", never under a read-model area; the purged `F` stays absent. The test pins that an activating pending fact with a purged in-range dependency degrades to a permanent harmless park, identical to a freshly-received orphan slice — NOT a hard error and NOT a half-materialized row.
+- **Defends:** ADMISSION/PENDING activation-on-replay (REPLAY-08, CONTENT-04, SYNC-11) extended to the case where the activation-time dependency was purged mid-pending; PROJ-17 park-on-missing-anchor semantics (park, don't error) applied to a newly-activated fact; Invariant 4 (replay deterministic, ceiling-independent per-tag adapter, must not abort on a parked fact); Invariant 1 (visibility deferred/dropped, never half-projected). Guards the `projectors.rs:456` hard-error hole on the activating replay path.
+- **Refs:** `content/file_slice/project.rs:68-77` (`content_file` need + park `return Ok(...).need(file_need)`); `content/file/project.rs:111-135` (`target_purged_need` + `validate_file_deletion` + `delete_file_projection(...).purge_self(fact.id)`); `content::file_deletion` (tag 53, `delete-file` -> `content::file_deletion::cli`); `core/projectors.rs:356` `purge_self`, `:456` unknown-tag Err (the behavior pending/park must avoid); `core/pipeline/project_pending_facts.rs` `drain_pending_projection`; sibling tests REPLAY-08, CONTENT-04, SYNC-11; negentropy `context_have` closure `sync/shared_fact/rows.rs:280-285`.
 
-### REPLAY-GAP11b — Quarantined auth fact whose in-range authority/signer anchor is removed during the quarantine window parks forever on activation, granting NO authority  `replay-cli`
-- **Setup:** Node B at a ceiling covering only v1 auth families, inside a workspace with a root `auth::admin` (tag 139) `A_auth` acting as a granting authority. B RECEIVES an above-ceiling authority fact `Q` — a proposed `auth::user_profile_v2` (the not-yet-existing v2 sibling flagged in inventory section 1, intro_version = N+1) OR a `grant-admin` (`auth::admin` tag 139) above-ceiling delegated-admin fact — whose projector, on activation, needs an in-range v1 anchor: for the delegated `auth::admin` path this is `DelegatedAdminNeeds.authority` resolved at `auth/admin/project.rs:121-126` (the authority admin `A_auth`) and `needs.user`; for `user_profile_v2` it is the `auth_user` anchor offered by `UserProjector` at `auth/user/project.rs:91-94`. `Q` is QUARANTINED (retained opaque, unprojected, uncounted, NOT errored at `projectors.rs:456`). WHILE `Q` is quarantined, the anchor fact it will need is REMOVED from the retained set during the window — e.g. the granting authority/user material is retired/purged through the auth removal path (`auth::local_secret_retirement` tag 157 / `auth::removal_frontier` tag 151 self-purge for key-material anchors, or the anchor fact otherwise no longer retained), so the `auth_user` / authority-admin payload `Q` will require is gone.
+### REPLAY-GAP11b — Pending auth fact whose in-range authority/signer anchor is removed during the pending window parks forever on activation, granting NO authority  `replay-cli`
+- **Setup:** Node B at a ceiling covering only v1 auth families, inside a workspace with a root `auth::admin` (tag 139) `A_auth` acting as a granting authority. B RECEIVES an above-ceiling authority fact `Q` — a proposed `auth::user_profile_v2` (the not-yet-existing v2 sibling flagged in inventory section 1, intro_version = N+1) OR a `grant-admin` (`auth::admin` tag 139) above-ceiling delegated-admin fact — whose projector, on activation, needs an in-range v1 anchor: for the delegated `auth::admin` path this is `DelegatedAdminNeeds.authority` resolved at `auth/admin/project.rs:121-126` (the authority admin `A_auth`) and `needs.user`; for `user_profile_v2` it is the `auth_user` anchor offered by `UserProjector` at `auth/user/project.rs:91-94`. `Q` is PENDING (pending opaque, unprojected, uncounted, NOT errored at `projectors.rs:456`). WHILE `Q` is pending, the anchor fact it will need is REMOVED from the retained set during the window — e.g. the granting authority/user material is retired/purged through the auth removal path (`auth::local_secret_retirement` tag 157 / `auth::removal_frontier` tag 151 self-purge for key-material anchors, or the anchor fact otherwise no longer retained), so the `auth_user` / authority-admin payload `Q` will require is gone.
 - **Action:** A signed manifest raises B's ceiling to cover `Q`'s tag (its kept-forever v_{N+1} projector + sibling `_v2/` dir present and routed); trusted_time advances past `blocker.expires_at + M`. Wipe derived state and replay all retained facts keyed by each fact's own tag.
-- **Expect:** On replay `Q` now routes to its v_{N+1} projector and is marked pending, but its authority/anchor need is unsatisfiable (the anchor was removed mid-quarantine). The projector returns `Ok(needs.output())` with the unmet need re-emitted — `auth/admin/project.rs:125-126` (`let Some(authority_fact) = context.payload_for(&needs.authority) else { return Ok(needs.output()) }`) or the `auth_user` park modeled on `auth/user/project.rs:65-72`. `Q` PARKS FOREVER (PROJ-17/PROJ-18 semantics): no admin/user-profile row, no `auth_user`/`admin` offer, NO error, and crucially NO authority is granted to the target (the pre-removal state had no such authority and the activating replay must not mint it from an absent anchor). Replay completes without `Err` and without aborting; `con users` / `con peers` / the admin read-model show `Q`'s target with NO new authority; `con state-summary` counts `Q` as retained-but-parked. This pins that a quarantined AUTHORITY fact cannot bootstrap itself when its proving anchor was purged during the quarantine window — it degrades to a permanent harmless park, never a hard error and never an unanchored authority grant.
-- **Defends:** ADMISSION activation-on-replay (AUTHZ-03) extended to a purged-during-quarantine authority anchor; PROJ-17/18 park-on-missing-anchor (park, don't error, don't grant); Invariant 1 (visibility/authority deferred, never granted without its anchor); Invariant 3/no-regression (an activating fact gains no authority beyond what its v1 anchors prove — PROJ-19); Invariant 4 (replay must not abort on the parked authority fact). Guards `projectors.rs:456` on the auth-scope activation path.
+- **Expect:** On replay `Q` now routes to its v_{N+1} projector and is marked pending, but its authority/anchor need is unsatisfiable (the anchor was removed mid-pending). The projector returns `Ok(needs.output())` with the unmet need re-emitted — `auth/admin/project.rs:125-126` (`let Some(authority_fact) = context.payload_for(&needs.authority) else { return Ok(needs.output()) }`) or the `auth_user` park modeled on `auth/user/project.rs:65-72`. `Q` PARKS FOREVER (PROJ-17/PROJ-18 semantics): no admin/user-profile row, no `auth_user`/`admin` offer, NO error, and crucially NO authority is granted to the target (the pre-removal state had no such authority and the activating replay must not mint it from an absent anchor). Replay completes without `Err` and without aborting; `con users` / `con peers` / the admin read-model show `Q`'s target with NO new authority; `con state-summary` counts `Q` as retained-but-parked. This pins that a pending AUTHORITY fact cannot bootstrap itself when its proving anchor was purged during the pending window — it degrades to a permanent harmless park, never a hard error and never an unanchored authority grant.
+- **Defends:** ADMISSION activation-on-replay (AUTHZ-03) extended to a purged-during-pending authority anchor; PROJ-17/18 park-on-missing-anchor (park, don't error, don't grant); Invariant 1 (visibility/authority deferred, never granted without its anchor); Invariant 3/no-regression (an activating fact gains no authority beyond what its v1 anchors prove — PROJ-19); Invariant 4 (replay must not abort on the parked authority fact). Guards `projectors.rs:456` on the auth-scope activation path.
 - **Refs:** `auth/admin/project.rs:121-146` (`DelegatedAdminNeeds`, `needs.authority`/`needs.user` parks at :125-128, id/workspace mismatch checks); `auth/user/project.rs:65-72,91-94` (`auth_user_invite` park pattern + `auth_user` anchor offer); proposed `auth::user_profile_v2` (inventory section 1 — does not yet exist); `auth::local_secret_retirement` (157) / `auth::removal_frontier` (151) removal path; `core/projectors.rs:356` `purge_self`, `:489` `project_typed`, `:456` unknown-tag Err; sibling test AUTHZ-03; PROJ-17/18/19.
 ### SYNC-GAP12a — Ceiling rises BETWEEN the compare-response plan and the requested-fact send within ONE have/need round  `multinode-network`
 - **Setup:** Floor 6, ceiling 6 (a mobile laggard `6..=6`, `expires_at = T`, is the blocker; desktop `6..=7`). Peer A (desktop, head 7) and peer B share a workspace over an established connection `C` (`connection::response` tag 44). A's shareable index holds an in-range v1 owner `O1` (`content::message:1`, tag 50) AND an above-ceiling-at-6 owner `U` (`content::message_v2`, intro_version 7). B's `sync::compare` (tag 165) mismatches a leaf range covering both `O1` and `U`'s timestamps. M is the skew margin; trusted_time starts `< T + M`.
@@ -5614,7 +5655,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Action:** Process child `Rlo` first at ceiling 6: `SendSyncCompareResponseHandler` runs `expand_fact_ids_with_context_for_connection` / `shareable_facts_for_connection_range(C, Rlo.start, Rlo.end, include_deps=true)`; `A` is in-range-and-ceiling-active so it ships to B. THEN cross `T + M`, expire mobile, recompute ceiling to 7. THEN process child `Rhi`: re-derive its plan at ceiling 7, where `O` (intro_version 7) is now ceiling-active and its closure recomputes `{O, A}` via the BFS over `negentropy_context_have_for_leaf`.
 - **Expect:** No torn closure: when `Rhi` is planned at ceiling 7, the include_deps BFS pulls `A` as `O`'s anchor, but `A` was ALREADY shipped to B during `Rlo` at ceiling 6, so B already holds it (`SendNeededFactIdHandler` is a no-op for an id B already retains — `persisted_fact(...).is_some()`), and `SendRequestedFact` re-requesting `A` is idempotent. B therefore ends with the complete closure `{A, O}`: the anchor selected under the OLD ceiling and the owner activated under the NEW ceiling converge into one valid dependency closure. The reverse-skew danger is also closed: had `Rhi` been planned BEFORE the rise (ceiling 6), `O` would be excluded (above-ceiling) and only re-offered on the post-rise pass — B is never left holding `O` (ceiling-active owner) without `A` (its anchor), nor `A` orphaned without an eventual `O`. Convergence holds regardless of WHICH side of the transition each child range is processed on.
 - **Defends:** Convergence-across-a-mid-sync-transition for a closure SPANNING two child compare ranges; the include_deps closure recompute against the NEW ceiling does not orphan an anchor selected under the OLD ceiling (nor vice versa); CEILING MONOTONICITY (3), VISIBILITY (1); closes the "between two child sync::compare ranges" half of the gap.
-- **Refs:** `sync/send_compare_response.rs` `SendSyncCompareResponseHandler::handle`; `sync/shared_fact/rows.rs:953` `shareable_facts_for_connection_range` (include_deps BFS over `negentropy_context_have_for_leaf` :1285) and `expand_fact_ids_with_context_for_connection` :1018; `sync/compare/create.rs` child-split (`MAX_HAVE_IDS_PER_RANGE`, `TimestampRange::split`); `sync/send_needed_fact_id.rs` no-op on already-retained id; `content::message_v2` intro_version 7 / `content::message:1` 50; E2EX-07 (ceiling 6->7), SYNC-11 (quarantine-then-activate at rest, the at-rest analog).
+- **Refs:** `sync/send_compare_response.rs` `SendSyncCompareResponseHandler::handle`; `sync/shared_fact/rows.rs:953` `shareable_facts_for_connection_range` (include_deps BFS over `negentropy_context_have_for_leaf` :1285) and `expand_fact_ids_with_context_for_connection` :1018; `sync/compare/create.rs` child-split (`MAX_HAVE_IDS_PER_RANGE`, `TimestampRange::split`); `sync/send_needed_fact_id.rs` no-op on already-retained id; `content::message_v2` intro_version 7 / `content::message:1` 50; E2EX-07 (ceiling 6->7), SYNC-11 (pending-then-activate at rest, the at-rest analog).
 ### REPLAY-GAP13a — In BLOCKED MODE, replay-dispatched `create_key_wrap` re-emits its workspace-scoped `key_wrap` (155) as a deterministic rebuild, NOT refused as new shared production  `handler-unit`
 - **Setup:** Runtime opened from `MATCH_RUNTIME` in BLOCKED MODE (trusted-time staleness window S elapsed without manifest refresh, or backward clock rollback beyond tolerance). The store retains the wrap inputs for a `FrontierRoot` source: `recipient_key` (150), source `local_key_secret` (152), `local_signer_secret` (133), plus `removal_frontier` (151) and the `workspace` (131) the scope keys to. The `key_wrap` (155) fact K was produced by an earlier `create_key_wrap` dispatch and is still retained. Wipe derived state. The `create_key_wrap` route is `runs_during_replay = true`.
 - **Action:** Run the wipe+replay path; projection re-emits the `create_key_wrap` intent and `CreateKeyWrapHandler::handle` runs over the retained inputs. `create::create_validated_key_wrap_fact` returns `PipelineEffects::new().fact(wrap)` where `wrap = Fact::new(auth::workspace::scope(workspace_id), ...)` (a WORKSPACE-scoped, therefore shareable, fact — `create.rs:94-96`).
@@ -5640,7 +5681,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Action:** Advance trusted_time past the blocker's `expires_at + M`, recompute the ceiling so it crosses V+3, then run `con replay` canonical (wipe derived state, re-mark all retained tag-50 facts pending, drain to fixpoint), then `con content-count WORKSPACE_ID_HEX`.
 - **Expect:** After the ceiling crosses V+3 and the wipe+replay runs, `message_payload_bytes:` shows the CORRECTED per-message-sum value for ALL retained facts — including the OLD ones authored before the fix existed. The fix is a DERIVATION re-applied at the new ceiling over the same unchanged tag-50 facts; it is NOT a fact rewrite. `content_messages:` and `max_message_timestamp:` (`count.max_created_at_ms`) are unchanged (only the buggy field is corrected). This is the OPPOSITE of "old wire shape keeps its old projector forever": a render-correctness derivation re-applies to every retained fact regardless of authoring era.
 - **Defends:** INVARIANT (2)+(4): a render-correctness fix is `f(retained facts, ceiling=V+3)` and re-applies on replay to ALL retained facts (old + new); replay is the mechanism that surfaces the corrected derivation once the ceiling crosses the fix's intro_version.
-- **Refs:** `content/message/queries.rs:59,71` (`count_for_workspace`/`message_payload_bytes` buggy `*CIPHERTEXT_BYTES`), `content/message/fact.rs:11` (`CIPHERTEXT_BYTES=128`), `content/message/cli.rs:380,384,385` (`content_count_output`), QUERY-08/09 (the bump gate), REPLAY-17/E2EX-29 (ceiling-independent sub-ceiling replay); planned `con replay`/`content-count`.
+- **Refs:** `content/message/queries.rs:59,71` (`count_for_workspace`/`message_payload_bytes` buggy `*CIPHERTEXT_BYTES`), `content/message/fact.rs:11` (`CIPHERTEXT_BYTES=128`), `content/message/cli.rs:380,384,385` (`content_count_output`), QUERY-08/09 (the bump gate), REPLAY-17/E2EX-29 (ceiling-independent sub-ceiling replay); `con replay`/`content-count`.
 
 ### QUERY-GAP14b — BOUNDARY: a render-fix derivation re-applies to old facts, but an incompatible-wire-shape NEW TAG keeps its old projector — same replay, opposite outcomes  `replay-cli`
 - **Setup:** One node retaining TWO independently-versioned changes in the same store: (1) OLD `content::message` facts (tag 50) subject to the V+3 `message_payload_bytes` render-correctness fix of QUERY-GAP14a (a DERIVATION over the unchanged tag-50 wire shape); and (2) a separate INCOMPATIBLE wire-shape change — a hypothetical `message:2` with a NEW tag (sibling `content/message_v2/`, its own kept-forever projector, new `FACT_ROUTES` entry per the VERSIONING KNOB rule), with some v1 (tag 50) AND some v2 (new tag) message facts retained, all admitted while ceiling-active. Ceiling now crosses V+3 (activating both the render fix and, say, `message:2`). Capture pre-replay `con content-count`.
@@ -5655,66 +5696,66 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Expect:** O_old's `message_payload_bytes:` = the buggy `N*128`; O_new's = the corrected per-message sum — from the EXACT SAME retained facts. The difference is driven solely by which derivation is ceiling-active (highest intro_version <= ceiling), NOT by any change to the log. This refines E2EX-29: E2EX-29 says sub-ceiling FACTS replay identically regardless of ambient ceiling (true here — every fact is still admitted/decoded identically via tag 50), but the SURFACED DERIVATION over those identical facts is correctly ceiling-dependent. The two statements are not in tension: fact decoding is ceiling-independent; the render derivation renders at the ceiling.
 - **Defends:** INVARIANT (2): surfaced meaning = `f(retained facts, protocol version=ceiling)` — the render-correctness derivation is selected by ceiling, so the same log produces the old value below V+3 and the corrected value at/above V+3; clears the apparent contradiction with E2EX-29's "ceiling-independent replay" (decoding vs derivation).
 - **Refs:** `content/message/queries.rs:59,71` (`count_for_workspace`); `content/message/cli.rs:380` (`content_count_output`); QUERY-22 (CliCommand/derivation selects highest intro_version <= ceiling); E2EX-29 / REPLAY-03 (ceiling-independent FACT replay — the decoding layer); QUERY-08 (the V+3 bump).
-### E2E-GAP15a — A quarantines newer B's owner, relays its shareable INDEX to a third node C at yet another ceiling; closure stays coherent across THREE ceilings  `multinode-network`
-- **Setup:** Three daemons fed the SAME signed `--release-manifest fleet.json` but resolving to DIFFERENT effective ceilings (divergence is by manifest+`clock`, not negotiated — CEIL-27). `bob`=`con_new` (head 8, manifest yields ceiling 8: `content::message:2` tag 56 is ceiling-active for bob). `alice`=`con_new` whose still-usable set pins ceiling 7 (tag 56 above-ceiling => quarantined on receipt). `carol`=`con_old` (head 6, manifest pins ceiling 6: also above both 56 and the protocol-7 derivations). Topology = alice is the hub: `accept_workspace_invite(&alice,&bob,&workspace,alice_port,"bob","bob-phone")` and `accept_workspace_invite(&alice,&carol,&workspace,alice_port,"carol","carol-phone")` into ONE shared workspace; `create_local_content_key` on each; `spawn_daemon` all three. bob and carol have NO direct connection — everything routes through alice.
-- **Action:** `con_new --db bob send WORKSPACE "v2-payload"` mints a tag-56 owner fact `U` (legal: at bob's ceiling 8). bob `sync-range ... --with-deps` to `endpoint_id(&alice)`; let alice pull. alice receives `U` (tag 56) ABOVE its ceiling 7 -> quarantine path. The `share_fact_with_sync` upsert on alice runs `record_sync_contribution` (shareable index) and `seed_connection::advertise_indexed_fact_to_connections_except` over alice's connections EXCLUDING bob's origin connection — so alice relays the `sync::shared_fact` (tag 162) / root `sync::compare` for `U`'s id to carol. Let carol pull from alice.
-- **Expect:** (1) alice RETAINS `U` opaque: `fact_count(&alice)` increments by one, but `content-count`/`messages WORKSPACE` on alice do NOT show it (uncounted, undisplayed, not errored). (2) alice's `sync::shared_fact` index (tag 162) for `U` projects and advertises to carol WITHOUT alice decoding `U` (SYNC-29 — the index layer is decoupled from `U`'s projectability). (3) carol, seeing an advertised id it lacks, runs `send_needed_fact_id` and emits a `sync::need_id` (SYNC-16, id-only, version never inspected); alice answers via `send_requested_fact` shipping `U` as opaque bytes verbatim (SYNC-18, `require_sendable_fact` passes — tag 56 is non-local/non-private). (4) carol RECEIVES `U` (tag 56) above ITS ceiling 6 and ALSO quarantines: `fact_count(&carol)` +1, `content-count(&carol,&workspace)` unchanged, no "no target projector registered for fact tag 56" error surfaces. (5) NO echo: carol does not re-advertise `U` back to alice as a fresh need (SYNC-17 — already-retained id suppresses re-request on alice), and alice does not re-send to bob (origin connection excluded). The three-ceiling closure converges with bob counting `U`, alice+carol holding it opaque, zero stranded need/have rounds.
-- **Defends:** Invariant (1) VISIBILITY (a tag-56 fact is admissible/transportable by every node but projectable only at/above ceiling 8); ADMISSION (received above-ceiling fact QUARANTINED not dropped/errored, at all three ceilings); CEIL-27 (each node uses its OWN locally-computed ceiling, not negotiated); the unpinned relay-of-quarantined-owner-index path that SYNC-29 + SYNC-16/17 + E2E-28 only cover pairwise.
-- **Refs:** `content::message` v1 tag 50 / v2 tag 56; `sync::shared_fact` tag 162; `sync::need_id` 167 / `sync::have_id` 166; `share_fact_with_sync.rs` `ShareFactWithSyncHandler::handle` (`record_sync_contribution` + `advertise_indexed_fact_to_connections_except`, src lines 200-223); `seed_connection.rs:116` `advertise_indexed_fact_to_connections_except` / `connection_ids_for_shareable_fact`; `send_needed_fact_id.rs` `SendNeededFactIdHandler`; `send_requested_fact.rs` `SendRequestedFactHandler` (`shareable_fact_for_connection`, `require_sendable_fact`); three-daemon pattern (`three_player_sync_through_alice_keeps_workspace_scopes_separate`); quarantine error site `core/projectors.rs:456`.
+### E2E-GAP15a — A holds newer B's owner pending, relays its shareable INDEX to a third node C at yet another ceiling; closure stays coherent across THREE ceilings  `multinode-network`
+- **Setup:** Three daemons fed the SAME signed `--release-manifest fleet.json` but resolving to DIFFERENT effective ceilings (divergence is by manifest+`clock`, not negotiated — CEIL-27). `bob`=`con_new` (head 8, manifest yields ceiling 8: `content::message:2` tag 56 is ceiling-active for bob). `alice`=`con_new` whose still-usable set pins ceiling 7 (tag 56 above-ceiling => pending on receipt). `carol`=`con_old` (head 6, manifest pins ceiling 6: also above both 56 and the protocol-7 derivations). Topology = alice is the hub: `accept_workspace_invite(&alice,&bob,&workspace,alice_port,"bob","bob-phone")` and `accept_workspace_invite(&alice,&carol,&workspace,alice_port,"carol","carol-phone")` into ONE shared workspace; `create_local_content_key` on each; `spawn_daemon` all three. bob and carol have NO direct connection — everything routes through alice.
+- **Action:** `con_new --db bob send WORKSPACE "v2-payload"` mints a tag-56 owner fact `U` (legal: at bob's ceiling 8). bob `sync-range ... --with-deps` to `endpoint_id(&alice)`; let alice pull. alice receives `U` (tag 56) ABOVE its ceiling 7 -> pending path. The `share_fact_with_sync` upsert on alice runs `record_sync_contribution` (shareable index) and `seed_connection::advertise_indexed_fact_to_connections_except` over alice's connections EXCLUDING bob's origin connection — so alice relays the `sync::shared_fact` (tag 162) / root `sync::compare` for `U`'s id to carol. Let carol pull from alice.
+- **Expect:** (1) alice RETAINS `U` opaque: `fact_count(&alice)` increments by one, but `content-count`/`messages WORKSPACE` on alice do NOT show it (uncounted, undisplayed, not errored). (2) alice's `sync::shared_fact` index (tag 162) for `U` projects and advertises to carol WITHOUT alice decoding `U` (SYNC-29 — the index layer is decoupled from `U`'s projectability). (3) carol, seeing an advertised id it lacks, runs `send_needed_fact_id` and emits a `sync::need_id` (SYNC-16, id-only, version never inspected); alice answers via `send_requested_fact` shipping `U` as opaque bytes verbatim (SYNC-18, `require_sendable_fact` passes — tag 56 is non-local/non-private). (4) carol RECEIVES `U` (tag 56) above ITS ceiling 6 and ALSO holds it pending: `fact_count(&carol)` +1, `content-count(&carol,&workspace)` unchanged, no "no target projector registered for fact tag 56" error surfaces. (5) NO echo: carol does not re-advertise `U` back to alice as a fresh need (SYNC-17 — already-retained id suppresses re-request on alice), and alice does not re-send to bob (origin connection excluded). The three-ceiling closure converges with bob counting `U`, alice+carol holding it opaque, zero stranded need/have rounds.
+- **Defends:** Invariant (1) VISIBILITY (a tag-56 fact is admissible/transportable by every node but projectable only at/above ceiling 8); ADMISSION (received above-ceiling fact PENDING not dropped/errored, at all three ceilings); CEIL-27 (each node uses its OWN locally-computed ceiling, not negotiated); the unpinned relay-of-pending-owner-index path that SYNC-29 + SYNC-16/17 + E2E-28 only cover pairwise.
+- **Refs:** `content::message` v1 tag 50 / v2 tag 56; `sync::shared_fact` tag 162; `sync::need_id` 167 / `sync::have_id` 166; `share_fact_with_sync.rs` `ShareFactWithSyncHandler::handle` (`record_sync_contribution` + `advertise_indexed_fact_to_connections_except`, src lines 200-223); `seed_connection.rs:116` `advertise_indexed_fact_to_connections_except` / `connection_ids_for_shareable_fact`; `send_needed_fact_id.rs` `SendNeededFactIdHandler`; `send_requested_fact.rs` `SendRequestedFactHandler` (`shareable_fact_for_connection`, `require_sendable_fact`); three-daemon pattern (`three_player_sync_through_alice_keeps_workspace_scopes_separate`); pending error site `core/projectors.rs:456`.
 
-### E2E-GAP15b — handler-unit: alice's shareable index for a quarantined owner advertises to a SECOND connection without decoding, and re-request is suppressed by retention  `handler-unit`
-- **Setup:** Single store (`CORE_SCHEMA_SOURCE` + `FACTS_SCHEMA_SOURCE`). Seed two distinct connections rooted at alice: `C_bob` (alice<->bob) and `C_carol` (alice<->carol), each with the endpoint/endpoint_shared facts the existing `share_fact_with_sync` / `seed_connection` unit tests construct. Insert an owner fact `U` with first byte tag 56 (`content::message:2`) that is RETAINED-but-quarantined on this node (no projector ran for it; it is opaque bytes in `persisted_fact`). Build a `ShareFactWithSync{ owner_fact_id: U.id, context_have: [], state: SyncShareState::Upsert }` whose `record_sync_contribution` makes `U` shareable for BOTH `C_bob` and `C_carol`. Mark `C_bob` as `U`'s origin connection (via the `fact_receipt` origin set) so it is the EXCLUDED connection.
+### E2E-GAP15b — handler-unit: alice's shareable index for a pending owner advertises to a SECOND connection without decoding, and re-request is suppressed by retention  `handler-unit`
+- **Setup:** Single store (`CORE_SCHEMA_SOURCE` + `FACTS_SCHEMA_SOURCE`). Seed two distinct connections rooted at alice: `C_bob` (alice<->bob) and `C_carol` (alice<->carol), each with the endpoint/endpoint_shared facts the existing `share_fact_with_sync` / `seed_connection` unit tests construct. Insert an owner fact `U` with first byte tag 56 (`content::message:2`) that is RETAINED-but-pending on this node (no projector ran for it; it is opaque bytes in `persisted_fact`). Build a `ShareFactWithSync{ owner_fact_id: U.id, context_have: [], state: SyncShareState::Upsert }` whose `record_sync_contribution` makes `U` shareable for BOTH `C_bob` and `C_carol`. Mark `C_bob` as `U`'s origin connection (via the `fact_receipt` origin set) so it is the EXCLUDED connection.
 - **Action:** (1) Submit the upsert intent to `ShareFactWithSyncHandler::handle`. (2) Independently, construct a `sync::have_id` advertising `U.id` arriving on `C_carol`, and submit `send_needed_fact_id_intent(SendNeededFactId{ have_fact_id })` to `SendNeededFactIdHandler::handle`.
-- **Expect:** (1) The share handler succeeds even though `U` is undecodable: `context.require_fact(&U.id)` + `require_non_local_fact_bytes(&U.id)` pass on opaque bytes (tag 56 is non-local), `record_sync_contribution` returns `changed=true`, and `advertise_indexed_fact_to_connections_except` emits a `send_facts_on_connection` intent for `C_carol` but NOT `C_bob` (origin excluded). The owner body is never decoded — no projector for tag 56 is invoked, no "no target projector registered for fact tag 56" error. (2) Because `U` is already retained, `persisted_fact(store,&U.id)?.is_some()` is true -> `SendNeededFactIdHandler::handle` returns empty `PipelineEffects::new()`; no `sync::need_id` is emitted (SYNC-17 echo suppression holds for a quarantined owner exactly as for a normal one). Together: alice can relay a quarantined owner's INDEX to a non-origin connection and will NOT re-fetch the same opaque owner it already holds.
-- **Defends:** ADMISSION/SUBSTANCE: the shareable-index + advertise relay layer is version-agnostic and decoupled from owner projectability (extends SYNC-29 from one index-projection to the multi-connection relay write path); SYNC-16/17 retention-suppression for quarantined bytes; no-echo guarantee underpinning the E2E across three ceilings.
+- **Expect:** (1) The share handler succeeds even though `U` is undecodable: `context.require_fact(&U.id)` + `require_non_local_fact_bytes(&U.id)` pass on opaque bytes (tag 56 is non-local), `record_sync_contribution` returns `changed=true`, and `advertise_indexed_fact_to_connections_except` emits a `send_facts_on_connection` intent for `C_carol` but NOT `C_bob` (origin excluded). The owner body is never decoded — no projector for tag 56 is invoked, no "no target projector registered for fact tag 56" error. (2) Because `U` is already retained, `persisted_fact(store,&U.id)?.is_some()` is true -> `SendNeededFactIdHandler::handle` returns empty `PipelineEffects::new()`; no `sync::need_id` is emitted (SYNC-17 echo suppression holds for a pending owner exactly as for a normal one). Together: alice can relay a pending owner's INDEX to a non-origin connection and will NOT re-fetch the same opaque owner it already holds.
+- **Defends:** ADMISSION/SUBSTANCE: the shareable-index + advertise relay layer is version-agnostic and decoupled from owner projectability (extends SYNC-29 from one index-projection to the multi-connection relay write path); SYNC-16/17 retention-suppression for pending bytes; no-echo guarantee underpinning the E2E across three ceilings.
 - **Refs:** `share_fact_with_sync.rs:178` `ShareFactWithSyncHandler::handle` (`require_fact` / `require_non_local_fact_bytes`, `record_sync_contribution`, `advertise_indexed_fact_to_connections_except` lines 200-223); `shared_fact/rows.rs:213` `record_sync_contribution`, `:1088` `connection_ids_for_shareable_fact`, `:1047` `shareable_fact_for_connection`; `seed_connection.rs:116`; `send_needed_fact_id.rs` early-return on `persisted_fact(...).is_some()`; `connection::fact_receipt::origin_connection_ids_for_fact`; tag 56 = `content::message:2`.
 
-### E2E-GAP15c — three-ceiling fleet rises to cover tag 56: alice + carol activate the relayed quarantined owner on wipe+replay deterministically, no strand/duplicate  `multinode-network`
-- **Setup:** Continue from E2E-GAP15a's end state: bob holds `U` (tag 56) materialized; alice (ceiling 7) and carol (ceiling 6) both hold `U` RETAINED-opaque/quarantined; the `sync::shared_fact` index for `U` and the connection facts persist on alice. All three still share one workspace.
-- **Action:** Retire the laggard release so the FLEET ceiling rises to cover tag 56 on every node: drop carol from the still-usable set (e.g. `clock advance` past its release `expires_at + M`, or remove carol's release from `fleet.json`) and refresh manifests so alice's and carol's ceilings both reach 8. Then run a wipe+replay on alice and on carol (the model's "quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"). Issue NO new `send`.
+### E2E-GAP15c — three-ceiling fleet rises to cover tag 56: alice + carol activate the relayed pending owner on wipe+replay deterministically, no strand/duplicate  `multinode-network`
+- **Setup:** Continue from E2E-GAP15a's end state: bob holds `U` (tag 56) materialized; alice (ceiling 7) and carol (ceiling 6) both hold `U` RETAINED-opaque/pending; the `sync::shared_fact` index for `U` and the connection facts persist on alice. All three still share one workspace.
+- **Action:** Retire the laggard release so the FLEET ceiling rises to cover tag 56 on every node: drop carol from the still-usable set (e.g. `clock advance` past its release `expires_at + M`, or remove carol's release from `fleet.json`) and refresh manifests so alice's and carol's ceilings both reach 8. Then run a wipe+replay on alice and on carol (the model's "pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"). Issue NO new `send`.
 - **Expect:** (1) On alice's replay, `U` is re-fed via the historical adapter keyed by its OWN tag 56 (REPLAY DETERMINISM, ceiling-independent per-fact) and now MATERIALIZES: `wait_for_content_count(&alice,&workspace,1)` and `poll_for_message_text(&alice,&workspace,"v2-payload",10_000)` pass; alice's `messages WORKSPACE` row now equals bob's byte-for-byte (Invariant (2) rendering uniformity at the common ceiling). (2) carol's replay likewise activates `U` and materializes the SAME row. (3) Determinism/no-echo: `fact_count` on each node is UNCHANGED by the replay (activation re-derives display rows from retained facts; it recreates only deterministic facts, mints no new owner) — no duplicate `U`, no new `sync::need_id`/`have_id` rounds spawned, no fact stranded as still-opaque on alice or carol. (4) bob is unaffected (already materialized; no regression). The cross-version dependency closure that spanned three ceilings collapses to a single coherent rendering once the ceiling covers tag 56.
-- **Defends:** ADMISSION ("quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"); Invariant (4) REPLAY DETERMINISM (each retained fact replays via the adapter keyed by its own tag, ceiling-independent, recreates only deterministic facts); Invariant (2) (post-activation rows identical across nodes at the common ceiling); confirms the three-ceiling relay leaves NO permanent strand or echo.
+- **Defends:** ADMISSION ("pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"); Invariant (4) REPLAY DETERMINISM (each retained fact replays via the adapter keyed by its own tag, ceiling-independent, recreates only deterministic facts); Invariant (2) (post-activation rows identical across nodes at the common ceiling); confirms the three-ceiling relay leaves NO permanent strand or echo.
 - **Refs:** `content::message:2` tag 56 historical adapter via `FACT_ROUTES` / `RouterProjector::project` (`core/projectors.rs:448`, error site :456 must NOT fire post-rise); wipe+replay harness; `wait_for_content_count` / `poll_for_message_text` / `fact_count`; manifest refresh + `clock advance` ceiling recompute; contrast SYNC-09/11 (single-node activation) and E2E-28 (fleet-min rise) which this extends to the relayed-owner three-ceiling case.
-### AUTHZ-GAP16a — quarantined bootstrap admin (tag 139) activating after its `auth_workspace` anchor was purged-with-preserving-tombstone resolves from the tombstone, never from nothing  `replay-cli`
-- **Setup:** Node B from AUTHZ-02/03 holding a QUARANTINED above-ceiling bootstrap `auth::admin` fact AD (a hypothetical N+1 reissue of tag 139; `authority_fact_id == workspace_id == W.id`, the root self-grant branch, `project_bootstrap_admin`). During the quarantine window — ceiling still N, AD opaque/unprojected — the workspace anchor W (the SOLE emitter of the `auth_workspace` offer over `W.id..W.id`, `auth::workspace::project`) is purged with an authority-preserving tombstone per the AUTHZ-13 safe path: a tombstone that re-publishes the `auth_workspace` offer AND lets core load anchor payload whose loaded `Fact.id == W.id` and whose decoded `WorkspaceFact` re-verifies `workspace::layout::verify_signature`. Then a signed manifest raises B's ceiling to cover AD's intro_version; trusted_time advanced past `blocker.expires_at + M`.
+### AUTHZ-GAP16a — pending bootstrap admin (tag 139) activating after its `auth_workspace` anchor was purged-with-preserving-tombstone resolves from the tombstone, never from nothing  `replay-cli`
+- **Setup:** Node B from AUTHZ-02/03 holding a PENDING above-ceiling bootstrap `auth::admin` fact AD (a hypothetical N+1 reissue of tag 139; `authority_fact_id == workspace_id == W.id`, the root self-grant branch, `project_bootstrap_admin`). During the pending window — ceiling still N, AD opaque/unprojected — the workspace anchor W (the SOLE emitter of the `auth_workspace` offer over `W.id..W.id`, `auth::workspace::project`) is purged with an authority-preserving tombstone per the AUTHZ-13 safe path: a tombstone that re-publishes the `auth_workspace` offer AND lets core load anchor payload whose loaded `Fact.id == W.id` and whose decoded `WorkspaceFact` re-verifies `workspace::layout::verify_signature`. Then a signed manifest raises B's ceiling to cover AD's intro_version; trusted_time advanced past `blocker.expires_at + M`.
 - **Action:** Wipe derived state and replay all retained facts (per-tag historical adapters). AD now routes to its `v_{N+1}` admin adapter; `project_bootstrap_admin` calls `context.payload_for(&needs.workspace)` (role `auth_workspace`, range `W.id..W.id`, project.rs:91/174).
 - **Expect:** The bootstrap admin materializes (root `admin` row + the two `auth_admin` offers, project.rs:243-269) ONLY by consuming the preserving tombstone's payload: the matched payload satisfies `matched.offer.owner == matched.payload.id` (projectors.rs:184) AND `decode_workspace_context`'s `workspace_fact.id == W.id` check (project.rs:234) AND `admin.signer_public_key == workspace.public_key` (project.rs:102). It MUST NOT materialize from a missing/None payload (that path returns `Ok(needs.output())` and parks — project.rs:92), and MUST NOT fabricate the row from the tombstone's own id as if it were W. Pre-rise state (and any replay where the tombstone does not load W-id payload) shows NO admin authority.
 - **Defends:** ADMISSION activation-on-replay (AUTHZ-03) INTERSECTED with anchor purge-with-preserving-tombstone (AUTHZ-13): the activating authority projector must resolve its anchor from the tombstone exactly as a live admit would, neither fabricating authority from a removed anchor nor silently dropping a legitimately-tombstoned grant. Invariants (3) ceiling monotonicity, (4) replay determinism, (6) safety floor.
 - **Refs:** `auth::admin::project::project_bootstrap_admin` (project.rs:85-114), `BootstrapAdminNeeds` (project.rs:167-187), `decode_workspace_context` (project.rs:230-241), `auth::workspace::project::WorkspaceProjector` (sole `auth_workspace` offer), `ProjectionContext::payload_for` / `payload_for_checked` owner-check (projectors.rs:170-188), AUTHZ-03, AUTHZ-13.
 
-### AUTHZ-GAP16b — quarantined DELEGATED admin (tag 139) whose granting `auth_admin` authority anchor was purged-with-tombstone cannot be satisfied by a substitute-id tombstone  `projector-unit`
-- **Setup:** Workspace W with root admin A1. A node holds a QUARANTINED above-ceiling DELEGATED `auth::admin` fact AD2 (N+1 reissue; `authority_fact_id == A1.id != W.id`, so `project_delegated_admin`; target user U in W). During quarantine the granting authority anchor A1 (the `auth_admin` offer over `A1.id..A1.id`, project.rs:251-257) is purged. Construct TWO tombstone variants for the activating replay: (i) a FAITHFUL preserving tombstone whose loaded payload has `Fact.id == A1.id` and decodes to A1's exact `AdminFact` (re-verifies `layout::verify_signature`, `authority.public_key`, `authority.workspace_id == W.id`); (ii) a SUBSTITUTE tombstone with a DIFFERENT fact id `T.id != A1.id` that re-publishes the `auth_admin` coordinate at `A1.id..A1.id` but whose loaded payload id is `T.id`. Ceiling then rises to cover AD2; trusted_time past `expires_at + M`. The `auth_workspace` (W) and `auth_user` (U) anchors remain intact.
+### AUTHZ-GAP16b — pending DELEGATED admin (tag 139) whose granting `auth_admin` authority anchor was purged-with-tombstone cannot be satisfied by a substitute-id tombstone  `projector-unit`
+- **Setup:** Workspace W with root admin A1. A node holds a PENDING above-ceiling DELEGATED `auth::admin` fact AD2 (N+1 reissue; `authority_fact_id == A1.id != W.id`, so `project_delegated_admin`; target user U in W). During pending the granting authority anchor A1 (the `auth_admin` offer over `A1.id..A1.id`, project.rs:251-257) is purged. Construct TWO tombstone variants for the activating replay: (i) a FAITHFUL preserving tombstone whose loaded payload has `Fact.id == A1.id` and decodes to A1's exact `AdminFact` (re-verifies `layout::verify_signature`, `authority.public_key`, `authority.workspace_id == W.id`); (ii) a SUBSTITUTE tombstone with a DIFFERENT fact id `T.id != A1.id` that re-publishes the `auth_admin` coordinate at `A1.id..A1.id` but whose loaded payload id is `T.id`. Ceiling then rises to cover AD2; trusted_time past `expires_at + M`. The `auth_workspace` (W) and `auth_user` (U) anchors remain intact.
 - **Action:** Wipe+replay. AD2 routes to its `v_{N+1}` delegated-admin adapter; `project_delegated_admin` resolves `payload_for(&needs.workspace)`, `payload_for(&needs.authority)`, `payload_for(&needs.user)` (project.rs:122-130).
 - **Expect:** Variant (i): AD2 materializes the delegated `admin` row and `auth_admin` offers — the faithful tombstone passes `authority_fact.id == admin.authority_fact_id` (== A1.id, project.rs:137-138) and the `signer_public_key == authority.public_key` check (project.rs:145). Variant (ii): REJECTED with "admin authority context payload id mismatch" (project.rs:138) because `matched.payload.id == T.id != A1.id` — equivalently caught by the offer-owner check (projectors.rs:184) since the substitute tombstone's offer.owner is T.id. A substitute-id tombstone NEVER lets a delegated grant re-anchor onto a removed authority; it does not silently drop the legitimately-tombstoned case (i). No version of the adapter relaxes the id-equality binding.
-- **Defends:** Cross-version authority containment under anchor purge: a quarantined delegated grant activating after its `auth_admin` anchor is purged must re-bind to the SAME authority fact id via a faithful tombstone, never to a re-keyed/substitute tombstone (which would forge an authority chain). Mirrors AUTHZ-11/AUTHZ-15 statically; this is the quarantine×purge×replay intersection. Invariants (3), (4).
+- **Defends:** Cross-version authority containment under anchor purge: a pending delegated grant activating after its `auth_admin` anchor is purged must re-bind to the SAME authority fact id via a faithful tombstone, never to a re-keyed/substitute tombstone (which would forge an authority chain). Mirrors AUTHZ-11/AUTHZ-15 statically; this is the pending×purge×replay intersection. Invariants (3), (4).
 - **Refs:** `auth::admin::project::project_delegated_admin` (project.rs:116-165), `DelegatedAdminNeeds` (project.rs:189-228), id-mismatch guards (project.rs:137-138, 234), `ProjectionContext::payload_for_checked` owner==payload.id (projectors.rs:184-186, 221), AUTHZ-11, AUTHZ-15.
 
-### AUTHZ-GAP16c — quarantined admin activating after a NON-preserving (coordinate-only) anchor purge PARKS uncounted, never fabricates authority  `replay-cli`
-- **Setup:** Same quarantined above-ceiling `auth::admin` AD as GAP16a/b, but the anchor purge during the quarantine window writes NO authority-preserving tombstone — the anchor bytes (W for the bootstrap case, or A1 for the delegated case) are physically removed and no fact whose loaded `Fact.id` equals the anchor id remains. The `auth_workspace` / `auth_admin` need coordinate therefore has no loadable offer-owner payload. Ceiling rises to cover AD; trusted_time past `expires_at + M`.
+### AUTHZ-GAP16c — pending admin activating after a NON-preserving (coordinate-only) anchor purge PARKS uncounted, never fabricates authority  `replay-cli`
+- **Setup:** Same pending above-ceiling `auth::admin` AD as GAP16a/b, but the anchor purge during the pending window writes NO authority-preserving tombstone — the anchor bytes (W for the bootstrap case, or A1 for the delegated case) are physically removed and no fact whose loaded `Fact.id` equals the anchor id remains. The `auth_workspace` / `auth_admin` need coordinate therefore has no loadable offer-owner payload. Ceiling rises to cover AD; trusted_time past `expires_at + M`.
 - **Action:** Wipe+replay. AD routes to its `v_{N+1}` adapter and projects; `payload_for(&needs.workspace)` (bootstrap) or `payload_for(&needs.authority)` (delegated) returns `None`.
-- **Expect:** The projector takes the `let Some(..) else { return Ok(needs.output()); }` PARK path (project.rs:92 for bootstrap, project.rs:122/125/128 for delegated): AD re-emits its unmet `auth_workspace`/`auth_admin`/`auth_user` needs and is DEFERRED. NO `admin` row is written, NO `auth_admin` offer is published, the target gains NO admin authority, and AD stays uncounted/undisplayed (as it was while quarantined). The replay does NOT hard-error (no projectors.rs:456 path — AD's tag is now routed) and does NOT fabricate authority from the removed anchor. The grant remains recoverable only if a faithful tombstone (GAP16a/b variant i) is later supplied; an unsafe purge that destroyed the anchor must leave the grant dormant, not active.
-- **Defends:** The "park, never fabricate" safety boundary when a quarantined authority fact activates but its anchor was purged WITHOUT a preserving tombstone — the opposite of GAP16a/b's faithful-tombstone path. Prevents both fabrication (authority from a removed anchor) and the silent error/crash that today's projectors.rs:456 would have produced for an unrouted tag. Invariants (1) (no crash, uncounted), (4), (6).
+- **Expect:** The projector takes the `let Some(..) else { return Ok(needs.output()); }` PARK path (project.rs:92 for bootstrap, project.rs:122/125/128 for delegated): AD re-emits its unmet `auth_workspace`/`auth_admin`/`auth_user` needs and is DEFERRED. NO `admin` row is written, NO `auth_admin` offer is published, the target gains NO admin authority, and AD stays uncounted/undisplayed (as it was while pending). The replay does NOT hard-error (no projectors.rs:456 path — AD's tag is now routed) and does NOT fabricate authority from the removed anchor. The grant remains recoverable only if a faithful tombstone (GAP16a/b variant i) is later supplied; an unsafe purge that destroyed the anchor must leave the grant dormant, not active.
+- **Defends:** The "park, never fabricate" safety boundary when a pending authority fact activates but its anchor was purged WITHOUT a preserving tombstone — the opposite of GAP16a/b's faithful-tombstone path. Prevents both fabrication (authority from a removed anchor) and the silent error/crash that today's projectors.rs:456 would have produced for an unrouted tag. Invariants (1) (no crash, uncounted), (4), (6).
 - **Refs:** `project_bootstrap_admin` / `project_delegated_admin` park returns (project.rs:92, 122, 125, 128), `ProjectionOutput::need` re-emission (projectors.rs:331), `RouterProjector::project` routed-tag path vs unknown-tag Err (projectors.rs:456), AUTHZ-03, AUTHZ-12, AUTHZ-29.
-### CONTENT-GAP17a — Retention-floor purge over a MIXED v1+quarantined-v2 message set: v2 stays quarantined-and-unpurged at ceiling N, then self-purges on ceiling-rise activation (no resurrection)  `replay-cli`
-- **Setup:** Single node at ceiling N where `content::message` v1 (tag 50) is ceiling-active but `content::message_v2` (a new tag, intro_version N+1, with its kept-forever `content/message_v2/` projector) is NOT. Seed a workspace and author several v1 messages via `con send WORKSPACE_ID_HEX TEXT` at low `minute` values. Then RECEIVE over sync one above-ceiling `message_v2` fact whose decoded `frontier_id`/`minute` fall in the same workspace and the same early minute band as the v1 messages; per ADMISSION it is QUARANTINED (retained opaque bytes, unprojected, undisplayed, uncounted — it does NOT hit the `RouterProjector::project` Err at `core/projectors.rs:456`). Now author a `content::retention_policy` (tag 147) via `con disappearing-set WORKSPACE_ID_HEX TTL_MINUTES` and then `con disappearing-tighten WORKSPACE_ID_HEX SMALLER_TTL --yes`, advancing `retire_minute` so the tightened floor sits ABOVE the minute band shared by the v1 messages AND the quarantined v2 fact. Drive trusted-time observations / the `content_message_expiry` `expiration_timeline()` past the relevant wakes so the floor is reached. Capture `con messages`, `con content-count`, `con disappearing-status WORKSPACE_ID_HEX` (effective_floor/current_ttl_minutes/horizon_floor), and `state_hash`.
+### CONTENT-GAP17a — Retention-floor purge over a MIXED v1+pending-v2 message set: v2 stays pending-and-unpurged at ceiling N, then self-purges on ceiling-rise activation (no resurrection)  `replay-cli`
+- **Setup:** Single node at ceiling N where `content::message` v1 (tag 50) is ceiling-active but `content::message_v2` (a new tag, intro_version N+1, with its kept-forever `content/message_v2/` projector) is NOT. Seed a workspace and author several v1 messages via `con send WORKSPACE_ID_HEX TEXT` at low `minute` values. Then RECEIVE over sync one above-ceiling `message_v2` fact whose decoded `frontier_id`/`minute` fall in the same workspace and the same early minute band as the v1 messages; per ADMISSION it is PENDING (pending opaque bytes, unprojected, undisplayed, uncounted — it does NOT hit the `RouterProjector::project` Err at `core/projectors.rs:456`). Now author a `content::retention_policy` (tag 147) via `con disappearing-set WORKSPACE_ID_HEX TTL_MINUTES` and then `con disappearing-tighten WORKSPACE_ID_HEX SMALLER_TTL --yes`, advancing `retire_minute` so the tightened floor sits ABOVE the minute band shared by the v1 messages AND the pending v2 fact. Drive trusted-time observations / the `content_message_expiry` `expiration_timeline()` past the relevant wakes so the floor is reached. Capture `con messages`, `con content-count`, `con disappearing-status WORKSPACE_ID_HEX` (effective_floor/current_ttl_minutes/horizon_floor), and `state_hash`.
 - **Action:** (1) Observe steady state at ceiling N. (2) Raise the fleet manifest so the oldest still-usable release supports protocol N+1 and advance trusted_time past `blocker.expires_at + M` so the ceiling rises to cover `message_v2`'s intro_version. (3) `con replay` (canonical wipe+replay).
-- **Expect:** At ceiling N: the v1 messages whose `minute < retire_minute` self-purge — each v1 `ContentMessageProjector` reaches `retention_floor_reached(...)` and emits `retired_output(...)` which `purge_self(message_id)`s and writes the `MESSAGE_TOMBSTONES` row (`message/project.rs:105, 463-491`); they are absent from `CONTENT_MESSAGES`/`OPENED_MESSAGES`. The quarantined v2 fact is UNTOUCHED by this purge — it is opaque and its projector never ran, and per `purge_self` policy (`core/projectors.rs:351-355` "Core verifies ... this id is the projected fact id; cross-fact deletion must be expressed as context that wakes the target fact's projector") NO other projector may purge it; it remains retained, uncounted, invisible, and the retention floor cannot reach inside it. After ceiling-rise + replay: the now-active v2 fact routes to `content/message_v2/`'s projector, which recomputes the SAME `retention_floor_need` (role `content_retention_floor`, `content/message.rs:28`) from the retained tag-147 policy chain and the SAME replayable `content_message_expiry` time wakes — finds `message.minute < retire_minute` — and emits its OWN `retired_output`/`purge_self` so it materializes a tombstone and is ABSENT from `CONTENT_MESSAGES`. The v2 message MUST NOT resurrect as a live row. `con content-count` does not increase for the now-expired v2 message; `con disappearing-status` floor/TTL is identical to ceiling N (re-derived from the same v1 policy facts). `state_hash` is stable across the canonical replay.
-- **Defends:** Closes the mixed-version retention-purge gap: a retention/disappearing floor that covers a quarantined-v2 fact's minute does not (and cannot) purge it at ceiling N, and the v2 fact, once active, RE-DERIVES its own expiry from retained retention+time facts and self-purges rather than leaking expired content back on upgrade. Invariant (4) replay determinism + ceiling-independence (each fact replays via its OWN-tag adapter); ADMISSION quarantine→activation; Invariant (5) old meaning preserved; the `purge_self` cross-fact constraint.
-- **Refs:** `content/message/project.rs` `expiry_minute_reached`/`retention_floor_reached`/`cover_horizon_reached` (lines 99-107, 366-409), `expired_output`/`retired_output` `purge_self` (lines 434-491); `core/projectors.rs:351-359` `purge_self` policy + `:456` unknown-tag Err (the quarantine path that must intercept the v2 tag at ceiling N); `content/message.rs:19-40` `COVER_HORIZON_MINUTES`/`expiration_timeline()`/`retention_floor_need` (role `content_retention_floor`); `content::retention_policy` tag 147 + `RetentionPolicyProjector`, `disappearing-set`/`disappearing-tighten` (`content/retention_policy/cli.rs` DISAPPEARING_SET_USAGE/DISAPPEARING_TIGHTEN_USAGE, `commands.rs`); read_models CONTENT_MESSAGES/OPENED_MESSAGES/MESSAGE_TOMBSTONES (registry.rs 36-182); cross-refs REPLAY-19/20, CONTENT-22/23/25.
+- **Expect:** At ceiling N: the v1 messages whose `minute < retire_minute` self-purge — each v1 `ContentMessageProjector` reaches `retention_floor_reached(...)` and emits `retired_output(...)` which `purge_self(message_id)`s and writes the `MESSAGE_TOMBSTONES` row (`message/project.rs:105, 463-491`); they are absent from `CONTENT_MESSAGES`/`OPENED_MESSAGES`. The pending v2 fact is UNTOUCHED by this purge — it is opaque and its projector never ran, and per `purge_self` policy (`core/projectors.rs:351-355` "Core verifies ... this id is the projected fact id; cross-fact deletion must be expressed as context that wakes the target fact's projector") NO other projector may purge it; it remains retained, uncounted, invisible, and the retention floor cannot reach inside it. After ceiling-rise + replay: the now-active v2 fact routes to `content/message_v2/`'s projector, which recomputes the SAME `retention_floor_need` (role `content_retention_floor`, `content/message.rs:28`) from the retained tag-147 policy chain and the SAME replayable `content_message_expiry` time wakes — finds `message.minute < retire_minute` — and emits its OWN `retired_output`/`purge_self` so it materializes a tombstone and is ABSENT from `CONTENT_MESSAGES`. The v2 message MUST NOT resurrect as a live row. `con content-count` does not increase for the now-expired v2 message; `con disappearing-status` floor/TTL is identical to ceiling N (re-derived from the same v1 policy facts). `state_hash` is stable across the canonical replay.
+- **Defends:** Closes the mixed-version retention-purge gap: a retention/disappearing floor that covers a pending-v2 fact's minute does not (and cannot) purge it at ceiling N, and the v2 fact, once active, RE-DERIVES its own expiry from retained retention+time facts and self-purges rather than leaking expired content back on upgrade. Invariant (4) replay determinism + ceiling-independence (each fact replays via its OWN-tag adapter); ADMISSION pending→activation; Invariant (5) old meaning preserved; the `purge_self` cross-fact constraint.
+- **Refs:** `content/message/project.rs` `expiry_minute_reached`/`retention_floor_reached`/`cover_horizon_reached` (lines 99-107, 366-409), `expired_output`/`retired_output` `purge_self` (lines 434-491); `core/projectors.rs:351-359` `purge_self` policy + `:456` unknown-tag Err (the pending path that must intercept the v2 tag at ceiling N); `content/message.rs:19-40` `COVER_HORIZON_MINUTES`/`expiration_timeline()`/`retention_floor_need` (role `content_retention_floor`); `content::retention_policy` tag 147 + `RetentionPolicyProjector`, `disappearing-set`/`disappearing-tighten` (`content/retention_policy/cli.rs` DISAPPEARING_SET_USAGE/DISAPPEARING_TIGHTEN_USAGE, `commands.rs`); read_models CONTENT_MESSAGES/OPENED_MESSAGES/MESSAGE_TOMBSTONES (registry.rs 36-182); cross-refs REPLAY-19/20, CONTENT-22/23/25.
 
-### CONTENT-GAP17b — A `content_purged` coordinate (deletion-style) CAN target an opaque quarantined-v2 fact; the offer is published but only CONSUMED when the v2 projector activates  `projector-unit`
-- **Setup:** Construct, via `project_typed` unit harness, the cross-fact purge path against a quarantined target. Build a `content::message_v2` fact F2 (new tag, above ceiling N) with known decoded `frontier_id = FR`, `minute = M`, and fact id `ID2`; it is QUARANTINED at the node (opaque, no `content_message_meta` offer emitted because its projector never ran). Build a `content::message_deletion` (tag 51) D whose `target_frontier_id = FR`, `target_minute = M`, `target_message_id = ID2`, authored by ID2's claimed author. Provide the deletion projector the signer/author context but NO `content_message_meta` payload for ID2 (since the v2 target is unprojectable at ceiling N).
+### CONTENT-GAP17b — A `content_purged` coordinate (deletion-style) CAN target an opaque pending-v2 fact; the offer is published but only CONSUMED when the v2 projector activates  `projector-unit`
+- **Setup:** Construct, via `project_typed` unit harness, the cross-fact purge path against a pending target. Build a `content::message_v2` fact F2 (new tag, above ceiling N) with known decoded `frontier_id = FR`, `minute = M`, and fact id `ID2`; it is PENDING at the node (opaque, no `content_message_meta` offer emitted because its projector never ran). Build a `content::message_deletion` (tag 51) D whose `target_frontier_id = FR`, `target_minute = M`, `target_message_id = ID2`, authored by ID2's claimed author. Provide the deletion projector the signer/author context but NO `content_message_meta` payload for ID2 (since the v2 target is unprojectable at ceiling N).
 - **Action:** Run `ContentMessageDeletionProjector::project_typed(D, context)` at ceiling N. Then separately decode the `target_purged_offer` it would publish and assert the coordinate bytes; then simulate ceiling-rise activation where the v2 projector emits its `target_purged_need(FR, M, ID2)` and check the offer/need overlap.
 - **Expect:** At ceiling N the deletion projector BLOCKS on its `content_message_meta` `target_need` for `ID2` (`message_deletion/project.rs:61-99`) — it returns the needs and does NOT yet publish a usable purge for a target it cannot validate, so no spurious tombstone for the opaque fact and no resurrection-by-deletion. CRITICALLY: the purge coordinate key produced by `target_purged_offer(FR, M, ID2)` (`content/purge/project.rs:47-56, 74-85`, layout = version(1)+frontier(32)+minute(8 BE)+fact_id(32) = 73 bytes, `CONTENT_PURGE_KEY_VERSION = 1`) is byte-identical to the `target_purged_need(FR, M, ID2)` the v2 message projector emits at `message/project.rs:75-81` — i.e. a purge coordinate CAN address a fact id the node cannot yet project, because the coordinate is keyed on the target's `(frontier_id, minute, fact_id)` and is stored opaquely by core. On ceiling-rise + replay, once both the authorizing context (the now-derivable `content_message_meta` offer for the activated v2 target) and the deletion's offer are present, the v2 projector exact-matches the `content_purged` coordinate via `decode_target_purge_key` and self-purges (`author_deletion_output`), so the activated v2 fact finds itself ALREADY-PURGED and never produces a live `CONTENT_MESSAGES` row.
-- **Defends:** Proves the inventory-section-1 purge coordinate (`target_purge_key`) can target an opaque quarantined fact, and that consumption is correctly deferred until the target projector exists — answering the open "whether a purge coordinate can target a fact the node cannot yet project." Closes the leak-on-upgrade question for the deletion-style purge path. Invariant (4); ADMISSION quarantine→activation; the `content_purged` MATCH rule (target projectors exact-match their own coordinate).
+- **Defends:** Proves the inventory-section-1 purge coordinate (`target_purge_key`) can target an opaque pending fact, and that consumption is correctly deferred until the target projector exists — answering the open "whether a purge coordinate can target a fact the node cannot yet project." Closes the leak-on-upgrade question for the deletion-style purge path. Invariant (4); ADMISSION pending→activation; the `content_purged` MATCH rule (target projectors exact-match their own coordinate).
 - **Refs:** `content/purge/project.rs` `target_purged_offer`/`target_purged_need`/`target_purge_key`/`decode_target_purge_key`/`TargetPurgeKey`/`content_purged_role` (lines 32-105), `CONTENT_PURGE_KEY_VERSION = 1`, `TARGET_PURGE_KEY_BYTES = 1+32+8+32`; `content/message_deletion/project.rs:61-137` (`content_message_meta` target_need gate + `target_purged_offer` emission); `content/message/project.rs:75-81` (`target_purged_need` keyed on `frontier_id`/`minute`/`fact.id`); `core/projectors.rs:351-359` `purge_self` self-only constraint.
 
-### CONTENT-GAP17c — `disappearing-compact` over a mixed set leaves the quarantined-v2 fact retained and uncounted; compaction is reproducible and the v2 fact re-expires (not resurrects) on activation  `replay-cli`
-- **Setup:** Continue from CONTENT-GAP17a's pre-rise state: ceiling N, v1 messages already retention-floor-purged (tombstoned), one `message_v2` fact still QUARANTINED whose `minute` is below the same tightened `retire_minute`, plus the retained tag-147 policy chain. Run `con disappearing-compact WORKSPACE_ID_HEX`, which drives the `content::purge` CONTEXT (role `content_purged`, `content/purge/project.rs` — NO `layout.rs`, NOT in `FACT_ROUTES`) to compact tombstones/purges. Capture FACT_ROUTES count (must stay 43), `con content-count`, `con messages`, and `state_hash` H1.
+### CONTENT-GAP17c — `disappearing-compact` over a mixed set leaves the pending-v2 fact retained and uncounted; compaction is reproducible and the v2 fact re-expires (not resurrects) on activation  `replay-cli`
+- **Setup:** Continue from CONTENT-GAP17a's pre-rise state: ceiling N, v1 messages already retention-floor-purged (tombstoned), one `message_v2` fact still PENDING whose `minute` is below the same tightened `retire_minute`, plus the retained tag-147 policy chain. Run `con disappearing-compact WORKSPACE_ID_HEX`, which drives the `content::purge` CONTEXT (role `content_purged`, `content/purge/project.rs` — NO `layout.rs`, NOT in `FACT_ROUTES`) to compact tombstones/purges. Capture FACT_ROUTES count (must stay 47), `con content-count`, `con messages`, and `state_hash` H1.
 - **Action:** (1) Run `con disappearing-compact` again and confirm idempotence (no new facts, same `state_hash`). (2) Raise the manifest + advance trusted_time so the ceiling covers `message_v2`. (3) `con replay`; then re-run `con disappearing-compact` and `con replay` once more for a second-pass determinism check (H1 vs H2).
-- **Expect:** Compaction at ceiling N produces NO new fact tag (`fact_route_tags_are_globally_unique`, registry.rs:717-729, still holds with exactly 43 routes — purge is context-only) and does NOT touch the quarantined v2 fact: it stays retained-opaque, uncounted by `con content-count`, invisible in `con messages`. Compaction is deterministically reproducible from retained facts (re-run yields identical `state_hash`). After ceiling-rise + replay the v2 projector activates, recomputes the SAME retention floor from the SAME retained tag-147 chain + `content_message_expiry` time wakes, and self-purges (`retired_output`/`purge_self`) so the v2 fact is tombstoned, ABSENT from `CONTENT_MESSAGES`, and not resurrected by compaction; a second compact+replay pass is byte-stable (H1 == H2). No expired v2 content leaks back post-upgrade through the compaction path.
-- **Defends:** Closes the compaction sub-case of the mixed-version retention gap: context-only compaction neither prematurely purges nor later resurrects a quarantined-v2 fact; the v2 fact's expiry is re-derived deterministically on activation. Invariant (4) "recreates only deterministic facts" + order/ceiling independence; model "purge is CONTEXT, NOT a fact family"; ADMISSION quarantine→activation.
-- **Refs:** `content/purge/project.rs` `content_purged_role`/`target_purge_key`; `content/retention_policy/cli.rs` DISAPPEARING_COMPACT_USAGE + `compact_workspace_id`; registry.rs `FACT_ROUTES` + `fact_route_tags_are_globally_unique` (717-729, 43 routes); `content/message/project.rs:434-491` `expired_output`/`retired_output` `purge_self`; cross-refs CONTENT-26, REPLAY-20.
+- **Expect:** Compaction at ceiling N produces NO new fact tag (`fact_route_tags_are_globally_unique`, registry.rs:717-729, still holds with exactly 47 routes — purge is context-only) and does NOT touch the pending v2 fact: it stays retained-opaque, uncounted by `con content-count`, invisible in `con messages`. Compaction is deterministically reproducible from retained facts (re-run yields identical `state_hash`). After ceiling-rise + replay the v2 projector activates, recomputes the SAME retention floor from the SAME retained tag-147 chain + `content_message_expiry` time wakes, and self-purges (`retired_output`/`purge_self`) so the v2 fact is tombstoned, ABSENT from `CONTENT_MESSAGES`, and not resurrected by compaction; a second compact+replay pass is byte-stable (H1 == H2). No expired v2 content leaks back post-upgrade through the compaction path.
+- **Defends:** Closes the compaction sub-case of the mixed-version retention gap: context-only compaction neither prematurely purges nor later resurrects a pending-v2 fact; the v2 fact's expiry is re-derived deterministically on activation. Invariant (4) "recreates only deterministic facts" + order/ceiling independence; model "purge is CONTEXT, NOT a fact family"; ADMISSION pending→activation.
+- **Refs:** `content/purge/project.rs` `content_purged_role`/`target_purge_key`; `content/retention_policy/cli.rs` DISAPPEARING_COMPACT_USAGE + `compact_workspace_id`; registry.rs `FACT_ROUTES` + `fact_route_tags_are_globally_unique` (717-729, 47 routes); `content/message/project.rs:434-491` `expired_output`/`retired_output` `purge_self`; cross-refs CONTENT-26, REPLAY-20.
 ### CEIL-GAP18a — version conjunct arrives one ceiling-step before its carrier class: fact stays dormant in the gap  `property`
 - **Setup:** A new fat fact family F is carrier-blocked: its encoded byte size exceeds `CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES` (4 KiB) and also exceeds `CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES` (= `file::layout::CONTENT_FILE_BYTES`), so `frame_size_class_for_facts` cannot place it in small/bundle, and unlike `content::file_slice` (tag 55) it has NO `frame_file_slice` (tag 169) chunking path yet. F is introduced at `intro_version = 8`. Protocol bundle staging (one monotonic u32 = named bundle of fact-tag versions): protocol **8** adds F's tag at intro 8 but NO new carrier; protocol **9** adds the larger/chunked carrier class that can finally transport F. Fleet still-usable set at trusted_time `t0`: a single blocker rel-old `supported_protocol = 1..=7` `expires_at = T7`; rel-head `1..=9`. trusted_time `t0 < T7 + M` so ceiling == 7.
 - **Action:** Advance trusted_time past `T7 + M` (rel-old leaves the still-usable set). Recompute ceiling and re-evaluate ceiling-active for F. Now every still-usable release supports protocol **8** for F's TAG (`intro_version 8 <= ceiling 8`) — the VERSION conjunct just became true — but the still-usable set's carriers (the protocol-8 carrier inventory) still has no class that fits F (the protocol-9 carrier has not yet been required/reached fleet-wide). Then attempt to mint and ship an F-fact: locally create it and run `SendFactsOnConnectionHandler` so `fact_batches` calls `frame_size_class_for_facts`.
@@ -5725,38 +5766,38 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 ### CEIL-GAP18b — carrier conjunct arrives one ceiling-step before its fact's intro_version: fact still dormant (symmetric skew)  `property`
 - **Setup:** Same fat family F, but stage the skew the OTHER way. The fleet first reaches a protocol that adds the larger/chunked carrier class (a new `frame_*` tag sibling, e.g. a chunked path modeled on `frame_file_slice` tag 169) at protocol **8**, while F's own TAG is introduced LATER at `intro_version = 9`. Fleet still-usable set: blocker rel-old `1..=7` `expires_at = T7`; rel-head `1..=9`. Start at ceiling 7, then advance trusted_time past `T7 + M` so ceiling becomes **8** (every still-usable release now supports protocol 8 and thus the new carrier class — the TRANSPORT conjunct is satisfied), but `intro_version 9 > ceiling 8` (the VERSION conjunct is not yet true).
 - **Action:** Re-evaluate ceiling-active for F at ceiling 8. Then attempt to locally mint an F-fact via the F-creating `con` command path (admission check), independent of whether a carrier now exists.
-- **Expect:** F is NOT ceiling-active even though a carrier that can transport it now exists on every still-usable release — the version conjunct fails (`intro_version 9 > ceiling 8`). Local creation of F is REFUSED (above-ceiling mint refused); a RECEIVED F-fact (e.g. from an over-eager peer) is QUARANTINED — retained as opaque bytes, unprojected/undisplayed/uncounted, NOT dropped and NOT errored to the user (it must NOT hit `RouterProjector::project`'s `"no target projector registered for fact tag {tag}"` at projectors.rs:456 as a user-facing error). The existence of a carrier never advances activation ahead of the version conjunct. Both conjuncts must hold at the same instant; the carrier leading by a ceiling step does not flip F live.
-- **Defends:** Invariant (1) VISIBILITY (BOTH conjuncts required simultaneously — the converse skew to CEIL-GAP18a); ADMISSION (above-ceiling local-create refused; received above-ceiling QUARANTINED, not errored); ceiling-active definition; closes coverage gap #8 in the carrier-leads-version direction.
-- **Refs:** `frame_size_class_for_facts` / new chunked carrier sibling tag (`connection_frame_wire.rs`, `connection::frame_file_slice` tag 169 precedent); quarantine vs `RouterProjector::project` Err@456 (`core/projectors.rs:456`); ceiling-active glossary; intro_version on routes (`FACT_ROUTES` / `RouterProjector`).
+- **Expect:** F is NOT ceiling-active even though a carrier that can transport it now exists on every still-usable release — the version conjunct fails (`intro_version 9 > ceiling 8`). Local creation of F is REFUSED (above-ceiling mint refused); a RECEIVED F-fact (e.g. from an over-eager peer) is PENDING — retained as opaque bytes, unprojected/undisplayed/uncounted, NOT dropped and NOT errored to the user (it must NOT hit `RouterProjector::project`'s `"no target projector registered for fact tag {tag}"` at projectors.rs:456 as a user-facing error). The existence of a carrier never advances activation ahead of the version conjunct. Both conjuncts must hold at the same instant; the carrier leading by a ceiling step does not flip F live.
+- **Defends:** Invariant (1) VISIBILITY (BOTH conjuncts required simultaneously — the converse skew to CEIL-GAP18a); ADMISSION (above-ceiling local-create refused; received above-ceiling PENDING, not errored); ceiling-active definition; closes coverage gap #8 in the carrier-leads-version direction.
+- **Refs:** `frame_size_class_for_facts` / new chunked carrier sibling tag (`connection_frame_wire.rs`, `connection::frame_file_slice` tag 169 precedent); pending vs `RouterProjector::project` Err@456 (`core/projectors.rs:456`); ceiling-active glossary; intro_version on routes (`FACT_ROUTES` / `RouterProjector`).
 
 ### CEIL-GAP18c — F activates EXACTLY when the lagging second conjunct lands, and gap-window-minted facts activate cleanly on the activating replay  `blackbox-cli`
-- **Setup:** Continue CEIL-GAP18a's staging (version conjunct true at ceiling 8, carrier still lagging). Two blockers gate the two conjuncts on separate timelines: rel-old `1..=7` `expires_at = T7` (its exit raises ceiling to 8, satisfying F's `intro_version 8 <= ceiling`); rel-mid `1..=8` `expires_at = T8` with `T8 > T7` whose still-usable presence is what keeps the protocol-8-only carrier inventory (no protocol-9 chunked carrier) in force — only when rel-mid also leaves does the fleet require protocol **9** and its larger/chunked carrier, satisfying the transport conjunct. rel-head `1..=9`. During the GAP window (`T7 + M < trusted_time < T8 + M`, ceiling == 8, F still carrier-blocked) an over-eager alpha/peer node ships an F-fact to this node; this node, correctly, QUARANTINES it (opaque, uncounted).
+- **Setup:** Continue CEIL-GAP18a's staging (version conjunct true at ceiling 8, carrier still lagging). Two blockers gate the two conjuncts on separate timelines: rel-old `1..=7` `expires_at = T7` (its exit raises ceiling to 8, satisfying F's `intro_version 8 <= ceiling`); rel-mid `1..=8` `expires_at = T8` with `T8 > T7` whose still-usable presence is what keeps the protocol-8-only carrier inventory (no protocol-9 chunked carrier) in force — only when rel-mid also leaves does the fleet require protocol **9** and its larger/chunked carrier, satisfying the transport conjunct. rel-head `1..=9`. During the GAP window (`T7 + M < trusted_time < T8 + M`, ceiling == 8, F still carrier-blocked) an over-eager alpha/peer node ships an F-fact to this node; this node, correctly, holds it pending (opaque, uncounted).
 - **Action:** (1) In the gap window, run the F-creating `con` command and `con content-count` / `con messages`. (2) Advance trusted_time past `T8 + M` so rel-mid leaves and ceiling/carrier-inventory reaches protocol 9 (BOTH conjuncts now true at the same instant). (3) Run the upgrade wipe+replay, then re-run `con content-count` and the F-shipping send (`SendFactsOnConnectionHandler` / `frame_size_class_for_facts`).
-- **Expect:** During the gap window: F-create is REFUSED, the quarantined inbound F is uncounted/undisplayed (count unchanged, no user-facing error). At the instant the LAST lagging conjunct lands (both `intro_version 8 <= ceiling` AND a transporting carrier on every still-usable release), F becomes ceiling-active — not one step earlier. On the activating wipe+replay the gap-window quarantined F-fact ACTIVATES: it routes to its kept-forever projector (keyed by its OWN tag), materializes, and is counted; replay is order-independent and ceiling-independent (each retained fact replays via the adapter for its own tag). A subsequent send now seals F via the protocol-9 carrier class (no frame growth). Activation is driven ONLY by the legitimate second-conjunct arrival, never by F's own gap-window arrival.
-- **Defends:** Invariant (1) (both conjuncts at the same instant gate activation — the precise minting-a-fact-peers-cannot-carry failure mode); ADMISSION (gap-window above-(transport-)ceiling create refused; received F quarantined then ACTIVATES on next wipe+replay once ceiling+carrier cover its tag); Invariant (4) REPLAY DETERMINISM (per-tag historical adapter, order/ceiling-independent); CARRIER CAPACITY GATES CEILING; closes coverage gap #8's staged-conjunct timeline (the unpinned gap-window behavior).
-- **Refs:** `con send` / `con content-count` / `con messages` (MATCH_COMMANDS, registry.rs); `frame_size_class_for_facts` and protocol-9 chunked carrier (`connection_frame_wire.rs:659-682`); `SendFactsOnConnectionHandler` carrier refusal (`connection/send_facts_on_connection.rs:372`); quarantine activation on wipe+replay vs `RouterProjector::project` Err@456 (`core/projectors.rs:456`); ceiling = min over still-usable releases at trusted_time with margin M (multi-blocker expiry, cf. CEIL-16); contrast static CEIL-17/18, MAN-28, E2EX-21.
-### MAN-GAP19a — Own-release-expired node STILL activates quarantined above-ceiling facts on wipe+replay when the fleet ceiling rises  `replay-cli`
-- **Setup:** A `con` node whose OWN release relX has `expires_at = Ex`; trusted_time advanced to `T > Ex + M`, so relX is past expiry and the node is PRODUCTION-BLOCKED (per MAN-09: `con send` refuses to emit `content::message` tag 50). Before expiry the node had RECEIVED an above-ceiling `message:2` fact (new tag, sibling `content/message_v2/`, kept-forever projector) which is currently QUARANTINED — retained opaque, unprojected, undisplayed, `con content-count` excludes it (REPLAY-07 state). The fleet manifest also knows the blocker relO (platform=ios `6..=6`, `expires_at = Eo`); the SAME trusted_time advance that expired relX ALSO carries `T > Eo + M`, so relO drops from the still-usable set and the ceiling RISES to cover `message:2`'s tag. Capture pre-replay `con content-count` and `con state-summary`.
+- **Expect:** During the gap window: F-create is REFUSED, the pending inbound F is uncounted/undisplayed (count unchanged, no user-facing error). At the instant the LAST lagging conjunct lands (both `intro_version 8 <= ceiling` AND a transporting carrier on every still-usable release), F becomes ceiling-active — not one step earlier. On the activating wipe+replay the gap-window pending F-fact ACTIVATES: it routes to its kept-forever projector (keyed by its OWN tag), materializes, and is counted; replay is order-independent and ceiling-independent (each retained fact replays via the adapter for its own tag). A subsequent send now seals F via the protocol-9 carrier class (no frame growth). Activation is driven ONLY by the legitimate second-conjunct arrival, never by F's own gap-window arrival.
+- **Defends:** Invariant (1) (both conjuncts at the same instant gate activation — the precise minting-a-fact-peers-cannot-carry failure mode); ADMISSION (gap-window above-(transport-)ceiling create refused; received F pending then ACTIVATES on next wipe+replay once ceiling+carrier cover its tag); Invariant (4) REPLAY DETERMINISM (per-tag historical adapter, order/ceiling-independent); CARRIER CAPACITY GATES CEILING; closes coverage gap #8's staged-conjunct timeline (the unpinned gap-window behavior).
+- **Refs:** `con send` / `con content-count` / `con messages` (MATCH_COMMANDS, registry.rs); `frame_size_class_for_facts` and protocol-9 chunked carrier (`connection_frame_wire.rs:659-682`); `SendFactsOnConnectionHandler` carrier refusal (`connection/send_facts_on_connection.rs:372`); pending activation on wipe+replay vs `RouterProjector::project` Err@456 (`core/projectors.rs:456`); ceiling = min over still-usable releases at trusted_time with margin M (multi-blocker expiry, cf. CEIL-16); contrast static CEIL-17/18, MAN-28, E2EX-21.
+### MAN-GAP19a — Own-release-expired node STILL activates pending above-ceiling facts on wipe+replay when the fleet ceiling rises  `replay-cli`
+- **Setup:** A `con` node whose OWN release relX has `expires_at = Ex`; trusted_time advanced to `T > Ex + M`, so relX is past expiry and the node is PRODUCTION-BLOCKED (per MAN-09: `con send` refuses to emit `content::message` tag 50). Before expiry the node had RECEIVED an above-ceiling `message:2` fact (new tag, sibling `content/message_v2/`, kept-forever projector) which is currently PENDING — pending opaque, unprojected, undisplayed, `con content-count` excludes it (REPLAY-07 state). The fleet manifest also knows the blocker relO (platform=ios `6..=6`, `expires_at = Eo`); the SAME trusted_time advance that expired relX ALSO carries `T > Eo + M`, so relO drops from the still-usable set and the ceiling RISES to cover `message:2`'s tag. Capture pre-replay `con content-count` and `con state-summary`.
 - **Action:** Run `con replay` canonical (wipes derived state, re-marks all retained facts pending, drains projection to fixpoint) on this OWN-EXPIRED, production-blocked node.
-- **Expect:** The own-release expiry does NOT gate the replay-side activation: the previously-quarantined `message:2` fact is marked pending and projects via its OWN-tag (v2) kept-forever adapter, producing its CONTENT_MESSAGES row; `con content-count` increases by one; `con messages` now shows it; `state_hash` changes to reflect the activated row. Replay completes — it does NOT abort at `RouterProjector::project` (`core/projectors.rs:456`) and does NOT refuse activation on the grounds that the binary is expired. The data is NOT stranded: activation (an INPUT/admission concern gated by the fleet ceiling) proceeds independently of the own-production-block. Throughout, `con send` STILL refuses (production remains blocked); local reads succeed (MAN-10).
-- **Defends:** TIME-26 "blocked withholds OUTPUT not INPUT/admission" extended to own-EXPIRY (MAN-09/10): own-production-block must NOT also gate replay activation of quarantined facts. ADMISSION "Quarantined facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag" holds even on an expired binary; Invariant (4) REPLAY DETERMINISM (ceiling-independent over retained facts) and (5) "local data is safe (replays after update)". Prevents the failure mode of stranding received data forever on an expired node.
-- **Refs:** MAN-09/10 (own-expiry blocks production, permits reads+replay), TIME-26 (output-not-input), REPLAY-07/08 + MAN-27/TIME-29 (quarantine activation on ceiling rise); `ReleaseManifestEntry.expires_at` + skew margin M; ceiling = min over still-usable releases (relO drop); new `message:2` tag + sibling `content/message_v2/` projector in `FACT_ROUTES`; `RouterProjector::project` Err@`core/projectors.rs:456` (the hard error quarantine activation must replace); `drain_pending_projection` (`core/pipeline/project_pending_facts.rs:248`); planned `con replay`/`content-count`/`messages`/`state-summary`; `content::message` `TYPE_CONTENT_MESSAGE = 50` (`content/message/layout.rs:22`); design rule 8 (replay local/deterministic).
+- **Expect:** The own-release expiry does NOT gate the replay-side activation: the previously-pending `message:2` fact is marked pending and projects via its OWN-tag (v2) kept-forever adapter, producing its CONTENT_MESSAGES row; `con content-count` increases by one; `con messages` now shows it; `state_hash` changes to reflect the activated row. Replay completes — it does NOT abort at `RouterProjector::project` (`core/projectors.rs:456`) and does NOT refuse activation on the grounds that the binary is expired. The data is NOT stranded: activation (an INPUT/admission concern gated by the fleet ceiling) proceeds independently of the own-production-block. Throughout, `con send` STILL refuses (production remains blocked); local reads succeed (MAN-10).
+- **Defends:** TIME-26 "blocked withholds OUTPUT not INPUT/admission" extended to own-EXPIRY (MAN-09/10): own-production-block must NOT also gate replay activation of pending facts. ADMISSION "Pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag" holds even on an expired binary; Invariant (4) REPLAY DETERMINISM (ceiling-independent over retained facts) and (5) "local data is safe (replays after update)". Prevents the failure mode of stranding received data forever on an expired node.
+- **Refs:** MAN-09/10 (own-expiry blocks production, permits reads+replay), TIME-26 (output-not-input), REPLAY-07/08 + MAN-27/TIME-29 (pending activation on ceiling rise); `ReleaseManifestEntry.expires_at` + skew margin M; ceiling = min over still-usable releases (relO drop); new `message:2` tag + sibling `content/message_v2/` projector in `FACT_ROUTES`; `RouterProjector::project` Err@`core/projectors.rs:456` (the hard error pending activation must replace); `drain_pending_projection` (`core/pipeline/project_pending_facts.rs:248`); `con replay`/`content-count`/`messages`/`state-summary`; `content::message` `TYPE_CONTENT_MESSAGE = 50` (`content/message/layout.rs:22`); design rule 8 (replay local/deterministic).
 
-### MAN-GAP19b — On the activating replay, the own-expired node activates quarantined facts WITHOUT re-enabling shared production (no signed/network leak through the activation seam)  `replay-cli`
-- **Setup:** Same own-expired (`T > Ex + M`), production-blocked node as MAN-GAP19a, holding the quarantined `message:2` fact, with the fleet ceiling now risen (relO expired) to cover its tag. The runtime is opened from `MATCH_RUNTIME`; the four `COMMAND_EXCLUDED_HANDLER_ROUTES` (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) plus the deterministic `runs_during_replay=true` handlers (`create_key_wrap`/`unwrap_key_wrap`, HANDLER_ROUTES #8/#9) are wired.
-- **Action:** Run `con replay` canonical and instrument the pass: observe whether activation of the quarantined fact triggers any (a) network frame send, (b) `sync::shared_fact` (tag 162) advertisement of the now-activated row, (c) fresh trusted-time observation, or (d) signing of a NEW shared production fact; and re-check `con send` immediately after replay.
+### MAN-GAP19b — On the activating replay, the own-expired node activates pending facts WITHOUT re-enabling shared production (no signed/network leak through the activation seam)  `replay-cli`
+- **Setup:** Same own-expired (`T > Ex + M`), production-blocked node as MAN-GAP19a, holding the pending `message:2` fact, with the fleet ceiling now risen (relO expired) to cover its tag. The runtime is opened from `MATCH_RUNTIME`; the four `COMMAND_EXCLUDED_HANDLER_ROUTES` (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) plus the deterministic `runs_during_replay=true` handlers (`create_key_wrap`/`unwrap_key_wrap`, HANDLER_ROUTES #8/#9) are wired.
+- **Action:** Run `con replay` canonical and instrument the pass: observe whether activation of the pending fact triggers any (a) network frame send, (b) `sync::shared_fact` (tag 162) advertisement of the now-activated row, (c) fresh trusted-time observation, or (d) signing of a NEW shared production fact; and re-check `con send` immediately after replay.
 - **Expect:** Activation re-materializes the read-model row ONLY. Zero network frames sent, zero new `sync::shared_fact` advertisements emitted for the activated row, zero fresh-time observations, zero newly-signed shared facts (design rule 8). Deterministic `create_key_wrap`/`unwrap_key_wrap` re-emissions during replay recreate only their existing deterministic facts (idempotent, dedupe to a no-op) and are NOT treated as new shared production to be refused — the rebuild is not corrupted. After replay, `con send` STILL refuses with the same "release expired, update required" block: the activation did NOT silently lift the own-expiry production block or re-enable the binary. The post-replay network barrier (rule 8: full replay+purge finishes before any network resumes) holds, and because the binary is expired the shared-production gate stays closed even after the barrier.
 - **Defends:** The activation seam must NOT become a backdoor that re-enables production on an expired binary — getting this wrong "re-enable[s] production on an expired binary." Separates INPUT activation (allowed) from OUTPUT/production (still blocked). Invariant (3) CEILING MONOTONICITY / EXPIRED PEERS ARE OUT (an expired release stays out of the visibility/production guarantee); design rule 8 (replay signs no new shared facts, sends no frames); coverage-r1 prose item #7 (blocked-mode × deterministic replay-recreated facts must not be withheld-as-production).
-- **Refs:** MAN-09 (own-expiry production block), TIME-28/MAN-31 (replay runs while blocked; deterministic recreation not treated as production), design rule 8 (Part I above rule 8: "Replay must not observe fresh time, send network frames ... or sign new shared facts"); `COMMAND_EXCLUDED_HANDLER_ROUTES` (`registry.rs:512-517`); `create_key_wrap`/`unwrap_key_wrap` (HANDLER_ROUTES #8/#9, `runs_during_replay=true`); `sync::shared_fact` tag 162; `con send` block path; planned `con replay`/`intent-registry`.
+- **Refs:** MAN-09 (own-expiry production block), TIME-28/MAN-31 (replay runs while blocked; deterministic recreation not treated as production), design rule 8 (Part I above rule 8: "Replay must not observe fresh time, send network frames ... or sign new shared facts"); `COMMAND_EXCLUDED_HANDLER_ROUTES` (`registry.rs:512-517`); `create_key_wrap`/`unwrap_key_wrap` (HANDLER_ROUTES #8/#9, `runs_during_replay=true`); `sync::shared_fact` tag 162; `con send` block path; `con replay`/`intent-registry`.
 
-### MAN-GAP19c — Multi-fact / cross-scope: own-expired node activates a quarantined file:2 + its slices AND a quarantined auth fact on the same ceiling-rise replay, order-independently  `replay-cli`
-- **Setup:** Own-expired (`T > Ex + M`), production-blocked node holding a MIX of quarantined above-ceiling facts received before expiry: (1) a `file:2` container fact (new tag, sibling `content/file_v2/`) plus its dependent above-ceiling `file_slice:2` facts, and (2) a quarantined above-ceiling auth fact (e.g. a `user_profile_v2` / new `auth::*` tag whose intro_version is above the old ceiling). All are retained opaque, unprojected, uncounted (`con content-count`/`con files`/`con users` exclude them). The fleet ceiling rises (relO and any other non-capable blocker past `expires_at + M`) to cover BOTH new tags; the kept-forever v2 projectors and sibling `_v2/` dirs exist for each. Capture pre-replay `con state-summary`.
+### MAN-GAP19c — Multi-fact / cross-scope: own-expired node activates a pending file:2 + its slices AND a pending auth fact on the same ceiling-rise replay, order-independently  `replay-cli`
+- **Setup:** Own-expired (`T > Ex + M`), production-blocked node holding a MIX of pending above-ceiling facts received before expiry: (1) a `file:2` container fact (new tag, sibling `content/file_v2/`) plus its dependent above-ceiling `file_slice:2` facts, and (2) a pending above-ceiling auth fact (e.g. a `user_profile_v2` / new `auth::*` tag whose intro_version is above the old ceiling). All are pending opaque, unprojected, uncounted (`con content-count`/`con files`/`con users` exclude them). The fleet ceiling rises (relO and any other non-capable blocker past `expires_at + M`) to cover BOTH new tags; the kept-forever v2 projectors and sibling `_v2/` dirs exist for each. Capture pre-replay `con state-summary`.
 - **Action:** Run `con replay` canonical, then `con replay --reverse`, then `con replay --scramble --seed N` (equivalently `con replay-check`) on the own-expired node; capture `con state-summary` after each pass.
-- **Expect:** On every pass the quarantined `file:2` + `file_slice:2` and the quarantined auth fact ACTIVATE: each routes to its OWN-tag kept-forever adapter, the file's slices resolve against their now-activated `file:2` parent via context-match wakeups regardless of admission order, the auth fact materializes its row, and the cross-scope dependency cascade converges. The post-replay `state_hash` is IDENTICAL across canonical / reverse / scramble passes (order-independent activation), and includes the newly-activated content AND auth rows. Own-expiry never selectively gates one scope's activation over another, and never aborts the replay. `con send` remains refused on every pass (production stays blocked). No fact is mis-routed (a v2 fact never hits a v1 projector).
-- **Defends:** The own-expiry × quarantine-activation independence (TIME-26 output-not-input) holds across SCOPES (content container+slice, auth) and across MULTI-FACT dependency cascades, and is order-independent (Invariant (4) REPLAY DETERMINISM, REPLAY-04/05 reverse+scramble equivalence). Confirms an expired node does not strand whole scopes of received data; activation is uniformly an admission/ceiling concern, not a per-scope production gate. Defends Invariant (1) VISIBILITY (a now-ceiling-active fact becomes projectable/displayable) under the awkward own-expired state.
-- **Refs:** MAN-GAP19a/b; REPLAY-02/04/05 (mixed-version + reverse/scramble determinism), REPLAY-07/08 (quarantine survive+activate); `content::file` `TYPE_CONTENT_FILE = 54` + `content::file_slice` `TYPE_CONTENT_FILE_SLICE = 55` (the file_slice→file parent cascade, inventory §1); proposed `auth::user_profile_v2` new tag (inventory §1 notes this family is NOT-yet-existing — RED until it lands); sibling `_v2/` projector dirs in `FACT_ROUTES`; context-match wakeups (`core::pipeline::context`); planned `con replay`/`--reverse`/`--scramble`/`replay-check`/`state-summary`/`files`/`users`; design rule 8.
+- **Expect:** On every pass the pending `file:2` + `file_slice:2` and the pending auth fact ACTIVATE: each routes to its OWN-tag kept-forever adapter, the file's slices resolve against their now-activated `file:2` parent via context-match wakeups regardless of admission order, the auth fact materializes its row, and the cross-scope dependency cascade converges. The post-replay `state_hash` is IDENTICAL across canonical / reverse / scramble passes (order-independent activation), and includes the newly-activated content AND auth rows. Own-expiry never selectively gates one scope's activation over another, and never aborts the replay. `con send` remains refused on every pass (production stays blocked). No fact is mis-routed (a v2 fact never hits a v1 projector).
+- **Defends:** The own-expiry × pending-activation independence (TIME-26 output-not-input) holds across SCOPES (content container+slice, auth) and across MULTI-FACT dependency cascades, and is order-independent (Invariant (4) REPLAY DETERMINISM, REPLAY-04/05 reverse+scramble equivalence). Confirms an expired node does not strand whole scopes of received data; activation is uniformly an admission/ceiling concern, not a per-scope production gate. Defends Invariant (1) VISIBILITY (a now-ceiling-active fact becomes projectable/displayable) under the awkward own-expired state.
+- **Refs:** MAN-GAP19a/b; REPLAY-02/04/05 (mixed-version + reverse/scramble determinism), REPLAY-07/08 (pending survive+activate); `content::file` `TYPE_CONTENT_FILE = 54` + `content::file_slice` `TYPE_CONTENT_FILE_SLICE = 55` (the file_slice→file parent cascade, inventory §1); proposed `auth::user_profile_v2` new tag (inventory §1 notes this family is NOT-yet-existing — RED until it lands); sibling `_v2/` projector dirs in `FACT_ROUTES`; context-match wakeups (`core::pipeline::context`); `con replay`/`--reverse`/`--scramble`/`replay-check`/`state-summary`/`files`/`users`; design rule 8.
 ### TIME-GAP110a — staleness timer ignores a flood of inbound `frame_observation` receives (no false freshness refresh)  `guardrail`
-- **Setup:** (proposed, once trusted_time/staleness exist) `con` daemon with last *signed* observation at `T_last`; staleness window `S`; local time advanced to `now > T_last + S` so the node has crossed into self-quarantine BLOCKED MODE per TIME-16. No fresh signed registry fact, canary, or embedded-metadata bump has arrived. The store is otherwise healthy and an established connection exists.
+- **Setup:** (proposed, once trusted_time/staleness exist) `con` daemon with last *signed* observation at `T_last`; staleness window `S`; local time advanced to `now > T_last + S` so the node has crossed into staleness block BLOCKED MODE per TIME-16. No fresh signed registry fact, canary, or embedded-metadata bump has arrived. The store is otherwise healthy and an established connection exists.
 - **Action:** deliver a sustained flood of inbound established-connection frames over the `receive_network_frame` intent path (`connection::receive_network_frame::ReceiveNetworkFrameHandler::handle`), each carrying a large/recent `received_at_local_ms` (e.g. `now`, far above `T_last`). Each classifies via `connection_frame::classify_frame` and produces a `connection::frame_observation` fact (`connection_frame::observed_frame_effect` → `frame_observation::create::fact_from_observation`, tag 173) whose `received_at_local_ms` is the attacker/socket-supplied receive time. Re-evaluate the staleness gate after the flood projects.
 - **Expect:** the staleness timer is computed ONLY from the greatest *signed* observation (embedded metadata / signed registry fact / signed canary per design rule 3); it does NOT read `ConnectionFrameObservationFact.received_at_local_ms` (nor the `connection_frame_observation` local context offered by `frame_observation::project`). The node stays BLOCKED — `now - T_last` still exceeds `S` — and shared production stays withheld; the flood of `frame_observation` facts admits/projects normally (local-only) but moves neither the staleness deadline nor `trusted_time`.
 - **Defends:** model "Staleness window S without refresh ... => BLOCKED MODE"; design rule 3 ("greatest trusted time learned from embedded release metadata, signed registry facts, or signed canaries" — an unsigned local receive time is none of these). Closes the gap that TIME-06 only structurally asserts `frame_observation` is local-only and TIME-16 never crosses staleness with the `frame_observation` receive path. Liveness/downgrade-bypass surface: an attacker who can deliver frames must not be able to forge time freshness.
@@ -5776,18 +5817,18 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Defends:** "TRUSTED TIME = monotonic max of signed observations" + skew-margin ceiling-advance gate; treats `frame_observation.received_at_local_ms` as a non-source for `trusted_time` on par with the logical clock (TIME-35) — both are unsigned/local and must not be backdoors into time-gated ceiling advance. Closes the cross of TIME-06 (structural local-only) with the ceiling/trusted_time computation (the unpinned half of coverage gap #10).
 - **Refs:** `frame_observation` tag 173 `received_at_local_ms` (`frame_observation/layout.rs:9-11,26-30`); proposed `trusted_time` key distinct from `CLOCK_KEY` (`clock.rs:16`); TIME-06, TIME-08, TIME-30, TIME-35; design rule 3 and rules 1-2 (ceiling = min over still-usable releases at trusted_time, advance only at `trusted_time > blocker.expires_at + M`).
 ### GUARD-GAP111a — connection::close projected in BLOCKED MODE emits its close offers + drives the ephemeral-secret purge, and the blocked-mode gate classifies none of it as withheld shared production  `guardrail`
-- **Setup:** (proposed, once blocked mode + the blocked-mode production gate exist) `con` in BLOCKED MODE (entered via staleness window `S` lapse or a clock rollback beyond tolerance, per TIME-15/TIME-16). An established connection at rest: a local `connection::response` (tag 44, `FactScope::Local`) row in `CONNECTION_RESPONSE_ROWS`, the initiator + responder `connection::ephemeral_secret` facts (tag 43, `FactScope::Local`) E1 and E2 named by that response's `initiator_ephemeral_secret_fact_id` / `responder_ephemeral_secret_fact_id`, both with rows in `CONNECTION_EPHEMERAL_SECRET_ROWS`. The ceiling currently does NOT cover some future tag, so the store also holds at least one quarantined above-ceiling fact (TIME-27 shape). No frame send is attempted.
+- **Setup:** (proposed, once blocked mode + the blocked-mode production gate exist) `con` in BLOCKED MODE (entered via staleness window `S` lapse or a clock rollback beyond tolerance, per TIME-15/TIME-16). An established connection at rest: a local `connection::response` (tag 44, `FactScope::Local`) row in `CONNECTION_RESPONSE_ROWS`, the initiator + responder `connection::ephemeral_secret` facts (tag 43, `FactScope::Local`) E1 and E2 named by that response's `initiator_ephemeral_secret_fact_id` / `responder_ephemeral_secret_fact_id`, both with rows in `CONNECTION_EPHEMERAL_SECRET_ROWS`. The ceiling currently does NOT cover some future tag, so the store also holds at least one pending above-ceiling fact (TIME-27 shape). No frame send is attempted.
 - **Action:** Issue the retire-before-replay close: `connection::close::commands::close(ctx, connection_id)` mints the local tag-45 fact (`Fact::new(FactScope::Local, closed_at_ms, ...)`), submit it via `Runtime::submit_fact`, then run the projection pass so `ConnectionCloseProjector::project_typed` and the woken `ConnectionResponseProjector` / `ConnectionEphemeralSecretProjector` (close-gate arm) all run, while the node stays in BLOCKED MODE the whole time.
-- **Expect:** Submission and projection are PERMITTED in blocked mode (TIME-25): the blocked-mode production gate does NOT refuse the close fact and does NOT suppress its projection output. `ConnectionCloseProjector` emits exactly its `connection_response` standing need plus `connection_closed_offer(close_id, connection_id)` and the two `ephemeral_secret_closed_offer(close_id, E1)` / `(close_id, E2)` offers (close.rs:29-39, close/project.rs:76-86) — and the blocked-mode classifier treats these context offers as an operational-safety/connection-lifecycle action, NOT as "shared production withheld". On the woken pass, `ConnectionResponseProjector::closed_output` deletes the `CONNECTION_RESPONSE_ROWS` row and `purge_self(response_id)`; `ConnectionEphemeralSecretProjector` (close gate, ephemeral_secret/project.rs:69-87) for BOTH E1 and E2 deletes the `CONNECTION_EPHEMERAL_SECRET_ROWS` row and `purge_self(fact.id)`. All three retired/secret facts are gone from the store after commit; the quarantined above-ceiling fact is untouched (still opaque, still retained). Because `connection::close`, `connection::response`, and `connection::ephemeral_secret` are all `FactScope::Local` and never travel over a frame (close/fact.rs doc; close/commands.rs:32), NO outbound frame is produced and nothing is counted as shared production — distinguishing this from the frame-seal path that TIME-25 DOES withhold.
+- **Expect:** Submission and projection are PERMITTED in blocked mode (TIME-25): the blocked-mode production gate does NOT refuse the close fact and does NOT suppress its projection output. `ConnectionCloseProjector` emits exactly its `connection_response` standing need plus `connection_closed_offer(close_id, connection_id)` and the two `ephemeral_secret_closed_offer(close_id, E1)` / `(close_id, E2)` offers (close.rs:29-39, close/project.rs:76-86) — and the blocked-mode classifier treats these context offers as an operational-safety/connection-lifecycle action, NOT as "shared production withheld". On the woken pass, `ConnectionResponseProjector::closed_output` deletes the `CONNECTION_RESPONSE_ROWS` row and `purge_self(response_id)`; `ConnectionEphemeralSecretProjector` (close gate, ephemeral_secret/project.rs:69-87) for BOTH E1 and E2 deletes the `CONNECTION_EPHEMERAL_SECRET_ROWS` row and `purge_self(fact.id)`. All three retired/secret facts are gone from the store after commit; the pending above-ceiling fact is untouched (still opaque, still retained). Because `connection::close`, `connection::response`, and `connection::ephemeral_secret` are all `FactScope::Local` and never travel over a frame (close/fact.rs doc; close/commands.rs:32), NO outbound frame is produced and nothing is counted as shared production — distinguishing this from the frame-seal path that TIME-25 DOES withhold.
 - **Defends:** TIME-25 ("connection::close / retirement remains permitted in blocked mode … an operational safety action, not shared production") crossed with the blocked-mode production gate (TIME-20..24) and the secret-hygiene purge (CONN-21); INVARIANT (6) SAFETY FLOOR (ephemeral secrets purged before upgrade even while blocked).
 - **Refs:** `connection/close.rs:22-39` (`CONNECTION_CLOSED_ROLE`, `CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE`, `connection_closed_offer`, `ephemeral_secret_closed_offer`), `connection/close/project.rs:76-86` (`ConnectionCloseProjector`), `connection/close/commands.rs:20-39` (`close`, `FactScope::Local`), `connection/response/project.rs:79-92,389-396` (`closed_output`, `CONNECTION_RESPONSE_ROWS`), `connection/ephemeral_secret/project.rs:69-87` (close gate, `CONNECTION_EPHEMERAL_SECRET_ROWS`, `purge_self`), `core/projectors.rs:356` (`purge_self` is self-only); TIME-25, CONN-19, CONN-21, TIME-27.
 
-### GUARD-GAP111b — ephemeral-secret purge from close does not race the quarantine-activation replay pass: the close purge runs and commits before the wipe+replay that activates a newly-covered tag  `replay-cli`
-- **Setup:** (proposed) Continue from GUARD-GAP111a's pre-replay state: an in-blocked-mode (or mid ceiling-transition) node holding (i) an open connection with response row + E1/E2 ephemeral rows, and (ii) a quarantined above-ceiling fact whose tag will be covered after the ceiling rises (TIME-29 shape). The retire-before-replay sequence per the model TRANSPORT rule "Retire connections … before replay" is: project the `connection::close` (tag 45) to purge first, THEN raise the ceiling and run wipe+replay.
-- **Action:** Drive the two phases in order: phase 1 — submit + project `connection::close` so E1, E2 (tag 43) and the response (tag 44) self-purge and their rows are deleted, and commit; phase 2 — raise the ceiling to cover the quarantined fact's tag, then run the wipe+replay pass (`con test-replay-deps-reverse` cascade surface today; the upgrade replay conceptually) that re-projects every retained fact via its own tag adapter and activates the formerly-quarantined fact.
-- **Expect:** The two passes are serialized, not interleaved: the close-driven purge fully commits (E1/E2/response bytes removed, `CONNECTION_EPHEMERAL_SECRET_ROWS` + `CONNECTION_RESPONSE_ROWS` rows deleted) BEFORE the quarantine-activation replay begins, so the replay rebuilds derived state from RETAINED facts only — it never re-derives a `connection_ephemeral_secret` row from a purged secret and never live-tails the retired session (the CONN-20 guarantee). The replay does not resurrect E1/E2: their bytes are gone, the surviving tag-45 `connection::close` fact replays deterministically via its own adapter, and the now-active formerly-quarantined fact projects to its own rows independently of the retired connection. Replay observes no fresh time, sends no frames, and the ephemeral purge result is order-independent w.r.t. the activation of the quarantined fact (no read-after-purge of E1/E2 by the activating projector, and no purge-after-activation that could strand a half-retired session).
-- **Defends:** Model TRANSPORT "Retire connections … before replay" sequenced ahead of quarantine activation; INVARIANT (4) REPLAY DETERMINISM (order-independent, ceiling-independent, recreates only deterministic facts from retained bytes) crossed with ADMISSION quarantine-activation (TIME-29); CONN-20 (no phantom live connection after close+replay); CONN-21 secret hygiene preserved across the activation pass.
-- **Refs:** `connection/ephemeral_secret/project.rs:69-87` (close-gate purge of E1+E2), `connection/response/project.rs:389-396` (`closed_output` purge), `connection/close/project.rs` (`ConnectionCloseProjector`), `core/projectors.rs:356` (`purge_self`), `core/projectors.rs` `RouterProjector::project` (per-tag adapter, projectors.rs:448-459), `sync::cascade_test_fact::cli` `test-replay-deps-reverse` (MATCH_COMMANDS #37, inventory §6 — no `con replay` subcommand exists); CONN-19, CONN-20, CONN-21, CONN-28, TIME-28, TIME-29.
+### GUARD-GAP111b — ephemeral-secret purge from close does not race the pending-activation replay pass: the close purge runs and commits before the wipe+replay that activates a newly-covered tag  `replay-cli`
+- **Setup:** (proposed) Continue from GUARD-GAP111a's pre-replay state: an in-blocked-mode (or mid ceiling-transition) node holding (i) an open connection with response row + E1/E2 ephemeral rows, and (ii) a pending above-ceiling fact whose tag will be covered after the ceiling rises (TIME-29 shape). The retire-before-replay sequence per the model TRANSPORT rule "Retire connections … before replay" is: project the `connection::close` (tag 45) to purge first, THEN raise the ceiling and run wipe+replay.
+- **Action:** Drive the two phases in order: phase 1 — submit + project `connection::close` so E1, E2 (tag 43) and the response (tag 44) self-purge and their rows are deleted, and commit; phase 2 — raise the ceiling to cover the pending fact's tag, then run the wipe+replay pass (`con test-replay-deps-reverse` cascade surface today; the upgrade replay conceptually) that re-projects every retained fact via its own tag adapter and activates the formerly-pending fact.
+- **Expect:** The two passes are serialized, not interleaved: the close-driven purge fully commits (E1/E2/response bytes removed, `CONNECTION_EPHEMERAL_SECRET_ROWS` + `CONNECTION_RESPONSE_ROWS` rows deleted) BEFORE the pending-activation replay begins, so the replay rebuilds derived state from RETAINED facts only — it never re-derives a `connection_ephemeral_secret` row from a purged secret and never live-tails the retired session (the CONN-20 guarantee). The replay does not resurrect E1/E2: their bytes are gone, the surviving tag-45 `connection::close` fact replays deterministically via its own adapter, and the now-active formerly-pending fact projects to its own rows independently of the retired connection. Replay observes no fresh time, sends no frames, and the ephemeral purge result is order-independent w.r.t. the activation of the pending fact (no read-after-purge of E1/E2 by the activating projector, and no purge-after-activation that could strand a half-retired session).
+- **Defends:** Model TRANSPORT "Retire connections … before replay" sequenced ahead of pending activation; INVARIANT (4) REPLAY DETERMINISM (order-independent, ceiling-independent, recreates only deterministic facts from retained bytes) crossed with ADMISSION pending-activation (TIME-29); CONN-20 (no phantom live connection after close+replay); CONN-21 secret hygiene preserved across the activation pass.
+- **Refs:** `connection/ephemeral_secret/project.rs:69-87` (close-gate purge of E1+E2), `connection/response/project.rs:389-396` (`closed_output` purge), `connection/close/project.rs` (`ConnectionCloseProjector`), `core/projectors.rs:356` (`purge_self`), `core/projectors.rs` `RouterProjector::project` (per-tag adapter, projectors.rs:448-459), `sync::cascade_test_fact::cli` `test-replay-deps-reverse`; CONN-19, CONN-20, CONN-21, CONN-28, TIME-28, TIME-29.
 
 ### GUARD-GAP111c — a forged/global connection::close cannot smuggle a secret purge through the blocked-mode operational-safety exemption  `projector-unit`
 - **Setup:** (proposed) Blocked-mode node with the same open connection (response row + E1/E2 ephemeral rows). Craft a `connection::close` fact submitted with `FactScope::Global` (or local but with NO matching `connection_response` context for its named `connection_id`) — i.e. an attempt to exploit the TIME-25 "close is always allowed in blocked mode" exemption to drive a purge of another session's secrets.
@@ -5796,14 +5837,14 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Defends:** TIME-25 retirement exemption is gated by the same local-scope + `connection_response`-context authority check as in NORMAL mode (no blocked-mode widening of the close authority surface); INVARIANT (6) SAFETY FLOOR (retirement authority is local + context-gated); secret hygiene not weaponizable.
 - **Refs:** `connection/close/project.rs:47-53` (structural local-scope check), `:55-65` (context need, no-offer-without-context), `:76-86` (offers only on the proven path); `connection/close.rs:41-61` (`exact_local_need`/`exact_local_offer` use `FactScope::Local`); CONN-22, TIME-25, CONN-21.
 ### SYNC-GAP20a — `sync_status` root_fingerprint folds `context_have`, so it diverges across two converged peers that recorded different anchor sets for the same owner (while the on-wire compare summary stays equal)  `projector-unit`
-- **Setup:** One in-memory `Store` per simulated node, both seeded with `CORE_SCHEMA_SOURCE + FACTS_SCHEMA_SOURCE` (the `store()` helper in `shared_fact/rows.rs` tests). On BOTH nodes record the SAME single owner fact `U` via `record_sync_contribution(store, &ShareFactWithSync{ workspace_id: W, owner_fact_id: U.id, timestamp_ms: U.timestamp, state: SyncShareState::Upsert, context_have }, Some(&U))`. Node A passes `context_have: vec![anchor_v1.id]` (a capable node that decoded a v2 owner and advertised its v1 dependency anchor — the SYNC-05 projector path). Node B passes `context_have: vec![]` (same owner learned without its dependency closure: anchor quarantined / purged / received deps-less). `U.id` and `U.timestamp` are byte-identical on both; the ONLY difference is the advertised `context_have`.
+- **Setup:** One in-memory `Store` per simulated node, both seeded with `CORE_SCHEMA_SOURCE + FACTS_SCHEMA_SOURCE` (the `store()` helper in `shared_fact/rows.rs` tests). On BOTH nodes record the SAME single owner fact `U` via `record_sync_contribution(store, &ShareFactWithSync{ workspace_id: W, owner_fact_id: U.id, timestamp_ms: U.timestamp, state: SyncShareState::Upsert, context_have }, Some(&U))`. Node A passes `context_have: vec![anchor_v1.id]` (a capable node that decoded a v2 owner and advertised its v1 dependency anchor — the SYNC-05 projector path). Node B passes `context_have: vec![]` (same owner learned without its dependency closure: anchor pending / purged / received deps-less). `U.id` and `U.timestamp` are byte-identical on both; the ONLY difference is the advertised `context_have`.
 - **Action:** (1) Call `sync_status(&store_a)` and `sync_status(&store_b)` and compare `root_count` and `root_fingerprint`. (2) Separately, build the on-wire summary over the SAME single fact on each node: `sync::compare::create::summarize_range(&[&U])` (the path SYNC-13 exercises) and compare those two `RangeSummary` values.
 - **Expect:** (1) `root_count` is EQUAL (both = 1) but `root_fingerprint` DIFFERS between A and B: each level-64 leaf's `summary.fingerprint` equals its `contribution_fingerprint`, which folds `blake3("topo:sync-contribution:v1:" || workspace_id || owner_fact_id || timestamp_be || len_be || context_have...)` (rows.rs:509-525) — A's leaf folds `[anchor_v1.id]`, B's folds the empty list, so the XORed roots in `sync_status` (rows.rs:821-835) are unequal. This proves `con sync-status root_fingerprint` is NOT closure-independent. (2) In contrast `summarize_range(&[&U])` is IDENTICAL on both: it folds ONLY `blake3("topo:sync-range-summary:v1:" || timestamp_be || fact.id)` (compare/create.rs:245-261) — no `context_have`, no version. The single test thus crosses the two fingerprint algorithms the suite conflates: the persisted root is closure-sensitive; the on-wire summary is closure-/version-independent.
 - **Defends:** Distinguishes the two fingerprint algorithms (persisted `contribution_fingerprint`-folds-`context_have` vs on-wire `(timestamp,id)` summary); corrects the over-broad reading of Invariant 2 that SYNC-26 attaches to `sync-status`; mechanism: `sync_status` root XORs leaf `contribution_fingerprint`s, so closure divergence under versioning (SYNC-05) flows into the root.
 - **Refs:** `shared_fact/rows.rs:509` `contribution_fingerprint`, `:280-307` `upsert_sync_contribution` (extends + recomputes leaf), `:821-835` `sync_status` (XOR of level-64 leaf summary fingerprints), `:39/:43` `NegentropyLeafRow.contribution_fingerprint`, `:213` `record_sync_contribution`; `share_fact_with_sync.rs:45-52` `ShareFactWithSync.context_have`; `compare/create.rs:245-261` `summarize_range` / `RangeSummary`; contrast SYNC-13/SYNC-26/SYNC-27.
 
 ### SYNC-GAP20b — a `root_fingerprint` mismatch on an identical id set (closure divergence only) does NOT trigger a perpetual compare/have/need round — convergence is decided by the on-wire `(timestamp,id)` summary, not `sync-status`  `multinode-network`
-- **Setup:** Two daemons in ONE shared workspace (`accept_workspace_invite(&alice,&bob,&workspace,alice_port,"bob","bob-phone")`, `create_local_content_key` each, `spawn_daemon` both). Engineer the divergent-closure-but-identical-ids end state of SYNC-GAP20a end to end: bob `send`s a v2 owner `U` plus its dependency anchor; bob `sync-range ... --with-deps` to `endpoint_id(&alice)`. Arrange that alice receives `U` AND the anchor but, on alice, `U`'s `share_fact_with_sync` upsert is projected with a DIFFERENT `context_have` than bob recorded (e.g. alice's projector advertised `[]`/a different anchor id because the anchor was quarantined/late when `U`'s projector ran on alice, while bob advertised the anchor). After exchange both nodes hold the SAME shareable id set for `W` (`shareable_facts_for_connection` returns equal id sets on both).
+- **Setup:** Two daemons in ONE shared workspace (`accept_workspace_invite(&alice,&bob,&workspace,alice_port,"bob","bob-phone")`, `create_local_content_key` each, `spawn_daemon` both). Engineer the divergent-closure-but-identical-ids end state of SYNC-GAP20a end to end: bob `send`s a v2 owner `U` plus its dependency anchor; bob `sync-range ... --with-deps` to `endpoint_id(&alice)`. Arrange that alice receives `U` AND the anchor but, on alice, `U`'s `share_fact_with_sync` upsert is projected with a DIFFERENT `context_have` than bob recorded (e.g. alice's projector advertised `[]`/a different anchor id because the anchor was pending/late when `U`'s projector ran on alice, while bob advertised the anchor). After exchange both nodes hold the SAME shareable id set for `W` (`shareable_facts_for_connection` returns equal id sets on both).
 - **Action:** (1) `con --db alice sync-status` and `con --db bob sync-status`; capture `root_count` and `root_fingerprint`. (2) Then drive the actual reconciliation: have each side issue `sync-range` over the common range and let the negentropy compare/have/need loop run to quiescence; poll `fact_count` and the count of outstanding `sync::need_id`(167)/`sync::have_id`(166) facts on each node.
 - **Expect:** (1) `root_count` MATCHES; `root_fingerprint` DIFFERS (the persisted root folds the divergent `context_have`, per SYNC-GAP20a). (2) Crucially this mismatch does NOT cause an endless reconciliation: the on-wire compare uses `summarize_range`/`range_summary_for_connection` (folds only `(timestamp,id)`), so the two converged peers compute EQUAL on-wire root summaries, the compare matches, and NO new `sync::need_id`/`sync::have_id` are minted — `fact_count` and outstanding control-fact counts reach a fixed point on both nodes within the poll window (no growth, no flap). The test pins that `sync-status root_fingerprint` is a LOCAL diagnostic that may legitimately disagree across closure-divergent peers, and that wire convergence is decided by the id-only summary — guarding against any future change that wired `sync-status root_fingerprint` into the compare/initiate path, which would wrongly trigger a perpetual round on identical id sets.
 - **Defends:** Mechanism: the on-wire negentropy summary (`summarize_range`, version-/closure-independent) governs convergence, NOT the persisted `sync_status` root; ADMISSION/closure: a v2 owner's SYNC-05 anchor advertisement can diverge `context_have` between peers without breaking termination; documents `sync-status` as closure-sensitive diagnostic, not a convergence oracle.
@@ -5834,7 +5875,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Action:** Compare `pre_pre_purge.root_fingerprint` (the index the node served BEFORE purge+replay) against `replayed_status.root_fingerprint` (what the same retained facts rebuild to AFTER purge+replay), and assert `negentropy_context_have_for_leaf(&replayed, [9;32], owner.id) == vec![anchor_keep]` (the rebuilt leaf no longer carries the purged anchor). For contrast, also drive a `SyncShareState::Retract` of the owner on `pre` followed by a fresh `vec![anchor_keep]` upsert (rows.rs:366-414) and show THAT path DOES reach the `replayed` fingerprint — i.e. only a full-leaf wipe, not the in-place merge, can shrink the set.
 - **Expect:** PINS that the persisted negentropy index is NOT a deterministic function of the retained facts across the purge boundary: `pre_pre_purge.root_fingerprint != replayed_status.root_fingerprint` (the pre-purge index folded `anchor_purged`; the post-purge rebuild cannot, because the purged anchor fact id is gone from the owner's advertised `context_have`). The replayed leaf is correctly `vec![anchor_keep]`, proving the fingerprint instability is caused by the live index's monotone accumulation (rows.rs:280-285), not by replay. The retract+re-upsert contrast confirms the index reaches the replay-consistent value ONLY when the whole leaf is dropped first (rows.rs:394-411), establishing the shape of any future per-anchor downward re-derivation fix and confirming INVARIANT (4)'s "ceiling-independent / rebuild from retained facts" is currently violated by a stale live index that disagrees with its own clean replay.
 - **Defends:** The fingerprint consequence of the gap across the wipe+replay/upgrade transition — INVARIANT (4) REPLAY DETERMINISM ("wipe+replay rebuilds derived state … recreates only deterministic facts") crossed with the purge/retention path: a live `root_fingerprint` that "secretly references purged material" diverges from the same node's clean replay. Pins rows.rs:280-285 as the divergence source and rows.rs:366-414 (retract) as the only existing healing path. Adjacent to but distinct from SYNC-GAP12c (closure BFS correctness) and REPLAY-GAP11 (authority-anchor purge replay).
-- **Refs:** `protocol/sync/shared_fact/rows.rs:280-298` (merge + unchanged-fingerprint short-circuit), `:308-360` (leaf/context-row rewrite — writes the grown set), `:366-414` (`retract_sync_contribution` — full-leaf removal, the only shrink path), `:417-453` (`update_node_path_in_tx` XOR fold into node summaries), `:509-525` (`contribution_fingerprint`), `:821-836` (`sync_status`/`root_fingerprint`); INVARIANT (4) REPLAY DETERMINISM, INVARIANT (6) SAFETY FLOOR (purged material must not remain folded into a served fingerprint), MODEL ADMISSION "quarantined facts activate on the next wipe+replay" transition; SYNC-GAP12c, REPLAY-GAP11, AUTHZ-GAP16.
+- **Refs:** `protocol/sync/shared_fact/rows.rs:280-298` (merge + unchanged-fingerprint short-circuit), `:308-360` (leaf/context-row rewrite — writes the grown set), `:366-414` (`retract_sync_contribution` — full-leaf removal, the only shrink path), `:417-453` (`update_node_path_in_tx` XOR fold into node summaries), `:509-525` (`contribution_fingerprint`), `:821-836` (`sync_status`/`root_fingerprint`); INVARIANT (4) REPLAY DETERMINISM, INVARIANT (6) SAFETY FLOOR (purged material must not remain folded into a served fingerprint), MODEL ADMISSION "pending facts activate on the next wipe+replay" transition; SYNC-GAP12c, REPLAY-GAP11, AUTHZ-GAP16.
 ### SYNC-GAP22a — Security-deprecation canary fires BETWEEN the compare-response plan and the requested-fact send: discontinuous ceiling JUMP re-derives the in-flight round (no +M gate)  `multinode-network`
 - **Setup:** Floor 6, ceiling 6. Still-usable set {mobile `6..=6` (the blocker, NOT yet past `expires_at = T`), desktop `6..=7`}. Peer A (desktop, head 7) and peer B share a workspace over an established `connection::response` (tag 44) connection `C`. A's shareable index (`SHAREABLE_FACT_ROWS` / `NEGENTROPY_LEAF_ROWS`, recorded by `record_sync_contribution`) holds an in-range v1 owner `O1` (`content::message:1`, tag 50) AND an owner `U` (`content::message_v2`, intro_version 7) that is above-ceiling at 6 — `U`'s bytes are retained in the index but it is NOT ceiling-active. B's incoming `sync::compare` (tag 165) mismatches a leaf range covering both `O1` and `U`'s timestamps. trusted_time is well below `T + M` (mobile's natural expiry is NOT imminent — this trigger must NOT be confused with timed expiry). The signed `must_update` canary (proposed durable local fact, sibling to `auth::local_secret_retirement`) naming the mobile release is staged but not yet applied.
 - **Action:** Drive ONE round in two steps. (1) Run `SendSyncCompareResponseHandler::handle` on B's compare at ceiling 6: `shareable_facts_for_connection(store, C)` + `response_plan_with_summaries(..., |range| range_summary_for_connection(store, C, range))` + `expand_fact_ids_with_context_for_connection(store, C, &plan.send_fact_ids)` select the send set under ceiling 6 — `O1` is named (in-range, ceiling-active) while `U` is excluded because at ceiling 6 it is above-ceiling and never minted into the round. The round lands a `sync::need_id` (tag 167) for `O1` (NOT for `U`). (2) BEFORE running `SendRequestedFactHandler::handle` on that `O1` need-id, APPLY the signed `must_update` canary naming the mobile release (per MAN-16/CEIL-12: a canary for ANOTHER release acts as an instantaneous ceiling INPUT). Recompute the still-usable set and ceiling: mobile leaves the set IMMEDIATELY — NOT at `T + M`, with NO skew margin — and the ceiling jumps 6 → 7 discontinuously. `U` (intro 7) is now ceiling-active.
@@ -5852,11 +5893,11 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 ### SYNC-GAP22c — Grace-window extension lands mid-round: it HOLDS the ceiling a naive timer would have raised, keeping a would-be-activated fact above-ceiling so it is NOT smuggled into the in-flight round (reverse-direction discontinuity)  `multinode-network`
 - **Setup:** Floor 6, ceiling 6. Still-usable {mobile `6..=6` `expires_at = T` (the blocker), desktop `6..=7`}. Peer A (desktop, head 7) is mid-round answering B over connection `C`. A's shareable index holds in-range v1 owner `O1` (`content::message:1`, tag 50) AND owner `U` (`content::message_v2`, intro 7, above-ceiling at 6, bytes retained). B's `sync::compare` (165) mismatches a leaf range covering both. trusted_time is approaching `T` such that, on a NAIVE timer with no grace handling, A would cross `T + M` between the plan and the send and would treat `U` as newly ceiling-active. A re-signed mobile manifest entry (`MAN-06` monotonic-union grace extension) moving `expires_at` to `T2 > T` is staged and reaches A (the capable producer) at `t_ext < T` — BEFORE the original deadline (the safe-grace case, CEIL-23).
 - **Action:** (1) Run `SendSyncCompareResponseHandler::handle` at ceiling 6: the plan names `O1` (ceiling-active) and EXCLUDES `U` (above-ceiling at 6); a `sync::need_id` (167) for `O1` lands. (2) APPLY the grace extension (mobile `expires_at` → `T2`) so A honors the extended deadline. (3) Advance trusted_time ACROSS the ORIGINAL `T + M` (where a naive timer would have raised the ceiling to 7) but keep it BELOW `T2 + M`. (4) Run `SendRequestedFactHandler::handle` on the in-flight `O1` need-id, and then run a FRESH `SendSyncCompareResponseHandler` seed pass.
-- **Expect:** The grace extension HOLDS the ceiling at 6 across the original `T + M` (CEIL-23: a producer that received the extension before the original deadline does not raise the ceiling while the extended blocker is still live). Therefore `U` stays above-ceiling / quarantined: the in-flight round ships ONLY `O1` (byte-identical via `require_sendable_fact`), and crucially the SUBSEQUENT fresh `response_plan_with_summaries` / `range_summary_for_connection` pass — recomputed against the grace-HELD ceiling 6 — STILL excludes `U` (its id is NOT entered into the new plan, NOT advertised in a `sync::have_id`). This is the OPPOSITE-direction discontinuity from SYNC-GAP22a: a naive timer would have raised the ceiling and smuggled `U` into the round; the grace extension must instead KEEP the ceiling down so a fact a timer would have activated is NOT smuggled in. `U` activates only after trusted_time later crosses `T2 + M` (or mobile is canaried). Negative control on monotonicity: a LATE extension arriving AFTER the original deadline (CEIL-24) cannot un-advance — but that is out of scope here; this test pins the SAFE-grace mid-round hold.
+- **Expect:** The grace extension HOLDS the ceiling at 6 across the original `T + M` (CEIL-23: a producer that received the extension before the original deadline does not raise the ceiling while the extended blocker is still live). Therefore `U` stays above-ceiling / pending: the in-flight round ships ONLY `O1` (byte-identical via `require_sendable_fact`), and crucially the SUBSEQUENT fresh `response_plan_with_summaries` / `range_summary_for_connection` pass — recomputed against the grace-HELD ceiling 6 — STILL excludes `U` (its id is NOT entered into the new plan, NOT advertised in a `sync::have_id`). This is the OPPOSITE-direction discontinuity from SYNC-GAP22a: a naive timer would have raised the ceiling and smuggled `U` into the round; the grace extension must instead KEEP the ceiling down so a fact a timer would have activated is NOT smuggled in. `U` activates only after trusted_time later crosses `T2 + M` (or mobile is canaried). Negative control on monotonicity: a LATE extension arriving AFTER the original deadline (CEIL-24) cannot un-advance — but that is out of scope here; this test pins the SAFE-grace mid-round hold.
 - **Defends:** VISIBILITY (1) and CEILING MONOTONICITY (3) under a grace-extension discontinuity that HOLDS (rather than raises) the ceiling mid-round; ADMISSION (a fact a naive timer would have activated is NOT smuggled into an in-flight round when a grace extension holds the ceiling); fills the Matrix C `sync × grace extension` cell (previously EMPTY) — the reverse-direction analog the smooth-expiry SYNC-GAP12a never exercised. Confirms `range_summary_for_connection` / shareable plan are recomputed against the grace-HELD ceiling between plan and send, not against a naive timer.
 - **Refs:** `sync/send_compare_response.rs` `SendSyncCompareResponseHandler::handle` (`response_plan_with_summaries`, `range_summary_for_connection`, `expand_fact_ids_with_context_for_connection`); `sync/send_requested_fact.rs` `SendRequestedFactHandler::handle` (`require_sendable_fact`); `sync::need_id` 167 / `sync::compare` 165; `content::message_v2` intro 7 vs `content::message:1` 50; CEIL-23 / CEIL-24 / MAN-06 (grace extension moves `expires_at` LATER and holds the ceiling; monotonic union; late-extension cannot un-advance); SYNC-GAP12a (the smooth-expiry analog whose reasoning is re-proven here for a held, non-time-gated ceiling).
 ### CONTENT-GAP23a — activating file_slice_v2 (new BAO geometry) MUST NOT validate against a RETAINED v1 content::file parent's root_hash  `replay-cli`
-- **Setup:** Node at a ceiling covering only the v1 content families. A v1 `content::file` (tag 54, `TYPE_CONTENT_FILE`) `F` is authored and projected: `CONTENT_FILES` row present, v1 geometry `blob_bytes`/`total_slices`/`slice_bytes`/`root_hash` set by `con send-file` at the v1 256 KiB slice geometry (`FILE_SLICE_PLAINTEXT_BYTES`). Its projector has published the standing `ContextOffer::range(fact.id, "content_file", scope, F.file_id, F.file_id)` (`content/file/project.rs:190-196`). The node then RECEIVES over sync an above-ceiling `file_slice_v2` fact `S` — a proposed new-tag sibling of `content::file_slice` (tag 55), intro_version = N+1, sibling `content/file_slice_v2/` dir, carrying the SAME `file_id` as `F` but a NEW BAO geometry: its `proof` slot was BAO-extracted against a v2-geometry encrypted root (e.g. 512 KiB plaintext slices, a re-sized `FILE_SLICE_BAO_PROOF_BYTES` slot) that does NOT equal `F.root_hash`. Per ADMISSION `S` is QUARANTINED (retained opaque, unprojected, undisplayed, uncounted — NOT routed to a missing projector, NOT hitting `core/projectors.rs:456`). CRITICALLY, only the v1 `F` (tag 54) is retained for this `file_id`; no `file_v2` parent of the v2 geometry exists.
+- **Setup:** Node at a ceiling covering only the v1 content families. A v1 `content::file` (tag 54, `TYPE_CONTENT_FILE`) `F` is authored and projected: `CONTENT_FILES` row present, v1 geometry `blob_bytes`/`total_slices`/`slice_bytes`/`root_hash` set by `con send-file` at the v1 256 KiB slice geometry (`FILE_SLICE_PLAINTEXT_BYTES`). Its projector has published the standing `ContextOffer::range(fact.id, "content_file", scope, F.file_id, F.file_id)` (`content/file/project.rs:190-196`). The node then RECEIVES over sync an above-ceiling `file_slice_v2` fact `S` — a proposed new-tag sibling of `content::file_slice` (tag 55), intro_version = N+1, sibling `content/file_slice_v2/` dir, carrying the SAME `file_id` as `F` but a NEW BAO geometry: its `proof` slot was BAO-extracted against a v2-geometry encrypted root (e.g. 512 KiB plaintext slices, a re-sized `FILE_SLICE_BAO_PROOF_BYTES` slot) that does NOT equal `F.root_hash`. Per ADMISSION `S` is PENDING (pending opaque, unprojected, undisplayed, uncounted — NOT routed to a missing projector, NOT hitting `core/projectors.rs:456`). CRITICALLY, only the v1 `F` (tag 54) is retained for this `file_id`; no `file_v2` parent of the v2 geometry exists.
 - **Action:** A fleet-wide signed manifest raises the ceiling so `file_slice_v2`'s tag is ceiling-active (its kept-forever v2 projector + sibling dir present and routed); trusted_time advances past `blocker.expires_at + M`. Wipe derived state and replay all retained facts via the per-tag historical adapter (`drain_pending_projection`). `S` now routes to `ContentFileSliceV2Projector` and is marked pending.
 - **Expect:** `S` resolves its parent need and finds ONLY the v1 `F`. It MUST NOT count: it either (i) PARKS — because the v2 projector emits its parent need under its OWN geometry role (e.g. `content_file_v2`, not the shared `content_file` role at `content/file_slice/project.rs:68-74`), so the v1 `F`'s `content_file` offer never matches and there is no retained v2 parent to satisfy it (PROJ-17 park: `return Ok(ProjectionOutput::new().need(file_v2_need))`, no row, no offer, no error); OR (ii) if the v2 projector deliberately shares the `content_file` role and so decodes `F` (decode succeeds — `F` IS tag 54, `message_project::decode_typed_fact(..., file::TYPE_CONTENT_FILE, ...)` at `content/file_slice/project.rs:78-84` returns Ok), it MUST then REJECT at BAO verification: `verified_slice_ciphertext(&slice, &file)` calls `crypto::bao_verify_slice(&F.root_hash, S.proof.bytes(), slice_start, slice_len)` (`content/file_slice/project.rs:101,218-230`), and because `S.proof` was extracted against a v2 root != `F.root_hash`, verification returns Err ("file slice bao proof verification failed") — fail-closed, no `FILE_SLICES` row. In NEITHER case is a slice row materialized against the wrong-geometry parent. Replay completes (Invariant 4: no `Err` abort of the whole replay; a returned per-fact Err is surfaced for `S` alone or `S` parks). `con save-file` reconstructs `F` from v1 slices ONLY; `con files`/`con content-count` are unchanged by `S`; `con state-summary` counts `S` under retained-facts and parked/pending-or-rejected, never under `FILE_SLICES`.
 - **Defends:** The unpinned boundary "a v2 slice cannot borrow a v1 parent's root_hash for verification" — the file-family analog of the version-knob rule applied to the BAO root. Content-integrity/safety: a slice whose ciphertext was proven against the v2 tree must NEVER be admitted by checking it against the v1 tree's root (cross-geometry proof acceptance = an unproven-ciphertext admission hole). Invariant 4 (replay deterministic, per-tag adapter, must not abort); Invariant 1 (visibility deferred/dropped, never half-projected against the wrong parent); CONTENT-14 (each tag-55 slice verifies its proof against the parent tag-54 root_hash) extended across the geometry boundary.
@@ -5870,7 +5911,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Refs:** `content/file_slice/project.rs:68-77` (the v1 `content_file` range need pattern the v2 projector must NOT reuse verbatim against a v1 offer), `:200-214` (`share_fact_with_sync` + `content_file_slice_row` materialize path that must NOT run), `:75-77` (park `return Ok(ProjectionOutput::new().need(file_need))`); `content/file/project.rs:190-196` (`content_file` offer); `core/context.rs:253` `ContextNeed::range` / `:309` `ContextOffer::range` (role-keyed matching); `core/projectors.rs:331` `ProjectionOutput::need`, `:489` `project_typed`; sibling CONTENT-GAP23a, CONTENT-16, REPLAY-GAP11a (orphan-slice park).
 
 ### CONTENT-GAP23c — symmetric guard: an activating v1 file_slice (tag 55) MUST NOT validate against a RETAINED file_v2 parent's new-geometry root  `replay-cli`
-- **Setup:** The mirror of GAP23a, ceiling-active in the other direction. Ceiling now covers v2 file geometry: a `content::file_v2` parent `F2` (new tag, sibling `content/file_v2/`, intro_version = N+1) is retained and projected with a v2-geometry `root_hash = R2` (e.g. 512 KiB slices). A v1 `content::file_slice` fact `S1` (tag 55, `TYPE_CONTENT_FILE_SLICE=55`) for the SAME `file_id` is retained — its `proof` was extracted against a v1-geometry root `R1 != R2`. (Reachable via: a peer at the operational floor sent v1 slices for a file the local node holds at v2 geometry, or a v1 slice was quarantined-then-activated while only a v2 parent is retained for that `file_id`.) The v1 `ContentFileSliceProjector` is routed (it is kept forever); `F2`'s projector publishes ITS parent offer.
+- **Setup:** The mirror of GAP23a, ceiling-active in the other direction. Ceiling now covers v2 file geometry: a `content::file_v2` parent `F2` (new tag, sibling `content/file_v2/`, intro_version = N+1) is retained and projected with a v2-geometry `root_hash = R2` (e.g. 512 KiB slices). A v1 `content::file_slice` fact `S1` (tag 55, `TYPE_CONTENT_FILE_SLICE=55`) for the SAME `file_id` is retained — its `proof` was extracted against a v1-geometry root `R1 != R2`. (Reachable via: a peer at the operational floor sent v1 slices for a file the local node holds at v2 geometry, or a v1 slice was pending-then-activated while only a v2 parent is retained for that `file_id`.) The v1 `ContentFileSliceProjector` is routed (it is kept forever); `F2`'s projector publishes ITS parent offer.
 - **Action:** Wipe derived state and replay all retained facts via the per-tag adapter; `S1` (tag 55) routes to the kept-forever v1 `ContentFileSliceProjector` and is marked pending while `F2` (file_v2) is the only parent retained for `file_id`.
 - **Expect:** `S1` MUST NOT count against `F2`. The v1 slice projector emits its `content_file` need (`content/file_slice/project.rs:68-74`) keyed to the v1 `content::file` role; because `F2` is a DIFFERENT tag publishing under its own `content_file_v2` role (geometry-distinct offer), `F2` does NOT match the v1 slice's `content_file` need and `S1` PARKS (`return Ok(ProjectionOutput::new().need(file_need))`, no row, no error). Should an implementation instead let `F2` satisfy the `content_file` role, the v1 slice's strict decode `decode_typed_fact(parent, file::TYPE_CONTENT_FILE=54, ...)` (`content/file_slice/project.rs:78-84`) MUST FAIL with "file slice parent context is not a content file" because `F2`'s first tag byte is the file_v2 tag (!= 54) — the `.map_err(|_| ...)` at :84 fires fail-closed; no BAO verification against `R2`, no `FILE_SLICES` row. Replay completes (Invariant 4). `con files` shows `F2` at v2 geometry; `S1` contributes no slice row; `con save-file` does not reconstruct a blob from a wrong-geometry parent.
 - **Defends:** The boundary is symmetric — neither a v2 slice against a v1 parent (GAP23a/b) NOR a v1 slice against a v2 parent may share a root_hash across geometries. Pins that the strict `TYPE_CONTENT_FILE=54` tag check at `content/file_slice/project.rs:84` is load-bearing for safety, not just hygiene: it stops a v1 slice from BAO-verifying its v1-geometry proof against a v2-geometry root. Invariant 5 (v1 slice reader kept forever, meaning preserved, but only against its own-tag parent); Invariant 4; content-integrity (no cross-geometry proof acceptance in EITHER direction).
@@ -5954,9 +5995,9 @@ The single-axis cells are saturated after round 1. The remaining weaknesses are 
 
 ## Thin / missing cells (prose)
 
-Round 1 closed the 11 big interaction items (key×ceiling, quarantine-dep-purge, ceiling-rises-mid-sync, blocked×deterministic-replay, three-ceiling relay, anchor-purge×activation, retention×mixed-version, two-conjunct carrier skew, own-expiry×activation, frame_observation time-backdoor, close×blocked/replay). Round-2 re-reading found the following NEW thin/missing cells — all are wire-detail or fingerprint-grain interactions the cluster sections asserted at too coarse a level, plus two transition×sync cells Matrix C still shows empty:
+Round 1 closed the 11 big interaction items (key×ceiling, pending-dep-purge, ceiling-rises-mid-sync, blocked×deterministic-replay, three-ceiling relay, anchor-purge×activation, retention×mixed-version, two-conjunct carrier skew, own-expiry×activation, frame_observation time-backdoor, close×blocked/replay). Round-2 re-reading found the following NEW thin/missing cells — all are wire-detail or fingerprint-grain interactions the cluster sections asserted at too coarse a level, plus two transition×sync cells Matrix C still shows empty:
 
-1. **`sync_status` root_fingerprint folds `context_have`, not just `(timestamp,id)` (sync/query, mixed)** — GENUINE GAP. `summarize_range` (compare/create.rs:245) folds only `(timestamp, fact.id)` — version-independent, as SYNC-13/SYNC-26 claim. But the PERSISTED leaf `contribution_fingerprint` (shared_fact/rows.rs:509) folds `(workspace_id, owner_fact_id, timestamp_ms, context_have[])`, and `sync_status` (rows.rs:821-835) XORs those leaf fingerprints into `root_fingerprint`. So `con sync-status` `root_fingerprint` is NOT version/closure-independent when two converged nodes recorded DIFFERENT `context_have` sets for the same owner (e.g. a node that decoded a v2 owner and advertised its v1 anchor vs a node where the owner's anchor was absent/quarantined when its projector ran). SYNC-26 explicitly asserts equality "fingerprint = XOR over (timestamp,id); version-independent" — that is true for the on-wire compare summary but FALSE for the persisted sync-status root. Untested seam between the two fingerprint algorithms.
+1. **`sync_status` root_fingerprint folds `context_have`, not just `(timestamp,id)` (sync/query, mixed)** — GENUINE GAP. `summarize_range` (compare/create.rs:245) folds only `(timestamp, fact.id)` — version-independent, as SYNC-13/SYNC-26 claim. But the PERSISTED leaf `contribution_fingerprint` (shared_fact/rows.rs:509) folds `(workspace_id, owner_fact_id, timestamp_ms, context_have[])`, and `sync_status` (rows.rs:821-835) XORs those leaf fingerprints into `root_fingerprint`. So `con sync-status` `root_fingerprint` is NOT version/closure-independent when two converged nodes recorded DIFFERENT `context_have` sets for the same owner (e.g. a node that decoded a v2 owner and advertised its v1 anchor vs a node where the owner's anchor was absent/pending when its projector ran). SYNC-26 explicitly asserts equality "fingerprint = XOR over (timestamp,id); version-independent" — that is true for the on-wire compare summary but FALSE for the persisted sync-status root. Untested seam between the two fingerprint algorithms.
 
 2. **Accumulated `context_have` keeps a purged anchor id in the leaf fingerprint forever (sync, mixed+transition)** — GENUINE GAP. `upsert_sync_contribution` (rows.rs:280-285) reads the existing leaf's context_have and EXTENDS (sort+dedup) — it never shrinks. So once an owner's projector advertised a context anchor, that anchor id stays in the contribution fingerprint even after the anchor fact is purged/retired/tombstoned. Two nodes that hold the same owner+same ids but learned the owner on opposite sides of an anchor purge compute different `root_fingerprint`s, and a single node's `root_fingerprint` does not change when the anchor is later purged (the index does not re-derive context_have downward). No test pins the monotone-accumulate-never-shrink behavior of context_have against the purge/retention path.
 
@@ -5964,7 +6005,7 @@ Round 1 closed the 11 big interaction items (key×ceiling, quarantine-dep-purge,
 
 4. **Grace-extension × in-flight sync compare, and security-deprecation canary × in-flight sync (sync, transition)** — GAP (Matrix C still shows empty). SYNC-GAP12a/b/c cover a ceiling RISE via blocker-EXPIRY mid-round. But neither a grace EXTENSION (CEIL-23/24: blocker.expires_at moved LATER, holding the ceiling) nor a security-deprecation canary (CEIL-12/MAN-13: blocker dropped EARLY, ceiling jumps UP without waiting for +M) has a sync-layer analog. When a canary fires mid-compare-round, the still-usable set recomputes instantly and the shareable index / negentropy summary must be recomputed against the new ceiling between the compare plan and the requested-fact send — distinct from the gradual-expiry SYNC-GAP12a because the jump is discontinuous and not gated by M. No test asserts the in-flight `sync::compare` child plan is re-derived (not stranded) when the trigger is a canary or a grace extension rather than a timed expiry.
 
-5. **file_slice_v2 with a NEW BAO geometry: a v1 slice and a quarantined v2 slice for the SAME file_id both reference one v1 `content::file` parent root_hash (content, mixed)** — THIN→GAP. CONTENT-15/16 and REPLAY-GAP11a cover v2-slice quarantine and the purged-parent park. But the BAO-proof-against-parent-root mechanism (CONTENT-14: each tag-55 slice verifies its proof against the parent tag-54 `root_hash`) is not crossed with a v2 slice whose larger plaintext geometry implies a DIFFERENT root_hash/tree shape for the SAME `file_id`. On activation the v2 slice projector must verify against a v2-geometry root — but the retained parent is a v1 `content::file` with a v1 root_hash. Either the v2 file descriptor must also be present (a v2 parent), or the v2 slice parks; no test pins that a v2 slice cannot validate against a v1 parent's root_hash (a cross-geometry proof must FAIL or PARK, never count). Safety-adjacent (a forged-geometry slice must not be admitted against the wrong parent).
+5. **file_slice_v2 with a NEW BAO geometry: a v1 slice and a pending v2 slice for the SAME file_id both reference one v1 `content::file` parent root_hash (content, mixed)** — THIN→GAP. CONTENT-15/16 and REPLAY-GAP11a cover v2-slice pending and the purged-parent park. But the BAO-proof-against-parent-root mechanism (CONTENT-14: each tag-55 slice verifies its proof against the parent tag-54 `root_hash`) is not crossed with a v2 slice whose larger plaintext geometry implies a DIFFERENT root_hash/tree shape for the SAME `file_id`. On activation the v2 slice projector must verify against a v2-geometry root — but the retained parent is a v1 `content::file` with a v1 root_hash. Either the v2 file descriptor must also be present (a v2 parent), or the v2 slice parks; no test pins that a v2 slice cannot validate against a v1 parent's root_hash (a cross-geometry proof must FAIL or PARK, never count). Safety-adjacent (a forged-geometry slice must not be admitted against the wrong parent).
 
 6. **Two same-version releases whose presentation chrome differs at the BYTE level vs the QUERY-09/10 value-vs-formatting classifier (query, new)** — THIN. QUERY-09/10 split value-changing fixes (gated) from formatting-only fixes (free). But the classifier itself is never exercised against a change that touches a value-bearing substring AND chrome in one diff (e.g. `format_bytes` changing both the unit string "B"→"KiB" AND rounding the number). The mixed diff must be classified value-changing (gated) — the conservative side. No test pins the classifier's behavior on a mixed formatting+value diff; a too-lenient classifier would let a value change ship as "formatting-only" without a protocol bump, breaking RENDERING UNIFORMITY across releases at the same ceiling.
 
