@@ -512,13 +512,10 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
         disappearing_value(&bob, &workspace_id, "effective_floor"),
         "200"
     );
-    // Remaining gap: `disappearing-status` does not expose a cover-state
-    // digest. The current black-box assertions verify the public floor,
-    // key-access loss, and below-floor authoring wedge.
-
-    // Slice-5 known limitation: the chop does not make the old TTL=0 message
-    // disappear from the read model. The visible guarantee tested here is that
-    // the public floor advances and below-floor authoring is refused.
+    wait_for_no_messages(&alice, &workspace_id);
+    wait_for_no_messages(&bob, &workspace_id);
+    wait_for_content_count(&alice, &workspace_id, "0");
+    wait_for_content_count(&bob, &workspace_id, "0");
 
     // Bonus (per the task's step 5): try to author a NEW message at a minute
     // below the horizon. Public authoring must wedge with the documented
