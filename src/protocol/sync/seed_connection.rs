@@ -83,7 +83,7 @@ impl IntentHandler for SeedConnectionSyncHandler {
         let input = decode_seed_connection_sync(raw)?;
         let store = context.store()?;
         let Some(_) =
-            connection::bootstrap_response::queries::connection_by_id(store, &input.connection_id)
+            connection::connection::queries::connection_by_id(store, &input.connection_id)
                 .map_err(|err| {
                     HandlerError::fatal(format!("seed_connection_sync connection row: {err}"))
                 })?
@@ -180,23 +180,18 @@ mod tests {
                 .expect("store");
         let connection_id = [8; 32];
         store
-            .insert_table_rows(vec![
-                connection::bootstrap_response::rows::bootstrap_response_row(
+            .insert_table_rows(vec![connection::connection::rows::connection_row(
+                connection::connection::rows::ConnectionRowFields::without_addresses(
                     connection_id,
-                    &connection::bootstrap_response::fact::BootstrapResponseFact {
-                        from_endpoint: [1; 32],
-                        to_endpoint: [2; 32],
-                        request_id: [3; 32],
-                        invite_secret_fact_id: [4; 32],
-                        initiator_ephemeral_secret_fact_id: [5; 32],
-                        responder_ephemeral_secret_fact_id: [6; 32],
-                        responder_ephemeral_public_key: [7; 32],
-                        handshake_hash: [8; 32],
-                        connection_secret: [9; 32],
-                    },
-                )
-                .expect("connection row"),
-            ])
+                    [1; 32],
+                    [2; 32],
+                    [3; 32],
+                    [7; 32],
+                    [8; 32],
+                    [9; 32],
+                ),
+            )
+            .expect("connection row")])
             .expect("insert rows");
         let intent = seed_connection_sync_intent(SeedConnectionSync { connection_id });
         let handler = SeedConnectionSyncHandler::new();
@@ -244,19 +239,16 @@ mod tests {
         );
         store
             .insert_table_rows(vec![
-                connection::bootstrap_response::rows::bootstrap_response_row(
-                    connection_id,
-                    &connection::bootstrap_response::fact::BootstrapResponseFact {
-                        from_endpoint: [1; 32],
-                        to_endpoint: [2; 32],
-                        request_id: [3; 32],
-                        invite_secret_fact_id: [4; 32],
-                        initiator_ephemeral_secret_fact_id: [5; 32],
-                        responder_ephemeral_secret_fact_id: [6; 32],
-                        responder_ephemeral_public_key: [7; 32],
-                        handshake_hash: [8; 32],
-                        connection_secret: [9; 32],
-                    },
+                connection::connection::rows::connection_row(
+                    connection::connection::rows::ConnectionRowFields::without_addresses(
+                        connection_id,
+                        [1; 32],
+                        [2; 32],
+                        [3; 32],
+                        [7; 32],
+                        [8; 32],
+                        [9; 32],
+                    ),
                 )
                 .expect("connection row"),
                 shared_fact::shareable_fact_row(shared_fact::ShareableFactRow {
@@ -305,19 +297,16 @@ mod tests {
             signing_secret: [13; 32],
         });
         rows.push(
-            connection::bootstrap_response::rows::bootstrap_response_row(
-                connection_id,
-                &connection::bootstrap_response::fact::BootstrapResponseFact {
-                    from_endpoint: local_endpoint,
-                    to_endpoint: remote_endpoint,
-                    request_id: [3; 32],
-                    invite_secret_fact_id: [4; 32],
-                    initiator_ephemeral_secret_fact_id: [5; 32],
-                    responder_ephemeral_secret_fact_id: [6; 32],
-                    responder_ephemeral_public_key: [7; 32],
-                    handshake_hash: [8; 32],
-                    connection_secret: [9; 32],
-                },
+            connection::connection::rows::connection_row(
+                connection::connection::rows::ConnectionRowFields::without_addresses(
+                    connection_id,
+                    local_endpoint,
+                    remote_endpoint,
+                    [3; 32],
+                    [7; 32],
+                    [8; 32],
+                    [9; 32],
+                ),
             )
             .expect("connection row"),
         );

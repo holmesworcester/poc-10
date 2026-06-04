@@ -171,7 +171,7 @@ There are two wake surfaces, and they must stay distinct:
 
 An authentication need proves only enough cryptographic material to authenticate
 the current fact boundary. It is not an authority proof. The one current user is
-`connection::connection_request`: its endpoint signature verifies against the
+`connection::request`: its endpoint signature verifies against the
 *initiator's* signing key, which lives in that initiator's `endpoint_shared`, so
 the authenticator parks via `NeedsAuthentication` on that `endpoint_shared`,
 reads its key, and verifies the signature. Finding that key proves "these bytes

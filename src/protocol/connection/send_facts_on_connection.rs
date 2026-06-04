@@ -20,7 +20,7 @@ use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::{
     auth::endpoint,
-    connection::bootstrap_response,
+    connection::connection,
     connection_frame::{
         self as frame_policy, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
         CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
@@ -266,10 +266,11 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         let work = decode_send_facts_on_connection_work(intent)?;
         let connection_id = work.connection_id();
         let Some(connection) =
-            bootstrap_response::queries::connection_by_id(context.store()?, &connection_id)
-                .map_err(|err| {
+            connection::queries::connection_by_id(context.store()?, &connection_id).map_err(
+                |err| {
                     HandlerError::fatal(format!("send_facts_on_connection connection row: {err}"))
-                })?
+                },
+            )?
         else {
             return Ok(PipelineEffects::new());
         };

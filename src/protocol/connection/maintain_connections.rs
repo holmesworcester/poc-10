@@ -9,7 +9,7 @@
 //! It owns no state. Each tick it asks the request families for their pending
 //! sets — local outbound request rows with a route and no answer yet, for both
 //! bootstrap and membership — and queues a send for each. That selection is a
-//! query over connection-owned read models (request rows and response rows), not
+//! query over connection-owned read models (request rows and connection rows), not
 //! a separate maintenance index; an answered request drops out of the query, so
 //! a connected peer stops being retried. Because each fire re-queues sends for
 //! every still-pending request, the recurring cadence is the retry interval and
@@ -22,8 +22,7 @@ use crate::core::intents::{
 };
 use crate::core::store::Store;
 
-use crate::protocol::connection::bootstrap_request::queries::pending_bootstrap_requests;
-use crate::protocol::connection::connection_request::queries::pending_membership_requests;
+use crate::protocol::connection::request::queries::pending_connection_requests;
 use crate::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame,
 };
@@ -36,9 +35,7 @@ pub const MAINTAIN_CONNECTIONS: &str = "maintain_connections";
 /// maintenance intent only when at least one request (bootstrap or membership)
 /// is pending, so the daemon does not queue empty work on a quiet tick.
 pub fn build_maintain_connections_intent(store: &Store) -> Result<Option<Intent>, String> {
-    if pending_bootstrap_requests(store)?.is_empty()
-        && pending_membership_requests(store)?.is_empty()
-    {
+    if pending_connection_requests(store)?.is_empty() {
         return Ok(None);
     }
     Ok(Some(maintain_connections_intent()))
@@ -71,15 +68,9 @@ impl IntentHandler for MaintainConnectionsHandler {
         let mut effects = PipelineEffects::new();
         // Queue one local send per pending request. Sends are local-only, so they
         // never survive replay; the next tick re-queries and re-queues.
-        for pending in pending_bootstrap_requests(store)? {
+        for pending in pending_connection_requests(store)? {
             effects = effects.local_intent(send_network_frame_intent(SendNetworkFrame {
-                routing_key: pending.request_sent_id,
-                frame: pending.sealed_request_bytes,
-            }));
-        }
-        for pending in pending_membership_requests(store)? {
-            effects = effects.local_intent(send_network_frame_intent(SendNetworkFrame {
-                routing_key: pending.request_sent_id,
+                routing_key: pending.request_id,
                 frame: pending.sealed_request_bytes,
             }));
         }

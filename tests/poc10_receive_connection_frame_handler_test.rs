@@ -15,15 +15,8 @@ use topo::protocol::auth::key_wrap::fact::{
 };
 use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
-use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
-use topo::protocol::connection::bootstrap_request::layout as connection_request_layout;
-use topo::protocol::connection::bootstrap_request::transit as request_transit;
-use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
-use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
-use topo::protocol::connection::bootstrap_response::transit as response_transit;
-use topo::protocol::connection::connection_established::fact::ConnectionEstablishedFact;
-use topo::protocol::connection::connection_established::layout as connection_established_layout;
-use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
+use topo::protocol::connection::connection::fact::ConnectionFact;
+use topo::protocol::connection::connection::layout as connection_layout;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
@@ -37,6 +30,8 @@ use topo::protocol::connection::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
 };
+use topo::protocol::connection::request::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP};
+use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection_frame_wire::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
@@ -120,6 +115,7 @@ fn project_connection_frame_fact(
 fn exact_match(
     owner: [u8; 32],
     role: &'static str,
+    scope: FactScope,
     key: [u8; 32],
     payload: Fact,
 ) -> MatchedContext {
@@ -129,14 +125,14 @@ fn exact_match(
         need: ContextNeed {
             owner,
             role: role.clone(),
-            scope: FactScope::Local,
+            scope: scope.clone(),
             start_key: key.clone(),
             end_key: key.clone(),
         },
         offer: ContextOffer {
             owner: payload.id,
             role,
-            scope: FactScope::Local,
+            scope,
             start_key: key.clone(),
             end_key: key,
         },
@@ -151,15 +147,12 @@ fn observation_match(frame_fact: &Fact) -> MatchedContext {
     exact_match(
         frame_fact.id,
         "connection_frame_observation",
+        FactScope::Local,
         frame_fact.id,
         observation,
     )
 }
 
-/// The local endpoint as `auth_local_endpoint` context for a sealed handshake
-/// frame projector. The projector needs the single local endpoint over the full
-/// key range (it cannot know the recipient id before opening), so the matched
-/// need mirrors that full range exactly.
 fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> MatchedContext {
     let endpoint_fact = Fact::new(
         FactScope::Local,
@@ -185,39 +178,46 @@ fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> Mat
     }
 }
 
-fn observed_connection_context(frame_fact: &Fact, connection_fact: Fact) -> ProjectionContext {
-    let established = connection_established_layout::decode_fact(connection_fact.body())
-        .expect("decode connection_established context");
+fn observed_connection_context(
+    frame_fact: &Fact,
+    connection_fact: Fact,
+    local_endpoint: &EndpointFact,
+) -> ProjectionContext {
     ProjectionContext::from_matches(vec![
         observation_match(frame_fact),
         exact_match(
             frame_fact.id,
-            "connection_established",
-            established.connection_id,
+            "connection",
+            FactScope::Local,
+            connection_fact.id,
             connection_fact,
         ),
+        local_endpoint_match(frame_fact.id, local_endpoint),
     ])
 }
 
-fn connection_fact() -> (Fact, ConnectionEstablishedFact) {
-    let connection = ConnectionEstablishedFact {
-        connection_id: [9; 32],
+fn connection_fact() -> (Fact, ConnectionFact, EndpointFact) {
+    let local_endpoint = local_endpoint();
+    let responder_ephemeral_private = [15; 32];
+    let connection = ConnectionFact {
         from_endpoint: [10; 32],
-        to_endpoint: [11; 32],
+        to_endpoint: local_endpoint.endpoint,
         request_id: [12; 32],
+        responder_addr: None,
+        initiator_addr: None,
         initiator_ephemeral_secret_fact_id: [14; 32],
         responder_ephemeral_secret_fact_id: [15; 32],
-        responder_ephemeral_public_key: [16; 32],
+        responder_ephemeral_public_key: crypto::x25519_public_key(&responder_ephemeral_private),
         handshake_hash: [17; 32],
         connection_secret: [18; 32],
-        established_at_ms: 19,
     };
     let fact = Fact::new(
         FactScope::Local,
         1,
-        connection_established_layout::encode_fact(&connection).expect("connection established"),
+        connection_layout::seal_fact(&connection, &responder_ephemeral_private)
+            .expect("connection"),
     );
-    (fact, connection)
+    (fact, connection, local_endpoint)
 }
 
 fn key_wrap_bytes() -> Vec<u8> {
@@ -243,11 +243,11 @@ fn key_wrap_bytes() -> Vec<u8> {
     auth_layout::encode_key_wrap(&wrap).expect("key wrap")
 }
 
-fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionEstablishedFact, Vec<u8>) {
-    let (connection_fact, connection) = connection_fact();
+fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionFact, EndpointFact, Vec<u8>) {
+    let (connection_fact, connection, local_endpoint) = connection_fact();
     let signed_wrap = key_wrap_bytes();
     let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-        connection_id: connection.connection_id,
+        connection_id: connection_fact.id,
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
@@ -255,12 +255,18 @@ fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionEstablishedFact, Vec<u8>
         facts: ConnectionFrameFactBundle::from_bytes([signed_wrap.clone()]),
     })
     .expect("seal connection::frame frame");
-    (frame, connection_fact, connection, signed_wrap)
+    (
+        frame,
+        connection_fact,
+        connection,
+        local_endpoint,
+        signed_wrap,
+    )
 }
 
 #[test]
 fn receive_handler_emits_ephemeral_connection_frame_small() {
-    let (frame, _, _, _) = encrypted_small_frame();
+    let (frame, _, _, _, _) = encrypted_small_frame();
     let intent = receive_intent(frame.clone());
     assert_eq!(intent.kind.as_str(), RECEIVE_NETWORK_FRAME);
 
@@ -300,11 +306,6 @@ fn receive_handler_emits_ephemeral_connection_frame_file_slice() {
     let input = frame_file_slice_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode file-slice connection frame");
     assert_eq!(input.frame, frame);
-    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
-        .expect("decode frame observation");
-    assert_eq!(observation.frame_fact_id, output.ephemeral_facts[0].id);
-    assert_eq!(observation.origin_addr, ORIGIN);
-    assert_eq!(observation.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
@@ -327,141 +328,33 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
     let input = frame_bundle_layout::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode bundle connection frame");
     assert_eq!(input.frame, frame);
-    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
-        .expect("decode frame observation");
-    assert_eq!(observation.frame_fact_id, output.ephemeral_facts[0].id);
-    assert_eq!(observation.origin_addr, ORIGIN);
-    assert_eq!(observation.received_at_local_ms, RECEIVED_AT);
 }
 
 #[test]
-fn sealed_request_frame_is_admitted_then_opened_by_its_projector() {
-    let invite = InviteSecretFact::new([33; 32]);
-    let endpoint = local_endpoint();
-    let initiator_ephemeral_private = [59; 32];
-    let mut request = BootstrapRequestFact {
-        from_endpoint: crypto::x25519_public_key(&[55; 32]),
-        to_endpoint: endpoint.endpoint,
-        nonce: [56; 32],
-        invite_fact_id: [57; 32],
-        bootstrap_hash: invite.bootstrap_hash,
-        invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-        invite_secret_fact_id: [60; 32],
-        initiator_ephemeral_secret_fact_id: [58; 32],
-        initiator_ephemeral_public_key: crypto::x25519_public_key(&initiator_ephemeral_private),
-        from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
-        to_listen_addr: None,
-    };
-    request.invite_signature = crypto::ed25519_sign(
-        &invite.bootstrap_secret,
-        &topo::protocol::connection::bootstrap_request::create::invite_signing_transcript(&request)
-            .expect("request transcript"),
-    );
-    let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
-    let frame =
-        request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
-            .expect("seal request");
+fn sealed_request_frame_is_admitted_as_durable_request_plus_observation() {
+    let frame = sealed_request_frame();
 
-    // The boundary admits the sealed bytes as an ephemeral fact plus an
-    // observation; it does no unsealing itself (no store needed).
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
         .expect("receive sealed request");
-    assert_eq!(output.facts.len(), 1, "frame observation");
-    assert_eq!(output.ephemeral_facts.len(), 1, "sealed frame fact");
-    let sealed_fact = output.ephemeral_facts[0].clone();
-    assert_eq!(sealed_fact.bytes, frame);
 
-    // Its projector unseals with the local endpoint secret from context and emits
-    // the recovered request fact plus its receipt.
-    let context = ProjectionContext::from_matches(vec![
-        observation_match(&sealed_fact),
-        local_endpoint_match(sealed_fact.id, &endpoint),
-    ]);
-    let opened = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
-        .project(&sealed_fact, &context)
-        .expect("open sealed request");
-    assert!(opened
-        .effects
-        .facts
-        .iter()
-        .any(|fact| fact.bytes == request_bytes));
-    let receipt_fact = opened
-        .effects
-        .facts
-        .iter()
-        .find(|fact| {
-            fact.body().first().copied() == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
-        })
-        .expect("receipt fact");
-    let receipt = fact_receipt_layout::decode_fact(receipt_fact.body()).expect("decode receipt");
-    assert_eq!(receipt.origin_addr, ORIGIN);
-    assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.ephemeral_facts.is_empty());
+    assert!(output.facts.iter().any(|fact| {
+        fact.scope == FactScope::Global
+            && fact.bytes == frame
+            && connection_request_layout::is_sealed_fact(fact.body())
+    }));
+    assert!(output.facts.iter().any(|fact| {
+        fact.scope == FactScope::Local
+            && fact.body().first().copied()
+                == Some(frame_observation_layout::TYPE_CONNECTION_FRAME_OBSERVATION)
+    }));
 }
 
 #[test]
-fn sealed_request_projector_parks_without_local_endpoint() {
-    let endpoint = local_endpoint();
-    let initiator_ephemeral_private = [59; 32];
-    let invite = InviteSecretFact::new([33; 32]);
-    let mut request = BootstrapRequestFact {
-        from_endpoint: crypto::x25519_public_key(&[55; 32]),
-        to_endpoint: endpoint.endpoint,
-        nonce: [56; 32],
-        invite_fact_id: [57; 32],
-        bootstrap_hash: invite.bootstrap_hash,
-        invite_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-        invite_secret_fact_id: [60; 32],
-        initiator_ephemeral_secret_fact_id: [58; 32],
-        initiator_ephemeral_public_key: crypto::x25519_public_key(&initiator_ephemeral_private),
-        from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
-        to_listen_addr: None,
-    };
-    request.invite_signature = crypto::ed25519_sign(
-        &invite.bootstrap_secret,
-        &topo::protocol::connection::bootstrap_request::create::invite_signing_transcript(&request)
-            .expect("request transcript"),
-    );
-    let request_bytes = connection_request_layout::encode_fact(&request).expect("request");
-    let frame =
-        request_transit::seal_connection_request(&request_bytes, &initiator_ephemeral_private)
-            .expect("seal request");
-
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame), &HandlerContext::new())
-        .expect("receive sealed request");
-    let sealed_fact = output.ephemeral_facts[0].clone();
-
-    // The unseal key is a context need: without the local endpoint in context the
-    // projector parks (needs auth_local_endpoint) and emits no durable facts —
-    // there is no handler-level retry.
-    let context = ProjectionContext::from_matches(vec![observation_match(&sealed_fact)]);
-    let parked = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
-        .project(&sealed_fact, &context)
-        .expect("project parks");
-    assert!(parked.effects.facts.is_empty());
-    assert!(parked
-        .needs
-        .iter()
-        .any(|need| need.role.as_str() == "auth_local_endpoint"));
-}
-
-#[test]
-fn raw_bootstrap_request_bytes_are_discarded_at_the_network_boundary() {
-    let endpoint = local_endpoint();
-    let request = BootstrapRequestFact {
-        from_endpoint: crypto::x25519_public_key(&[55; 32]),
-        to_endpoint: endpoint.endpoint,
-        nonce: [56; 32],
-        invite_fact_id: [57; 32],
-        bootstrap_hash: [58; 32],
-        invite_signature: [59; crypto::ED25519_SIGNATURE_BYTES],
-        invite_secret_fact_id: [60; 32],
-        initiator_ephemeral_secret_fact_id: [61; 32],
-        initiator_ephemeral_public_key: crypto::x25519_public_key(&[62; 32]),
-        from_listen_addr: Some("127.0.0.1:41001".parse().expect("return addr")),
-        to_listen_addr: None,
-    };
+fn raw_connection_request_bytes_are_discarded_at_the_network_boundary() {
+    let request = plaintext_request();
     let frame = connection_request_layout::encode_fact(&request).expect("request");
 
     let output = ReceiveNetworkFrameHandler::new()
@@ -473,86 +366,55 @@ fn raw_bootstrap_request_bytes_are_discarded_at_the_network_boundary() {
 }
 
 #[test]
-fn raw_bootstrap_response_bytes_are_discarded_at_the_network_boundary() {
-    let endpoint = local_endpoint();
-    let response = BootstrapResponseFact {
-        from_endpoint: crypto::x25519_public_key(&[63; 32]),
-        to_endpoint: endpoint.endpoint,
-        request_id: [64; 32],
-        invite_secret_fact_id: [65; 32],
-        initiator_ephemeral_secret_fact_id: [66; 32],
-        responder_ephemeral_secret_fact_id: [67; 32],
-        responder_ephemeral_public_key: crypto::x25519_public_key(&[68; 32]),
-        handshake_hash: [69; 32],
-        connection_secret: [70; 32],
-    };
-    let frame = connection_response_layout::encode_fact(&response).expect("response");
+fn raw_connection_bytes_are_discarded_at_the_network_boundary() {
+    let connection = plaintext_connection();
+    let frame = connection_layout::encode_fact(&connection).expect("response");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame), &HandlerContext::new())
-        .expect("raw response is consumed");
+        .expect("raw connection is consumed");
 
     assert!(output.facts.is_empty());
     assert!(output.ephemeral_facts.is_empty());
 }
 
 #[test]
-fn receive_handler_opens_sealed_response_to_durable_response_and_receipt() {
-    let endpoint = local_endpoint();
+fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() {
     let responder_ephemeral_private = [72; 32];
-    let response = BootstrapResponseFact {
+    let connection = ConnectionFact {
         from_endpoint: crypto::x25519_public_key(&[71; 32]),
-        to_endpoint: endpoint.endpoint,
+        to_endpoint: local_endpoint().endpoint,
         request_id: [73; 32],
-        invite_secret_fact_id: [74; 32],
+        responder_addr: None,
+        initiator_addr: None,
         initiator_ephemeral_secret_fact_id: [75; 32],
         responder_ephemeral_secret_fact_id: [76; 32],
         responder_ephemeral_public_key: crypto::x25519_public_key(&responder_ephemeral_private),
         handshake_hash: [77; 32],
         connection_secret: [78; 32],
     };
-    let response_bytes = connection_response_layout::encode_fact(&response).expect("response");
-    let frame =
-        response_transit::seal_connection_response(&response_bytes, &responder_ephemeral_private)
-            .expect("seal response");
+    let frame = connection_layout::seal_fact(&connection, &responder_ephemeral_private)
+        .expect("seal connection");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
-        .expect("receive sealed response");
-    assert_eq!(output.ephemeral_facts.len(), 1);
-    let sealed_fact = output.ephemeral_facts[0].clone();
-    assert_eq!(sealed_fact.bytes, frame);
+        .expect("receive sealed connection");
 
-    let context = ProjectionContext::from_matches(vec![
-        observation_match(&sealed_fact),
-        local_endpoint_match(sealed_fact.id, &endpoint),
-    ]);
-    let opened = topo::protocol::connection_frame::SealedHandshakeFrameProjector::new()
-        .project(&sealed_fact, &context)
-        .expect("open sealed response");
-    assert!(opened
-        .effects
-        .facts
-        .iter()
-        .any(|fact| fact.bytes == response_bytes));
-    let receipt_fact = opened
-        .effects
-        .facts
-        .iter()
-        .find(|fact| {
-            fact.body().first().copied() == Some(fact_receipt_layout::TYPE_CONNECTION_FACT_RECEIPT)
-        })
-        .expect("receipt fact");
-    let receipt = fact_receipt_layout::decode_fact(receipt_fact.body()).expect("decode receipt");
-    assert_eq!(receipt.origin_addr, ORIGIN);
-    assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
+    assert_eq!(output.facts.len(), 2);
+    assert!(output.ephemeral_facts.is_empty());
+    assert!(output.facts.iter().any(|fact| {
+        fact.scope == FactScope::Local
+            && fact.bytes == frame
+            && connection_layout::is_sealed_fact(fact.body())
+    }));
 }
 
 #[test]
 fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
-    let (frame, connection_fact, connection, signed_wrap) = encrypted_small_frame();
+    let (frame, connection_fact, connection, local_endpoint, signed_wrap) = encrypted_small_frame();
     let input_fact = connection_frame_small_fact(frame.clone());
-    let context = observed_connection_context(&input_fact, connection_fact.clone());
+    let context =
+        observed_connection_context(&input_fact, connection_fact.clone(), &local_endpoint);
 
     let output = project_connection_frame_fact(&input_fact, context);
 
@@ -574,7 +436,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
     assert_eq!(receipt.origin_addr, ORIGIN);
     assert_eq!(receipt.local_endpoint_id, connection.to_endpoint);
     assert_eq!(receipt.sender_endpoint_id, connection.from_endpoint);
-    assert_eq!(receipt.connection_id, Some(connection.connection_id));
+    assert_eq!(receipt.connection_id, Some(connection_fact.id));
     assert_eq!(receipt.request_id, Some(connection.request_id));
     assert_eq!(receipt.frame_hash, crypto::hash(&frame));
     assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
@@ -582,7 +444,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
 
 #[test]
 fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
-    let (frame, _, _, _) = encrypted_small_frame();
+    let (frame, _, _, _, _) = encrypted_small_frame();
     let intent = receive_intent_from_origin(frame, b"127.0.0.1_41001");
 
     let output = ReceiveNetworkFrameHandler::new()
@@ -596,9 +458,9 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
 
 #[test]
 fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
-    let (connection_fact, connection) = connection_fact();
+    let (connection_fact, connection, local_endpoint) = connection_fact();
     let compare_bytes = sync_compare_layout::encode_fact(&SyncCompareFact {
-        connection_id: connection.connection_id,
+        connection_id: connection_fact.id,
         range: TimestampRange { start: 10, end: 20 },
         summary: RangeSummary {
             count: 0,
@@ -608,7 +470,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
     })
     .expect("sync compare");
     let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-        connection_id: connection.connection_id,
+        connection_id: connection_fact.id,
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
@@ -617,7 +479,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
     })
     .expect("seal connection::frame frame");
     let input_fact = connection_frame_small_fact(frame);
-    let context = observed_connection_context(&input_fact, connection_fact);
+    let context = observed_connection_context(&input_fact, connection_fact, &local_endpoint);
 
     let output = project_connection_frame_fact(&input_fact, context);
 
@@ -638,10 +500,10 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 #[test]
 fn well_formed_bundle_frame_without_observation_context_emits_transient_need_only() {
     on_big_stack(|| {
-        let (_, connection) = connection_fact();
+        let (connection_fact, _, _) = connection_fact();
         let frame = frame_wire::encode_frame_bytes(
             CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-            FixedBytes(connection.connection_id),
+            FixedBytes(connection_fact.id),
             FixedBytes([19; 24]),
             b"not-opened-without-context",
         )
@@ -662,10 +524,10 @@ fn well_formed_bundle_frame_without_observation_context_emits_transient_need_onl
 #[test]
 fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only() {
     on_big_stack(|| {
-        let (_, connection) = connection_fact();
+        let (connection_fact, _, _) = connection_fact();
         let frame = frame_wire::encode_frame_bytes(
             CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-            FixedBytes(connection.connection_id),
+            FixedBytes(connection_fact.id),
             FixedBytes([19; 24]),
             b"not-opened-without-context",
         )
@@ -676,7 +538,7 @@ fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only
         let output = project_connection_frame_fact(&input_fact, context);
 
         assert_eq!(output.needs.len(), 1);
-        assert_eq!(output.needs[0].role.as_str(), "connection_established");
+        assert_eq!(output.needs[0].role.as_str(), "connection");
         assert!(output.effects.facts.is_empty());
     });
 }
@@ -693,7 +555,7 @@ fn malformed_frame_header_is_discarded_by_receive_handler() {
 
 #[test]
 fn truncated_small_frame_after_valid_header_is_discarded_by_receive_handler() {
-    let (mut bytes, _, _, _) = encrypted_small_frame();
+    let (mut bytes, _, _, _, _) = encrypted_small_frame();
     bytes.truncate(bytes.len() - 1);
 
     let output = ReceiveNetworkFrameHandler::new()
@@ -702,6 +564,55 @@ fn truncated_small_frame_after_valid_header_is_discarded_by_receive_handler() {
 
     assert!(output.facts.is_empty());
     assert!(output.ephemeral_facts.is_empty());
+}
+
+fn sealed_request_frame() -> Vec<u8> {
+    let invite = InviteSecretFact::new([33; 32]);
+    let initiator_ephemeral_private = [59; 32];
+    let mut request = plaintext_request();
+    request.bootstrap_hash = invite.bootstrap_hash;
+    request.invite_signature = [0; crypto::ED25519_SIGNATURE_BYTES];
+    request.initiator_ephemeral_public_key =
+        crypto::x25519_public_key(&initiator_ephemeral_private);
+    connection::request::create::sign_bootstrap_request(&mut request, &invite)
+        .expect("sign request");
+    connection_request_layout::seal_fact(&request, &initiator_ephemeral_private)
+        .expect("seal request")
+}
+
+fn plaintext_request() -> ConnectionRequestFact {
+    let endpoint = local_endpoint();
+    ConnectionRequestFact {
+        mode: REQUEST_MODE_BOOTSTRAP,
+        from_endpoint: crypto::x25519_public_key(&[55; 32]),
+        to_endpoint: endpoint.endpoint,
+        nonce: [56; 32],
+        dialed_addr: Some("127.0.0.1:41001".parse().expect("dialed addr")),
+        initiator_addr: None,
+        invite_fact_id: [57; 32],
+        bootstrap_hash: [58; 32],
+        invite_signature: [59; crypto::ED25519_SIGNATURE_BYTES],
+        invite_secret_fact_id: [60; 32],
+        initiator_endpoint_shared_id: [0; 32],
+        endpoint_signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        initiator_ephemeral_secret_fact_id: [61; 32],
+        initiator_ephemeral_public_key: crypto::x25519_public_key(&[62; 32]),
+    }
+}
+
+fn plaintext_connection() -> ConnectionFact {
+    ConnectionFact {
+        from_endpoint: crypto::x25519_public_key(&[63; 32]),
+        to_endpoint: local_endpoint().endpoint,
+        request_id: [64; 32],
+        responder_addr: None,
+        initiator_addr: None,
+        initiator_ephemeral_secret_fact_id: [66; 32],
+        responder_ephemeral_secret_fact_id: [67; 32],
+        responder_ephemeral_public_key: crypto::x25519_public_key(&[68; 32]),
+        handshake_hash: [69; 32],
+        connection_secret: [70; 32],
+    }
 }
 
 fn local_endpoint() -> EndpointFact {

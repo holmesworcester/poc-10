@@ -950,8 +950,8 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str, daemons:
 }
 
 /// Invite bootstrap establishes membership, and afterwards a membership
-/// `connect` reconnects the now-known peer without any invite material — the
-/// capability that survives invite-link expiry.
+/// `connect` reconnects the now-known peer without any invite material when the
+/// caller supplies a current dial address.
 #[test]
 fn cli_membership_connect_reconnects_known_peer_without_invite() {
     let tmp = tempfile::tempdir().expect("tmp dir");
@@ -973,7 +973,8 @@ fn cli_membership_connect_reconnects_known_peer_without_invite() {
 
     // 2. connect to a never-seen endpoint errors: unknown peers need an invite.
     let unknown_endpoint = "ab".repeat(32);
-    let unknown = topo(&["--db", &bob, "connect", &unknown_endpoint]);
+    let alice_addr = format!("127.0.0.1:{alice_port}");
+    let unknown = topo(&["--db", &bob, "connect", &unknown_endpoint, &alice_addr]);
     assert!(
         !unknown.status.success(),
         "connect to an unknown endpoint must error instead of inventing a connection:\nstdout={}\nstderr={}",
@@ -982,11 +983,17 @@ fn cli_membership_connect_reconnects_known_peer_without_invite() {
     );
 
     // 3. connect to the now-known peer resolves to a membership connection. bob
-    // holds alice's endpoint_shared (synced during bootstrap) plus a learned
-    // address, so the trigger picks membership — no invite material involved.
+    // holds alice's endpoint_shared (synced during bootstrap), and the caller
+    // supplies the current address — no invite material involved.
     let alice_identity = assert_success(topo(&["--db", &alice, "identity"]));
     let alice_endpoint = line_value(&alice_identity, "endpoint_id");
-    let connect = assert_success(topo(&["--db", &bob, "connect", &alice_endpoint]));
+    let connect = assert_success(topo(&[
+        "--db",
+        &bob,
+        "connect",
+        &alice_endpoint,
+        &alice_addr,
+    ]));
     assert!(
         connect.contains("request_id="),
         "membership connect should report its request id:\n{connect}"

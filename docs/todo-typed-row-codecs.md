@@ -98,7 +98,7 @@ projection rows often omit authority fields or add query-specific fields.
 1. Inventory every `rows.rs` file that manually writes byte offsets.
 2. Add a `RowWriter` / `RowReader` helper or a declarative row layout macro.
 3. Convert one representative fixed-width row family first:
-   `connection/bootstrap_request/rows.rs`.
+   `connection/request/rows.rs`.
 4. Add golden tests that prove the new codec emits the same bytes as the old
    implementation.
 5. Convert the rest of the connection rows, then auth/content/sync rows.

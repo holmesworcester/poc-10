@@ -169,12 +169,12 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
     let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
     let connections = runtime
         .store()
-        .table_rows(connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS)
+        .table_rows(connection::connection::rows::CONNECTION_ROWS)
         .map_err(|err| format!("count connections: {err}"))?
         .len();
     let connection_requests = runtime
         .store()
-        .table_rows(connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS)
+        .table_rows(connection::request::rows::CONNECTION_REQUEST_ROWS)
         .map_err(|err| format!("count connection requests: {err}"))?
         .len();
     let invite_accepted = runtime

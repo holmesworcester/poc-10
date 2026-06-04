@@ -82,12 +82,10 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid send_network_frame payload: {err}")
 }
 
-use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{
     retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::network::{self, NetworkTarget, OutboundFrame};
-use crate::protocol::connection::observed_endpoint_address::queries::observed_endpoint_address;
 use crate::protocol::{auth::endpoint, connection};
 
 pub const SEND_NETWORK_FRAME_MISSING_ROUTE: &str = "send_network_frame_missing_route";
@@ -138,69 +136,29 @@ fn resolve_target(
     connection_id: &RoutingKey,
     context: &HandlerContext,
 ) -> Result<NetworkTarget, HandlerError> {
-    if let Some(route_fact) = persisted_fact(context.store()?, connection_id)? {
-        if let Ok(sent) = connection::bootstrap_request_sent::decode_fact_payload(route_fact.body())
-        {
-            return Ok(NetworkTarget::new(sent.peer_addr));
-        }
-        if let Ok(sent) =
-            connection::bootstrap_response_sent::decode_fact_payload(route_fact.body())
-        {
-            return Ok(NetworkTarget::new(sent.peer_addr));
-        }
-        if let Ok(sent) =
-            connection::connection_request_sent::decode_fact_payload(route_fact.body())
-        {
-            return Ok(NetworkTarget::new(sent.peer_addr));
-        }
-        if let Ok(sent) =
-            connection::connection_response_sent::decode_fact_payload(route_fact.body())
-        {
-            return Ok(NetworkTarget::new(sent.peer_addr));
-        }
+    if let Some(target) = resolve_connection_request_row_target(connection_id, context)? {
+        return Ok(target);
     }
-    match resolve_connection_row_target(connection_id, context) {
-        Ok(target) => return Ok(target),
-        Err(row_err) => {
-            if let Some(route_fact) = persisted_fact(context.store()?, connection_id)? {
-                if let Ok(connection) =
-                    connection::bootstrap_response::layout::decode_fact(route_fact.body())
-                {
-                    return resolve_bootstrap_response_target(connection_id, &connection, context);
-                }
-            }
-            return Err(row_err);
-        }
-    }
+    resolve_connection_row_target(connection_id, context)
 }
 
-fn resolve_bootstrap_response_target(
-    _connection_id: &RoutingKey,
-    connection: &connection::bootstrap_response::fact::BootstrapResponseFact,
+fn resolve_connection_request_row_target(
+    request_id: &RoutingKey,
     context: &HandlerContext,
-) -> Result<NetworkTarget, HandlerError> {
-    let request_fact =
-        persisted_fact(context.store()?, &connection.request_id)?.ok_or_else(|| {
-            retry_intent(
-                "send_network_frame route: send_network_frame missing connection request fact",
-            )
-        })?;
-    let request = connection::bootstrap_request::layout::decode_fact(request_fact.body())?;
-    let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
-        .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
-    let addr = if local_endpoint.endpoint == connection.from_endpoint {
-        request.from_listen_addr
-    } else if local_endpoint.endpoint == connection.to_endpoint {
-        request.to_listen_addr
-    } else {
-        return Err("send_network_frame local endpoint is not part of connection".into());
+) -> Result<Option<NetworkTarget>, HandlerError> {
+    let Some(row) = connection::request::queries::request_by_id(context.store()?, request_id)
+        .map_err(|err| {
+            HandlerError::fatal(format!("send_network_frame request row read: {err}"))
+        })?
+    else {
+        return Ok(None);
     };
-    let Some(addr) = addr else {
+    let Some(addr) = row.peer_addr else {
         return Err(retry_intent(format!(
             "send_network_frame route: {SEND_NETWORK_FRAME_MISSING_ROUTE}"
         )));
     };
-    Ok(NetworkTarget::new(addr))
+    Ok(Some(NetworkTarget::new(addr)))
 }
 
 fn resolve_connection_row_target(
@@ -208,7 +166,7 @@ fn resolve_connection_row_target(
     context: &HandlerContext,
 ) -> Result<NetworkTarget, HandlerError> {
     let Some(connection) =
-        connection::bootstrap_response::queries::connection_by_id(context.store()?, connection_id)
+        connection::connection::queries::connection_by_id(context.store()?, connection_id)
             .map_err(|err| {
                 HandlerError::fatal(format!("send_network_frame route row read: {err}"))
             })?
@@ -219,14 +177,14 @@ fn resolve_connection_row_target(
     };
     let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
         .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
-    let peer_endpoint = if local_endpoint.endpoint == connection.from_endpoint {
-        connection.to_endpoint
+    let addr = if local_endpoint.endpoint == connection.from_endpoint {
+        connection.initiator_addr
     } else if local_endpoint.endpoint == connection.to_endpoint {
-        connection.from_endpoint
+        connection.responder_addr
     } else {
         return Err("send_network_frame local endpoint is not part of connection".into());
     };
-    let Some(addr) = observed_endpoint_address(context.store()?, &peer_endpoint)? else {
+    let Some(addr) = addr else {
         return Err(retry_intent(format!(
             "send_network_frame route: {SEND_NETWORK_FRAME_MISSING_ROUTE}"
         )));

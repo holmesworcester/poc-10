@@ -43,7 +43,7 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::connection::fact_receipt::fact::{
-        ConnectionFactReceipt, OriginAddr, RECEIVE_PATH_CONNECTION_RESPONSE,
+        ConnectionFactReceipt, OriginAddr, RECEIVE_PATH_CONNECTION,
     };
     use crate::protocol::connection::fact_receipt::layout;
 
@@ -55,7 +55,7 @@ mod tests {
             origin_addr: OriginAddr::new(b"127.0.0.1:41001").expect("origin"),
             local_endpoint_id: [2; 32],
             sender_endpoint_id: [3; 32],
-            receive_path: RECEIVE_PATH_CONNECTION_RESPONSE,
+            receive_path: RECEIVE_PATH_CONNECTION,
             connection_id: Some([4; 32]),
             request_id: Some([6; 32]),
             frame_hash: [5; 32],

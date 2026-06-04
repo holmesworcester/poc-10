@@ -8,7 +8,7 @@
 //! Projection validates the keypair, writes a local row keyed by the secret
 //! fact id, and publishes exact local context for the matching request or
 //! response. Change this family when handshake secret bytes, row storage, or
-//! context offers change; connection requests and responses own how the secret
+//! context offers change; request and connection facts own how the secret
 //! is consumed.
 
 pub mod authenticate;

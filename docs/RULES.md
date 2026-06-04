@@ -36,12 +36,11 @@ in `src/core` or `src/protocol`.
   work. The single visible place an intent is enqueued in reaction to a fact is
   that fact's **projector**, so "what does admitting this fact enqueue?" is
   answerable by reading one projector, and a replayable intent can never smuggle
-  in a non-replayable one. Concretely, `create_bootstrap_response` and
-  `create_connection_response` create responder ephemeral, response-sent, and
-  `connection_established` facts; the response-sent fact's projector emits the
-  network send.
+  in a non-replayable one. Concretely, `create_connection` creates
+  responder ephemeral material and the sealed `connection` fact; the connection
+  fact's projector emits the network send.
 - Replayability decides where a send is emitted. A response send is reactive to
-  a received request and is emitted by the response-sent fact's projector. A *request*
+  a received request and is emitted by the connection fact's projector. A *request*
   send is operational liveness, not durable truth: a projector-emitted request
   send would be a live-only intent that replay suppresses and never re-issues, so
   request sends are driven by the live recurring `maintain_connections` loop,
@@ -308,10 +307,10 @@ name a request, response, receipt, bundle, or shared fact.
 ### Fact Sealing
 
 Sealing is a property of the fact type, not a runtime mode. Every connection
-fact that travels on the wire — `bootstrap_request`, `connection_request`, the
-connection (response) fact, and the established frame facts — owns its own
-sealing end to end, in its own modules. There is no seal-mode discriminator and
-no separate envelope or transit-wrapper fact in another module.
+fact that travels on the wire — `request`, `connection`,
+and established frame facts — owns its own sealing end to end, in its own
+modules. There is no seal-mode discriminator and no separate envelope or
+transit-wrapper fact in another module.
 
 - `create.rs` seals a fact when it generates it: sealing is wrapping, and
   wrapping is `create.rs`'s job. Handshake facts are sealed asymmetrically to
@@ -320,8 +319,8 @@ no separate envelope or transit-wrapper fact in another module.
 - Unsealing is a context need. A receiver opens a sealed connection fact in that
   fact's own projector, which declares a context need for its unseal key —
   `auth_local_endpoint` (the local endpoint secret) for handshake facts,
-  `connection_established` (the `connection_secret`) for established frames — and
-  unseals from it, exactly as the established-frame projector already does. The
+  `connection` (the `connection_secret`) for established frames — and unseals
+  from it, exactly as the established-frame projector already does. The
   receive boundary admits the typed wire bytes and does no unsealing itself;
   there is no inline unseal handler and no key plumbing at the boundary.
 

@@ -164,8 +164,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "connection",
             &[
-                "create_bootstrap_response",
-                "create_connection_response",
+                "create_connection",
                 "maintain_connections",
                 "receive_network_frame",
                 "send_facts_on_connection",
@@ -1170,7 +1169,7 @@ const STANDARD_FAMILY_FILES: [&str; 10] = [
     "commands.rs",
     "cli.rs",
     // Wire-transport encoding for a fact family whose canonical bytes are sent
-    // sealed on the wire (connection request/response), kept separate from the
+    // sealed on the wire (request/connection), kept separate from the
     // durable `layout.rs`.
     "transit.rs",
 ];
@@ -1179,8 +1178,7 @@ const STANDARD_FAMILY_FILES: [&str; 10] = [
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local directories that are deliberately not fact families.
-const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] =
-    ["content/purge", "connection/observed_endpoint_address"];
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 1] = ["content/purge"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
@@ -1816,11 +1814,11 @@ fn connection_intents_treat_connection_frames_as_opaque() {
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
         // Connection intent handlers must not hand-roll connection crypto: the
-        // wire seal/open primitives live in the request/response `transit.rs`
+        // wire seal/open primitives live in the request/response layout modules
         // and established-frame wire modules, not in handlers. Loading the local
-        // endpoint to seal/unseal a first-contact handshake frame (the receive
-        // boundary, create_bootstrap_response) is allowed, so this rule targets
-        // the crypto primitives rather than any auth dependency.
+        // endpoint to open a first-contact request in create_connection
+        // is allowed, so this rule targets the crypto primitives rather than any
+        // auth dependency.
         for forbidden in [
             "canonical_events",
             "XChaCha",
@@ -2239,38 +2237,35 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
 
 /// Flat-intent rule: a handler that creates a fact does only that and stops; it
 /// must never enqueue a follow-on intent or open a socket. Handshake sends are
-/// emitted by the local response fact's *projector*, so the `create_*_response`
+/// emitted by the local connection fact's projector, so the `create_connection`
 /// handlers must contain no chained send intents and no network IO. This keeps
 /// "what does admitting this fact enqueue?" answerable from one projector and
 /// keeps replay classification honest (a replayable create can never smuggle in
 /// a non-replayable send).
 #[test]
-fn create_response_handlers_only_create_facts_and_chain_no_intents() {
+fn create_connection_handler_only_creates_facts_and_chains_no_intents() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
-    for relative in [
-        "src/protocol/connection/create_bootstrap_response.rs",
-        "src/protocol/connection/create_connection_response.rs",
-    ] {
+    for relative in ["src/protocol/connection/create_connection.rs"] {
         let text = source_text(&root.join(relative));
         for forbidden in [
             ".intent(",
             ".local_intent(",
             "network::send",
             "send_network_frame",
-            "send_connection_response::",
+            "send_connection::",
         ] {
             if text.contains(forbidden) {
                 offenders.push(format!(
-                    "{relative} chains {forbidden:?}; create_*_response must only create facts \
-                     (the local response projector emits the send)"
+                    "{relative} chains {forbidden:?}; create_connection must only create facts \
+                     (the local connection projector emits the send)"
                 ));
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "create_*_response handlers must stay flat (fact creation only):\n{}",
+        "create_connection handlers must stay flat (fact creation only):\n{}",
         offenders.join("\n")
     );
 }

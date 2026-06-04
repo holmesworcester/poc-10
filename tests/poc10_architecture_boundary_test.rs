@@ -122,7 +122,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "connection",
             &[
-                "create_bootstrap_response.rs",
+                "create_connection.rs",
                 "receive_network_frame.rs",
                 "send_facts_on_connection.rs",
                 "send_network_frame.rs",
@@ -444,7 +444,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "encryption.pending_wrap_reconcile",
         "encryption.negentropy_pending_purges",
         "connection.pending_connection_attempts",
-        "connection.pending_connection_responses",
+        "connection.pending_connections",
         "canonical_in",
         "connection_frame_out",
         "purge_instructions",
@@ -453,7 +453,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "pending_wrap_reconcile",
         "negentropy_pending_purges",
         "pending_connection_attempts",
-        "pending_connection_responses",
+        "pending_connections",
     ];
     let offenders = source_matches_in_paths(root, vec![pipeline_path], &forbidden);
     assert!(
@@ -563,7 +563,7 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "encryption.pending_wrap_reconcile",
         "encryption.negentropy_pending_purges",
         "connection.pending_connection_attempts",
-        "connection.pending_connection_responses",
+        "connection.pending_connections",
         "canonical_in",
         "connection_frame_out",
         "purge_instructions",
@@ -572,7 +572,7 @@ fn poc10_target_source_has_no_old_worker_queue_names() {
         "pending_wrap_reconcile",
         "negentropy_pending_purges",
         "pending_connection_attempts",
-        "pending_connection_responses",
+        "pending_connections",
     ];
     let target_paths = std::iter::once("src/core".to_string())
         .chain(
@@ -657,13 +657,12 @@ fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents() {
 fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let accept_commands = source_text(&root.join("src/protocol/auth/invite/commands.rs"));
-    let request_projector =
-        source_text(&root.join("src/protocol/connection/bootstrap_request/project.rs"));
+    let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 
     assert!(
         !accept_commands.contains("send_network_frame_intent"),
-        "accept/link commands should create connection_request facts, not enqueue bootstrap IO directly"
+        "accept/link commands should create request facts, not enqueue bootstrap IO directly"
     );
     assert!(
         maintenance.contains("send_network_frame_intent"),
@@ -678,12 +677,11 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
 #[test]
 fn poc10_connection_request_projection_excludes_wire_transport() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let request_projector = root.join("src/protocol/connection/bootstrap_request/project.rs");
+    let request_projector = root.join("src/protocol/connection/request/project.rs");
 
-    // There is no sealed-envelope fact: the request is itself the wire payload,
-    // sealed by the transit layer. The request projector must stay on canonical
-    // request admission and must not contain wire seal/open transport, which
-    // lives in connection/bootstrap_request/transit.rs and the receive handler.
+    // There is no sealed-envelope fact: the request fact is itself the sealed
+    // wire payload. The request projector must stay on request admission and
+    // retry-row materialization, not transport boundary handling.
     let request_wrapper_offenders = source_code_matches_in_paths(
         root,
         vec![request_projector],
@@ -696,7 +694,7 @@ fn poc10_connection_request_projection_excludes_wire_transport() {
     );
     assert!(
         request_wrapper_offenders.is_empty(),
-        "connection_request projection must stay on the canonical request fact; wire seal/open transport belongs to connection/bootstrap_request/transit.rs:\n{}",
+        "request projection must stay on the request fact; wire receive classification belongs to receive_network_frame:\n{}",
         request_wrapper_offenders.join("\n")
     );
 }

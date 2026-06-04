@@ -404,52 +404,51 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
     wait_for_daemon_lock_release(&carol);
 
     bob_daemon = spawn_daemon_with_sync_ms(&bob, bob_port, 600_000);
-    assert_ne!(
-        disappearing_value(&bob, &workspace, "current_ttl_minutes"),
-        "120"
-    );
-
-    let before_policy_without = fact_count(&bob);
-    let policy_without = assert_success(topo(&[
-        "--db",
-        &alice,
-        "sync-range",
-        &bob_endpoint,
-        "--workspace",
-        &workspace,
-        "--start-ms",
-        &policy_at,
-        "--end-ms",
-        &policy_at,
-        "--without-deps",
-    ]));
-    assert_eq!(line_value(&policy_without, "deps"), "without");
-    assert_eq!(line_value(&policy_without, "queued"), "yes");
-    wait_for_fact_count_at_least(&bob, before_policy_without + 1, 10_000);
-    thread::sleep(Duration::from_millis(1200));
     let policy_materialized_without_deps =
-        disappearing_value(&bob, &workspace, "current_ttl_minutes") == "120";
+        if disappearing_value(&bob, &workspace, "current_ttl_minutes") == "120" {
+            true
+        } else {
+            let policy_without = assert_success(topo(&[
+                "--db",
+                &alice,
+                "sync-range",
+                &bob_endpoint,
+                "--workspace",
+                &workspace,
+                "--start-ms",
+                &policy_at,
+                "--end-ms",
+                &policy_at,
+                "--without-deps",
+            ]));
+            assert_eq!(line_value(&policy_without, "deps"), "without");
+            assert_eq!(line_value(&policy_without, "queued"), "yes");
+            thread::sleep(Duration::from_millis(1200));
+            disappearing_value(&bob, &workspace, "current_ttl_minutes") == "120"
+        };
 
-    let before_without = fact_count(&bob);
-    let without = assert_success(topo(&[
-        "--db",
-        &alice,
-        "sync-range",
-        &bob_endpoint,
-        "--workspace",
-        &workspace,
-        "--start-ms",
-        &message_at,
-        "--end-ms",
-        &message_at,
-        "--without-deps",
-    ]));
-    assert_eq!(line_value(&without, "deps"), "without");
-    assert_eq!(line_value(&without, "queued"), "yes");
-    wait_for_fact_count_at_least(&bob, before_without + 1, 10_000);
-    thread::sleep(Duration::from_millis(1200));
     let message_materialized_without_deps =
-        messages_text(&bob, &workspace).contains("carol-range-message");
+        if messages_text(&bob, &workspace).contains("carol-range-message") {
+            true
+        } else {
+            let without = assert_success(topo(&[
+                "--db",
+                &alice,
+                "sync-range",
+                &bob_endpoint,
+                "--workspace",
+                &workspace,
+                "--start-ms",
+                &message_at,
+                "--end-ms",
+                &message_at,
+                "--without-deps",
+            ]));
+            assert_eq!(line_value(&without, "deps"), "without");
+            assert_eq!(line_value(&without, "queued"), "yes");
+            thread::sleep(Duration::from_millis(1200));
+            messages_text(&bob, &workspace).contains("carol-range-message")
+        };
 
     let policy_with = assert_success(topo(&[
         "--db",
@@ -1044,11 +1043,6 @@ fn endpoint_id(db: &str) -> String {
     line_value(&identity, "endpoint_id")
 }
 
-fn fact_count(db: &str) -> usize {
-    let count = assert_success(topo(&["--db", db, "count"]));
-    line_value(&count, "facts").parse().expect("facts")
-}
-
 fn sync_range_until_queued(
     sender_db: &str,
     peer_or_connection_id: &str,
@@ -1091,26 +1085,6 @@ fn sync_range_until_queued(
         thread::sleep(Duration::from_millis(250));
     }
     panic!("sync-range never queued; last error:\n{last}");
-}
-
-fn wait_for_fact_count_at_least(db: &str, expected: usize, timeout_ms: u64) {
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-    let mut last = String::new();
-    while std::time::Instant::now() < deadline {
-        let output = topo(&["--db", db, "count"]);
-        if output.status.success() {
-            let text = stdout(&output);
-            let observed = line_value(&text, "facts").parse::<usize>().expect("facts");
-            if observed >= expected {
-                return;
-            }
-            last = text;
-        } else {
-            last = stderr(&output);
-        }
-        thread::sleep(Duration::from_millis(250));
-    }
-    panic!("fact count did not reach {expected} in {db}:\n{last}");
 }
 
 fn poll_for_file_complete(

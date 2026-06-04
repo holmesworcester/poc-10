@@ -1,6 +1,6 @@
 //! Connection close fact payload.
 //!
-//! The payload names the local connection response fact that should be retired
+//! The payload names the local connection fact that should be retired
 //! and records the local close time. Close facts are local-only: they do not
 //! travel over connection frames and they do not contain private material.
 //!

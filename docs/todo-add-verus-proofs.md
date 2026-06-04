@@ -148,7 +148,7 @@ core rejects cross-fact purges from projector output
 ```
 
 These core proofs intentionally do not know protocol roles such as
-`auth_admin`, `content_message`, or `connection_request`.
+`auth_admin`, `content_message`, or `request`.
 
 ## Fact Family Proof Contract
 
@@ -159,10 +159,10 @@ and purges that the fact family emits.
 Example shape:
 
 ```text
-valid_connection_request_fact(fact)
-valid_connection_request_offer(offer, payload, graph)
-valid_connection_request_row(row, fact, graph)
-valid_connection_response_intent(intent, fact, matched_context, graph)
+valid_request_fact(fact)
+valid_request_offer(offer, payload, graph)
+valid_request_row(row, fact, graph)
+valid_connection_intent(intent, fact, matched_context, graph)
 
 lemma_request_projector_waits_without_materializing(...)
 lemma_request_projector_offer_is_valid(...)
@@ -356,9 +356,9 @@ Predicates:
 valid_connection_invite_secret_offer(offer, invite_secret)
 valid_ephemeral_secret_offer(offer, ephemeral_secret)
 valid_connection_fact_receipt_offer(offer, receipt_fact)
-valid_connection_request_offer(offer, request_fact, graph)
-valid_connection_response_row(row, response_fact, graph)
-valid_connection_response_offer(offer, response_fact, graph)
+valid_request_offer(offer, request_fact, graph)
+valid_connection_row(row, response_fact, graph)
+valid_connection_offer(offer, response_fact, graph)
 ```
 
 Proof chain:
@@ -371,14 +371,14 @@ connection_fact_receipt projector
   -> receipt offer implies only local observation for received_fact_id
   -> receipt alone grants no request, response, or child-fact authority
 
-connection_request projector
+request projector
   -> invite context is present
   -> invite signature transcript verifies
   -> local branch has matching local ephemeral secret
   -> received branch has matching local endpoint and request receipt
-  -> emitted connection_request offer is valid
+  -> emitted request offer is valid
 
-connection_response projector
+connection projector
   -> request offer is valid
   -> invite context matches request bootstrap hash
   -> endpoint direction reverses request
@@ -509,8 +509,8 @@ core context and matcher lemmas
 core projection-output purge and replacement lemmas
 connection_ephemeral_secret proof
 connection_fact_receipt proof
-connection_request proof
-connection_response proof
+request proof
+connection proof
 auth_workspace proof
 auth_admin proof
 sync_share_fact_with_sync proof
@@ -555,7 +555,7 @@ Use this template when assigning proof work to a worktree:
 4. Prove connection fact-receipt offer validity without treating receipts as
    authority.
 5. Prove connection request offer validity.
-6. Prove connection response row and offer validity.
+6. Prove connection row and offer validity.
 7. Add auth workspace/admin/user/user-invite predicates and prove admin closure.
 8. Prove `share_fact_with_sync` accepts only admitted non-local owner facts and
    validated non-local dependencies.

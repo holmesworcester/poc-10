@@ -15,8 +15,8 @@ use crate::core::wire::{FixedLayout, FixedSlot};
 
 use super::create::normalize_origin_addr_bytes;
 use super::fact::{
-    ConnectionFactReceipt, OriginAddr, ORIGIN_ADDR_BYTES, RECEIVE_PATH_CONNECTION_FRAME,
-    RECEIVE_PATH_CONNECTION_REQUEST, RECEIVE_PATH_CONNECTION_RESPONSE,
+    ConnectionFactReceipt, OriginAddr, ORIGIN_ADDR_BYTES, RECEIVE_PATH_CONNECTION,
+    RECEIVE_PATH_CONNECTION_FRAME, RECEIVE_PATH_CONNECTION_REQUEST,
 };
 
 pub const TYPE_CONNECTION_FACT_RECEIPT: u8 = 164;
@@ -138,7 +138,7 @@ fn validate_receive_path(path: u8) -> Result<(), String> {
     match path {
         RECEIVE_PATH_CONNECTION_REQUEST
         | RECEIVE_PATH_CONNECTION_FRAME
-        | RECEIVE_PATH_CONNECTION_RESPONSE => Ok(()),
+        | RECEIVE_PATH_CONNECTION => Ok(()),
         other => Err(format!("unknown connection receive path {other}")),
     }
 }
@@ -157,7 +157,7 @@ mod tests {
             origin_addr: OriginAddr::new(b"127.0.0.1:41001").expect("origin"),
             local_endpoint_id: [2; 32],
             sender_endpoint_id: [3; 32],
-            receive_path: RECEIVE_PATH_CONNECTION_RESPONSE,
+            receive_path: RECEIVE_PATH_CONNECTION,
             connection_id: Some([4; 32]),
             request_id: Some([6; 32]),
             frame_hash: [5; 32],

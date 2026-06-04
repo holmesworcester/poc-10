@@ -2,7 +2,7 @@
 
 Sync is the replication planning scope. We use it to make shared facts
 converge between endpoints so other scopes can rely on eventual consistency for
-admitted shared facts. Sync starts once per established connection with an
+admitted shared facts. Sync starts once per live connection with an
 initial seed compare, continues with live-tail sends for newly indexed facts on
 established authorized connections, and, where catch-up work remains, uses
 periodic daemon tick catch-up (`--sync-ms`/`--tick-ms`) to drain queued
@@ -60,7 +60,7 @@ Fact projectors in other scopes enqueue the sync-owned `share_fact_with_sync`
 intent after they can identify the sync scope and the validated context that
 should travel with the owner fact. Sync records that projector-supplied graph;
 it does not rediscover dependencies by scanning protocol rows or parsing
-payload bytes. Connection supplies established connection rows and frame send
+payload bytes. Connection supplies live connection rows and frame send
 handlers. Sync asks connection to send fact ids; connection decides frame size,
 sealing, and socket IO. Auth endpoint rows are used when building
 connection-specific visibility: shareable-fact queries check workspace
@@ -74,7 +74,7 @@ publishing context, or queuing sync-owned intents such as `share_fact_with_sync`
 
 ## Connection Boundary
 
-Sync is scoped by established connections. A connection response identifies the
+Sync is scoped by live connections. A connection identifies the
 local endpoint, the remote endpoint, the workspace routes learned during the
 handshake, and the connection secret used to seal frames. Sync uses that
 connection id as the security and transport domain for every compare,
@@ -91,7 +91,7 @@ their meaning.
 Connection-specific visibility combines three pieces of state:
 
 - sync shareable rows, which say a fact may participate in workspace sync;
-- connection request/response rows, which name the established peer session
+- connection request/connection rows, which name the live peer session
   and workspace routes for that connection;
 - auth endpoint membership rows, which say whether the remote endpoint is a
   member of a workspace.
@@ -108,7 +108,7 @@ fact to other authorized connections.
 
 Live tail is the latency path after initial connection seeding. When
 `share_fact_with_sync` records a changed upsert, sync asks the connection
-visibility index which established connections may see that owner fact. It
+visibility index which live connections may see that owner fact. It
 removes any origin connection recorded by `connection_fact_receipt`,
 recursively expands the owner through stored `context_have` edges for each
 remaining connection, and queues `send_facts_on_connection`.
@@ -143,7 +143,7 @@ handlers.
 ## Convergence Process
 
 Sync converges by turning projector output into a durable range index, then
-exchanging summaries, exact ids, and the requested fact bytes over established
+exchanging summaries, exact ids, and the requested fact bytes over live
 connections:
 
 1. The owner projector admits or partially understands a shared fact. In the
@@ -245,8 +245,8 @@ upserts or retracts one owner fact's durable sync visibility, refreshes the
 affected range-summary rows, and triggers live-tail advertisement while
 skipping the origin connection that supplied the fact.
 
-`seed_connection_sync` is emitted by response-received lifecycle projection after
-`connection_established` context proves the live connection row exists. It
+`seed_connection_sync` is emitted by `connection` projection after
+`connection` context proves the live connection row exists. It
 computes the root range summary for facts visible on that connection, creates a
 root `compare` fact, and asks connection to send it.
 
@@ -298,7 +298,7 @@ connection sync.
 ```text
 range_request {
   workspace_id: fact:workspace_acme
-  connection_id: fact:connection_response_ab
+  connection_id: fact:connection_ab
   start: 1715000000000
   end: 1715000999999
 }
@@ -330,7 +330,7 @@ expanded with dependency closure.
 
 ```text
 compare {
-  connection_id: fact:connection_response_ab
+  connection_id: fact:connection_ab
   range: { start: 0, end: u64::MAX }
   summary: { count: 318, fingerprint: blake3:range_fingerprint }
   response_requested: true
@@ -347,7 +347,7 @@ missing.
 
 ```text
 have_id {
-  connection_id: fact:connection_response_ab
+  connection_id: fact:connection_ab
   timestamp: 1715000060000
   fact_id: fact:message_hello
 }
@@ -362,7 +362,7 @@ on that connection and asks connection to send the bytes.
 
 ```text
 need_id {
-  connection_id: fact:connection_response_ab
+  connection_id: fact:connection_ab
   fact_id: fact:message_hello
 }
 ```
@@ -374,7 +374,7 @@ auth/content projector admits message_hello
   -> share_fact_with_sync(upsert message_hello, context_have=[endpoint, user, key])
   -> sync_shareable_fact_rows + negentropy rows
 
-connection_response_received_ab + connection_established_ab
+connection_ab
   -> seed_connection_sync
   -> compare(root summary)
   -> send_facts_on_connection(compare)

@@ -117,7 +117,7 @@ const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
 const INTENT_HANDLER_FILES: [&str; 11] = [
-    "src/protocol/connection/create_bootstrap_response.rs",
+    "src/protocol/connection/create_connection.rs",
     "src/protocol/connection/receive_network_frame.rs",
     "src/protocol/connection/send_facts_on_connection.rs",
     "src/protocol/connection/send_network_frame.rs",
@@ -259,7 +259,7 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
         "encryption.pending_wrap_reconcile",
         "encryption.negentropy_pending_purges",
         "connection.pending_connection_attempts",
-        "connection.pending_connection_responses",
+        "connection.pending_connections",
         "canonical_in",
         "connection_frame_out",
         "purge_instructions",
@@ -268,7 +268,7 @@ fn cutover_active_non_legacy_source_has_no_legacy_imports_worker_runs_or_old_que
         "pending_wrap_reconcile",
         "negentropy_pending_purges",
         "pending_connection_attempts",
-        "pending_connection_responses",
+        "pending_connections",
         "READY_EVENTS",
         "BLOCKED_EVENTS_BY_MISSING_DEP",
         "MISSING_DEPS_BY_BLOCKED_EVENT",
@@ -561,7 +561,7 @@ fn cutover_purge_child_secret_retirement_sync_and_expiry_are_projector_owned() {
         "src/protocol/auth/local_history_node_secret/project.rs",
         "src/protocol/auth/local_recipient_key/project.rs",
         "src/protocol/connection/ephemeral_secret/project.rs",
-        "src/protocol/connection/bootstrap_response/project.rs",
+        "src/protocol/connection/connection/project.rs",
         "src/protocol/content/message/project.rs",
         "src/protocol/content/reaction/project.rs",
         "src/protocol/content/file/project.rs",

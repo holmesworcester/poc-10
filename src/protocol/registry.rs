@@ -278,10 +278,8 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS connection_observed_endpoint_address_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS bootstrap_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS bootstrap_response_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_server_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS user_invite_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -332,11 +330,9 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
         auth::admin::rows::ADMIN_ROWS,
         connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
-        connection::observed_endpoint_address::rows::CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
         connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
-        connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
-        connection::connection_request::rows::CONNECTION_REQUEST_ROWS,
-        connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
+        connection::request::rows::CONNECTION_REQUEST_ROWS,
+        connection::connection::rows::CONNECTION_ROWS,
         auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
         auth::invite_server::rows::INVITE_SERVER_ROWS,
         auth::user_invite::rows::USER_INVITE_ROWS,
@@ -383,7 +379,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     cli_command!("accept", auth::invite::cli::ACCEPT_USAGE, accept),
     cli_command!(
         "connect",
-        connection::connection_request::commands::CONNECT_USAGE,
+        connection::request::commands::CONNECT_USAGE,
         connect
     ),
     cli_command!(
@@ -539,11 +535,9 @@ pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FAC
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
-    connection::observed_endpoint_address::rows::CONNECTION_OBSERVED_ENDPOINT_ADDRESS_ROWS,
     connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
-    connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
-    connection::connection_request::rows::CONNECTION_REQUEST_ROWS,
-    connection::bootstrap_response::rows::BOOTSTRAP_RESPONSE_ROWS,
+    connection::request::rows::CONNECTION_REQUEST_ROWS,
+    connection::connection::rows::CONNECTION_ROWS,
     read_models::FILE_ROWS,
     read_models::FILE_DELETION_ROWS,
     read_models::FILE_SLICE_ROWS,
@@ -623,19 +617,8 @@ projector_routes! {
     project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
     project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
-    project_bootstrap_request_sent => connection::bootstrap_request_sent::layout::TYPE_BOOTSTRAP_REQUEST_SENT, connection::bootstrap_request_sent::project::BootstrapRequestSentProjector, not_replayed;
-    project_bootstrap_request_received => connection::bootstrap_request_received::layout::TYPE_BOOTSTRAP_REQUEST_RECEIVED, connection::bootstrap_request_received::project::BootstrapRequestReceivedProjector, not_replayed;
-    project_bootstrap_response_sent => connection::bootstrap_response_sent::layout::TYPE_BOOTSTRAP_RESPONSE_SENT, connection::bootstrap_response_sent::project::BootstrapResponseSentProjector, not_replayed;
-    project_bootstrap_response_received => connection::bootstrap_response_received::layout::TYPE_BOOTSTRAP_RESPONSE_RECEIVED, connection::bootstrap_response_received::project::BootstrapResponseReceivedProjector, not_replayed;
-    project_connection_request_sent => connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT, connection::connection_request_sent::project::ConnectionRequestSentProjector, not_replayed;
-    project_connection_request_received => connection::connection_request_received::layout::TYPE_CONNECTION_REQUEST_RECEIVED, connection::connection_request_received::project::ConnectionRequestReceivedProjector, not_replayed;
-    project_connection_response_sent => connection::connection_response_sent::layout::TYPE_CONNECTION_RESPONSE_SENT, connection::connection_response_sent::project::ConnectionResponseSentProjector, not_replayed;
-    project_connection_response_received => connection::connection_response_received::layout::TYPE_CONNECTION_RESPONSE_RECEIVED, connection::connection_response_received::project::ConnectionResponseReceivedProjector, not_replayed;
-    project_connection_established => connection::connection_established::layout::TYPE_CONNECTION_ESTABLISHED, connection::connection_established::project::ConnectionEstablishedProjector, not_replayed;
-    project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector, not_replayed;
-    project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector, not_replayed;
-    project_connection_request => connection::connection_request::layout::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector, not_replayed;
-    project_connection_response => connection::connection_response::layout::TYPE_CONNECTION_RESPONSE, connection::connection_response::project::ConnectionResponseProjector, not_replayed;
+    project_connection_request => connection::request::layout::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, not_replayed;
+    project_connection => connection::connection::layout::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, not_replayed;
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
@@ -670,8 +653,6 @@ projector_routes! {
     project_connection_frame_bundle => connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector;
     project_connection_frame_observation => connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector;
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
-    project_sealed_bootstrap_request => connection::bootstrap_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
-    project_sealed_bootstrap_response => connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
     project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }
@@ -712,15 +693,9 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // live session, rebuilt from committed request/response facts after the
     // barrier — never replay-time work.
     handler_route!(
-        "create_bootstrap_response",
-        connection::create_bootstrap_response::CREATE_BOOTSTRAP_RESPONSE,
-        connection::create_bootstrap_response::CreateBootstrapResponseHandler,
-        replay = false
-    ),
-    handler_route!(
-        "create_connection_response",
-        connection::create_connection_response::CREATE_CONNECTION_RESPONSE,
-        connection::create_connection_response::CreateConnectionResponseHandler,
+        "create_connection",
+        connection::create_connection::CREATE_CONNECTION,
+        connection::create_connection::CreateConnectionHandler,
         replay = false
     ),
     handler_route!(

@@ -26,7 +26,7 @@ fn typed_row_codecs_todo_records_row_layout_cleanup_plan() {
         "Cursor Helper",
         "Declarative Row Layout Macro",
         "Reuse Existing Fact Codecs Where Exact",
-        "Convert one representative fixed-width row family first: `connection/bootstrap_request/rows.rs`",
+        "Convert one representative fixed-width row family first: `connection/request/rows.rs`",
         "Add a guardrail test that flags direct `value[N..M].copy_from_slice(...)`",
         "Commit the completed work on that same worktree branch before handoff or review",
         "Existing row bytes remain stable for a golden fixture",

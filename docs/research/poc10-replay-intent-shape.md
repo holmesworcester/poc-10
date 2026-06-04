@@ -83,7 +83,7 @@ Initial poc-10 policy:
 | `share_fact_with_sync` | Runs during replay if kept as an intent; it rebuilds sync-derived state. |
 | `create_key_wrap` | Runs during replay; it deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
 | `unwrap_key_wrap` | Runs during replay if its handler only creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
-| `create_bootstrap_response` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
+| `create_connection` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
 | connection candidate registration intents | Run during replay; they rebuild connection-maintenance-owned candidate rows from endpoint/auth facts. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
@@ -128,7 +128,7 @@ replaced by recurring connection maintenance.
 
 ## Connection Maintenance
 
-Connection retry should not be owned by historical `connection_request` facts.
+Connection retry should not be owned by historical `request` facts.
 The operational goal is to keep the local endpoint connected to enough peers in
 a potentially large endpoint set.
 
@@ -170,12 +170,11 @@ It should not own an operational retry loop and should not emit
 `connection_peer_retry` wakes. Bootstrap sends become local attempts created by
 connection-maintenance decisions.
 
-`create_bootstrap_response` needs an atomicity fix. It must not send network
-bytes before the responder ephemeral, response-sent, and
-`connection_established` facts commit.
+`create_connection` is flat fact creation. It must not send network bytes before
+the responder ephemeral and `connection` facts commit.
 The safe shape is:
 
-- create or reuse the durable local response-sent and established facts;
+- create or reuse the durable local connection fact;
 - commit them first;
 - queue a local send derived from the committed response;
 - if the send is lost, later live request retry or connection maintenance can
@@ -261,7 +260,7 @@ maintenance attempts before the replay barrier should report an error.
 - Connection test: daemon startup installs the recurring
   `maintain_connections` schedule in memory, and no persisted job row exists.
 - Connection test: replay no longer recreates bootstrap retries from old
-  `connection_request` history alone.
+  `request` history alone.
 - Bootstrap test: replay rebuilds the connection candidate index but creates no
   bootstrap send before recurring maintenance runs.
 - Bootstrap test: `recurring-run maintain_connections --now MS` creates or

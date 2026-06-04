@@ -4,7 +4,7 @@
 //!   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
 //!      exactly one bundled encrypted connection frame.
 //!   2. CONTEXT. The frame fact has exact local `connection_frame_observation`
-//!      context, and its header names an exact local `connection_established`
+//!      context, and its header names an exact local `connection`
 //!      context. Missing context emits only a transient need for the fixed-point
 //!      pass; malformed and undecryptable frames produce no durable output.
 //!   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,

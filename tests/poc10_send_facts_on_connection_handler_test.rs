@@ -7,9 +7,9 @@ use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
-use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
-use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
-use topo::protocol::connection::bootstrap_response::rows as connection_response_rows;
+use topo::protocol::connection::connection::fact::ConnectionFact;
+use topo::protocol::connection::connection::layout as connection_layout;
+use topo::protocol::connection::connection::rows as connection_rows;
 use topo::protocol::connection::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -19,22 +19,23 @@ use topo::protocol::connection_frame_wire as connection_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
 
-fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, BootstrapResponseFact) {
-    let connection = BootstrapResponseFact {
+fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionFact) {
+    let connection = ConnectionFact {
         from_endpoint: local_endpoint,
         to_endpoint: [11; 32],
         request_id: [12; 32],
-        invite_secret_fact_id: [13; 32],
         initiator_ephemeral_secret_fact_id: [14; 32],
         responder_ephemeral_secret_fact_id: [15; 32],
         responder_ephemeral_public_key: [16; 32],
         handshake_hash: [17; 32],
         connection_secret: [18; 32],
+        responder_addr: None,
+        initiator_addr: None,
     };
     let fact = Fact::new(
         topo::core::facts::FactScope::Local,
         1,
-        connection_response_layout::encode_fact(&connection).expect("connection response"),
+        connection_layout::encode_fact(&connection).expect("connection"),
     );
     (fact, connection)
 }
@@ -45,9 +46,18 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     let local_endpoint = local_endpoint();
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
     store
-        .insert_table_rows(vec![connection_response_rows::bootstrap_response_row(
-            connection_fact.id,
-            &connection,
+        .insert_table_rows(vec![connection_rows::connection_row(
+            connection_rows::ConnectionRowFields {
+                connection_id: connection_fact.id,
+                from_endpoint: connection.from_endpoint,
+                to_endpoint: connection.to_endpoint,
+                request_id: connection.request_id,
+                responder_ephemeral_public_key: connection.responder_ephemeral_public_key,
+                handshake_hash: connection.handshake_hash,
+                connection_secret: connection.connection_secret,
+                responder_addr: connection.responder_addr,
+                initiator_addr: connection.initiator_addr,
+            },
         )
         .expect("connection row")])
         .expect("seed connection row");

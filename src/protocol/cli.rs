@@ -145,19 +145,25 @@ pub(crate) fn accept_link(
 }
 
 pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    args.require_len(1, connection::connection_request::commands::CONNECT_USAGE)?;
+    args.require_len(2, connection::request::commands::CONNECT_USAGE)?;
     let target_endpoint = decode_hex_32(
         args.get(0)
-            .ok_or(connection::connection_request::commands::CONNECT_USAGE)?,
+            .ok_or(connection::request::commands::CONNECT_USAGE)?,
         "endpoint id",
     )?;
+    let dialed_addr = args
+        .get(1)
+        .ok_or(connection::request::commands::CONNECT_USAGE)?
+        .parse()
+        .map_err(|_| "connect address must be HOST:PORT".to_string())?;
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("connect")?)?;
     let output = ctx.with_command_context(|command_context| {
-        connection::connection_request::commands::connect(
+        connection::request::commands::connect(
             command_context,
-            connection::connection_request::commands::Connect {
+            connection::request::commands::Connect {
                 created_at_ms: command_context.next_timestamp(),
                 target_endpoint,
+                dialed_addr,
                 from_listen_addr,
             },
         )

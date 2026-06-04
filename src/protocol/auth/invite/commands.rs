@@ -326,8 +326,8 @@ pub fn accept(
         reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
     }
 
-    let request = connection::bootstrap_request::commands::create(
-        connection::bootstrap_request::commands::CreateConnectionRequest {
+    let request = connection::request::commands::create_bootstrap(
+        connection::request::commands::CreateBootstrapConnectionRequest {
             created_at_ms: input.created_at_ms.saturating_add(1),
             local_endpoint: local,
             remote_endpoint: input.invite.endpoint,
@@ -337,8 +337,8 @@ pub fn accept(
                 .identity_scope
                 .then_some(input.invite.workspace_id),
             invite_fact_id: input.invite.invite_fact_id,
-            from_listen_addr: input.from_listen_addr,
-            to_listen_addr: Some(input.invite.addr),
+            dialed_addr: input.invite.addr,
+            initiator_addr: input.from_listen_addr,
         },
     )?;
     let mut facts = endpoint_output.effects.facts;
@@ -456,16 +456,16 @@ pub fn accept_device_link(
     let local = endpoint_output.receipt.endpoint;
     reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
 
-    let request = connection::bootstrap_request::commands::create(
-        connection::bootstrap_request::commands::CreateConnectionRequest {
+    let request = connection::request::commands::create_bootstrap(
+        connection::request::commands::CreateBootstrapConnectionRequest {
             created_at_ms: input.created_at_ms.saturating_add(1),
             local_endpoint: local,
             remote_endpoint: input.invite.endpoint,
             bootstrap_secret: input.invite.bootstrap_secret,
             workspace_id: Some(input.invite.workspace_id),
             invite_fact_id: input.invite.invite_fact_id,
-            from_listen_addr: input.from_listen_addr,
-            to_listen_addr: Some(input.invite.addr),
+            dialed_addr: input.invite.addr,
+            initiator_addr: input.from_listen_addr,
         },
     )?;
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
@@ -526,16 +526,16 @@ pub fn accept_invite_server(
     let local = endpoint_output.receipt.endpoint;
     reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
 
-    let request = connection::bootstrap_request::commands::create(
-        connection::bootstrap_request::commands::CreateConnectionRequest {
+    let request = connection::request::commands::create_bootstrap(
+        connection::request::commands::CreateBootstrapConnectionRequest {
             created_at_ms: input.created_at_ms.saturating_add(1),
             local_endpoint: local,
             remote_endpoint: input.invite.endpoint,
             bootstrap_secret: input.invite.bootstrap_secret,
             workspace_id: Some(input.invite.workspace_id),
             invite_fact_id: input.invite.invite_fact_id,
-            from_listen_addr: input.from_listen_addr,
-            to_listen_addr: Some(input.invite.addr),
+            dialed_addr: input.invite.addr,
+            initiator_addr: input.from_listen_addr,
         },
     )?;
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {

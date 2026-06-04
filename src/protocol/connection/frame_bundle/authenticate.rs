@@ -6,7 +6,7 @@
 //!   2. ID. The content id equals `hash(bytes)`.
 //!
 //! Frame facts carry only wire bytes; there is no fact-boundary signature and no
-//! intrinsic field rule. Admission scope, the observation and response context,
+//! intrinsic field rule. Admission scope, the observation and connection context,
 //! decryption, and child materialization are all interpretation the projector
 //! owns through `create::project_observed_frame`.
 

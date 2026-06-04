@@ -14,7 +14,7 @@ use crate::core::wire::FixedSlot;
 pub const ORIGIN_ADDR_BYTES: usize = 256;
 pub const RECEIVE_PATH_CONNECTION_REQUEST: u8 = 0;
 pub const RECEIVE_PATH_CONNECTION_FRAME: u8 = 1;
-pub const RECEIVE_PATH_CONNECTION_RESPONSE: u8 = 2;
+pub const RECEIVE_PATH_CONNECTION: u8 = 2;
 
 pub type EndpointId = FactId;
 pub type ConnectionId = FactId;

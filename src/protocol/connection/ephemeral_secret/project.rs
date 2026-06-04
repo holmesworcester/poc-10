@@ -2,7 +2,7 @@
 //!
 //! Ephemeral secrets are local handshake capabilities. Projection turns live
 //! local secret facts into durable local rows plus exact context offers that
-//! request/response projectors can match by secret fact id. When a connection
+//! request/connection projectors can match by secret fact id. When a connection
 //! close fact names the secret, the same owner deletes its row and purges its
 //! own fact bytes.
 //!
@@ -16,7 +16,7 @@
 //!      purge their own fact bytes.
 //!
 //! Change this file when the local capability proof or materialized row changes.
-//! Request and response projectors own the context checks that consume this
+//! Request and connection projectors own the context checks that consume this
 //! offer.
 
 use crate::core::facts::{Fact, FactScope};

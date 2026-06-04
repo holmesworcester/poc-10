@@ -304,19 +304,16 @@ mod tests {
         );
         for connection_id in [origin_connection_id, other_connection_id] {
             rows.push(
-                connection::bootstrap_response::rows::bootstrap_response_row(
-                    connection_id,
-                    &connection::bootstrap_response::fact::BootstrapResponseFact {
-                        from_endpoint: local_endpoint,
-                        to_endpoint: remote_endpoint,
-                        request_id: [8; 32],
-                        invite_secret_fact_id: [9; 32],
-                        initiator_ephemeral_secret_fact_id: [10; 32],
-                        responder_ephemeral_secret_fact_id: [11; 32],
-                        responder_ephemeral_public_key: [12; 32],
-                        handshake_hash: [13; 32],
-                        connection_secret: [14; 32],
-                    },
+                connection::connection::rows::connection_row(
+                    connection::connection::rows::ConnectionRowFields::without_addresses(
+                        connection_id,
+                        local_endpoint,
+                        remote_endpoint,
+                        [8; 32],
+                        [12; 32],
+                        [13; 32],
+                        [14; 32],
+                    ),
                 )
                 .expect("connection row"),
             );

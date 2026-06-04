@@ -57,7 +57,7 @@ Auth's primary cross-scope interface is context. Content consumes
 bounded proof that a message, reaction, file, deletion, or retention policy can
 continue projection. Connection consumes `auth_daemon_endpoint`,
 `auth_local_endpoint`, and `connection_invite_secret`; those offers let sealed
-bootstrap frames open locally and let request/response projection validate
+bootstrap frames open locally and let request/connection projection validate
 invite signatures.
 
 Auth can consume sync-owned `sync_exact_fact` context when an auth projector is
