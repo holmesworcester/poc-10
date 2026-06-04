@@ -4,7 +4,7 @@ use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
+use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::layout as endpoint_layout;
@@ -96,7 +96,7 @@ fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
 fn project_connection_frame_fact(
     fact: &Fact,
     context: ProjectionContext,
-) -> topo::core::projectors::ProjectionOutput {
+) -> topo::core::pipeline::ProjectionOutput {
     match fact.body().first().copied() {
         Some(frame_small_layout::TYPE_CONNECTION_FRAME_SMALL) => {
             ConnectionFrameSmallProjector::new()

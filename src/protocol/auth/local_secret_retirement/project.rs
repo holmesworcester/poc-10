@@ -10,7 +10,7 @@
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };

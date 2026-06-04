@@ -11,7 +11,7 @@
 //!      each with a durable `connection::fact_receipt`.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };

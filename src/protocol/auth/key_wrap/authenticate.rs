@@ -11,7 +11,7 @@
 //! owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -42,7 +42,7 @@ fn authenticate_key_wrap(fact: &Fact) -> Result<KeyWrapFact, String> {
 mod tests {
     use crate::core::crypto::{X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES};
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::key_wrap::create::admit_key_wrap_fact;
     use crate::protocol::auth::key_wrap::fact::{
         KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,

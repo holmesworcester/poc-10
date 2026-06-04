@@ -11,7 +11,7 @@
 //! interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -44,7 +44,7 @@ fn authenticate_local_history_node_secret(
 mod tests {
     use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
     use crate::protocol::auth::local_history_node_secret::layout;
 

@@ -18,7 +18,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, FactCodec, ProjectionContext,
     ProjectionOutput, Projector,
 };
@@ -410,7 +410,7 @@ mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::RowMutation;
-    use crate::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use crate::core::pipeline::{MatchedContext, ProjectionContext, Projector};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
     use crate::protocol::connection::ephemeral_secret::{

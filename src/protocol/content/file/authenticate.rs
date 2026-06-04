@@ -16,7 +16,7 @@
 //! projector.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -96,7 +96,7 @@ fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::content::file::create::signed_file_fact;
     use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
 

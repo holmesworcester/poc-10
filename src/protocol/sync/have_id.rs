@@ -23,7 +23,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncHaveIdFact, String>
 
 pub(crate) struct Codec;
 
-impl crate::core::projectors::FactCodec for Codec {
+impl crate::core::pipeline::FactCodec for Codec {
     type Payload = fact::SyncHaveIdFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {

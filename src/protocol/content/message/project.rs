@@ -16,7 +16,7 @@ use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
     Projector, SemanticProjector, TimeWake,
 };
@@ -46,8 +46,8 @@ struct OpenedMessageRow {
     text: String,
 }
 
-pub fn expiration_timeline() -> crate::core::projectors::Timeline {
-    crate::core::projectors::Timeline::new("content_message_expiry")
+pub fn expiration_timeline() -> crate::core::pipeline::Timeline {
+    crate::core::pipeline::Timeline::new("content_message_expiry")
         .expect("valid content-message expiry timeline")
 }
 
@@ -731,7 +731,7 @@ mod projector_tests {
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::projectors::{MatchedContext, ProjectionContext, Projector, TimeRange};
+    use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint_shared::{
         fact::{EndpointRole, EndpointSharedFact},
         layout as endpoint_shared_layout,

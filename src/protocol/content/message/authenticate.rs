@@ -19,7 +19,7 @@
 //! retention, and secret context and materializes rows.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, DecodedAuthenticator, FactCodec,
     ProjectionContext,
 };
@@ -85,7 +85,7 @@ pub fn verify_signature(fact: &ContentMessageFact) -> Result<(), String> {
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::content::message::encode;
     use crate::protocol::content::message::fact::{
         ContentMessageFact, MessageCiphertext, NONCE_BYTES,

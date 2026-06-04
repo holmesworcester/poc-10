@@ -36,7 +36,7 @@ use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::intents::IntentHandler;
 use crate::core::pipeline;
-use crate::core::projectors::{FactRoute, Projector};
+use crate::core::pipeline::{FactRoute, Projector};
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{quoted_identifier_list, quoted_table_name_str, Store, TableName};
 use rusqlite::types::ValueRef;

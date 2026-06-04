@@ -9,7 +9,7 @@
 //! owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -39,7 +39,7 @@ fn authenticate_shared_fact(fact: &Fact) -> Result<SharedFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::sync::shared_fact::fact::SharedFact;
     use crate::protocol::sync::shared_fact::layout;
 

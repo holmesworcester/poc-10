@@ -10,7 +10,7 @@
 //! context is interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -44,7 +44,7 @@ fn authenticate_cascade_test_fact(fact: &Fact) -> Result<CascadeTestFact, String
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::sync::cascade_test_fact::fact::{
         CascadeDependencies, CascadeTestFact, PAYLOAD_BYTES,
     };

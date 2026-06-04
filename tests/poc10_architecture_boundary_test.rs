@@ -338,12 +338,12 @@ fn poc10_has_no_product_demo_or_smoke_command_surface() {
 
 #[test]
 fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
-    let topo::core::projectors::ProjectionOutput {
+    let topo::core::pipeline::ProjectionOutput {
         needs,
         offers,
         time_wakes,
         effects,
-    } = topo::core::projectors::ProjectionOutput::default();
+    } = topo::core::pipeline::ProjectionOutput::default();
 
     assert!(needs.is_empty());
     assert!(offers.is_empty());

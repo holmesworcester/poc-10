@@ -9,7 +9,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
     Projector, SemanticProjector,
 };

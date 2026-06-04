@@ -6,8 +6,9 @@ A **land-first** refactor: make fact authentication a first-class per-family
 layer, separate from projection. It is independent of protocol versioning — it
 needs no ceiling, adapter, release manifest, or trusted time — and should ship
 **before** that work. The protocol-versioning plan (`protocol-versioning.md`)
-builds on this layer (its `authenticate → adapt → project` pipeline reuses these
-authenticators unchanged), but the split is useful on its own today.
+builds on this layer (its `decode → authenticate → adapt → project` pipeline
+reuses these authenticators unchanged), but the split is useful on its own
+today.
 
 **Status: landed through model staged routes.** Change 1: every routed fact
 family has an `authenticate.rs`; projectors consume an `AuthenticatedFact` and
@@ -15,7 +16,8 @@ verify no signatures; the old `project_typed` / `TypedProjector` path is
 removed; the full suite is green and behaviour is unchanged. Change 2 (the
 behaviour-changing follow-on — per-fact projection isolation + purge/keep
 classification) is described under *Error isolation and purge* below and also
-landed. Change 3: core has an optional staged route runner, so converted facts
+landed. Change 3: `core::pipeline` now exposes first-class route, decode,
+authenticate, adapt, project, effects, and commit contracts. Converted facts
 declare `decode`, `authenticate`, `adapt`, and `project` as first-class
 `FactRoute.pipeline` stages while unconverted facts keep the legacy
 projector-composed route shape for fact-by-fact cutover.
@@ -38,10 +40,11 @@ names these as separate sections in every projector's top-of-file policy:
    author, membership, deletion, retention, secrets, time).
 3. **MATERIALIZE** — read-model rows and context offers.
 
-But they are not separated in *code*: `core::projectors::project_typed::<Codec,_>`
-decodes via the family `FactCodec`, then the `TypedProjector::project_typed` runs
-`layout::verify_signature(...)`, the structural checks, **and** the context /
-materialize logic in one place (see `content/message/project.rs`).
+The current staged model separates those sections in code. `core::pipeline`
+owns the call order, while the fact family owns the role files: `decode.rs`
+parses bytes, `authenticate.rs` proves the fact boundary, `adapt.rs` maps the
+authenticated source shape to the semantic shape, and `project.rs` proves
+context and materializes effects.
 
 This refactor splits section 1 into a first-class **authenticator**
 (`authenticate.rs`) that turns raw bytes into an `AuthenticatedFact<T>`, rejects
@@ -60,9 +63,10 @@ Why land it first:
   canonical facts).
 - It removes raw-byte parsing from projectors, a clean boundary a guardrail can
   enforce.
-- It is the bottom of the eventual `authenticate → adapt → project` pipeline, but
-  it stands alone: the projector consumes an authenticated fact instead of raw
-  bytes. Adapters and ceilings come later and do not block this.
+- It is the bottom of the `decode → authenticate → adapt → project` pipeline:
+  the projector consumes an authenticated/adapted value instead of raw bytes.
+  Non-identity adapters and ceilings can land later without changing the
+  authenticator contract.
 
 ## The contract
 
@@ -142,10 +146,9 @@ Not every cryptographic check belongs in the same place.
   inauthentic. The projector opens the container with that context and
   materializes the opened inner facts plus receipts; it must not re-authenticate
   or project the children. The inner facts are admitted back through the normal
-  `authenticate -> adapt -> project` pipeline on their own. (Decode is already
-  separated from projectors via `FactCodec`, so a carrier needs no opener
-  relocation; `NeedsAuthentication` is for an external *verifier key*, not for a
-  context-keyed AEAD open whose failure is silent.)
+  `decode -> authenticate -> adapt -> project` pipeline on their own.
+  `NeedsAuthentication` is for an external *verifier key*, not for a
+  context-keyed AEAD open whose failure is silent.
 - **Signatures inside encryption wrappers.** If a wire wrapper encrypts a
   canonical signed fact, the signature is "inside" the wrapper only while in
   transit. After the wrapper opens, the recovered canonical fact bytes go through
@@ -181,12 +184,12 @@ were signed by this key"; the projector still proves "this `endpoint_shared`
 binds the sender and sits in a shared workspace."
 
 As built, an authentication need is carried on the *same* standing-need channel
-as a projection need (core runs the authenticator inside the projection call via
-`project_authenticated`, and `NeedsAuthentication` becomes a standing need that
-re-wakes the same path). The two surfaces are distinct in ownership and meaning;
-a separate authentication stage — core authenticating by tag before adapting and
-projection — is the immediate next versioning-prep step, even before real
-non-identity adapters or a ceiling exist.
+as a projection need. In converted routes, core's staged helper runs
+authentication before adaptation and projection; `NeedsAuthentication` becomes a
+standing need that re-wakes the same route. In legacy composed routes, the
+family projector still invokes the compatibility authentication helper until
+that family is cut over. The two surfaces are distinct in ownership and meaning
+even though core schedules both through standing context.
 
 Purge, deletion, retention, and all materialization effects stay projector-owned.
 A purge fact may be authentic forever, but whether a target observes it, removes
@@ -194,20 +197,24 @@ rows, retracts sync sharing, or calls `purge_self` is target interpretation.
 
 ## Pipeline change
 
-- **Before:** `core` → `RouterProjector` → `project_typed::<Codec,_>` (decode) →
-  `TypedProjector::project_typed` (verify_signature + structural + context +
-  materialize). (Both `project_typed` and `TypedProjector` are now removed.)
-- **After:** `core` → tag route → `Projector::project` →
-  `project_authenticated::<Authenticator,_>` → **authenticator** (decode + id +
-  boundary signature + intrinsic field rules, optionally parked on a verifier-key
-  need) → `AuthenticatedFact<T>` → `AuthenticatedProjector::project_authenticated`
-  (scope + context + materialize). `FactCodec` stays (the authenticator decodes
-  through it); `verify_fact_id` is the shared id check.
+The read pipeline is now explicit in core:
+
+```text
+route -> decode -> authenticate -> adapt -> project -> effects -> commit
+```
+
+`route.rs` selects a tag route. `decode.rs` names the typed byte parser.
+`authenticate.rs` proves content id, fact-boundary cryptography, and intrinsic
+single-fact rules, optionally parking on a narrow authentication need.
+`adapt.rs` maps authenticated source values to the semantic value projected at
+the active head version. `project.rs` proves scope, context, authority,
+deletion, retention, and materialization. `effects.rs` packages the replacement
+context/time-wake state plus `PipelineEffects`, and the SQL workers commit it.
 
 This is precisely the bottom of the versioning pipeline `authenticate → adapt →
-project`. There is **no adapter** in this landing: the projector consumes the
-authenticated fact directly, at head. Adapters and the ceiling are added later,
-between authenticate and project, without changing the authenticators.
+project`, with decode now first-class as well. The current model adapters are
+identity adapters, but their file and route labels are real so version splits
+have a reviewable conversion point.
 
 ### Staged core pipeline
 
@@ -216,10 +223,12 @@ runner is:
 
 ```text
 raw fact bytes
-  -> decode (inside authenticate for primary admission)
-  -> authenticator
-  -> identity adapt stub (or real adapt chain after a version split)
-  -> projector
+  -> decode
+  -> authenticate
+  -> identity adapt stub (or real adapter after a version split)
+  -> project
+  -> effects
+  -> commit
 ```
 
 Core owns the stage boundaries and the wake queues. `AuthenticationNeed` wakes
@@ -232,12 +241,13 @@ has this decoder, this authenticator, this adapt slot, and this projector."
 Converted projectors call `project_staged::<Codec, Authenticator, Adapter, _>()`
 for direct tests, and their registered route function also calls the same core
 runner. Transitional families keep `project_authenticated`, which preserves the
-existing behavior while the cutover proceeds fact by fact. Context payloads
-requested by projectors are decoded and adapted before they are handed to the
-projector; they are not re-authenticated by the consumer path. Their offer
-exists only because the owner already passed its own route, so needs/offers keep
-matching on stable role/scope/range coordinates while payload shape adapts to
-the active ceiling.
+existing behavior while the cutover proceeds fact by fact. Context payload facts
+are loaded by core through matched needs/offers, but the consuming projector
+decodes them through the owning typed helper when it needs fields. They are not
+re-authenticated by the consumer path: their offer exists only because the owner
+already passed its own route. Needs/offers keep matching on stable
+role/scope/range coordinates while future typed helpers can adapt payload shape
+to the active ceiling.
 
 The first implementation substep built two model family shapes before the
 fan-out: a signed/encrypted content family (`content/message`) and a
@@ -398,13 +408,13 @@ compiles and the suite stays green at each conversion.
 Per family (order: `auth` → `connection` → `content` → `sync`):
 
 1. Move the policy's section 1 (STRUCTURAL / AUTHENTICATED +
-   `verify_signature` + intrinsic field checks) out of `project_typed` into
-   `authenticate.rs`, returning `Authenticated`, `NeedsAuthentication`, or
-   `Invalid`.
-2. Re-type the projector's `project_typed` to take `AuthenticatedFact<T>`; it now
+   `verify_signature` + intrinsic field checks) into `authenticate.rs`,
+   returning `Authenticated`, `NeedsAuthentication`, or `Invalid`.
+2. Re-type the projector body to take an authenticated or semantic value; it now
    begins at section 2 (CONTEXT).
-3. Point `Projector::project` at `project_authenticated::<Authenticator, _>` so
-   core authenticates before projecting (no separate route table — see *Directory
+3. Point `Projector::project` at `project_staged::<Codec, Authenticator, Adapter, _>`
+   for converted routes, or at `project_authenticated::<Authenticator, _>` for
+   transitional routes, so core authenticates before projecting (see *Directory
    and registry*).
 4. Add the per-family authenticator pure-unit tests and the boundary guardrail.
 
@@ -455,8 +465,9 @@ authenticate their primary fact":
   model: a projector consumes an `AuthenticatedFact`, starts at scope/context,
   parses no primary bytes, and verifies no signatures (primary or context);
   `authenticate.rs` is a standard fact-family role file.
-- **`src/core/README.md`** *(done)* — `projectors.rs` description names the
-  `Authenticator` / `AuthenticatedProjector` layer.
+- **`src/core/README.md`** *(done)* — `pipeline.rs` is the source of truth for
+  route/decode/authenticate/adapt/project/effects contracts, and `projectors.rs`
+  is documented only as a transitional re-export facade.
 - **Boundary / guardrail tests** *(done)* — in `poc10_intent_cleanliness_test.rs`:
   `target_projectors_authenticate_primary_through_core_before_projecting`
   (delegation to `project_authenticated::<super::authenticate::_, _>` + a sibling

@@ -9,7 +9,7 @@
 //! projector and its intents own.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -39,7 +39,7 @@ fn authenticate_have_id(fact: &Fact) -> Result<SyncHaveIdFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::sync::have_id::create::advertisement_fact;
     use crate::protocol::sync::have_id::fact::SyncHaveIdFact;
 

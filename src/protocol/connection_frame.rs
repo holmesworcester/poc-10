@@ -19,7 +19,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::projectors::{FactCodec, ProjectionContext, ProjectionOutput};
+use crate::core::pipeline::{FactCodec, ProjectionContext, ProjectionOutput};
 use crate::core::wire::FixedSlot;
 use crate::protocol::connection_frame_wire as wire;
 pub(crate) use crate::protocol::connection_frame_wire::{

@@ -9,7 +9,7 @@
 //! projector and its intents own.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -39,7 +39,7 @@ fn authenticate_need_id(fact: &Fact) -> Result<SyncNeedIdFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::sync::need_id::create::fact as need_id_fact;
     use crate::protocol::sync::need_id::fact::SyncNeedIdFact;
 

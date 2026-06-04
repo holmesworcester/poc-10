@@ -4,7 +4,7 @@
 //! shape. This identity adapter keeps the staged route explicit and gives
 //! future versioned facts a dedicated conversion point.
 
-use crate::core::projectors::Adapter;
+use crate::core::pipeline::Adapter;
 
 use super::fact::ContentMessageFact;
 

@@ -8,7 +8,7 @@
 use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
-use topo::core::projectors::{
+use topo::core::pipeline::{
     FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector,
 };
 use topo::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};

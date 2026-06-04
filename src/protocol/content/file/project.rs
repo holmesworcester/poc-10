@@ -12,7 +12,7 @@
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };

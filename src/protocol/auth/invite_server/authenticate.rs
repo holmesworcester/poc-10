@@ -11,7 +11,7 @@
 //! interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -54,7 +54,7 @@ fn authenticate_invite_server(fact: &Fact) -> Result<InviteServerFact, String> {
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::invite_server::create::signed_invite_server_fact;
     use crate::protocol::auth::invite_server::fact::InviteServerFact;
 

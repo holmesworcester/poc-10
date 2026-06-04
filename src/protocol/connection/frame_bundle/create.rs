@@ -1,7 +1,7 @@
 //! Bundled connection-frame fact construction helpers.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+use crate::core::pipeline::{ProjectionContext, ProjectionOutput};
 use crate::protocol::connection_frame;
 
 use super::fact::ConnectionFrameBundleFact;

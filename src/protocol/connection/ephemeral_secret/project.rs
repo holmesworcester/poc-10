@@ -21,7 +21,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };

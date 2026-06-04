@@ -13,7 +13,7 @@
 //! facts, also in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -46,7 +46,7 @@ fn authenticate_reaction(fact: &Fact) -> Result<ContentReactionFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::content::reaction::create::signed_reaction_fact;
     use crate::protocol::content::reaction::fact::{
         ContentReactionFact, ReactionCiphertext, REACTION_NONCE_BYTES,

@@ -11,7 +11,7 @@
 //! the projector.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -44,7 +44,7 @@ fn authenticate_key_request(fact: &Fact) -> Result<KeyRequestFact, String> {
 mod tests {
     use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::key_request::fact::KeyRequestFact;
     use crate::protocol::auth::key_request::layout;
     use crate::protocol::auth::workspace;

@@ -13,7 +13,7 @@
 //! in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -48,7 +48,7 @@ mod tests {
     use crate::core::command_context::LocalSigningCapability;
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::content::message_deletion::create::delete_message;
     use crate::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
 

@@ -155,10 +155,10 @@ Non-trivial projectors should make their proof shape obvious to a reviewer:
    `AuthenticatedFact`. Keep its shape uniform; it owns no context, authority,
    or rows.
 2. Converted families implement `Projector::project()` as a small call through
-   `core::projectors::project_staged::<ModuleCodec, ModuleAuthenticator, ModuleAdapter, _>()`
+   `core::pipeline::project_staged::<ModuleCodec, ModuleAuthenticator, ModuleAdapter, _>()`
    and set the route's `FactPipeline::Staged` metadata. Transitional families
    may still call
-   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()`. The
+   `core::pipeline::project_authenticated::<ModuleAuthenticator, _>()`. The
    staged runner owns `decode -> authenticate -> adapt -> project`; projector
    files keep only the typed projector body.
 3. Put the real proof in

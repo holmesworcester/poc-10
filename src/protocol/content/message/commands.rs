@@ -11,7 +11,7 @@ use crate::core::command_context::{
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::facts::{Fact, FactId};
-use crate::core::projectors::authenticate_authored;
+use crate::core::pipeline::authenticate_authored;
 use crate::core::runtime::Runtime;
 use crate::protocol::auth;
 use crate::protocol::content::message::author;

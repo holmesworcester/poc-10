@@ -27,7 +27,7 @@ use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::pipeline;
-use crate::core::projectors::{FactRoute, Projector, Timeline};
+use crate::core::pipeline::{FactRoute, Projector, Timeline};
 use crate::core::schema::{
     CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
 };
@@ -644,7 +644,7 @@ fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource>
 mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{ProjectionContext, ProjectionOutput};
+    use crate::core::pipeline::{ProjectionContext, ProjectionOutput};
 
     struct NoopProjector;
 

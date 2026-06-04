@@ -23,7 +23,7 @@
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
 use crate::core::network;
-use crate::core::projectors::Timeline;
+use crate::core::pipeline::Timeline;
 use crate::core::runtime::{HandlerRoute, RecurringIntentBuilder, Runtime, WorkStatus};
 use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};

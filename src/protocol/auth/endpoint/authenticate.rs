@@ -10,7 +10,7 @@
 //! projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -40,7 +40,7 @@ fn authenticate_endpoint(fact: &Fact) -> Result<EndpointFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::endpoint::create::{create_local_endpoint, endpoint_fact};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
 

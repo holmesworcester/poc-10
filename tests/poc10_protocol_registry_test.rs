@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topo::core::projectors::FactPipeline;
+use topo::core::pipeline::FactPipeline;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {

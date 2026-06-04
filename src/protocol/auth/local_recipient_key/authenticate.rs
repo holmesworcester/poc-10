@@ -11,7 +11,7 @@
 //! projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -42,7 +42,7 @@ fn authenticate_local_recipient_key(fact: &Fact) -> Result<LocalRecipientKeyFact
 mod tests {
     use crate::core::crypto::{self, X25519_PRIVATE_KEY_BYTES};
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
     use crate::protocol::auth::local_recipient_key::layout;
 

@@ -23,7 +23,7 @@ pub const TYPE_KEY_WRAP: u8 = layout::TYPE_KEY_WRAP;
 
 pub(crate) struct Codec;
 
-impl crate::core::projectors::FactCodec for Codec {
+impl crate::core::pipeline::FactCodec for Codec {
     type Payload = fact::KeyWrapFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {

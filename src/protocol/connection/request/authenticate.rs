@@ -16,7 +16,7 @@
 //! remain the projector's job.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, AuthenticatedFact, Authentication, Authenticator, ProjectionContext,
 };
 
@@ -44,7 +44,7 @@ impl Authenticator for ConnectionRequestAuthenticator {
 mod tests {
     use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::connection::request::create::sign_request;
     use crate::protocol::connection::request::fact::{

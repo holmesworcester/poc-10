@@ -27,7 +27,7 @@ pub fn encode_fact_payload(fact: &fact::AdminFact) -> Result<Vec<u8>, String> {
 
 pub(crate) struct Codec;
 
-impl crate::core::projectors::FactCodec for Codec {
+impl crate::core::pipeline::FactCodec for Codec {
     type Payload = fact::AdminFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {

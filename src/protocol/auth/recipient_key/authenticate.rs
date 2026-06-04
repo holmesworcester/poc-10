@@ -14,7 +14,7 @@
 //! signer matching are proven from other facts, also in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -54,7 +54,7 @@ fn authenticate_recipient_key(fact: &Fact) -> Result<RecipientKeyFact, String> {
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::recipient_key::create::signed_recipient_key_fact;
     use crate::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 

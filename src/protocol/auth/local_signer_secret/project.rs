@@ -8,7 +8,7 @@
 //!      scope and emits no rows, facts, intents, or shareable context.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };

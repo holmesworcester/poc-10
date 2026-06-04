@@ -11,7 +11,7 @@
 
 use crate::core::crypto;
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -46,7 +46,7 @@ fn authenticate_ephemeral_secret(fact: &Fact) -> Result<ConnectionEphemeralSecre
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
     use crate::protocol::connection::ephemeral_secret::layout;
 

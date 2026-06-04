@@ -62,8 +62,9 @@ Protocol code enters core through declarations and effect values:
   command-excluded handler names.
 - `app::ProtocolDescription` adds the product name, daemon declarations, CLI
   command table, and command context constructor.
-- `projectors::Projector` receives one `Fact` plus a `ProjectionContext` and
-  returns a `ProjectionOutput`.
+- `pipeline::Projector` receives one `Fact` plus a `ProjectionContext` and
+  returns a `ProjectionOutput`; staged families also implement the pipeline
+  decode, authenticate, adapt, and semantic project traits.
 - `intents::IntentHandler` receives one idempotent `Intent` plus a
   `HandlerContext` containing only declared input facts and returns
   `PipelineEffects`.
@@ -190,21 +191,19 @@ use core syntax and contracts, but core must not import their semantic rules.
   outbound queue rows, deterministic route+bytes row keys, listener setup,
   length-prefixed TCP frame reading/writing, and cleanup. It does not classify
   bootstrap frames, connection frames, auth facts, sync facts, or content facts.
-- `pipeline.rs`: public facade for SQL-backed queue workers. Runtime calls this
-  file to submit facts and intents, admit due time wakes, drain pending
-  projection, dispatch queued intents, and purge exact facts. The concrete
-  commit and scheduling code lives in the pipeline submodules below.
+- `pipeline.rs`: public facade for fact lifecycle contracts and SQL-backed
+  queue workers. It names the route, decode, authenticate, adapt, project,
+  effects, and commit stages, and runtime calls it to submit facts and intents,
+  admit due time wakes, drain pending projection, dispatch queued intents, and
+  purge exact facts. The concrete stage contracts and worker code live in the
+  pipeline submodules below.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal command output by default. It is for runtime profiling, not protocol
   measurement semantics.
-- `projectors.rs`: projection contract from one fact plus matched context to
-  deterministic output. It defines `Projector`, the `Authenticator` /
-  `AuthenticatedProjector` pre-projection layer (`AuthenticatedFact`,
-  `Authentication`, `project_authenticated`, `verify_fact_id`), `FactCodec`,
-  `ProjectionContext`, `ProjectionOutput`, time wakes, and self-purge. It
-  enforces the owner rule: a projector emits replacement context and time wakes
-  for the fact being projected, starting from an already-authenticated fact.
+- `projectors.rs`: transitional re-export facade for the fact-processing
+  pipeline. New code should import from `pipeline`; this file keeps existing
+  protocol modules compiling during fact-by-fact cutover.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command effects, drains
   projection and intent queues, admits due time wakes, filters command-safe
@@ -224,11 +223,30 @@ use core syntax and contracts, but core must not import their semantic rules.
 
 ### Pipeline Submodules
 
+- `pipeline/route.rs`: tag route declarations and the staged-vs-composed route
+  metadata that reviewers use to see whether a family is on the first-class
+  pipeline or the legacy composed path.
+- `pipeline/decode.rs`: decode-stage trait. Core owns when decoding happens;
+  protocol families own how their bytes become typed payloads.
+- `pipeline/authenticate.rs`: authentication-stage contracts and helpers:
+  `AuthenticatedFact`, `Authentication`, `Authenticator`,
+  `DecodedAuthenticator`, `authenticate_authored`, and `verify_fact_id`.
+- `pipeline/adapt.rs`: adapter-stage trait for moving from authenticated source
+  shape to the semantic value projected at the active head version.
+- `pipeline/project.rs`: project-stage contracts and staged runners. It exposes
+  `AuthenticatedProjector`, `SemanticProjector`, `project_authenticated`, and
+  `project_staged`.
+- `pipeline/context.rs`: in-memory `ProjectionContext`, matched payload facts,
+  due time ranges, and typed payload helpers visible while one fact is being
+  processed.
+- `pipeline/effects.rs`: `ProjectionOutput`, time wakes, and due time ranges.
+  Projection output is the complete context/time-wake replacement plus shared
+  `PipelineEffects` for one fact.
 - `pipeline/commit_effects.rs`: shared atomic commit path for
   `PipelineEffects`. It validates duplicate or conflicting effects, purges exact
   facts, admits durable and ephemeral facts, applies allowed row mutations, and
   queues follow-up intents inside the caller's transaction.
-- `pipeline/context.rs`: SQL implementation of standing context. It stores
+- `pipeline/context_store.rs`: SQL implementation of standing context. It stores
   need/offer edges, assembles projection context with matched payload facts,
   computes replacement deltas by owner, and fans out pending projection rows
   when new needs and offers overlap.

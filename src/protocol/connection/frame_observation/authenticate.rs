@@ -11,7 +11,7 @@
 //! observation context for the observed frame fact.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -41,7 +41,7 @@ fn authenticate_frame_observation(fact: &Fact) -> Result<ConnectionFrameObservat
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::connection::frame_observation::create::fact_from_observation;
     use crate::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact;
 

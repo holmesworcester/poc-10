@@ -7,7 +7,7 @@
 //!      progressive send own transfer for this protocol slice.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
     ProjectionOutput, Projector,
 };

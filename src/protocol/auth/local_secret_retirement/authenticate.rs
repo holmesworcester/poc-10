@@ -11,7 +11,7 @@
 //! projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -41,7 +41,7 @@ fn authenticate_local_secret_retirement(fact: &Fact) -> Result<LocalSecretRetire
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::local_secret_retirement::fact::{
         LocalSecretRetirementFact, RETIRE_REASON_CHOP,
     };

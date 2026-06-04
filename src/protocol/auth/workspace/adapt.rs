@@ -4,7 +4,7 @@
 //! identity adapter exists so the staged route exposes the same
 //! decode/authenticate/adapt/project slots future versioned facts will use.
 
-use crate::core::projectors::Adapter;
+use crate::core::pipeline::Adapter;
 
 use super::fact::WorkspaceFact;
 

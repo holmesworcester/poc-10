@@ -13,7 +13,7 @@
 //! other facts, also in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -55,7 +55,7 @@ fn authenticate_user_invite(fact: &Fact) -> Result<UserInviteFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::user_invite::create::signed_user_invite_fact;
     use crate::protocol::auth::user_invite::fact::UserInviteFact;
 

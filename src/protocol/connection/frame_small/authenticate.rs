@@ -11,7 +11,7 @@
 //! owns through `create::project_observed_frame`.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -41,7 +41,7 @@ fn authenticate_frame_small(fact: &Fact) -> Result<ConnectionFrameSmallFact, Str
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::core::wire::FixedBytes;
     use crate::protocol::connection::frame_small::create::fact_from_wire;
     use crate::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;

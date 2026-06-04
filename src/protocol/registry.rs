@@ -23,7 +23,7 @@ use crate::core::cli::CliCommand;
 use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
@@ -586,7 +586,7 @@ impl Projector for ProtocolProjector {
 macro_rules! projector_route {
     ($name:ident, content::message::project::ContentMessageProjector, staged_content_message) => {
         fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
-            crate::core::projectors::project_staged::<
+            crate::core::pipeline::project_staged::<
                 content::message::decode::Codec,
                 content::message::authenticate::ContentMessageAuthenticator,
                 content::message::adapt::ContentMessageAdapter,
@@ -600,7 +600,7 @@ macro_rules! projector_route {
     };
     ($name:ident, auth::workspace::project::WorkspaceProjector, staged_workspace) => {
         fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
-            crate::core::projectors::project_staged::<
+            crate::core::pipeline::project_staged::<
                 auth::workspace::decode::Codec,
                 auth::workspace::authenticate::WorkspaceAuthenticator,
                 auth::workspace::adapt::WorkspaceAdapter,

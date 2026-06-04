@@ -12,7 +12,7 @@
 //! interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::projectors::{
+use crate::core::pipeline::{
     verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
 };
 
@@ -58,7 +58,7 @@ fn authenticate_admin(fact: &Fact) -> Result<AdminFact, String> {
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
     use crate::protocol::auth::admin::create::signed_admin_fact;
     use crate::protocol::auth::admin::fact::AdminFact;
 

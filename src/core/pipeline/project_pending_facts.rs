@@ -25,7 +25,7 @@
 //! This module owns the SQL-backed projection loop. It admits facts into the
 //! pending queue, turns due time wakes into pending projection with time-range
 //! context, loads each pending fact's previous standing context and matched
-//! inputs through `pipeline::context`, runs the protocol projector, and commits
+//! inputs through `pipeline::context_store`, runs the protocol projector, and commits
 //! the replacement context plus projector `PipelineEffects` in one transaction.
 //! The shared effects are written by `commit_effects`; this file owns the
 //! projection-specific work around them.
@@ -41,7 +41,7 @@ use super::commit_effects::{
     commit_pipeline_effects_in_tx, sqlite_string_error, suppress_disallowed_intents,
     validate_pipeline_effects, IntentAdmissionPolicy,
 };
-use super::context::{
+use super::context_store::{
     insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
     stored_matching_context, wake_context_matches_in_tx,
 };
@@ -54,7 +54,7 @@ use crate::core::fact_store::{
     insert_fact_and_pending_in_tx, persisted_fact, purge_fact_in_tx,
 };
 use crate::core::facts::{Fact, FactId};
-use crate::core::projectors::{
+use crate::core::pipeline::{
     ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
 use crate::core::schema::{PENDING_PROJECTION, PENDING_TIME_RANGES, TIME_WAKES};
@@ -1281,7 +1281,7 @@ mod tests {
             start_key: key.clone(),
             end_key: key.clone(),
         };
-        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+        crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
         let projector = PrematureNeedUntilPayload {
@@ -1329,7 +1329,7 @@ mod tests {
             start_key: ContextKey::from_bytes(b"a"),
             end_key: ContextKey::from_bytes(b"z"),
         };
-        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+        crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
         let pending = PendingFact {
@@ -1493,7 +1493,7 @@ mod tests {
             start_key: key.clone(),
             end_key: key.clone(),
         };
-        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+        crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
         let pending = PendingFact {
@@ -1536,7 +1536,7 @@ mod tests {
                 start_key: ContextKey::from_bytes(vec![index as u8]),
                 end_key: ContextKey::from_bytes(vec![index as u8]),
             };
-            crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+            crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
                 .expect("insert stored offer");
         }
 
@@ -1669,7 +1669,7 @@ mod tests {
             start_key: key.clone(),
             end_key: key.clone(),
         };
-        crate::core::pipeline::context::insert_context_offer_for_test(&store, &offer)
+        crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
         let progress = drain_pending_projection(

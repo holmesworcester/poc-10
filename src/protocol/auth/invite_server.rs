@@ -20,7 +20,7 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteServerFact, Strin
 
 pub(crate) struct Codec;
 
-impl crate::core::projectors::FactCodec for Codec {
+impl crate::core::pipeline::FactCodec for Codec {
     type Payload = fact::InviteServerFact;
 
     fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {

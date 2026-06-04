@@ -1,9 +1,10 @@
 # Core Pipeline
 
-The pipeline is core's SQL-backed runtime work loop. It turns admitted facts,
-standing context, due time wakes, and queued intents into committed runtime
-state. The pipeline does not know protocol semantics; it owns queue mechanics,
-context fanout, retry behavior, and transaction boundaries.
+The pipeline is core's fact lifecycle plus the SQL-backed runtime work loop that
+commits it. It turns admitted facts, standing context, due time wakes, and
+queued intents into committed runtime state. The pipeline does not know protocol
+semantics; it owns route invocation, context fanout, retry behavior, and
+transaction boundaries.
 
 ## Interface To Core And Protocol
 
@@ -17,26 +18,28 @@ The public facade is `src/core/pipeline.rs`. Runtime code calls it to:
 - dispatch queued intents with the registered protocol handlers.
 - purge exact facts and their core-owned derived rows.
 
-Protocol code does not call pipeline modules directly. It participates through
-`Projector`, `IntentHandler`, `ProjectionOutput`, and `PipelineEffects`.
-Projectors decide what facts need or offer, what rows they materialize, and
-what follow-up intents to enqueue. Handlers decide what bounded stateful work to
-perform. The pipeline decides when those outputs become durable.
+Protocol code participates through `Projector`, `FactCodec`, `Authenticator`,
+`Adapter`, `SemanticProjector`, `IntentHandler`, `ProjectionOutput`, and
+`PipelineEffects`. Fact families own the concrete stage implementations.
+Projectors decide what facts need or offer, what rows they materialize, and what
+follow-up intents to enqueue. Handlers decide what bounded stateful work to
+perform. The pipeline decides when those effects become durable.
 
 ## Read Projection Path
 
 The direction for routed facts is a first-class staged read path:
 
 ```text
-fact bytes -> decode -> authenticate -> adapt -> project -> ProjectionOutput
+route -> decode -> authenticate -> adapt -> project -> effects -> commit
 ```
 
 Converted routes declare those stages in `FactRoute.pipeline` as
 `FactPipeline::Staged`. The core projection worker still stays
 protocol-neutral: it loads the fact and context, then invokes the registered
-protocol projector. The protocol router selects the tag route, runs the staged
-helper, and hands the settled `ProjectionOutput` back to the same commit
-boundary.
+protocol projector. The protocol router selects the tag route, core's staged
+helper runs decode/authenticate/adapt/project, and the settled
+`ProjectionOutput` hands context replacement plus `PipelineEffects` to the same
+commit boundary.
 
 The legacy path remains for fact-by-fact cutover. Routes marked
 `FactPipeline::ProjectorComposed` still call the family projector directly, and
@@ -44,6 +47,21 @@ that projector may invoke the old composed authentication helper internally.
 That compatibility path should preserve existing fact behavior until a family is
 split into explicit `decode.rs`, `authenticate.rs`, `adapt.rs`, and `project.rs`
 roles.
+
+## Write Authoring Path
+
+The write-side shape is:
+
+```text
+command -> author -> encode -> authenticate self-check -> admit -> read pipeline
+```
+
+Commands own user intent, argument parsing, local capability lookup, receipts,
+and the decision to author a fact. The family author/encode code owns canonical
+bytes, signing transcripts, AEAD associated data, deterministic nonce inputs,
+and any padding policy needed to create the fact. Before admission, authored
+facts should pass the same family authentication gate that will accept them on
+the read path. After admission they are just facts queued for projection.
 
 ## Data Flow
 
@@ -93,10 +111,22 @@ that range without allowing projectors to read the clock.
 
 ## Module Responsibilities
 
+- `route.rs` owns tag route declarations and the staged-vs-composed route
+  metadata.
+- `decode.rs` owns the decode trait core invokes at the read-stage boundary.
+- `authenticate.rs` owns authentication result types, authentication traits,
+  the authored-fact self-check helper, and the fact-id self-check helper.
+- `adapt.rs` owns the adapter trait that converts authenticated source values to
+  the semantic value projected at the active head version.
+- `project.rs` owns authenticated and semantic projector traits plus the staged
+  helper functions that compose decode/authenticate/adapt/project.
+- `context.rs` owns the in-memory `ProjectionContext` and matched payload
+  helpers visible while processing one fact.
+- `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
 - `project_pending_facts.rs` owns fact admission, pending projection drain,
   time-wake admission, projection context fixpoint growth, and the projection
   commit boundary.
-- `context.rs` owns persisted context edges, range-overlap matching, projection
+- `context_store.rs` owns persisted context edges, range-overlap matching, projection
   context assembly, and wake fanout.
 - `dispatch.rs` owns intent queue claiming, handler input loading, retry
   handling, and handler-output commit.
@@ -143,8 +173,10 @@ replay and process restart safe.
 
 ## What Does Not Belong Here
 
-Do not add protocol policy, fact layout decoding, context role meaning, sync
-range semantics, connection routes, command formatting, or network frame
-parsing to the pipeline. The pipeline should stay a protocol-blind scheduler
-and commit layer. If a change needs to know what a row or fact means, make the
-change in the owning protocol scope and return the appropriate core effect.
+Do not add protocol policy, concrete fact layout decoding, context role meaning,
+sync range semantics, connection routes, command formatting, or network frame
+parsing to the pipeline. The pipeline can define when decode/authenticate/adapt/
+project run and what data shape each stage exchanges, but the protocol family
+must own what the bytes, rows, context roles, signatures, or commands mean. If a
+change needs semantic knowledge, make it in the owning protocol scope and return
+the appropriate core effect.
