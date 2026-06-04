@@ -3,13 +3,16 @@
 //! The fact type is public protocol metadata. User-visible message text is an
 //! encrypted field that opens only when matching key context is available.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::facts::FactId;
 use crate::core::wire::FixedSlot;
 
 pub const UNIX_MINUTE_MS: u64 = 60_000;
 pub const CIPHERTEXT_BYTES: usize = 128;
 pub const NONCE_BYTES: usize = 24;
+pub const TEXT_LENGTH_PREFIX_BYTES: usize = 4;
+pub const PLAINTEXT_SLOT_BYTES: usize = CIPHERTEXT_BYTES - XCHACHA20_POLY1305_TAG_BYTES;
+pub const MAX_TEXT_BYTES: usize = PLAINTEXT_SLOT_BYTES - TEXT_LENGTH_PREFIX_BYTES;
 pub type MessageCiphertext = FixedSlot<CIPHERTEXT_BYTES>;
 
 pub type WorkspaceId = FactId;

@@ -10,7 +10,7 @@ use crate::core::facts::FactId;
 use crate::core::store::Store;
 use rusqlite::{params, OptionalExtension};
 
-use super::{fact::CIPHERTEXT_BYTES, rows};
+use super::fact::{FrontierId, WorkspaceId, CIPHERTEXT_BYTES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenedMessage {
@@ -26,6 +26,17 @@ pub struct ContentCount {
     pub content_messages: usize,
     pub message_payload_bytes: u64,
     pub max_created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentMessageRow {
+    pub workspace_id: WorkspaceId,
+    pub message_id: FactId,
+    pub created_at_ms: u64,
+    pub author_user_id: FactId,
+    pub signer_id: FactId,
+    pub frontier_id: FrontierId,
+    pub minute: u64,
 }
 
 pub fn opened_messages(store: &Store, workspace_id: FactId) -> Result<Vec<OpenedMessage>, String> {
@@ -90,7 +101,7 @@ pub(crate) fn max_created_at_ms(store: &Store) -> Result<u64, String> {
 pub fn content_message_rows(
     store: &Store,
     workspace_id: FactId,
-) -> Result<Vec<rows::ContentMessageRow>, String> {
+) -> Result<Vec<ContentMessageRow>, String> {
     let mut stmt = store
         .conn()
         .prepare(
@@ -102,7 +113,7 @@ pub fn content_message_rows(
         .map_err(|err| format!("load message rows: {err}"))?;
     let rows = stmt
         .query_map(params![workspace_id], |row| {
-            Ok(rows::ContentMessageRow {
+            Ok(ContentMessageRow {
                 workspace_id,
                 message_id: row.get(0)?,
                 author_user_id: row.get(1)?,
@@ -122,7 +133,7 @@ pub fn content_message_row(
     store: &Store,
     workspace_id: FactId,
     message_id: FactId,
-) -> Result<Option<rows::ContentMessageRow>, String> {
+) -> Result<Option<ContentMessageRow>, String> {
     store
         .conn()
         .query_row(
@@ -132,7 +143,7 @@ pub fn content_message_row(
              LIMIT 1",
             params![workspace_id, message_id],
             |row| {
-                Ok(rows::ContentMessageRow {
+                Ok(ContentMessageRow {
                     workspace_id,
                     message_id,
                     author_user_id: row.get(0)?,

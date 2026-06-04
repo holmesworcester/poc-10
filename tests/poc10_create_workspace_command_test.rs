@@ -11,7 +11,9 @@ use topo::core::store::Store;
 use topo::protocol::auth::workspace::commands::{
     create_workspace_with_identity, BootstrapIdentity,
 };
-use topo::protocol::auth::workspace::layout as workspace_layout;
+use topo::protocol::auth::workspace::{
+    authenticate as workspace_authenticate, decode as workspace_decode,
+};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 struct FixedClock(Cell<u64>);
@@ -70,8 +72,8 @@ fn create_workspace_emits_decodable_workspace_fact() {
         .iter()
         .find(|fact| fact.id == output.receipt.workspace_fact_id)
         .expect("workspace fact emitted");
-    let decoded = workspace_layout::decode_fact(&workspace_fact.bytes).expect("decode fact");
-    workspace_layout::verify_signature(&decoded).expect("workspace signature");
+    let decoded = workspace_decode::decode_fact(&workspace_fact.bytes).expect("decode fact");
+    workspace_authenticate::verify_signature(&decoded).expect("workspace signature");
     assert_eq!(decoded.name, "Research");
     assert_eq!(decoded.created_at_ms, 60_000);
 }

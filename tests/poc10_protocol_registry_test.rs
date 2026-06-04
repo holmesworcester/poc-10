@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use topo::core::projectors::FactPipeline;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
@@ -41,6 +42,53 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .handlers
         .iter()
         .any(|handler| handler.name == "receive_network_frame"));
+}
+
+#[test]
+fn model_routes_declare_first_class_pipeline_stages() {
+    assert_staged_route(
+        topo::protocol::content::message::TYPE_CONTENT_MESSAGE,
+        "content::message::decode::Codec",
+        "content::message::authenticate::ContentMessageAuthenticator",
+        "content::message::adapt::ContentMessageAdapter",
+        "content::message::project::ContentMessageProjector",
+    );
+    assert_staged_route(
+        topo::protocol::auth::workspace::TYPE_WORKSPACE,
+        "auth::workspace::decode::Codec",
+        "auth::workspace::authenticate::WorkspaceAuthenticator",
+        "auth::workspace::adapt::WorkspaceAdapter",
+        "auth::workspace::project::WorkspaceProjector",
+    );
+}
+
+fn assert_staged_route(
+    tag: u8,
+    expected_decode: &str,
+    expected_authenticate: &str,
+    expected_adapt: &str,
+    expected_project: &str,
+) {
+    let route = MATCH_RUNTIME
+        .fact_routes
+        .iter()
+        .find(|route| route.tag == tag)
+        .expect("model route");
+
+    let FactPipeline::Staged {
+        decode,
+        authenticate,
+        adapt,
+        project,
+    } = route.pipeline
+    else {
+        panic!("model route {tag} should use the staged pipeline");
+    };
+
+    assert_eq!(decode, expected_decode);
+    assert_eq!(authenticate, expected_authenticate);
+    assert_eq!(adapt, expected_adapt);
+    assert_eq!(project, expected_project);
 }
 
 #[test]
@@ -253,7 +301,7 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
     for truth_tag in [
         connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT,
         topo::protocol::auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED,
-        topo::protocol::content::message::layout::TYPE_CONTENT_MESSAGE,
+        topo::protocol::content::message::TYPE_CONTENT_MESSAGE,
         topo::protocol::auth::key_wrap::layout::TYPE_KEY_WRAP,
     ] {
         assert!(

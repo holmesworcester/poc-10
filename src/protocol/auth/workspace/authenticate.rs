@@ -13,7 +13,8 @@
 
 use crate::core::facts::Fact;
 use crate::core::projectors::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, Authenticator, DecodedAuthenticator, FactCodec,
+    ProjectionContext,
 };
 
 use super::fact::WorkspaceFact;
@@ -31,21 +32,46 @@ impl Authenticator for WorkspaceAuthenticator {
     }
 }
 
+impl DecodedAuthenticator<super::decode::Codec> for WorkspaceAuthenticator {
+    type Authenticated = WorkspaceFact;
+
+    fn authenticate_decoded<'a>(
+        fact: &'a Fact,
+        workspace: WorkspaceFact,
+        _context: &ProjectionContext,
+    ) -> Authentication<'a, Self::Authenticated> {
+        Authentication::from_result(fact, prove_decoded_workspace(fact, workspace))
+    }
+}
+
 fn authenticate_workspace(fact: &Fact) -> Result<WorkspaceFact, String> {
     // 1. Layout.
-    let workspace = super::Codec::decode_fact(fact)?;
+    let workspace = super::decode::Codec::decode_fact(fact)?;
+    prove_decoded_workspace(fact, workspace)
+}
+
+fn prove_decoded_workspace(fact: &Fact, workspace: WorkspaceFact) -> Result<WorkspaceFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&workspace)?;
+    verify_signature(&workspace)?;
     Ok(workspace)
+}
+
+pub fn verify_signature(fact: &WorkspaceFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.public_key,
+        &super::encode::signing_bytes(fact)?,
+        &fact.signature,
+        "workspace",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
     use crate::core::projectors::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::workspace::create::create_workspace;
+    use crate::protocol::auth::workspace::author::create_workspace;
     use crate::protocol::auth::workspace::fact::WorkspaceFact;
 
     use super::WorkspaceAuthenticator;

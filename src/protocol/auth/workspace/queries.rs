@@ -6,15 +6,24 @@
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
+use crate::core::row_schema::RowValue;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint_shared;
-use crate::protocol::auth::workspace::rows;
 use crate::protocol::connection;
 use crate::protocol::sync::shared_fact;
 
+use super::fact::{WorkspaceId, WorkspacePublicKey, WORKSPACE_NAME_BYTES};
 use endpoint_shared::rows::EndpointSharedRow;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    pub workspace_id: WorkspaceId,
+    pub created_at_ms: u64,
+    pub public_key: WorkspacePublicKey,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSummary {
@@ -27,10 +36,10 @@ pub struct WorkspaceSummary {
 pub fn list_workspaces(store: &Store) -> Result<Vec<WorkspaceSummary>, String> {
     let mut workspaces = Vec::new();
     for (key, value) in store
-        .table_rows(rows::WORKSPACE_ROWS)
+        .table_rows(super::WORKSPACE_ROWS)
         .map_err(|err| format!("read workspace rows: {err}"))?
     {
-        let row = rows::decode_workspace_row(&key, &value)?;
+        let row = decode_workspace_row(&key, &value)?;
         workspaces.push(WorkspaceSummary {
             workspace_id: row.workspace_id,
             created_at_ms: row.created_at_ms,
@@ -50,7 +59,7 @@ pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceS
 
 pub fn count_workspaces(store: &Store) -> Result<usize, String> {
     store
-        .table_row_count(rows::WORKSPACE_ROWS)
+        .table_row_count(super::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))
 }
 
@@ -135,9 +144,9 @@ fn local_endpoint_id(store: &Store) -> Result<Option<FactId>, String> {
 
 fn workspace_name(store: &Store, workspace_id: FactId) -> Result<Option<String>, String> {
     store
-        .table_row(rows::WORKSPACE_ROWS, &workspace_id)
+        .table_row(super::WORKSPACE_ROWS, &workspace_id)
         .map_err(|err| format!("load workspace row: {err}"))?
-        .map(|value| rows::decode_workspace_row(&workspace_id, &value).map(|row| row.name))
+        .map(|value| decode_workspace_row(&workspace_id, &value).map(|row| row.name))
         .transpose()
 }
 
@@ -162,7 +171,7 @@ pub struct RuntimeCountReport {
 pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, String> {
     let workspace_rows = runtime
         .store()
-        .table_row_count(rows::WORKSPACE_ROWS)
+        .table_row_count(super::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))?;
     let facts = runtime.facts().count();
     let sync_facts = shared_fact::sync_status(runtime.store())?.indexed_facts;
@@ -191,4 +200,52 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
         connection_facts: connection_requests + connections,
         invite_accepted,
     })
+}
+
+pub(crate) fn decode_workspace_row(key: &[u8], value: &[u8]) -> Result<WorkspaceRow, String> {
+    let key_fields = super::WORKSPACE_ROW_SCHEMA.decode_key(key)?;
+    let value_fields = super::WORKSPACE_ROW_SCHEMA.decode_value(value)?;
+    let workspace_id = bytes32_field(&key_fields[0], "workspace_id")?;
+    let created_at_ms = u64_field(&value_fields[0], "created_at_ms")?;
+    let public_key = bytes32_field(&value_fields[1], "public_key")?;
+    let name = workspace_name_field(&value_fields[2])?;
+    Ok(WorkspaceRow {
+        workspace_id,
+        created_at_ms,
+        public_key,
+        name,
+    })
+}
+
+fn bytes32_field(value: &RowValue, name: &str) -> Result<[u8; 32], String> {
+    let bytes = bytes_field(value, name)?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{name} must be 32 bytes"))
+}
+
+fn bytes_field(value: &RowValue, name: &str) -> Result<Vec<u8>, String> {
+    match value {
+        RowValue::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(format!("{name} must be bytes")),
+    }
+}
+
+fn u64_field(value: &RowValue, name: &str) -> Result<u64, String> {
+    match value {
+        RowValue::U64(value) => Ok(*value),
+        _ => Err(format!("{name} must be u64")),
+    }
+}
+
+fn workspace_name_field(value: &RowValue) -> Result<String, String> {
+    let bytes = bytes_field(value, "name")?;
+    let padded: [u8; WORKSPACE_NAME_BYTES] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "workspace name slot has wrong length".to_string())?;
+    super::fact::WorkspaceName::from_padded(padded)
+        .map(|name| name.to_string())
+        .map_err(|err| format!("{err:?}"))
 }

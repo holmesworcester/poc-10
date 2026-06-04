@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection};
 use topo::core::crypto;
+use topo::core::row_schema::{RowField, RowTableSchema, RowValue};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::{SchemaSource, Store, TableName, TableRow};
 use topo::protocol::content::{file, reaction};
@@ -9,6 +10,15 @@ use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
 const TEST_ROWS: TableName = TableName::new("test_rows");
+const SCHEMA_BACKED_ROWS: TableName = TableName::new("schema_backed_rows");
+
+const SCHEMA_BACKED_KEY: &[RowField] = &[RowField::bytes32("owner")];
+const SCHEMA_BACKED_VALUE: &[RowField] = &[
+    RowField::u64be("created_at_ms"),
+    RowField::bytes("payload", 2),
+];
+const SCHEMA_BACKED_ROW_SCHEMA: RowTableSchema =
+    RowTableSchema::new(SCHEMA_BACKED_ROWS, SCHEMA_BACKED_KEY, SCHEMA_BACKED_VALUE);
 
 const TYPED_MESSAGES_SCHEMA: SchemaSource = SchemaSource {
     ddl: r#"
@@ -23,6 +33,7 @@ CREATE INDEX IF NOT EXISTS typed_messages_by_workspace_created
     ON typed_messages (workspace_id, created_at_ms);
 "#,
     row_tables: &[],
+    row_schemas: &[],
 };
 
 const TEST_ROWS_SCHEMA: SchemaSource = SchemaSource {
@@ -33,6 +44,18 @@ CREATE TABLE IF NOT EXISTS test_rows (
 );
 "#,
     row_tables: &[TEST_ROWS],
+    row_schemas: &[],
+};
+
+const SCHEMA_BACKED_ROWS_SCHEMA: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TABLE IF NOT EXISTS schema_backed_rows (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+"#,
+    row_tables: &[],
+    row_schemas: &[SCHEMA_BACKED_ROW_SCHEMA],
 };
 
 fn checked_schema_sources() -> [SchemaSource; 2] {
@@ -359,6 +382,7 @@ CREATE TABLE IF NOT EXISTS legacy_key_value_shape (
 );
 "#,
         row_tables: &[],
+        row_schemas: &[],
     };
 
     let store = Store::open_disk_with_schema_sources(&path, &[key_value_shape])
@@ -372,6 +396,35 @@ CREATE TABLE IF NOT EXISTS legacy_key_value_shape (
         .expect_err("non-allowlisted key/value table should reject row helper");
 
     assert!(err.to_string().contains("not an opaque row table"));
+}
+
+#[test]
+fn schema_backed_row_tables_are_allowlisted_and_keep_declared_shape() {
+    let store = Store::open_memory_with_schema_sources(&[SCHEMA_BACKED_ROWS_SCHEMA])
+        .expect("open schema-backed row store");
+    let row = SCHEMA_BACKED_ROW_SCHEMA
+        .row(
+            &[RowValue::Bytes(vec![1; 32])],
+            &[RowValue::U64(9), RowValue::Bytes(vec![7, 8])],
+        )
+        .expect("schema row");
+
+    assert_eq!(store.row_schemas(), &[SCHEMA_BACKED_ROW_SCHEMA]);
+    assert_eq!(
+        store.insert_table_rows(vec![row.clone()]).expect("insert"),
+        1
+    );
+
+    let stored = store
+        .table_row(SCHEMA_BACKED_ROWS, &row.key)
+        .expect("read")
+        .expect("stored row");
+    assert_eq!(
+        SCHEMA_BACKED_ROW_SCHEMA
+            .decode_value(&stored)
+            .expect("decode value"),
+        vec![RowValue::U64(9), RowValue::Bytes(vec![7, 8])]
+    );
 }
 
 #[test]

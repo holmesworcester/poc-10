@@ -9,14 +9,16 @@ needs no ceiling, adapter, release manifest, or trusted time — and should ship
 builds on this layer (its `authenticate → adapt → project` pipeline reuses these
 authenticators unchanged), but the split is useful on its own today.
 
-**Status: landed (changes 1 and 2).** Change 1: every routed fact family has an
-`authenticate.rs`; projectors consume an `AuthenticatedFact` and verify no
-signatures; the old `project_typed` / `TypedProjector` path is removed; the full
-suite is green and behaviour is unchanged. Change 2 (the behaviour-changing
-follow-on — per-fact projection isolation + purge/keep classification) is
-described under *Error isolation and purge* below and also landed. The immediate
-next structural step is the core-managed staged route runner: decode by tag,
-authenticate primary facts, pass through an identity adapt slot, then project.
+**Status: landed through model staged routes.** Change 1: every routed fact
+family has an `authenticate.rs`; projectors consume an `AuthenticatedFact` and
+verify no signatures; the old `project_typed` / `TypedProjector` path is
+removed; the full suite is green and behaviour is unchanged. Change 2 (the
+behaviour-changing follow-on — per-fact projection isolation + purge/keep
+classification) is described under *Error isolation and purge* below and also
+landed. Change 3: core has an optional staged route runner, so converted facts
+declare `decode`, `authenticate`, `adapt`, and `project` as first-class
+`FactRoute.pipeline` stages while unconverted facts keep the legacy
+projector-composed route shape for fact-by-fact cutover.
 
 This note was originally named "fact validators." The design insight is that the
 pre-projector layer should not claim full protocol validity. It proves that a
@@ -207,10 +209,10 @@ project`. There is **no adapter** in this landing: the projector consumes the
 authenticated fact directly, at head. Adapters and the ceiling are added later,
 between authenticate and project, without changing the authenticators.
 
-### Next step: staged core pipeline
+### Staged core pipeline
 
-The landed helper is the first step, not the final shape. The next change should
-hoist the composition into core as a per-tag `FactRoute` runner:
+The staged helper is the first cutover shape. A converted per-tag `FactRoute`
+runner is:
 
 ```text
 raw fact bytes
@@ -222,25 +224,67 @@ raw fact bytes
 
 Core owns the stage boundaries and the wake queues. `AuthenticationNeed` wakes
 authentication; projector context needs, offers, and time wakes wake projection
-for an already authenticated and adapted fact. The route is still typed inside the
-protocol: the protocol route owns the concrete `T`, its `decode`, `authenticate`,
-`adapt`, and `project` functions, while core sees only "tag 50 has this decoder,
-this authenticator, this adapt slot, and this projector."
+for an already authenticated and adapted fact. The route is still typed inside
+the protocol: the protocol route owns the concrete `T`, its `decode`,
+`authenticate`, `adapt`, and `project` functions, while core sees only "tag 50
+has this decoder, this authenticator, this adapt slot, and this projector."
 
-Projectors stop invoking `project_authenticated` themselves once this lands.
-That helper either becomes route-runner logic or disappears. Context payloads
+Converted projectors call `project_staged::<Codec, Authenticator, Adapter, _>()`
+for direct tests, and their registered route function also calls the same core
+runner. Transitional families keep `project_authenticated`, which preserves the
+existing behavior while the cutover proceeds fact by fact. Context payloads
 requested by projectors are decoded and adapted before they are handed to the
-projector; they are not re-authenticated by the consumer path. Their offer exists
-only because the owner already passed its own route, so needs/offers keep
-matching on stable role/scope/range coordinates while payload shape adapts to the
-active ceiling.
+projector; they are not re-authenticated by the consumer path. Their offer
+exists only because the owner already passed its own route, so needs/offers keep
+matching on stable role/scope/range coordinates while payload shape adapts to
+the active ceiling.
 
-The first implementation substep is to build model family shapes before the
-fan-out. Pick a small representative set — for example a signed/encrypted
-content family, an external-verifier authentication-need family, a container
-frame family, and a deterministic handler-authored sync/auth family — and write
-the full directory/file shape for each. Review the file names, top-of-file
-policies, route declarations, and test style before migrating every family.
+The first implementation substep built two model family shapes before the
+fan-out: a signed/encrypted content family (`content/message`) and a
+deterministic root auth family (`auth/workspace`). Future model candidates are
+an external-verifier authentication-need family, a container frame family, and a
+deterministic handler-authored sync/auth family.
+
+### Model fact lessons
+
+- `content/message` and `auth/workspace` are the first production staged
+  routes. Each route declares `decode`, `authenticate`, `adapt`, and `project`
+  labels in `FactRoute.pipeline`, and the route function calls
+  `project_staged`.
+- `encode.rs` owns canonical bytes and pure transcript helpers. It does not
+  sign, encrypt, read context, authenticate, adapt, project, or admit.
+- `decode.rs` owns byte parsing and `FactCodec`. It checks tags, lengths,
+  canonical padding, and fixed slots; it does not check ids, signatures,
+  verifier context, or semantic relationships.
+- `authenticate.rs` owns id proof, signature proof, intrinsic single-fact
+  rules, and authentication parking. In staged routes it receives the decoded
+  source value and does not re-decode.
+- `adapt.rs` maps authenticated source values to the active semantic shape. It
+  is identity for both model facts, but the physical file and route label are
+  present so future version splits have a reviewable conversion point.
+- `project.rs` receives semantic values and owns unsigned scope checks, context,
+  authority, rows, offers, needs, time wakes, intents, deletion, retention, and
+  purge. It does not decode or authenticate primary bytes.
+- `author.rs` owns pure construction from explicit inputs: assembly, signing,
+  encryption, and calls to `encode.rs`. It must not reference `CommandContext`,
+  `Store`, or `Runtime`.
+- `commands.rs` owns runtime gathering and command receipts. It gathers the
+  authoring snapshot, calls `author.rs`, runs the authenticate self-check before
+  returning facts, and does not own projection rows or fact byte layout.
+- Row shape is separate from fact shape. Core can learn row fields from
+  protocol-owned `SchemaSource.row_schemas` declarations without hard-coding
+  protocol semantics; projectors still decide when to emit rows.
+- `auth/workspace` no longer has a `rows.rs`: its module root declares
+  `WORKSPACE_ROW_SCHEMA`, `src/protocol/registry.rs` registers it through
+  `SchemaSource.row_schemas`, `project.rs` emits `WORKSPACE_ROW_SCHEMA.row(...)`,
+  and `queries.rs` decodes through the schema before applying read semantics.
+- `content/message` no longer has a `rows.rs`: its materialized read models are
+  typed SQL tables declared in registry `read_models`; `project.rs` owns the
+  private row-mutation builders, while `queries.rs` owns result structs and read
+  SQL. Typed-table rows should not detour through a per-family row file.
+- Documentation should be readable by following the pipeline. Each converted
+  family needs top-of-file docs saying what that role owns, and reviewers should
+  be able to line up the route declaration with the role files.
 
 ### Write-side twin: command authoring pipeline
 
@@ -294,9 +338,11 @@ the canonical form.
     ceiling-selected local construction live here. This replaces fact-family
     `create.rs` in the target shape; non-family intent names such as
     `create_key_wrap` may keep their established command names.
-  - `authenticate.rs` — `decode` + id check + fact-boundary cryptographic proof
-    + intrinsic field rules, returning `Authenticated`, `NeedsAuthentication`,
-    or `Invalid`.
+  - `authenticate.rs` — id check + fact-boundary cryptographic proof +
+    intrinsic field rules, returning `Authenticated`, `NeedsAuthentication`, or
+    `Invalid`. Staged authenticators receive the decoded source value; legacy
+    composed authenticators may still decode internally until their route is
+    cut over.
   - `adapt.rs` — typed source value to the active semantic value; identity for
     current families, non-identity for version splits.
   - `project.rs` — active semantic value plus context to rows, needs, offers,
@@ -304,15 +350,12 @@ the canonical form.
 - `project.rs` drops primary decode + signature; the projector implements
   `AuthenticatedProjector` (binds `let (fact, payload) = authenticated.into_parts()`)
   and begins at scope + context. Scope stays in the projector (interpretation).
-- **Routing, as built.** Authentication composes *into* the projector path: the
-  family's `Projector::project` delegates to
-  `project_authenticated::<Authenticator,_>`, which runs the authenticator then
-  the projector. There is no separate runtime `tag → authenticator` table yet;
-  completeness ("every routed family has an `authenticate.rs` and delegates to
-  it") is enforced by a guardrail. The next home is a staged `FactRoute` —
-  core authenticating by tag at *admission*, running the route's adapt slot, and
-  then projecting. It should land before real adapters and before ceiling logic:
-  every current family gets an identity adapt slot.
+- **Routing, as built.** `FactRoute.pipeline` records whether a route is still
+  `ProjectorComposed` or has first-class `decode -> authenticate -> adapt ->
+  project` stages. `content/message` and `auth/workspace` are staged model
+  routes; their route functions call core `project_staged`. Existing
+  unconverted families keep the old composed path so the cutover can proceed
+  fact by fact without changing their behavior.
 - Foreign context is still read through module-owned typed helpers, never another
   module's raw layout codec — and a projector **never re-verifies a context
   fact's signature**: that fact was authenticated before it could offer the
@@ -337,7 +380,8 @@ a split whose structure a reviewer cannot follow is not done.
   that only writes rows may start at materialize); its decode and signature moved
   to the authenticator. Security-sensitive context is named in structs / bindings
   (no positional `needs[0]`), authority branches live in path-specific functions,
-  and rows go through module-owned helpers.
+  and row mutations go through schema-backed helpers or registry typed-table
+  schemas.
 - The split must be legible to a maintainer asking *"where does authentication
   happen, and where does interpretation happen?"* — authenticators authenticate,
   projectors interpret and validate context; inline comments attach to
@@ -345,11 +389,11 @@ a split whose structure a reviewer cannot follow is not done.
 
 ## Scope — complete in one pass
 
-This is **one cohesive change covering every routed fact family** — finish it in
-one go. Do **not** land a partial split (some families authenticated, others still
-parsing in the projector): that leaves two contradictory patterns in the tree.
-The per-family order below is **internal sequencing** so the tree compiles and
-the suite stays green at each commit — not a licence to stop early.
+This is a fact-by-fact cutover with a compatibility requirement. Do not create a
+third pattern: converted families use staged route metadata and role files;
+unconverted families remain on the existing composed projector path until they
+are migrated. The per-family order below is internal sequencing so the tree
+compiles and the suite stays green at each conversion.
 
 Per family (order: `auth` → `connection` → `content` → `sync`):
 

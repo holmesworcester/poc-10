@@ -1,32 +1,23 @@
-//! `send_message` semantic content-message authoring.
+//! Command-facing content-message workflows.
 //!
 //! Message facts keep their semantic content-message type. The user-visible
 //! text is the encrypted field inside that fact, and projection opens it only
-//! when matching key context is available.
+//! when matching key context is available. Commands gather runtime state,
+//! call `author.rs`, self-check the authored fact, and return facts for
+//! admission.
 
 use crate::core::command_context::{
     CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability,
     LocalSigningCapability, WorkspaceId,
 };
-use crate::core::crypto::{self, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_TAG_BYTES};
-use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
-use crate::core::intents::TableDeleteWhere;
-use crate::core::intents::Value;
+use crate::core::facts::{Fact, FactId};
+use crate::core::projectors::authenticate_authored;
 use crate::core::runtime::Runtime;
-use crate::core::store::TableName;
-use crate::core::wire;
 use crate::protocol::auth;
-use crate::protocol::content::message::fact::{
-    ContentMessageFact, MessageCiphertext, CIPHERTEXT_BYTES, NONCE_BYTES, UNIX_MINUTE_MS,
-};
-use crate::protocol::content::message::layout;
+use crate::protocol::content::message::author;
+use crate::protocol::content::message::fact::MAX_TEXT_BYTES;
 use crate::protocol::content::message::queries;
-use crate::protocol::content::message::rows;
 use crate::protocol::content::{message, retention_policy};
-
-pub const TEXT_LENGTH_PREFIX_BYTES: usize = 4;
-pub const PLAINTEXT_SLOT_BYTES: usize = CIPHERTEXT_BYTES - XCHACHA20_POLY1305_TAG_BYTES;
-pub const MAX_TEXT_BYTES: usize = PLAINTEXT_SLOT_BYTES - TEXT_LENGTH_PREFIX_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendReceipt {
@@ -80,7 +71,7 @@ pub fn generate_messages(
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
     let message_text_bytes = requested_message_text_bytes.min(MAX_TEXT_BYTES);
     let authoring = crate::core::perf_profile::measure_result("authoring_snapshot", || {
-        MessageAuthoringSnapshot::prepare(ctx, workspace_id)
+        prepare_authoring_snapshot(ctx, workspace_id)
     })?;
 
     let mut facts = Vec::with_capacity(count);
@@ -95,6 +86,7 @@ pub fn generate_messages(
         let fact = crate::core::perf_profile::measure_result("message_fact_build", || {
             authoring.build_message_fact(&text, timestamp)
         })?;
+        authenticate_authored::<super::authenticate::ContentMessageAuthenticator>(&fact)?;
         fact_ids.push(fact.id);
         facts.push(fact);
     }
@@ -110,146 +102,36 @@ pub fn generate_messages(
     .with_facts(facts))
 }
 
+fn prepare_authoring_snapshot(
+    ctx: &CommandContext<'_>,
+    workspace_id: WorkspaceId,
+) -> Result<author::MessageAuthoringSnapshot, String> {
+    let signing = ctx.local_signing_capability(workspace_id)?;
+    let encryption = ctx.local_encryption_capability(workspace_id)?;
+    let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
+    let active_policy = retention_policy::queries::active_for_workspace(ctx.store(), workspace_id)?;
+    let retained_floor_minute = retained_floor_from_tombstones(ctx, workspace_id)?;
+    author::MessageAuthoringSnapshot::new(
+        workspace_id,
+        signing,
+        encryption,
+        author_user_id,
+        active_policy,
+        retained_floor_minute,
+    )
+}
+
 fn build_message_fact(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
     text: &str,
     created_at_ms: u64,
 ) -> Result<Fact, String> {
-    validate_message_text(text)?;
-    MessageAuthoringSnapshot::prepare(ctx, workspace_id)?.build_message_fact(text, created_at_ms)
-}
-
-struct MessageAuthoringSnapshot {
-    workspace_id: WorkspaceId,
-    signing: LocalSigningCapability,
-    encryption: LocalEncryptionCapability,
-    signer_public_key: crypto::Ed25519PublicKey,
-    author_user_id: FactId,
-    active_policy: Option<retention_policy::rows::RetentionPolicyRow>,
-    retained_floor_minute: u64,
-}
-
-impl MessageAuthoringSnapshot {
-    fn prepare(ctx: &CommandContext<'_>, workspace_id: WorkspaceId) -> Result<Self, String> {
-        let signing = ctx.local_signing_capability(workspace_id)?;
-        let encryption = ctx.local_encryption_capability(workspace_id)?;
-        if signing.workspace_id != workspace_id {
-            return Err("signing capability is not bound to this workspace".to_string());
-        }
-        if encryption.workspace_id != workspace_id {
-            return Err("encryption capability is not bound to this workspace".to_string());
-        }
-
-        let signer_public_key = crypto::ed25519_public_key(&signing.private_key);
-        let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
-        let active_policy =
-            retention_policy::queries::active_for_workspace(ctx.store(), workspace_id)?;
-        let retained_floor_minute = retained_floor_from_tombstones(ctx, workspace_id)?;
-
-        Ok(Self {
-            workspace_id,
-            signing,
-            encryption,
-            signer_public_key,
-            author_user_id,
-            active_policy,
-            retained_floor_minute,
-        })
-    }
-
-    fn build_message_fact(&self, text: &str, created_at_ms: u64) -> Result<Fact, String> {
-        validate_message_text(text)?;
-
-        let minute = created_at_ms / UNIX_MINUTE_MS;
-        if let Some(policy) = &self.active_policy {
-            if minute < policy.retire_minute {
-                return Err(
-                    "send_message minute is below the active disappearing floor".to_string()
-                );
-            }
-        }
-        if minute < self.retained_floor_minute {
-            return Err("no retained ancestor covers message minute".to_string());
-        }
-        let expires_at_minute = self
-            .active_policy
-            .as_ref()
-            .map(|policy| minute.saturating_add(u64::from(policy.ttl_minutes)))
-            .unwrap_or(u64::MAX);
-        let retention_policy_id = self
-            .active_policy
-            .as_ref()
-            .map(|policy| policy.policy_id)
-            .unwrap_or([0; 32]);
-
-        let nonce = deterministic_nonce(self.workspace_id, self.signing.signer_id, created_at_ms);
-        let plaintext = pad_plaintext(text.as_bytes())?;
-        let ciphertext = crate::core::perf_profile::measure_result("message_encrypt", || {
-            crypto::xchacha20poly1305_encrypt(
-                &self.encryption.key_secret,
-                &associated_data(self.workspace_id, self.encryption.frontier_id, minute),
-                &nonce,
-                &plaintext,
-            )
-        })?;
-        if ciphertext.len() != CIPHERTEXT_BYTES {
-            return Err(format!(
-                "content message ciphertext is {} bytes, expected {CIPHERTEXT_BYTES}",
-                ciphertext.len()
-            ));
-        }
-
-        let mut message = ContentMessageFact {
-            workspace_id: self.workspace_id,
-            created_at_ms,
-            author_user_id: self.author_user_id,
-            signer_id: self.signing.signer_id,
-            signer_public_key: self.signer_public_key,
-            frontier_id: self.encryption.frontier_id,
-            local_history_node_secret_id: [0; 32],
-            expires_at_minute,
-            retention_policy_id,
-            minute,
-            nonce,
-            ciphertext: MessageCiphertext::new(&ciphertext)
-                .map_err(|err| format!("content message ciphertext: {err}"))?,
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-        };
-        let (_, signature) = crate::core::perf_profile::measure_result("message_sign", || {
-            Ok::<_, String>(crypto::ed25519_sign_canonical(
-                &self.signing.private_key,
-                &layout::signing_bytes(&message)?,
-            ))
-        })?;
-        message.signature = signature;
-
-        let fact = crate::core::perf_profile::measure_result("message_encode", || {
-            Ok::<_, String>(Fact::new(
-                FactScope::Scoped {
-                    kind: ScopeKind::new("workspace").expect("valid workspace scope"),
-                    id: self.workspace_id,
-                },
-                created_at_ms,
-                layout::encode_fact(&message)?,
-            ))
-        })?;
-
-        Ok(fact)
-    }
-}
-
-fn validate_message_text(text: &str) -> Result<(), String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err("send_message text must not be blank".to_string());
-    }
-    if text.len() > MAX_TEXT_BYTES {
-        return Err(format!(
-            "send_message text exceeds {MAX_TEXT_BYTES} byte encrypted slot"
-        ));
-    }
-    Ok(())
+    author::validate_message_text(text)?;
+    let fact =
+        prepare_authoring_snapshot(ctx, workspace_id)?.build_message_fact(text, created_at_ms)?;
+    authenticate_authored::<super::authenticate::ContentMessageAuthenticator>(&fact)?;
+    Ok(fact)
 }
 
 fn deterministic_generated_text(
@@ -293,64 +175,6 @@ fn retained_floor_from_tombstones(
     workspace_id: WorkspaceId,
 ) -> Result<u64, String> {
     queries::retained_floor_from_tombstones(ctx.store(), workspace_id)
-}
-
-pub fn pad_plaintext(text: &[u8]) -> Result<Vec<u8>, String> {
-    if text.len() > MAX_TEXT_BYTES {
-        return Err("text too long for encrypted slot".to_string());
-    }
-    let mut buf = vec![0u8; PLAINTEXT_SLOT_BYTES];
-    let len = u32::try_from(text.len()).expect("text length fits u32");
-    wire::put_u32be(len, &mut buf[..TEXT_LENGTH_PREFIX_BYTES]).map_err(|err| format!("{err:?}"))?;
-    buf[TEXT_LENGTH_PREFIX_BYTES..TEXT_LENGTH_PREFIX_BYTES + text.len()].copy_from_slice(text);
-    Ok(buf)
-}
-
-pub fn recover_text(plaintext: &[u8]) -> Result<String, String> {
-    if plaintext.len() != PLAINTEXT_SLOT_BYTES {
-        return Err(format!(
-            "plaintext slot is {} bytes, expected {PLAINTEXT_SLOT_BYTES}",
-            plaintext.len()
-        ));
-    }
-    let len = wire::take_u32be(&plaintext[..TEXT_LENGTH_PREFIX_BYTES])
-        .map_err(|err| format!("{err:?}"))? as usize;
-    if len > MAX_TEXT_BYTES {
-        return Err("recovered text length out of range".to_string());
-    }
-    let bytes = &plaintext[TEXT_LENGTH_PREFIX_BYTES..TEXT_LENGTH_PREFIX_BYTES + len];
-    String::from_utf8(bytes.to_vec()).map_err(|err| format!("text was not utf-8: {err}"))
-}
-
-pub fn associated_data(
-    workspace_id: WorkspaceId,
-    frontier_id: crate::core::facts::FactId,
-    minute: u64,
-) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(32 + 32 + 8);
-    bytes.extend_from_slice(&workspace_id);
-    bytes.extend_from_slice(&frontier_id);
-    let mut minute_bytes = [0u8; 8];
-    wire::put_u64be(minute, &mut minute_bytes).expect("eight-byte minute slot");
-    bytes.extend_from_slice(&minute_bytes);
-    bytes
-}
-
-pub fn deterministic_nonce(
-    workspace_id: WorkspaceId,
-    signer_id: crate::core::facts::FactId,
-    created_at_ms: u64,
-) -> XChaCha20Poly1305Nonce {
-    let mut info = Vec::with_capacity(32 + 32 + 8);
-    info.extend_from_slice(&workspace_id);
-    info.extend_from_slice(&signer_id);
-    let mut ts = [0u8; 8];
-    wire::put_u64be(created_at_ms, &mut ts).expect("eight-byte timestamp slot");
-    info.extend_from_slice(&ts);
-    let hash = crypto::hash(&info);
-    let mut nonce = [0u8; NONCE_BYTES];
-    nonce.copy_from_slice(&hash[..NONCE_BYTES]);
-    nonce
 }
 
 // ---------------------------------------------------------------------------
@@ -492,27 +316,9 @@ impl RetentionMessageView for MessageRetentionFact {
 }
 
 pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> {
-    let message = layout::decode_fact(fact.body())?;
-    layout::verify_signature(&message)?;
+    let message = super::decode::decode_fact(fact.body())?;
+    super::authenticate::verify_signature(&message)?;
     content_message_retention(message)
-}
-
-/// Builds the keyed delete for a message row in `table`. This is a pure value
-/// constructor used by message projection when expiry, deletion, or retention
-/// context removes the target fact.
-pub(crate) fn message_row_delete(
-    table: TableName,
-    workspace_id: FactId,
-    message_id: FactId,
-) -> TableDeleteWhere {
-    TableDeleteWhere {
-        table,
-        columns: rows::MESSAGE_KEY_COLUMNS,
-        values: vec![
-            Value::Bytes(workspace_id.to_vec()),
-            Value::Bytes(message_id.to_vec()),
-        ],
-    }
 }
 
 fn content_message_retention(
@@ -532,6 +338,7 @@ fn content_message_retention(
 mod tests {
     use super::*;
     use crate::core::command_context::FnClock;
+    use crate::core::crypto;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -603,8 +410,10 @@ mod tests {
         assert_eq!(output.effects.facts.len(), 4);
         for (index, fact) in output.effects.facts.iter().enumerate() {
             assert_eq!(fact.timestamp, 10_000 + index as u64);
-            let message = layout::decode_fact(fact.body()).expect("decode message");
-            layout::verify_signature(&message).expect("valid signature");
+            let message = crate::protocol::content::message::decode::decode_fact(fact.body())
+                .expect("decode message");
+            crate::protocol::content::message::authenticate::verify_signature(&message)
+                .expect("valid signature");
             assert_eq!(message.workspace_id, workspace_id);
             assert_eq!(message.author_user_id, vault.signer_id);
             assert_eq!(message.signer_id, vault.signer_id);

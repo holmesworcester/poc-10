@@ -6,9 +6,10 @@
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::{self, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
+use crate::core::projectors::authenticate_authored;
 use crate::core::store::Store;
 use crate::protocol::auth;
-use crate::protocol::auth::workspace::create;
+use crate::protocol::auth::workspace::author;
 use crate::protocol::content;
 use crate::protocol::content::retention_policy::fact::SCOPE_KIND_WORKSPACE;
 
@@ -47,7 +48,8 @@ pub fn create_workspace_with_identity(
         auth::endpoint::commands::local_or_create(ctx.store(), created_at_ms + 4)?;
     let endpoint = endpoint_output.receipt.endpoint;
     let user_public = endpoint.signing_public_key;
-    let workspace = create::create_workspace(created_at_ms, endpoint.signing_secret, name)?;
+    let workspace = author::create_workspace(created_at_ms, endpoint.signing_secret, name)?;
+    authenticate_authored::<super::authenticate::WorkspaceAuthenticator>(&workspace)?;
     let workspace_id = workspace.id;
 
     let user_invite = user_invite_fact(

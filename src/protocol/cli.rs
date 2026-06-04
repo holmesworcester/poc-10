@@ -87,7 +87,7 @@ impl MatchCliContext {
         run: impl FnOnce(&CommandContext<'_>) -> Result<T, String>,
     ) -> Result<T, String> {
         let clock = FixedClock(timestamp);
-        let vault = content::message::create::ContentMessageVault::for_workspace(
+        let vault = content::message::commands::ContentMessageVault::for_workspace(
             &self.runtime,
             workspace_id,
         )?;
@@ -632,7 +632,7 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     })?;
     let clock = FixedClock(timestamp);
     let vault = crate::core::perf_profile::measure_result("context_setup", || {
-        content::message::create::ContentMessageVault::for_workspace(&ctx.runtime, workspace_id)
+        content::message::commands::ContentMessageVault::for_workspace(&ctx.runtime, workspace_id)
     })?;
     let command_context = ctx.runtime.command_context(&clock, &vault);
     let output = crate::core::perf_profile::measure_result("command_build", || {

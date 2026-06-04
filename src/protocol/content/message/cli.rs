@@ -67,14 +67,14 @@ pub struct DeleteMessageReceipt {
 pub fn send(
     ctx: &CommandContext<'_>,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<message::create::SendReceipt>, String> {
+) -> Result<CommandOutput<message::commands::SendReceipt>, String> {
     args.require_len(2, SEND_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let text = args.get(1).expect("length checked");
-    message::create::send_message(ctx, workspace_id, text)
+    message::commands::send_message(ctx, workspace_id, text)
 }
 
-pub fn send_output(receipt: &message::create::SendReceipt, text: &str) -> CliOutput {
+pub fn send_output(receipt: &message::commands::SendReceipt, text: &str) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
         format!("fact_id: {}", encode_hex_32(&receipt.message_fact_id)),
@@ -87,16 +87,16 @@ pub fn send_output(receipt: &message::create::SendReceipt, text: &str) -> CliOut
 pub fn generate(
     ctx: &CommandContext<'_>,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<message::create::GenerateReceipt>, String> {
+) -> Result<CommandOutput<message::commands::GenerateReceipt>, String> {
     args.require_len(3, GENERATE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let count = args.parse_positive_usize(1, GENERATE_USAGE)?;
     let message_text_bytes = args.parse_positive_usize(2, GENERATE_USAGE)?;
-    message::create::generate_messages(ctx, workspace_id, count, message_text_bytes)
+    message::commands::generate_messages(ctx, workspace_id, count, message_text_bytes)
 }
 
 pub fn generated_output(
-    receipt: &message::create::GenerateReceipt,
+    receipt: &message::commands::GenerateReceipt,
     applied_facts: usize,
 ) -> CliOutput {
     CliOutput::lines(vec![
@@ -187,7 +187,7 @@ pub fn send_file(
         .and_then(|name| name.to_str())
         .ok_or_else(|| "file path must have a utf-8 filename".to_string())?
         .to_string();
-    let message_output = message::create::send_message(ctx, parsed.workspace_id, &parsed.text)?;
+    let message_output = message::commands::send_message(ctx, parsed.workspace_id, &parsed.text)?;
     let message_receipt = message_output.receipt.clone();
     let author_user_id = local_author_user_id(ctx.store(), parsed.workspace_id)?;
     let created_at_ms = message_receipt.created_at_ms.saturating_add(1);

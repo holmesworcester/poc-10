@@ -1,13 +1,13 @@
-//! Deterministic constructors for workspace facts.
+//! Pure workspace fact authoring.
 //!
-//! This layer takes already-resolved parameters and returns the canonical fact
-//! bytes. API and CLI workflows that need command context, local capabilities,
-//! or multi-fact orchestration belong in `commands.rs`.
+//! This layer takes explicit inputs and signing material, builds the typed
+//! source value, signs the canonical transcript, encodes bytes, and returns the
+//! fact. Runtime gathering and command orchestration belong in `commands.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::core::facts::{Fact, FactScope};
-use crate::protocol::auth::workspace::fact::{WorkspaceFact, WorkspaceName, WORKSPACE_NAME_BYTES};
-use crate::protocol::auth::workspace::layout;
+
+use super::fact::{WorkspaceFact, WorkspaceName, WORKSPACE_NAME_BYTES};
 
 pub fn create_workspace(
     created_at_ms: u64,
@@ -33,8 +33,8 @@ pub fn create_workspace(
     };
     let mut workspace = workspace;
     let (_, signature) =
-        crypto::ed25519_sign_canonical(&private_key, &layout::signing_bytes(&workspace)?);
+        crypto::ed25519_sign_canonical(&private_key, &super::encode::signing_bytes(&workspace)?);
     workspace.signature = signature;
-    let bytes = layout::encode_fact(&workspace)?;
+    let bytes = super::encode::encode_fact(&workspace)?;
     Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
 }

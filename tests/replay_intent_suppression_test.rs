@@ -8,7 +8,9 @@
 use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
-use topo::core::projectors::{FactRoute, ProjectionContext, ProjectionOutput, Projector};
+use topo::core::projectors::{
+    FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector,
+};
 use topo::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
 use topo::core::store::SchemaSource;
 
@@ -147,6 +149,7 @@ const RUNTIME_NOT_REPLAYED: RuntimeDescription = RuntimeDescription {
     fact_routes: &[FactRoute {
         tag: FACT_TAG,
         projector: route_projector,
+        pipeline: FactPipeline::ProjectorComposed,
         replayed: false,
     }],
     handlers: HANDLERS,

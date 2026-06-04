@@ -1,60 +1,26 @@
-//! Fixed-width layout for content-message target facts.
+//! Byte decoding for content-message facts and opened plaintext slots.
 //!
-//! Body shape:
-//!   tag (u8)
-//!   workspace_id (32)
-//!   created_at_ms (u64be)
-//!   author_user_id (32)
-//!   signer_id (32)
-//!   frontier_id (32)
-//!   local_history_node_secret_id (32)
-//!   expires_at_minute (u64be)
-//!   retention_policy_id (32)
-//!   minute (u64be)
-//!   nonce (24)
-//!   ciphertext (fixed slot)
+//! Fact decoding proves only the fixed layout: tag, length, field order, and
+//! bounded ciphertext slot. Id and signature checks live in `authenticate.rs`.
+//! Plaintext recovery is here because projection decrypts to this fixed slot
+//! and then needs a canonical UTF-8 string.
 
-use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use crate::core::wire;
 
-use super::fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES};
+use super::encode::{CONTENT_MESSAGE_BYTES, TYPE_CONTENT_MESSAGE};
+use super::fact::{
+    ContentMessageFact, CIPHERTEXT_BYTES, MAX_TEXT_BYTES, PLAINTEXT_SLOT_BYTES,
+    TEXT_LENGTH_PREFIX_BYTES,
+};
 
-pub const TYPE_CONTENT_MESSAGE: u8 = 50;
+pub(crate) struct Codec;
 
-pub const CONTENT_MESSAGE_BYTES: usize = 1
-    + 32
-    + 8
-    + 32
-    + 32
-    + 32
-    + 32
-    + 32
-    + 8
-    + 32
-    + 8
-    + NONCE_BYTES
-    + 4
-    + CIPHERTEXT_BYTES
-    + ED25519_SIGNATURE_BYTES;
-const SIGNATURE_OFFSET: usize = CONTENT_MESSAGE_BYTES - ED25519_SIGNATURE_BYTES;
+impl crate::core::projectors::FactCodec for Codec {
+    type Payload = ContentMessageFact;
 
-pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
-    let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_BYTES);
-    out.u8(TYPE_CONTENT_MESSAGE);
-    out.fixed(&fact.workspace_id);
-    out.u64be(fact.created_at_ms);
-    out.fixed(&fact.author_user_id);
-    out.fixed(&fact.signer_id);
-    out.fixed(&fact.signer_public_key);
-    out.fixed(&fact.frontier_id);
-    out.fixed(&fact.local_history_node_secret_id);
-    out.u64be(fact.expires_at_minute);
-    out.fixed(&fact.retention_policy_id);
-    out.u64be(fact.minute);
-    out.fixed(&fact.nonce);
-    out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
-    out.fixed(&fact.signature);
-    out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
+    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
+        decode_fact(fact.body())
+    }
 }
 
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
@@ -85,18 +51,20 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
     Ok(fact)
 }
 
-pub fn signing_bytes(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
-    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..CONTENT_MESSAGE_BYTES)
-        .map_err(wire_err)
-}
-
-pub fn verify_signature(fact: &ContentMessageFact) -> Result<(), String> {
-    crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &signing_bytes(fact)?,
-        &fact.signature,
-        "content message",
-    )
+pub fn recover_text(plaintext: &[u8]) -> Result<String, String> {
+    if plaintext.len() != PLAINTEXT_SLOT_BYTES {
+        return Err(format!(
+            "plaintext slot is {} bytes, expected {PLAINTEXT_SLOT_BYTES}",
+            plaintext.len()
+        ));
+    }
+    let len = wire::take_u32be(&plaintext[..TEXT_LENGTH_PREFIX_BYTES])
+        .map_err(|err| format!("{err:?}"))? as usize;
+    if len > MAX_TEXT_BYTES {
+        return Err("recovered text length out of range".to_string());
+    }
+    let bytes = &plaintext[TEXT_LENGTH_PREFIX_BYTES..TEXT_LENGTH_PREFIX_BYTES + len];
+    String::from_utf8(bytes.to_vec()).map_err(|err| format!("text was not utf-8: {err}"))
 }
 
 fn wire_err(err: wire::WireError) -> String {
@@ -106,6 +74,8 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
+    use crate::protocol::content::message::fact::{MessageCiphertext, NONCE_BYTES};
 
     fn fact() -> ContentMessageFact {
         ContentMessageFact {
@@ -120,22 +90,23 @@ mod tests {
             retention_policy_id: [6; 32],
             minute: 3,
             nonce: [8; NONCE_BYTES],
-            ciphertext: crate::protocol::content::message::fact::MessageCiphertext::new(b"sealed")
-                .expect("ciphertext"),
+            ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
             signature: [10; ED25519_SIGNATURE_BYTES],
         }
     }
 
     #[test]
     fn content_message_roundtrips_fixed_width() {
-        let encoded = encode_fact(&fact()).expect("encode");
+        let encoded =
+            crate::protocol::content::message::encode::encode_fact(&fact()).expect("encode");
         assert_eq!(encoded.len(), CONTENT_MESSAGE_BYTES);
         assert_eq!(decode_fact(&encoded).expect("decode"), fact());
     }
 
     #[test]
     fn rejects_wrong_tag() {
-        let mut encoded = encode_fact(&fact()).expect("encode");
+        let mut encoded =
+            crate::protocol::content::message::encode::encode_fact(&fact()).expect("encode");
         encoded[0] = TYPE_CONTENT_MESSAGE.wrapping_add(1);
         assert!(decode_fact(&encoded).is_err());
     }

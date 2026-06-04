@@ -24,7 +24,7 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::projectors::{
-    FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
+    FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
@@ -319,7 +319,6 @@ CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
 CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 "#,
     row_tables: &[
-        auth::workspace::rows::WORKSPACE_ROWS,
         auth::key_wrap::rows::KEY_WRAP_ROWS,
         auth::user::rows::USER_ROWS,
         auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
@@ -347,6 +346,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::shared_fact::rows::NEGENTROPY_NODE_ROWS,
         content::retention_policy::rows::RETENTION_POLICY_ROWS,
     ],
+    row_schemas: &[auth::workspace::WORKSPACE_ROW_SCHEMA],
 };
 
 // Every CLI command's host function must live in `protocol::cli`. This macro
@@ -558,7 +558,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     auth::invite_server::rows::INVITE_SERVER_ROWS,
     auth::user::rows::USER_ROWS,
     auth::user_invite::rows::USER_INVITE_ROWS,
-    auth::workspace::rows::WORKSPACE_ROWS,
+    auth::workspace::WORKSPACE_ROWS,
     read_models::OPENED_MESSAGE_ROWS,
     read_models::MESSAGE_TOMBSTONE_ROWS,
     sync::compare::rows::SYNC_COMPARE_ROWS,
@@ -584,10 +584,41 @@ impl Projector for ProtocolProjector {
 }
 
 macro_rules! projector_route {
+    ($name:ident, content::message::project::ContentMessageProjector, staged_content_message) => {
+        fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
+            crate::core::projectors::project_staged::<
+                content::message::decode::Codec,
+                content::message::authenticate::ContentMessageAuthenticator,
+                content::message::adapt::ContentMessageAdapter,
+                content::message::project::ContentMessageProjector,
+            >(
+                &content::message::project::ContentMessageProjector::new(),
+                fact,
+                context,
+            )
+        }
+    };
+    ($name:ident, auth::workspace::project::WorkspaceProjector, staged_workspace) => {
+        fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
+            crate::core::projectors::project_staged::<
+                auth::workspace::decode::Codec,
+                auth::workspace::authenticate::WorkspaceAuthenticator,
+                auth::workspace::adapt::WorkspaceAdapter,
+                auth::workspace::project::WorkspaceProjector,
+            >(
+                &auth::workspace::project::WorkspaceProjector::new(),
+                fact,
+                context,
+            )
+        }
+    };
     ($name:ident, $projector:path) => {
         fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
             <$projector>::new().project(fact, context)
         }
+    };
+    ($name:ident, $projector:path, $replay:ident) => {
+        projector_route!($name, $projector);
     };
 }
 
@@ -599,18 +630,39 @@ macro_rules! projector_route {
 // that replay rebuilds deterministically.
 macro_rules! projector_routes {
     ($($name:ident => $tag:path, $projector:path $(, $replay:ident)? ;)+) => {
-        $(projector_route!($name, $projector);)+
+        $(projector_route!($name, $projector $(, $replay)?);)+
 
         pub(crate) const FACT_ROUTES: &[FactRoute] = &[
             $(FactRoute {
                 tag: $tag,
                 projector: $name,
+                pipeline: projector_routes!(@pipeline $($replay)?),
                 replayed: projector_routes!(@replayed $($replay)?),
             },)+
         ];
     };
+    (@pipeline) => { FactPipeline::ProjectorComposed };
+    (@pipeline not_replayed) => { FactPipeline::ProjectorComposed };
+    (@pipeline staged_content_message) => {
+        FactPipeline::Staged {
+            decode: "content::message::decode::Codec",
+            authenticate: "content::message::authenticate::ContentMessageAuthenticator",
+            adapt: "content::message::adapt::ContentMessageAdapter",
+            project: "content::message::project::ContentMessageProjector",
+        }
+    };
+    (@pipeline staged_workspace) => {
+        FactPipeline::Staged {
+            decode: "auth::workspace::decode::Codec",
+            authenticate: "auth::workspace::authenticate::WorkspaceAuthenticator",
+            adapt: "auth::workspace::adapt::WorkspaceAdapter",
+            project: "auth::workspace::project::WorkspaceProjector",
+        }
+    };
     (@replayed) => { true };
     (@replayed not_replayed) => { false };
+    (@replayed staged_content_message) => { true };
+    (@replayed staged_workspace) => { true };
 }
 
 projector_routes! {
@@ -622,7 +674,7 @@ projector_routes! {
     project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
     project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
     project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
-    project_content_message => content::message::layout::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector;
+    project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, staged_content_message;
     project_content_message_deletion => content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector;
     project_content_reaction => content::reaction::layout::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector;
     project_auth_recipient_key => auth::recipient_key::layout::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector;
@@ -635,7 +687,7 @@ projector_routes! {
     project_auth_local_recipient_key => auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector;
     project_endpoint => auth::endpoint::layout::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector;
     project_invite => auth::invite::layout::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector;
-    project_workspace => auth::workspace::layout::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector;
+    project_workspace => auth::workspace::encode::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector, staged_workspace;
     project_auth_local_signer_secret => auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector;
     project_device_invite => auth::device_invite::layout::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector;
     project_endpoint_shared => auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector;

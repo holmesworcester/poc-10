@@ -382,22 +382,33 @@ impl ProjectionOutput {
     }
 }
 
-/// The protocol-facing projection entry point.
-///
-/// Implement `Projector::project` as a small call through
-/// `project_authenticated::<ModuleAuthenticator, _>()`, then put interpretation
-/// in `AuthenticatedProjector::project_authenticated`. The family authenticator
-/// (`authenticate.rs`) decodes and authenticates the primary bytes first, so the
-/// projector starts from an `AuthenticatedFact` and never parses raw bytes.
-pub trait Projector {
-    fn project(&self, fact: &Fact, context: &ProjectionContext)
-        -> Result<ProjectionOutput, String>;
-}
-
 /// Function pointer used by static projector route tables.
 pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
 /// Function that maps an envelope fact to its semantic fact tag.
 pub type EffectiveTagFn = fn(&Fact) -> Result<u8, String>;
+
+/// Human-readable stage declaration for a fact route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactPipeline {
+    /// Legacy route: the projector function composes authentication/adaptation
+    /// internally. This keeps unconverted facts running during fact-by-fact
+    /// cutover.
+    ProjectorComposed,
+    /// Staged route: the registered route function calls core's first-class
+    /// decode, authenticate, adapt, and project runner.
+    Staged {
+        decode: &'static str,
+        authenticate: &'static str,
+        adapt: &'static str,
+        project: &'static str,
+    },
+}
+
+impl FactPipeline {
+    pub const fn is_staged(self) -> bool {
+        matches!(self, Self::Staged { .. })
+    }
+}
 
 /// Route from a fact tag to the projector that owns that tag.
 #[derive(Debug, Clone, Copy)]
@@ -405,6 +416,9 @@ pub struct FactRoute {
     /// Effective fact tag routed to this projector function.
     pub tag: u8,
     pub projector: ProjectorFn,
+    /// Whether this route is still projector-composed or uses core's
+    /// first-class staged read pipeline.
+    pub pipeline: FactPipeline,
     /// Whether a from-scratch replay re-projects this fact type. `true` for
     /// durable protocol truth (membership, content, keys, learned addresses)
     /// that must rebuild deterministically. `false` for durable facts whose
@@ -414,6 +428,18 @@ pub struct FactRoute {
     /// rebuilt. This is the projector-route analog of a handler route's
     /// `runs_during_replay`.
     pub replayed: bool,
+}
+
+/// The protocol-facing projection entry point.
+///
+/// Legacy families implement `project` as a small call through
+/// `project_authenticated`. Converted families declare `FactPipeline::Staged`
+/// in their route and implement `project` through `project_staged`, so route
+/// metadata and direct projector calls expose the same
+/// decode/authenticate/adapt/project stages.
+pub trait Projector {
+    fn project(&self, fact: &Fact, context: &ProjectionContext)
+        -> Result<ProjectionOutput, String>;
 }
 
 /// Route for envelope facts whose outer tag is not the semantic fact tag.
@@ -572,10 +598,10 @@ impl<'a, T> Authentication<'a, T> {
 /// Family authenticator: primary bytes to an authenticated typed fact.
 ///
 /// Implementations live in each family's `authenticate.rs` and reuse the family
-/// `FactCodec` decoder plus `layout::verify_signature`. They do decode +
-/// id-check + intrinsic field rules + the fact-boundary cryptographic proof, and
-/// nothing context-semantic. A context-free authenticator ignores `context`; a
-/// carrier authenticator reads only the narrow crypto context it parks on.
+/// `FactCodec` decoder plus the family fact-boundary cryptographic proof. They
+/// do decode + id-check + intrinsic field rules + proof, and nothing
+/// context-semantic. A context-free authenticator ignores `context`; a carrier
+/// authenticator reads only the narrow crypto context it parks on.
 pub trait Authenticator {
     type Authenticated;
 
@@ -583,6 +609,31 @@ pub trait Authenticator {
         fact: &'a Fact,
         context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated>;
+}
+
+/// Authenticator for the first-class staged read pipeline.
+///
+/// The fact's owning codec decodes raw bytes first. The authenticator receives
+/// that decoded source value and owns id checks, fact-boundary cryptographic
+/// proof, verifier-key parking, and intrinsic single-fact rules. It does not
+/// materialize rows or inspect semantic context.
+pub trait DecodedAuthenticator<C: FactCodec> {
+    type Authenticated;
+
+    fn authenticate_decoded<'a>(
+        fact: &'a Fact,
+        decoded: C::Payload,
+        context: &ProjectionContext,
+    ) -> Authentication<'a, Self::Authenticated>;
+}
+
+/// Adapt an authenticated source value into the semantic value projected at the
+/// active head version.
+pub trait Adapter {
+    type Source;
+    type Semantic;
+
+    fn adapt(source: Self::Source) -> Result<Self::Semantic, String>;
 }
 
 /// Projector implementation after core has authenticated the input fact.
@@ -595,6 +646,20 @@ pub trait AuthenticatedProjector<A: Authenticator> {
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, A::Authenticated>,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String>;
+}
+
+/// Projector body for the first-class staged read pipeline.
+///
+/// Implementations receive the semantic value after decode, authentication, and
+/// adaptation. They own scope/context proof, authority, rows, needs/offers,
+/// time wakes, intents, emitted facts, and purge.
+pub trait SemanticProjector<T> {
+    fn project_semantic(
+        &self,
+        fact: &Fact,
+        semantic: T,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String>;
 }
@@ -619,6 +684,51 @@ where
             projector.project_authenticated(authenticated, context)
         }
         Authentication::NeedsAuthentication(need) => Ok(ProjectionOutput::new().need(need)),
+        Authentication::Invalid(error) => Err(error),
+    }
+}
+
+/// Decode, authenticate, adapt, then project through first-class stages.
+///
+/// Converted route functions should call this helper. It preserves the legacy
+/// parking/rejection behavior while making every stage explicit in
+/// `FactRoute.pipeline`.
+pub fn project_staged<C, A, Ad, P>(
+    projector: &P,
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<ProjectionOutput, String>
+where
+    C: FactCodec,
+    A: DecodedAuthenticator<C>,
+    Ad: Adapter<Source = A::Authenticated>,
+    P: SemanticProjector<Ad::Semantic>,
+{
+    let decoded = C::decode_fact(fact)?;
+    match A::authenticate_decoded(fact, decoded, context) {
+        Authentication::Authenticated(authenticated) => {
+            let (fact_ref, source) = authenticated.into_parts();
+            let semantic = Ad::adapt(source)?;
+            projector.project_semantic(fact_ref, semantic, context)
+        }
+        Authentication::NeedsAuthentication(need) => Ok(ProjectionOutput::new().need(need)),
+        Authentication::Invalid(error) => Err(error),
+    }
+}
+
+/// Self-check a freshly authored fact against its own authenticator.
+///
+/// The write pipeline's exit gate mirrors the read pipeline's entry gate:
+/// authored bytes must be acceptable to the family authenticator before they
+/// are admitted. `NeedsAuthentication` is accepted because some valid facts
+/// require verifier context that is not available at authoring time; `Invalid`
+/// means the author/encode/sign transcript drifted and must not be submitted.
+pub fn authenticate_authored<A>(fact: &Fact) -> Result<(), String>
+where
+    A: Authenticator,
+{
+    match A::authenticate(fact, &ProjectionContext::default()) {
+        Authentication::Authenticated(_) | Authentication::NeedsAuthentication(_) => Ok(()),
         Authentication::Invalid(error) => Err(error),
     }
 }
@@ -797,6 +907,142 @@ mod tests {
             .expect_err("offer owner mismatch should fail before decode");
 
         assert_eq!(err, "typed context offer payload mismatch");
+    }
+
+    #[test]
+    fn staged_pipeline_decodes_authenticates_adapts_then_projects() {
+        let fact = Fact::new(FactScope::Global, 1, vec![200, 5]);
+        let output =
+            project_staged::<ModelCodec, ModelAuthenticator, ModelAdapter, ModelProjector>(
+                &ModelProjector,
+                &fact,
+                &ProjectionContext::default(),
+            )
+            .expect("staged projection");
+
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.offers[0].owner, fact.id);
+        assert_eq!(output.offers[0].start_key.as_bytes(), &[15]);
+    }
+
+    #[test]
+    fn staged_pipeline_parks_authentication_before_adapt_or_project() {
+        let fact = Fact::new(FactScope::Global, 1, vec![200, 2]);
+        let output =
+            project_staged::<ModelCodec, ModelAuthenticator, ModelAdapter, ModelProjector>(
+                &ModelProjector,
+                &fact,
+                &ProjectionContext::default(),
+            )
+            .expect("authentication need parks");
+
+        assert_eq!(output.needs.len(), 1);
+        assert_eq!(output.needs[0].role.as_str(), "model_auth");
+        assert!(output.offers.is_empty());
+    }
+
+    #[test]
+    fn fact_route_records_staged_pipeline_metadata() {
+        fn model_projector(
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            project_staged::<ModelCodec, ModelAuthenticator, ModelAdapter, ModelProjector>(
+                &ModelProjector,
+                fact,
+                context,
+            )
+        }
+
+        let route = FactRoute {
+            tag: 200,
+            projector: model_projector,
+            pipeline: FactPipeline::Staged {
+                decode: "ModelCodec",
+                authenticate: "ModelAuthenticator",
+                adapt: "ModelAdapter",
+                project: "ModelProjector",
+            },
+            replayed: true,
+        };
+
+        assert!(route.pipeline.is_staged());
+        let output = (route.projector)(
+            &Fact::new(FactScope::Global, 1, vec![200, 5]),
+            &ProjectionContext::default(),
+        )
+        .expect("route projection");
+        assert_eq!(output.offers.len(), 1);
+    }
+
+    struct ModelCodec;
+
+    impl FactCodec for ModelCodec {
+        type Payload = u8;
+
+        fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
+            if fact.bytes.first().copied() != Some(200) {
+                return Err("wrong model tag".to_string());
+            }
+            fact.bytes
+                .get(1)
+                .copied()
+                .ok_or_else(|| "missing model payload".to_string())
+        }
+    }
+
+    struct ModelAuthenticator;
+
+    impl DecodedAuthenticator<ModelCodec> for ModelAuthenticator {
+        type Authenticated = u8;
+
+        fn authenticate_decoded<'a>(
+            fact: &'a Fact,
+            decoded: u8,
+            _context: &ProjectionContext,
+        ) -> Authentication<'a, Self::Authenticated> {
+            match decoded {
+                0 => Authentication::Invalid("zero is not authentic".to_string()),
+                2 => Authentication::NeedsAuthentication(ContextNeed::range(
+                    fact.id,
+                    "model_auth",
+                    FactScope::Global,
+                    vec![2],
+                    vec![2],
+                )),
+                value => Authentication::Authenticated(AuthenticatedFact::new(fact, value)),
+            }
+        }
+    }
+
+    struct ModelAdapter;
+
+    impl Adapter for ModelAdapter {
+        type Source = u8;
+        type Semantic = u16;
+
+        fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
+            Ok(u16::from(source) + 10)
+        }
+    }
+
+    struct ModelProjector;
+
+    impl SemanticProjector<u16> for ModelProjector {
+        fn project_semantic(
+            &self,
+            fact: &Fact,
+            semantic: u16,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new().offer(ContextOffer::range(
+                fact.id,
+                "model_semantic",
+                FactScope::Global,
+                vec![semantic as u8],
+                vec![semantic as u8],
+            )))
+        }
     }
 
     struct FirstByteCodec;

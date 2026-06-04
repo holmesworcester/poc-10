@@ -454,15 +454,20 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
             continue;
         }
 
-        // Primary decode + authentication belong to the family authenticator,
-        // which core runs before the projector. Every fact-module projector
-        // delegates `Projector::project` to
-        // `project_authenticated::<super::authenticate::_, _>()` and implements
-        // `AuthenticatedProjector<super::authenticate::_>`, so it starts from an
-        // already-authenticated fact and never parses its own primary bytes.
-        let routes_authenticated = production
-            .contains("project_authenticated::<super::authenticate::")
-            && production.contains("impl AuthenticatedProjector<super::authenticate::");
+        // Primary decode + authentication belong to the family authenticator.
+        // Old families delegate to `project_authenticated::<Authenticator, _>`;
+        // staged families delegate to
+        // `project_staged::<Codec, Authenticator, Adapter, _>`.
+        let delegates_authenticated =
+            production.contains("project_authenticated::<super::authenticate::");
+        let delegates_staged = production.contains("project_staged::<")
+            && production.contains("super::decode::")
+            && production.contains("super::authenticate::")
+            && production.contains("super::adapt::")
+            && production.contains("impl SemanticProjector<");
+        let routes_authenticated = delegates_staged
+            || (delegates_authenticated
+                && production.contains("impl AuthenticatedProjector<super::authenticate::"));
         if !routes_authenticated {
             missing_delegation.push(relative.clone());
         }
@@ -475,10 +480,9 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
 
     assert!(
         missing_delegation.is_empty(),
-        "every fact-module projector must delegate Projector::project to \
-         project_authenticated::<super::authenticate::_, _>() and implement \
-         AuthenticatedProjector<super::authenticate::_>, so core authenticates the primary \
-         fact before projection and the projector never parses its own bytes:\n{}",
+        "every fact-module projector must delegate Projector::project to project_staged \
+         or project_authenticated with its family authenticate.rs, so primary bytes are \
+         decoded/authenticated before projector policy runs:\n{}",
         missing_delegation.join("\n")
     );
     assert!(
@@ -1156,8 +1160,12 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 10] = [
+const STANDARD_FAMILY_FILES: [&str; 14] = [
     "fact.rs",
+    "encode.rs",
+    "decode.rs",
+    "adapt.rs",
+    "author.rs",
     "layout.rs",
     // Primary-fact authentication: decode + id-check + fact-boundary signature
     // or container opening + intrinsic field rules, ahead of projection.
@@ -1486,7 +1494,9 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let relative_key = format!("{scope}/{family}");
             let has_normal_fact_shape = family_dir.join("fact.rs").is_file()
-                && family_dir.join("layout.rs").is_file()
+                && (family_dir.join("layout.rs").is_file()
+                    || (family_dir.join("encode.rs").is_file()
+                        && family_dir.join("decode.rs").is_file()))
                 && family_dir.join("project.rs").is_file();
             if !has_normal_fact_shape
                 && !NON_FACT_SCOPE_DIR_EXCEPTIONS.contains(&relative_key.as_str())
@@ -1651,7 +1661,7 @@ fn connection_frame_helper_family_does_not_reappear() {
 #[test]
 fn fact_like_family_directories_are_registered_normal_fact_modules() {
     // A directory that owns a fact shape (`fact.rs`) or byte tag/layout
-    // (`layout.rs`) is a real fact family. Real fact families have uniform
+    // (`layout.rs` or the target `encode.rs`/`decode.rs`) is a real fact family. Real fact families have uniform
     // role files and must be present in the protocol projector route table;
     // helper/context-only modules are not fact-like unless they introduce a
     // fact shape or layout.
@@ -1664,7 +1674,9 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
         for family_dir in immediate_subdirs(&scope_dir) {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let has_fact = family_dir.join("fact.rs").is_file();
-            let has_layout = family_dir.join("layout.rs").is_file();
+            let has_layout = family_dir.join("layout.rs").is_file()
+                || (family_dir.join("encode.rs").is_file()
+                    && family_dir.join("decode.rs").is_file());
             if !has_fact && !has_layout {
                 continue;
             }
@@ -1673,12 +1685,12 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
             let has_project = family_dir.join("project.rs").is_file();
             if !has_fact || !has_layout || !has_project {
                 offenders.push(format!(
-                    "{relative} is fact-like but does not have fact.rs, layout.rs, and project.rs"
+                    "{relative} is fact-like but does not have fact.rs, layout.rs or encode.rs/decode.rs, and project.rs"
                 ));
                 continue;
             }
 
-            let layout_route = format!("{scope}::{family}::layout::");
+            let layout_route = format!("{scope}::{family}::");
             let project_route = format!("{scope}::{family}::project::");
             if !registry.contains(&layout_route) || !registry.contains(&project_route) {
                 offenders.push(format!(
@@ -1711,7 +1723,9 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let fact_path = family_dir.join("fact.rs");
             let layout_path = family_dir.join("layout.rs");
-            if !fact_path.is_file() && !layout_path.is_file() {
+            let split_layout =
+                family_dir.join("encode.rs").is_file() && family_dir.join("decode.rs").is_file();
+            if !fact_path.is_file() && !layout_path.is_file() && !split_layout {
                 continue;
             }
 
@@ -1730,12 +1744,18 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
                 }
             }
 
-            let route_marker = format!("=> {scope}::{family}::layout::");
-            let route_count = registry.matches(&route_marker).count();
+            let route_marker = format!(", {scope}::{family}::project::");
+            let route_count = registry
+                .lines()
+                .filter(|line| {
+                    let line = line.trim();
+                    line.starts_with("project_")
+                        && line.contains("=>")
+                        && line.contains(&route_marker)
+                })
+                .count();
             if route_count != 1 {
-                offenders.push(format!(
-                    "{relative} has {route_count} projector routes through its layout"
-                ));
+                offenders.push(format!("{relative} has {route_count} projector routes"));
             }
         }
     }

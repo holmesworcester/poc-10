@@ -10,12 +10,10 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
+    Projector, SemanticProjector,
 };
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
-
-use super::rows::workspace_row;
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceProjector;
@@ -32,7 +30,23 @@ impl Projector for WorkspaceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::WorkspaceAuthenticator, _>(self, fact, context)
+        project_staged::<
+            super::decode::Codec,
+            super::authenticate::WorkspaceAuthenticator,
+            super::adapt::WorkspaceAdapter,
+            _,
+        >(self, fact, context)
+    }
+}
+
+impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
+    fn project_semantic(
+        &self,
+        fact: &Fact,
+        workspace: super::fact::WorkspaceFact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        self.project_authenticated(AuthenticatedFact::new(fact, workspace), context)
     }
 }
 
@@ -57,7 +71,9 @@ impl AuthenticatedProjector<super::authenticate::WorkspaceAuthenticator> for Wor
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::PutRow(workspace_row(fact.id, &workspace)?)),
+                .row_mutation(RowMutation::PutRow(super::workspace_row(
+                    fact.id, &workspace,
+                )?)),
             fact.id,
             fact,
             Vec::new(),
@@ -68,12 +84,12 @@ impl AuthenticatedProjector<super::authenticate::WorkspaceAuthenticator> for Wor
 #[cfg(test)]
 mod projector_tests {
     use super::*;
-    use crate::protocol::auth::workspace::create;
+    use crate::protocol::auth::workspace::{author, encode, queries};
     use std::collections::BTreeSet;
 
     #[test]
     fn workspace_projector_emits_sync_share_contribution() {
-        let fact = create::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
+        let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
         let projected = WorkspaceProjector::new()
             .project(&fact, &ProjectionContext::default())
             .expect("project workspace");
@@ -85,5 +101,29 @@ mod projector_tests {
             .map(|intent| intent.kind.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(intent_kinds, BTreeSet::from(["share_fact_with_sync"]));
+    }
+
+    #[test]
+    fn workspace_row_schema_preserves_payload_bytes_and_decodes_fields() {
+        let fact = super::super::fact::WorkspaceFact {
+            created_at_ms: 42,
+            public_key: [7; 32],
+            name: super::super::fact::WorkspaceName::new("Engineering").expect("name"),
+            signature: [8; crate::core::crypto::ED25519_SIGNATURE_BYTES],
+        };
+
+        let row = super::super::workspace_row([9; 32], &fact).expect("workspace row");
+
+        assert_eq!(row.table, super::super::WORKSPACE_ROWS);
+        assert_eq!(
+            row.value,
+            encode::encode_payload(&fact).expect("fact payload bytes")
+        );
+        let decoded =
+            queries::decode_workspace_row(&row.key, &row.value).expect("decode workspace row");
+        assert_eq!(decoded.workspace_id, [9; 32]);
+        assert_eq!(decoded.created_at_ms, 42);
+        assert_eq!(decoded.public_key, [7; 32]);
+        assert_eq!(decoded.name, "Engineering");
     }
 }

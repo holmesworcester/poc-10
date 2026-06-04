@@ -71,6 +71,37 @@ fn matching_code_lines(root: &Path, paths: Vec<PathBuf>, needles: &[&str]) -> Ve
     matches
 }
 
+fn matching_production_code_lines(
+    root: &Path,
+    paths: Vec<PathBuf>,
+    needles: &[&str],
+) -> Vec<String> {
+    let mut matches = Vec::new();
+    for path in paths {
+        let text = source_text(&path);
+        let production = text.split("\n#[cfg(test)]").next().unwrap_or(&text);
+        for (index, line) in production.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            for needle in needles {
+                if code.contains(needle) {
+                    matches.push(format!(
+                        "{}:{} contains {needle:?}",
+                        path.strip_prefix(root).unwrap().display(),
+                        index + 1
+                    ));
+                }
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
 fn matching_lines(root: &Path, paths: Vec<PathBuf>, needles: &[&str]) -> Vec<String> {
     matching_lines_with_comment_mode(root, paths, needles, false)
 }
@@ -837,7 +868,7 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     paths.extend(intent_handler_files(&root));
     paths.push(root.join("src/protocol/connection_frame.rs"));
 
-    let offenders = matching_code_lines(
+    let offenders = matching_production_code_lines(
         &root,
         paths,
         &[
@@ -864,7 +895,7 @@ fn cutover_context_predicates_replace_manual_payload_matching() {
     let root = root();
     let paths = project_files(&root);
 
-    let offenders = matching_code_lines(
+    let offenders = matching_production_code_lines(
         &root,
         paths,
         &[
@@ -891,8 +922,8 @@ fn cutover_content_wire_layouts_use_central_schema_codec() {
         "src/protocol/content/file_deletion/layout.rs",
         "src/protocol/content/file_slice/layout.rs",
         "src/protocol/content/file_slice/rows.rs",
-        "src/protocol/content/message/layout.rs",
-        "src/protocol/content/message/rows.rs",
+        "src/protocol/content/message/project.rs",
+        "src/protocol/content/message/queries.rs",
         "src/protocol/content/message_deletion/layout.rs",
         "src/protocol/content/reaction/layout.rs",
         "src/protocol/content/reaction/rows.rs",
@@ -902,7 +933,7 @@ fn cutover_content_wire_layouts_use_central_schema_codec() {
     .filter(|path| path.is_file())
     .collect::<Vec<_>>();
 
-    let offenders = matching_code_lines(
+    let offenders = matching_production_code_lines(
         &root,
         paths,
         &[

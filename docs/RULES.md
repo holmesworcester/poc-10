@@ -55,9 +55,18 @@ in `src/core` or `src/protocol`.
 - `src/core/` contains protocol-neutral mechanics only: facts, context,
   matchers, projection contracts, intents, handler dispatch, store, wire,
   crypto, network queues, TCP, clock, and schema declarations.
-- `src/protocol/<scope>/<fact_family>/` owns fact shape, fixed wire layout,
-  primary-fact authentication (`authenticate.rs`), command constructors,
-  projection, rows, queries, and context helpers for one fact family.
+- `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
+  fact shape (`fact.rs`), canonical byte construction and transcripts
+  (`encode.rs`), byte parsing (`decode.rs`), primary-fact authentication
+  (`authenticate.rs`), semantic adaptation (`adapt.rs`), local authoring
+  (`author.rs`), commands (`commands.rs`), projection, schema-backed row
+  materialization, queries, CLI adapters, and context helpers as applicable.
+- `layout.rs` and `create.rs` are transitional names for unmigrated families.
+  In target code, byte rules move to `encode.rs` and `decode.rs`, and pure fact
+  construction moves to `author.rs`; runtime gathering remains in
+  `commands.rs`. Handwritten fact-family `rows.rs` files are transitional too:
+  converted families declare row shape through schema metadata and keep
+  materialization policy in `project.rs` and read semantics in `queries.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
@@ -106,11 +115,12 @@ explicitly archived or the user asks for history.
 
 ## Projectors
 
-- Projectors interpret an already-authenticated fact in context; they do not
-  authenticate and do not do IO. Primary decode, the fact-id check, the
-  fact-boundary signature, and intrinsic single-fact field rules belong to the
-  family `authenticate.rs`; core runs it before the projector, so a projector
-  receives an `AuthenticatedFact` and never parses raw primary bytes.
+- Projectors interpret an already-authenticated, adapted semantic fact in
+  context; they do not authenticate and do not do IO. Primary decode, the
+  fact-id check, the fact-boundary signature, and intrinsic single-fact field
+  rules belong to the family `authenticate.rs`. Converted routes run
+  `decode -> authenticate -> adapt -> project`, so a projector receives typed
+  fact data and never parses raw primary bytes.
 - Projectors do not verify signatures. The primary fact's signature is proven by
   its authenticator, and any fact reached through context was authenticated
   before it could offer that context, so its authenticity is guaranteed. A
@@ -140,18 +150,25 @@ explicitly archived or the user asks for history.
 
 Non-trivial projectors should make their proof shape obvious to a reviewer:
 
-1. Authenticate in `authenticate.rs`: a numbered policy (layout, fact id,
-   signature, intrinsic field rules) that returns an `AuthenticatedFact`. Keep
-   its shape uniform and reviewable; it owns no context, authority, or rows.
-2. Implement `Projector::project()` as a small call through
-   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()`.
+1. Authenticate in `authenticate.rs`: a reviewable policy (decoded bytes or
+   legacy decode, fact id, signature, intrinsic field rules) that returns an
+   `AuthenticatedFact`. Keep its shape uniform; it owns no context, authority,
+   or rows.
+2. Converted families implement `Projector::project()` as a small call through
+   `core::projectors::project_staged::<ModuleCodec, ModuleAuthenticator, ModuleAdapter, _>()`
+   and set the route's `FactPipeline::Staged` metadata. Transitional families
+   may still call
+   `core::projectors::project_authenticated::<ModuleAuthenticator, _>()`. The
+   staged runner owns `decode -> authenticate -> adapt -> project`; projector
+   files keep only the typed projector body.
 3. Put the real proof in
    `AuthenticatedProjector<ModuleAuthenticator>::project_authenticated()`,
-   binding `let (fact, payload) = authenticated.into_parts();` and beginning at
-   the section it owns — scope/context (`// 2.`) or, for a minimal projector that
-   only writes rows, materialize (`// 3.`) — with matching numbered markers. The
-   top-of-file policy still names every section; the structural/authentication
-   ones now live in `authenticate.rs`.
+   or `SemanticProjector<SemanticFact>::project_semantic()` for staged routes,
+   binding `let (fact, payload) = authenticated.into_parts();` when using the
+   compatibility authenticated body. Body comments should explain the block
+   they guard; do not require numbered references back to the module policy.
+   The top-of-file policy still names the projector's proof shape, while
+   structural/authentication proof lives in `authenticate.rs`.
 4. Name every security-sensitive context need in a small struct or local
    binding. Avoid positional `needs[0]` contracts.
 5. Split real authority branches into path-specific functions whose names say
@@ -192,12 +209,11 @@ through the `ProjectionContext` helper anchored to the need they emitted.
 ### Typed Facts And Foreign Context
 
 Core persists facts as opaque bytes. The owning fact module supplies a small
-`FactCodec`; its `authenticate.rs` decodes through that codec, checks the id and
-the signature, and produces an `AuthenticatedFact`. Core runs the authenticator
-before the projector, so `project_authenticated()` receives the typed,
-authenticated payload. Do not call a raw layout decoder on the primary fact
-outside the module codec, and do not decode or authenticate the primary fact in
-the projector.
+`decode.rs`/`FactCodec`; its `authenticate.rs` checks the id and signature,
+enforces intrinsic rules, and produces an `AuthenticatedFact`. Converted routes
+then run `adapt.rs` before the typed projector body. Do not call a raw decoder
+on the primary fact outside the module codec, and do not decode or authenticate
+the primary fact in the projector.
 
 Foreign context fact bytes are different. A projector should not import another
 fact module's raw layout codec. It should call a module-owned typed helper that
@@ -220,9 +236,9 @@ the fact's structural, signature, authority, or cross-field policy.
 Projectors may decide when a row should be materialized. They do not own the row
 shape. Durable table ownership belongs in the explicit SQL schema declarations
 in `core::schema`, `core::network`, or `protocol::registry`; row construction
-belongs in module-owned row helpers. Projectors emit row mutations through those
-helpers rather than declaring table names, column sets, or opaque row shapes
-inline.
+belongs in module-owned row helpers or generated helpers from schema-backed row
+declarations. Projectors emit row mutations through those helpers rather than
+declaring table names, column sets, or opaque row shapes inline.
 
 Patterns to avoid in projector files:
 
@@ -245,8 +261,8 @@ Patterns to avoid in projector files:
 - Deferred handlers must be retry-safe: if required inputs or external effects
   are unavailable, return an error so the intent remains queued.
 - Handlers must not construct shared fact wire layouts inline. If a handler
-  needs to create a protocol fact, the owning event module provides a
-  `create.rs` helper.
+  needs to create a protocol fact, the owning event module provides an
+  `author.rs` helper; `create.rs` is transitional for unmigrated families.
 - Handlers must not become logic dumping grounds. They validate their intent,
   load exact inputs through handler context, perform one bounded effect, and
   return facts/intents/purges.
@@ -260,7 +276,7 @@ bounded effect, and returns `PipelineEffects`. It must be retry-safe: transient
 absence of required input or external IO returns `retry_intent`, leaving the
 queue row in place.
 
-Handlers may call deterministic `create.rs` constructors owned by the fact
+Handlers may call deterministic `author.rs` constructors owned by the fact
 module they are emitting. They must not inline shared fact wire layouts, mutate
 projection rows directly, run projectors, or become a second command layer.
 
@@ -277,10 +293,11 @@ projection rows directly, run projectors, or become a second command layer.
 
 ### Wire And Codec Style
 
-Wire layouts are protocol contracts. Keep tag checks, byte lengths, enum
-validation, canonical padding, and transcript construction in the owning fact
-module's `layout.rs` or narrow typed helper. Core wire primitives supply syntax;
-the fact module supplies meaning.
+Wire layouts are protocol contracts. In converted families, `encode.rs` owns
+canonical bytes and pure transcript helpers, while `decode.rs` owns tag checks,
+byte lengths, enum validation, and canonical padding. `author.rs` owns actual
+signing, encryption, assembly, and calls to `encode.rs`. Core wire primitives
+supply syntax; the fact module supplies meaning.
 
 ## Sync And Connection Frames
 

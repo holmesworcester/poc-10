@@ -17,10 +17,10 @@ the plan reuses:
 - Tag-routed facts: `FactRoute { tag, projector, replayed }` and the
   `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
   `core::projectors::RouterProjector`.
-- Per-family authenticators: each routed family has `authenticate.rs`, and today
-  authentication is composed into projection with
-  `project_authenticated::<Authenticator, _>`. There is no core-managed staged
-  `FactRoute` runner yet.
+- Per-family authenticators: each routed family has `authenticate.rs`.
+  Converted families route through a core-managed staged `FactRoute` runner;
+  unconverted families still compose authentication into projection with
+  `project_authenticated::<Authenticator, _>`.
 - Replay runtime: `replay`, `state-summary`, `replay-check`,
   `intent-registry`, and `recurring-intents` are in `src`.
 - Container frame facts: `connection::{frame_small,frame_bundle,frame_file_slice}`
@@ -34,10 +34,11 @@ the plan reuses:
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
 routes, a release manifest, trusted time, scope-owned ceiling adapters,
-`intro_version` on routes/handlers/commands, a core-owned per-tag route that
-runs `authenticate -> adapt -> project` as separate stages for primary facts,
-derives context payloads through `decode -> adapt`, and the pending
-admission state for wire-admitted bytes that cannot yet become active facts.
+`intro_version` on routes/handlers/commands, derived context payloads through
+`decode -> adapt`, and the pending admission state for wire-admitted bytes that
+cannot yet become active facts. A core-managed staged `FactRoute` runner is
+available for converted facts; unconverted facts still use projector-composed
+routes.
 
 ## 1. Summary — the model in one breath
 
@@ -1912,24 +1913,24 @@ Carry this TODO list forward while the model families are being built:
 
 ### CREATE-01 — content::message create at ceiling emits the ceiling tag/version  `blackbox-cli`
 - **Setup:** Single `con` binary whose head supports `message:2`. Fleet manifest pins ceiling = protocol 7, whose bundle includes `message:2` (i.e. `message:2.intro_version <= ceiling`). Trusted time fresh, not BLOCKED.
-- **Action:** `con send <workspace> "hello"` (run fn `send` -> `content::message::cli` -> `content::message::create::send_message`).
+- **Action:** `con send <workspace> "hello"` (run fn `send` -> `content::message::cli` -> `content::message::commands::send_message`).
 - **Expect:** Exactly one persisted fact with first byte `TYPE_CONTENT_MESSAGE = 50` produced by the `message_v2` constructor; `con messages` displays it; `con content-count` counts it. No pending, no "no target projector registered" error.
 - **Defends:** Invariant (1) VISIBILITY + ceiling-active create; version-neutral dispatch selects the ceiling create.
-- **Refs:** `protocol/content/message/create.rs::send_message`, `content/message/layout.rs::TYPE_CONTENT_MESSAGE=50`, registry `MATCH_COMMANDS` `send`, `FACT_ROUTES` tag 50.
+- **Refs:** `protocol/content/message/commands.rs::send_message`, `content/message/encode.rs::TYPE_CONTENT_MESSAGE=50`, registry `MATCH_COMMANDS` `send`, `FACT_ROUTES` tag 50.
 
 ### CREATE-02 — content::message: newer binary below ceiling emits the CEILING version not its head  `blackbox-cli`
 - **Setup:** `con` binary head supports `message:3` (newer than fleet). Manifest ceiling = protocol 7 (bundle has `message:2`, NOT `message:3` — some still-usable release on another platform only reaches `message:2`).
 - **Action:** `con send <workspace> "below ceiling"`.
 - **Expect:** The emitted message fact is the **`message_v2`** wire shape (the ceiling bucket), even though `create.rs` for `message_v3` exists in this binary. A peer on the older still-usable release admits, projects, and renders it. The binary does NOT emit `message_v3`.
 - **Defends:** Invariant (1)+(2): clients render/create AT THE CEILING, not their head. Version-neutral dispatch chooses ceiling create.
-- **Refs:** `content/message/create.rs` (v2 vs v3 buckets), version-neutral run fn `send`, ceiling resolution over `ReleaseManifestEntry.supported_protocol`.
+- **Refs:** `content/message/commands.rs` (v2 vs v3 buckets), version-neutral run fn `send`, ceiling resolution over `ReleaseManifestEntry.supported_protocol`.
 
 ### CREATE-03 — content::message constructor refuses to emit above-ceiling  `guardrail`
 - **Setup:** Binary head has a `message_v3` constructor compiled in (encoder EXISTS). Ceiling = protocol 7, `message_v3.intro_version` (say protocol 8) > ceiling.
 - **Action:** Attempt to drive the `message_v3` create path directly (e.g. force-select the head bucket / submit a tag-for-v3 fact for local creation).
 - **Expect:** Local creation is REFUSED with an admission error (above-ceiling local create rejected), NOT persisted, NOT silently downgraded into v2. The v3 encoder existing is not sufficient to emit.
 - **Defends:** ADMISSION: "local creation of an above-ceiling fact is REFUSED" — even though the encoder exists.
-- **Refs:** admission gate vs `core/runtime.rs::submit_fact@268`, `content/message/create.rs` v3 bucket, ceiling check.
+- **Refs:** admission gate vs `core/runtime.rs::submit_fact@268`, `content/message/commands.rs` v3 bucket, ceiling check.
 
 ### CREATE-04 — content::reaction create at ceiling emits tag 52  `blackbox-cli`
 - **Setup:** Ceiling bundle includes `reaction:1` (head version). Trusted time fresh.
@@ -2139,21 +2140,21 @@ Carry this TODO list forward while the model families are being built:
 - **Action:** `con send <workspace> "x"` resolves the constructor bucket.
 - **Expect:** With an ABSENT create/cli bucket at v-next, the version-neutral entry REUSES the previous version's `create.rs` (asserts param-subset compatibility: `v_next.required_inputs ⊆ active_cli.collected_params`). Same bytes as before the bump for the fact; only the derived read-model differs.
 - **Defends:** "an ABSENT bucket entry => reuse previous"; VERSION BUCKETS "cli ONLY if the input surface changed (absent=reuse prev)"; invariant (2) (new derivation withheld until ceiling-active but constructor unchanged).
-- **Refs:** `MATCH_COMMANDS` `send` run fn, version-bucket reuse contract, `content/message/create.rs`.
+- **Refs:** `MATCH_COMMANDS` `send` run fn, version-bucket reuse contract, `content/message/commands.rs`.
 
 ### CREATE-34 — version-neutral entry dispatches by ceiling without editing old create.rs  `guardrail`
 - **Setup:** Two buckets exist: `message/create.rs` (v1, kept forever) and `message_v2/create.rs` (new). The version-neutral `send` run fn picks the highest `intro_version <= ceiling`.
 - **Action:** Inspect dispatch: set ceiling to the v1 era, then to the v2 era; observe which `create.rs` is invoked. Confirm `message/create.rs` (v1) source is unchanged by the v2 addition.
 - **Expect:** Ceiling=v1-era -> v1 `create.rs` invoked; ceiling=v2-era -> v2 `create.rs` invoked. The v1 file is byte-identical pre/post the v2 addition (additive sibling `_vN/`, not an edit). Dispatch is data-driven off the bucket table + ceiling.
 - **Defends:** "the version-neutral constructor entry dispatches to the ceiling-appropriate create.rs without editing old code"; invariant (5) READERS FOREVER.
-- **Refs:** `MATCH_COMMANDS`/`cli_command!` macro, ceiling resolution, `content/message/create.rs` v1 vs sibling v2.
+- **Refs:** `MATCH_COMMANDS`/`cli_command!` macro, ceiling resolution, `content/message/commands.rs` v1 vs sibling v2.
 
 ### CREATE-35 — above-ceiling refusal applies in BLOCKED MODE too (no above-ceiling create when stale)  `guardrail`
 - **Setup:** Ceiling would be protocol 8 if fresh, but trusted time is past the staleness window S without refresh => BLOCKED MODE. Effective production ceiling withheld.
 - **Action:** Attempt `con send` resolving a v-next constructor that requires the higher ceiling.
 - **Expect:** Construction uses the last safely-attested ceiling bucket (not the unattested higher one); above-ceiling create is REFUSED while blocked. Local reads + replay still run, but shared production of the higher-version fact is withheld.
 - **Defends:** TRUSTED TIME / BLOCKED MODE: "shared production withheld; local reads + replay still run"; ADMISSION refuse-above-ceiling.
-- **Refs:** trusted-time staleness window S, ceiling resolution, `content/message/create.rs` bucket selection.
+- **Refs:** trusted-time staleness window S, ceiling resolution, `content/message/commands.rs` bucket selection.
 
 ### CREATE-36 — constructor never emits the sealed envelope tags (46/47) as routed facts  `guardrail`
 - **Setup:** Bootstrap handshake constructors (`connection::request`/`response` create) and the sealed-frame APIs in `bootstrap_request/layout.rs`.
@@ -2243,7 +2244,7 @@ dispatch (cli.rs:94), name-uniqueness check `validate_command_names`
 - **Defends:** param-subset contract guardrail
   (`v_next.required_inputs ⊆ active_cli.collected_params`); invariant (1).
 - **Refs:** `content::message::cli::send` (cli.rs:67-75), `SEND_USAGE`,
-  `message::create::send_message`.
+  `message::commands::send_message`.
 
 ### CLI-07 — param-subset contract VIOLATED: new required param with no cli bucket fails the gate  `guardrail`
 - **Setup:** `send_v2` constructor now also requires `thread_id` (a NEW required
@@ -2657,7 +2658,7 @@ implementation must satisfy. Each is labeled in **Defends**.
 - **Action:** Project the v1 fact through its own kept-forever projector (keyed by tag 50) and read it via `content_message_row`/`opened_messages`.
 - **Expect:** The row carries the full ceiling-era column set (all fields the V read-model exposes), populated from the v1 fact's available data; no v1-specific reduced row shape leaks into the read model.
 - **Defends:** INVARIANT (2)+(5): readers forever; old facts surface through the head read-model row shape.
-- **Refs:** `content/message/queries.rs:90-148` (`content_message_rows`/`content_message_row`), `content/message/rows.rs`, `core/projectors.rs:402` (FactRoute keyed by own tag).
+- **Refs:** `content/message/queries.rs:90-148` (`content_message_rows`/`content_message_row`), `content/message/project.rs` row builders, `registry.rs` `read_models::CONTENT_MESSAGES`, `core/projectors.rs:402` (FactRoute keyed by own tag).
 
 ### QUERY-15 — pending above-ceiling input is uncounted and undisplayed in queries  `blackbox-cli`
 - **Setup:** A received fact whose tag's intro_version > current ceiling (e.g. a hypothetical message:2 received while ceiling is at message:1). Per the model admission keeps it pending before it becomes protocol truth.
@@ -2801,7 +2802,7 @@ Verified grounding from `/home/holmes/poc-10/src`:
 - **Action:** Call `ContentMessageProjector::project(&fact, &context)` (the route `project_content_message`, registry.rs:604) directly.
 - **Expect:** Output emits `RowMutation::InsertValues(content_message_row(...))` and, after decrypt, `RowMutation::InsertValues(opened_message_row(...))` into the CURRENT `CONTENT_MESSAGE_ROWS`/`OPENED_MESSAGE_ROWS` typed tables (message/project.rs:170-207) — i.e. the head row schema, not any historical row schema. No version-conditional row branch exists.
 - **Defends:** Invariant 2 (rendering uniformity: head row shape) + version-bucket rule "rows/queries shared at head; old projectors emit ceiling-era rows".
-- **Refs:** `content::message::project::ContentMessageProjector`, `content/message/rows.rs` (`content_message_row`, `opened_message_row`), `registry.rs:604`.
+- **Refs:** `content::message::project::ContentMessageProjector`, `content/message/project.rs` (`content_message_row`, `opened_message_row`), `registry.rs` `read_models`, `registry.rs:604`.
 
 ### PROJ-02 — auth::user (tag 14) old fact projects to current user_row shape `projector-unit`
 - **Setup:** Current binary. A retained `auth::user` fact (tag 14, global scope) from an older era; ProjectionContext pre-loaded with the matching `auth_user_invite` payload whose workspace/public_key match the user.
@@ -4238,7 +4239,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Action:** Wipe derived state and replay all retained facts (`test-replay-deps-reverse` style full wipe+replay over the fact log).
 - **Expect:** Every tag-50 fact routes to `content::message::project::ContentMessageProjector` via `FACT_ROUTES` and rebuilds identical `CONTENT_MESSAGES` + `OPENED_MESSAGES` rows; `con messages WORKSPACE_ID_HEX` and `con view` produce byte-identical output to pre-wipe. No "no target projector" error.
 - **Defends:** Invariant 4 (replay determinism, adapter keyed by own tag); invariant 2 (rendering uniformity).
-- **Refs:** `content/message/layout.rs` TYPE_CONTENT_MESSAGE=50, `content/message/project.rs` ContentMessageProjector, `content/message/rows.rs` content_message_row/opened_message_row, registry.rs:604.
+- **Refs:** `content/message/encode.rs` TYPE_CONTENT_MESSAGE=50, `content/message/project.rs` ContentMessageProjector and row builders, registry.rs `read_models`, registry.rs:604.
 
 ### CONTENT-02 — message v2 (new body encoding + mentions) is REFUSED on local create below ceiling  `blackbox-cli`
 - **Setup:** Build whose head defines proposed `content::message_v2` (tag e.g. 56, sibling `content/message_v2/`) carrying the richer body (length-prefixed body blob + mention list) with intro_version = N+1. Fleet manifest ceiling pinned at N (an older still-usable release does not transport message_v2).
@@ -4448,7 +4449,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 - **Action:** Apply the safety-floor retirement (drop the unsafe transport format) and trigger reissue/tighten.
 - **Expect:** Only the unsafe transport format is removed (invariant 6 — removed before expiry ONLY when unsafe); existing safe v1 messages are NOT rewritten/converted — they keep their tag-50 reader forever; new safe messages are reissued under a safe tag. No bulk conversion pass over the message log.
 - **Defends:** Invariant 6 (safety floor); invariant 5 (readers forever); charter "unsafe encoding handled by suppress/tighten/reissue not mass conversion."
-- **Refs:** `content/message/layout.rs` CONTENT_MESSAGE_BYTES fixed-width admission, FACT_ROUTES, safety-floor rule.
+- **Refs:** `content/message/encode.rs` CONTENT_MESSAGE_BYTES fixed-width admission, FACT_ROUTES, safety-floor rule.
 
 ### CONTENT-32 — global tag uniqueness holds when every content family gains a v2 sibling  `guardrail`
 - **Setup:** Hypothetical head where each of the 7 content families plus `unfurl` has registered a distinct v2 tag (e.g. message_v2, reaction_v2, file_v2, file_slice_v2, file_deletion_v2, message_deletion_v2, retention_policy_v2, unfurl) in `FACT_ROUTES`, each with its own kept-forever projector and sibling `_v2/` dir.
@@ -5725,10 +5726,10 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 
 ### GUARD-28 — protocol version bundle maps to a named monotonic u32 (no internal version bytes for routed facts)  `guardrail`
 - **Setup:** the target protocol-version bundle definition (protocol 7 = protocol 6 + {message:2, file:3}) and the routed-fact layouts.
-- **Action:** scan routed-fact `layout.rs` files for an internal per-fact "version byte" that drives routing; assert routed facts version via TAG only.
+- **Action:** scan routed-fact `encode.rs` files and transitional `layout.rs` files for an internal per-fact "version byte" that drives routing; assert routed facts version via TAG only.
 - **Expect:** no routed fact uses an internal version byte for routing (the versioning knob is the tag). The only allowed internal version bytes are the non-routed sealed handshake (`bootstrap_request/layout.rs` private `VERSION=1`) and the connection frame wire header (`CONNECTION_FRAME_VERSION=1`) and inner bundle (`INNER_BUNDLE_VERSION=1`) — all socket/envelope level, not routed-fact level. The protocol-version u32 is monotonic.
 - **Defends:** Mechanism "VERSIONING KNOB = the fact tag … No internal version bytes for routed facts"; "PROTOCOL VERSION = a single monotonic u32 = a NAMED BUNDLE."
-- **Refs:** `connection_frame_wire.rs` (CONNECTION_FRAME_VERSION, INNER_BUNDLE_VERSION), `connection/bootstrap_request/layout.rs` (private VERSION), routed `layout.rs` files (e.g. `content/message/layout.rs` TYPE byte only).
+- **Refs:** `connection_frame_wire.rs` (CONNECTION_FRAME_VERSION, INNER_BUNDLE_VERSION), `connection/bootstrap_request/layout.rs` (private VERSION), routed `encode.rs`/transitional `layout.rs` files (e.g. `content/message/encode.rs` TYPE byte only).
 
 ### GUARD-29 — CEILING-FILTERED router only activates routes with intro_version<=ceiling  `projector-unit`
 - **Setup:** a `RouterProjector` built from `FACT_ROUTES` where some routes have `intro_version > ceiling` and some `<=`; a ceiling value C from the manifest.
@@ -5864,14 +5865,14 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Defends:** ADMISSION ("pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag"); Invariant (4) REPLAY DETERMINISM (each retained fact replays via the adapter keyed by its own tag, ceiling-independent, recreates only deterministic facts); Invariant (2) (post-activation rows identical across nodes at the common ceiling); confirms the three-ceiling relay leaves NO permanent strand or echo.
 - **Refs:** `content::message:2` tag 56 historical adapter via `FACT_ROUTES` / `RouterProjector::project` (`core/projectors.rs:448`, error site :456 must NOT fire post-rise); wipe+replay harness; `wait_for_content_count` / `poll_for_message_text` / `fact_count`; manifest refresh + `clock advance` ceiling recompute; contrast SYNC-09/11 (single-node activation) and E2E-28 (fleet-min rise) which this extends to the relayed-owner three-ceiling case.
 ### AUTHZ-GAP16a — pending bootstrap admin (tag 139) activating after its `auth_workspace` anchor was purged-with-preserving-tombstone resolves from the tombstone, never from nothing  `replay-cli`
-- **Setup:** Node B from AUTHZ-02/03 holding a PENDING above-ceiling bootstrap `auth::admin` fact AD (a hypothetical N+1 reissue of tag 139; `authority_fact_id == workspace_id == W.id`, the root self-grant branch, `project_bootstrap_admin`). During the pending window — ceiling still N, AD opaque/unprojected — the workspace anchor W (the SOLE emitter of the `auth_workspace` offer over `W.id..W.id`, `auth::workspace::project`) is purged with an authority-preserving tombstone per the AUTHZ-13 safe path: a tombstone that re-publishes the `auth_workspace` offer AND lets core load anchor payload whose loaded `Fact.id == W.id` and whose decoded `WorkspaceFact` re-verifies `workspace::layout::verify_signature`. Then a signed manifest raises B's ceiling to cover AD's intro_version; trusted_time advanced past `blocker.expires_at + M`.
+- **Setup:** Node B from AUTHZ-02/03 holding a PENDING above-ceiling bootstrap `auth::admin` fact AD (a hypothetical N+1 reissue of tag 139; `authority_fact_id == workspace_id == W.id`, the root self-grant branch, `project_bootstrap_admin`). During the pending window — ceiling still N, AD opaque/unprojected — the workspace anchor W (the SOLE emitter of the `auth_workspace` offer over `W.id..W.id`, `auth::workspace::project`) is purged with an authority-preserving tombstone per the AUTHZ-13 safe path: a tombstone that re-publishes the `auth_workspace` offer AND lets core load anchor payload whose loaded `Fact.id == W.id` and whose decoded `WorkspaceFact` re-verifies `workspace::authenticate::verify_signature`. Then a signed manifest raises B's ceiling to cover AD's intro_version; trusted_time advanced past `blocker.expires_at + M`.
 - **Action:** Wipe derived state and replay all retained facts (per-tag historical adapters). AD now routes to its `v_{N+1}` admin adapter; `project_bootstrap_admin` calls `context.payload_for(&needs.workspace)` (role `auth_workspace`, range `W.id..W.id`, project.rs:91/174).
 - **Expect:** The bootstrap admin materializes (root `admin` row + the two `auth_admin` offers, project.rs:243-269) ONLY by consuming the preserving tombstone's payload: the matched payload satisfies `matched.offer.owner == matched.payload.id` (projectors.rs:184) AND `decode_workspace_context`'s `workspace_fact.id == W.id` check (project.rs:234) AND `admin.signer_public_key == workspace.public_key` (project.rs:102). It MUST NOT materialize from a missing/None payload (that path returns `Ok(needs.output())` and parks — project.rs:92), and MUST NOT fabricate the row from the tombstone's own id as if it were W. Pre-rise state (and any replay where the tombstone does not load W-id payload) shows NO admin authority.
 - **Defends:** ADMISSION activation-on-replay (AUTHZ-03) INTERSECTED with anchor purge-with-preserving-tombstone (AUTHZ-13): the activating authority projector must resolve its anchor from the tombstone exactly as a live admit would, neither fabricating authority from a removed anchor nor silently dropping a legitimately-tombstoned grant. Invariants (3) ceiling monotonicity, (4) replay determinism, (6) safety floor.
 - **Refs:** `auth::admin::project::project_bootstrap_admin` (project.rs:85-114), `BootstrapAdminNeeds` (project.rs:167-187), `decode_workspace_context` (project.rs:230-241), `auth::workspace::project::WorkspaceProjector` (sole `auth_workspace` offer), `ProjectionContext::payload_for` / `payload_for_checked` owner-check (projectors.rs:170-188), AUTHZ-03, AUTHZ-13.
 
 ### AUTHZ-GAP16b — pending DELEGATED admin (tag 139) whose granting `auth_admin` authority anchor was purged-with-tombstone cannot be satisfied by a substitute-id tombstone  `projector-unit`
-- **Setup:** Workspace W with root admin A1. A node holds a PENDING above-ceiling DELEGATED `auth::admin` fact AD2 (N+1 reissue; `authority_fact_id == A1.id != W.id`, so `project_delegated_admin`; target user U in W). During pending the granting authority anchor A1 (the `auth_admin` offer over `A1.id..A1.id`, project.rs:251-257) is purged. Construct TWO tombstone variants for the activating replay: (i) a FAITHFUL preserving tombstone whose loaded payload has `Fact.id == A1.id` and decodes to A1's exact `AdminFact` (re-verifies `layout::verify_signature`, `authority.public_key`, `authority.workspace_id == W.id`); (ii) a SUBSTITUTE tombstone with a DIFFERENT fact id `T.id != A1.id` that re-publishes the `auth_admin` coordinate at `A1.id..A1.id` but whose loaded payload id is `T.id`. Ceiling then rises to cover AD2; trusted_time past `expires_at + M`. The `auth_workspace` (W) and `auth_user` (U) anchors remain intact.
+- **Setup:** Workspace W with root admin A1. A node holds a PENDING above-ceiling DELEGATED `auth::admin` fact AD2 (N+1 reissue; `authority_fact_id == A1.id != W.id`, so `project_delegated_admin`; target user U in W). During pending the granting authority anchor A1 (the `auth_admin` offer over `A1.id..A1.id`, project.rs:251-257) is purged. Construct TWO tombstone variants for the activating replay: (i) a FAITHFUL preserving tombstone whose loaded payload has `Fact.id == A1.id` and decodes to A1's exact `AdminFact` (re-verifies `auth::admin::authenticate::verify_signature`, `authority.public_key`, `authority.workspace_id == W.id`); (ii) a SUBSTITUTE tombstone with a DIFFERENT fact id `T.id != A1.id` that re-publishes the `auth_admin` coordinate at `A1.id..A1.id` but whose loaded payload id is `T.id`. Ceiling then rises to cover AD2; trusted_time past `expires_at + M`. The `auth_workspace` (W) and `auth_user` (U) anchors remain intact.
 - **Action:** Wipe+replay. AD2 routes to its `v_{N+1}` delegated-admin adapter; `project_delegated_admin` resolves `payload_for(&needs.workspace)`, `payload_for(&needs.authority)`, `payload_for(&needs.user)` (project.rs:122-130).
 - **Expect:** Variant (i): AD2 materializes the delegated `admin` row and `auth_admin` offers — the faithful tombstone passes `authority_fact.id == admin.authority_fact_id` (== A1.id, project.rs:137-138) and the `signer_public_key == authority.public_key` check (project.rs:145). Variant (ii): REJECTED with "admin authority context payload id mismatch" (project.rs:138) because `matched.payload.id == T.id != A1.id` — equivalently caught by the offer-owner check (projectors.rs:184) since the substitute tombstone's offer.owner is T.id. A substitute-id tombstone NEVER lets a delegated grant re-anchor onto a removed authority; it does not silently drop the legitimately-tombstoned case (i). No version of the adapter relaxes the id-equality binding.
 - **Defends:** Cross-version authority containment under anchor purge: a pending delegated grant activating after its `auth_admin` anchor is purged must re-bind to the SAME authority fact id via a faithful tombstone, never to a re-keyed/substitute tombstone (which would forge an authority chain). Mirrors AUTHZ-11/AUTHZ-15 statically; this is the pending×purge×replay intersection. Invariants (3), (4).
@@ -5928,7 +5929,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Action:** Run `con replay` canonical (wipes derived state, re-marks all retained facts pending, drains projection to fixpoint) on this OWN-EXPIRED, production-blocked node.
 - **Expect:** The own-release expiry does NOT gate the replay-side activation: the previously-pending `message:2` fact is marked pending and projects via its OWN-tag (v2) kept-forever adapter, producing its CONTENT_MESSAGES row; `con content-count` increases by one; `con messages` now shows it; `state_hash` changes to reflect the activated row. Replay completes — it does NOT abort at `RouterProjector::project` (`core/projectors.rs:456`) and does NOT refuse activation on the grounds that the binary is expired. The data is NOT stranded: activation (an INPUT/admission concern gated by the fleet ceiling) proceeds independently of the own-production-block. Throughout, `con send` STILL refuses (production remains blocked); local reads succeed (MAN-10).
 - **Defends:** TIME-26 "blocked withholds OUTPUT not INPUT/admission" extended to own-EXPIRY (MAN-09/10): own-production-block must NOT also gate replay activation of pending facts. ADMISSION "Pending facts ACTIVATE on the next wipe+replay once the ceiling rises to cover their tag" holds even on an expired binary; Invariant (4) REPLAY DETERMINISM (ceiling-independent over retained facts) and (5) "local data is safe (replays after update)". Prevents the failure mode of stranding received data forever on an expired node.
-- **Refs:** MAN-09/10 (own-expiry blocks production, permits reads+replay), TIME-26 (output-not-input), REPLAY-07/08 + MAN-27/TIME-29 (pending activation on ceiling rise); `ReleaseManifestEntry.expires_at` + skew margin M; ceiling = min over still-usable releases (relO drop); new `message:2` tag + sibling `content/message_v2/` projector in `FACT_ROUTES`; `RouterProjector::project` Err@`core/projectors.rs:456` (the hard error pending activation must replace); `drain_pending_projection` (`core/pipeline/project_pending_facts.rs:248`); `con replay`/`content-count`/`messages`/`state-summary`; `content::message` `TYPE_CONTENT_MESSAGE = 50` (`content/message/layout.rs:22`); design rule 8 (replay local/deterministic).
+- **Refs:** MAN-09/10 (own-expiry blocks production, permits reads+replay), TIME-26 (output-not-input), REPLAY-07/08 + MAN-27/TIME-29 (pending activation on ceiling rise); `ReleaseManifestEntry.expires_at` + skew margin M; ceiling = min over still-usable releases (relO drop); new `message:2` tag + sibling `content/message_v2/` projector in `FACT_ROUTES`; `RouterProjector::project` Err@`core/projectors.rs:456` (the hard error pending activation must replace); `drain_pending_projection` (`core/pipeline/project_pending_facts.rs:248`); `con replay`/`content-count`/`messages`/`state-summary`; `content::message` `TYPE_CONTENT_MESSAGE = 50` (`content/message/encode.rs:22`); design rule 8 (replay local/deterministic).
 
 ### MAN-GAP19b — On the activating replay, the own-expired node activates pending facts WITHOUT re-enabling shared production (no signed/network leak through the activation seam)  `replay-cli`
 - **Setup:** Same own-expired (`T > Ex + M`), production-blocked node as MAN-GAP19a, holding the pending `message:2` fact, with the fleet ceiling now risen (relO expired) to cover its tag. The runtime is opened from `MATCH_RUNTIME`; the four `COMMAND_EXCLUDED_HANDLER_ROUTES` (`send_bootstrap_connection_request`, `send_facts_on_connection`, `send_network_frame`, `receive_network_frame`) plus the deterministic `runs_during_replay=true` handlers (`create_key_wrap`/`unwrap_key_wrap`, HANDLER_ROUTES #8/#9) are wired.

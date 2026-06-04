@@ -680,9 +680,9 @@ mod tests {
         };
         workspace.signature = ed25519_sign(
             &signing_secret,
-            &auth::workspace::layout::signing_bytes(&workspace).expect("signing bytes"),
+            &auth::workspace::encode::signing_bytes(&workspace).expect("signing bytes"),
         );
-        let bytes = auth::workspace::layout::encode_fact(&workspace).expect("workspace");
+        let bytes = auth::workspace::encode::encode_fact(&workspace).expect("workspace");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit workspace");
 

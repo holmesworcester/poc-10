@@ -15,28 +15,36 @@
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::RowMutation;
+use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::projectors::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector, TimeWake,
+    project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
+    Projector, SemanticProjector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
 use crate::protocol::content::{
     message_deletion, purge::project as content_purge, retention_policy,
 };
+use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
-use super::rows::{
-    content_message_row, message_tombstone_row, message_tombstone_row_at_minute,
-    opened_message_row, OpenedMessageRow, CONTENT_MESSAGE_ROWS, OPENED_MESSAGE_ROWS,
-};
+use super::fact::{AuthorId, ContentMessageFact, SignerId, WorkspaceId, UNIX_MINUTE_MS};
 
 pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
 
 const RETENTION_FLOOR_ROLE: &str = "content_retention_floor";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenedMessageRow {
+    workspace_id: WorkspaceId,
+    message_id: FactId,
+    created_at_ms: u64,
+    author_user_id: AuthorId,
+    signer_id: SignerId,
+    text: String,
+}
 
 pub fn expiration_timeline() -> crate::core::projectors::Timeline {
     crate::core::projectors::Timeline::new("content_message_expiry")
@@ -71,6 +79,69 @@ pub fn retention_floor_offer(
     )
 }
 
+fn content_message_row(message_id: FactId, fact: &ContentMessageFact) -> TableInsert {
+    read_models::CONTENT_MESSAGES.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(message_id.to_vec()),
+        Value::Bytes(fact.author_user_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.signer_id.to_vec()),
+        Value::Bytes(fact.frontier_id.to_vec()),
+        Value::U64(fact.minute),
+        Value::Bool(false),
+    ])
+}
+
+fn opened_message_row(input: OpenedMessageRow) -> TableInsert {
+    read_models::OPENED_MESSAGES.insert(vec![
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.message_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.author_user_id.to_vec()),
+        Value::Bytes(input.signer_id.to_vec()),
+        Value::Bytes(input.text.into_bytes()),
+    ])
+}
+
+fn message_tombstone_row(
+    workspace_id: WorkspaceId,
+    message_id: FactId,
+    author_user_id: AuthorId,
+    created_at_ms: u64,
+) -> TableInsert {
+    message_tombstone_row_at_minute(
+        workspace_id,
+        message_id,
+        author_user_id,
+        created_at_ms / UNIX_MINUTE_MS,
+    )
+}
+
+fn message_tombstone_row_at_minute(
+    workspace_id: WorkspaceId,
+    message_id: FactId,
+    author_user_id: AuthorId,
+    authored_minute: u64,
+) -> TableInsert {
+    read_models::MESSAGE_TOMBSTONES.insert(vec![
+        Value::Bytes(workspace_id.to_vec()),
+        Value::Bytes(message_id.to_vec()),
+        Value::Bytes(author_user_id.to_vec()),
+        Value::U64(authored_minute),
+    ])
+}
+
+fn message_row_delete(
+    schema: TypedTableSchema,
+    workspace_id: FactId,
+    message_id: FactId,
+) -> TableDeleteWhere {
+    schema.delete_by_key(vec![
+        Value::Bytes(workspace_id.to_vec()),
+        Value::Bytes(message_id.to_vec()),
+    ])
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ContentMessageProjector;
 
@@ -86,9 +157,23 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ContentMessageAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::decode::Codec,
+            super::authenticate::ContentMessageAuthenticator,
+            super::adapt::ContentMessageAdapter,
+            _,
+        >(self, fact, context)
+    }
+}
+
+impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjector {
+    fn project_semantic(
+        &self,
+        fact: &Fact,
+        message: super::fact::ContentMessageFact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        self.project_authenticated(AuthenticatedFact::new(fact, message), context)
     }
 }
 
@@ -398,7 +483,7 @@ fn decrypt_text(
     };
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &key,
-        &crate::protocol::content::message::create::associated_data(
+        &crate::protocol::content::message::author::associated_data(
             message.workspace_id,
             message.frontier_id,
             message.minute,
@@ -406,7 +491,7 @@ fn decrypt_text(
         &message.nonce,
         &message.ciphertext,
     )?;
-    crate::protocol::content::message::create::recover_text(&plaintext)
+    crate::protocol::content::message::decode::recover_text(&plaintext)
 }
 
 fn expiry_minute_reached(
@@ -483,13 +568,13 @@ fn expired_output(
                 message.author_user_id,
                 message.created_at_ms,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-                CONTENT_MESSAGE_ROWS,
+            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+                read_models::CONTENT_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-                OPENED_MESSAGE_ROWS,
+            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+                read_models::OPENED_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
@@ -513,13 +598,13 @@ fn retired_output(
                 message.author_user_id,
                 floor_minute.saturating_sub(1),
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-                CONTENT_MESSAGE_ROWS,
+            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+                read_models::CONTENT_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-                OPENED_MESSAGE_ROWS,
+            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+                read_models::OPENED_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
@@ -542,13 +627,13 @@ fn author_deletion_output(
                 message.author_user_id,
                 message.created_at_ms,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-                CONTENT_MESSAGE_ROWS,
+            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+                read_models::CONTENT_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
-            .row_mutation(RowMutation::DeleteWhere(super::create::message_row_delete(
-                OPENED_MESSAGE_ROWS,
+            .row_mutation(RowMutation::DeleteWhere(message_row_delete(
+                read_models::OPENED_MESSAGES,
                 message.workspace_id,
                 message_id,
             )))
@@ -654,10 +739,11 @@ mod projector_tests {
     use topo::protocol::auth::local_history_node_secret::project as coverage;
     use topo::protocol::auth::local_key_secret::{fact::LocalKeySecretFact, layout as auth_layout};
     use topo::protocol::content::message::fact::{ContentMessageFact, MessageCiphertext};
-    use topo::protocol::content::message::{layout, project, rows};
+    use topo::protocol::content::message::{author, encode, project};
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::layout as deletion_layout;
     use topo::protocol::content::purge::project as content_purge;
+    use topo::protocol::registry::read_models;
 
     use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
 
@@ -690,6 +776,74 @@ mod projector_tests {
                     _ => None,
                 })
         };
+    }
+
+    #[test]
+    fn content_message_row_builders_use_registry_typed_schemas() {
+        let fact = ContentMessageFact {
+            workspace_id: [1; 32],
+            created_at_ms: 60_000,
+            author_user_id: [2; 32],
+            signer_id: [3; 32],
+            signer_public_key: [7; 32],
+            frontier_id: [4; 32],
+            local_history_node_secret_id: [5; 32],
+            expires_at_minute: u64::MAX,
+            retention_policy_id: [6; 32],
+            minute: 1,
+            nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
+            ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
+            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
+        };
+
+        let row = super::content_message_row([9; 32], &fact);
+        assert_eq!(row.table, read_models::CONTENT_MESSAGE_ROWS);
+        assert_eq!(row.columns, read_models::CONTENT_MESSAGES.columns);
+        assert_eq!(
+            row.values[0],
+            topo::core::intents::Value::Bytes(vec![1; 32])
+        );
+        assert_eq!(
+            row.values[1],
+            topo::core::intents::Value::Bytes(vec![9; 32])
+        );
+        assert_eq!(
+            row.values[2],
+            topo::core::intents::Value::Bytes(vec![2; 32])
+        );
+        assert_eq!(
+            row.values[4],
+            topo::core::intents::Value::Bytes(vec![3; 32])
+        );
+        assert_eq!(
+            row.values[5],
+            topo::core::intents::Value::Bytes(vec![4; 32])
+        );
+        assert_eq!(row.values[7], topo::core::intents::Value::Bool(false));
+
+        let opened = super::opened_message_row(super::OpenedMessageRow {
+            workspace_id: [1; 32],
+            message_id: [2; 32],
+            created_at_ms: 60_000,
+            author_user_id: [3; 32],
+            signer_id: [4; 32],
+            text: "hello".to_string(),
+        });
+        assert_eq!(opened.table, read_models::OPENED_MESSAGE_ROWS);
+        assert_eq!(opened.columns, read_models::OPENED_MESSAGES.columns);
+        assert_eq!(
+            opened.values[5],
+            topo::core::intents::Value::Bytes(b"hello".to_vec())
+        );
+
+        let tombstone = super::message_tombstone_row([1; 32], [2; 32], [3; 32], 120_000);
+        assert_eq!(tombstone.table, read_models::MESSAGE_TOMBSTONE_ROWS);
+        assert_eq!(tombstone.columns, read_models::MESSAGE_TOMBSTONES.columns);
+        assert_eq!(
+            tombstone.values[2],
+            topo::core::intents::Value::Bytes(vec![3; 32])
+        );
+        assert_eq!(tombstone.values[3], topo::core::intents::Value::U64(2));
     }
 
     #[test]
@@ -727,7 +881,7 @@ mod projector_tests {
         );
         assert_eq!(output.effects.row_mutations.len(), 2);
 
-        let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content message row");
+        let row = put_row!(output, read_models::CONTENT_MESSAGE_ROWS).expect("content message row");
         assert_eq!(
             row.values[0],
             topo::core::intents::Value::Bytes(message.workspace_id.to_vec())
@@ -749,7 +903,7 @@ mod projector_tests {
             topo::core::intents::Value::Bytes(message.frontier_id.to_vec())
         );
 
-        let opened = put_row!(output, rows::OPENED_MESSAGE_ROWS).expect("opened row");
+        let opened = put_row!(output, read_models::OPENED_MESSAGE_ROWS).expect("opened row");
         assert_eq!(
             opened.values[1],
             topo::core::intents::Value::Bytes(fact.id.to_vec())
@@ -776,7 +930,7 @@ mod projector_tests {
             output.effects.intents[0].kind.as_str(),
             "share_fact_with_sync"
         );
-        assert!(put_row!(output, rows::CONTENT_MESSAGE_ROWS).is_none());
+        assert!(put_row!(output, read_models::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
         assert!(output
             .needs
@@ -803,12 +957,12 @@ mod projector_tests {
         message.expires_at_minute = message.minute + 1;
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &layout::signing_bytes(&message).expect("message signing bytes"),
+            &encode::signing_bytes(&message).expect("message signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
+            encode::encode_fact(&message).expect("encode content message"),
         );
         let context = ProjectionContext::default().with_time_ranges(vec![TimeRange {
             timeline: topo::protocol::content::message::expiration_timeline(),
@@ -858,7 +1012,8 @@ mod projector_tests {
             output.effects.intents[0].kind.as_str(),
             "share_fact_with_sync"
         );
-        let row = put_row!(output, rows::CONTENT_MESSAGE_ROWS).expect("content metadata row");
+        let row =
+            put_row!(output, read_models::CONTENT_MESSAGE_ROWS).expect("content metadata row");
         assert_eq!(
             row.values[0],
             topo::core::intents::Value::Bytes(message.workspace_id.to_vec())
@@ -867,7 +1022,7 @@ mod projector_tests {
             row.values[1],
             topo::core::intents::Value::Bytes(fact.id.to_vec())
         );
-        assert!(put_row!(output, rows::OPENED_MESSAGE_ROWS).is_none());
+        assert!(put_row!(output, read_models::OPENED_MESSAGE_ROWS).is_none());
     }
 
     #[test]
@@ -907,9 +1062,9 @@ mod projector_tests {
             )
             .expect("deletion wakes message");
 
-        assert!(put_delete!(output, rows::CONTENT_MESSAGE_ROWS).is_some());
-        assert!(put_delete!(output, rows::OPENED_MESSAGE_ROWS).is_some());
-        assert!(put_row!(output, rows::MESSAGE_TOMBSTONE_ROWS).is_some());
+        assert!(put_delete!(output, read_models::CONTENT_MESSAGE_ROWS).is_some());
+        assert!(put_delete!(output, read_models::OPENED_MESSAGE_ROWS).is_some());
+        assert!(put_row!(output, read_models::MESSAGE_TOMBSTONE_ROWS).is_some());
     }
 
     #[test]
@@ -952,15 +1107,10 @@ mod projector_tests {
         let frontier_id = [3; 32];
         let minute = 3;
         let nonce = [7; crate::protocol::content::message::fact::NONCE_BYTES];
-        let plaintext = topo::protocol::content::message::create::pad_plaintext(text.as_bytes())
-            .expect("pad plaintext");
+        let plaintext = author::pad_plaintext(text.as_bytes()).expect("pad plaintext");
         let ciphertext = crypto::xchacha20poly1305_encrypt(
             &key,
-            &topo::protocol::content::message::create::associated_data(
-                workspace_id,
-                frontier_id,
-                minute,
-            ),
+            &author::associated_data(workspace_id, frontier_id, minute),
             &nonce,
             &plaintext,
         )
@@ -982,12 +1132,12 @@ mod projector_tests {
         };
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &layout::signing_bytes(&message).expect("message signing bytes"),
+            &encode::signing_bytes(&message).expect("message signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
-            layout::encode_fact(&message).expect("encode content message"),
+            encode::encode_fact(&message).expect("encode content message"),
         );
         (message, fact, key)
     }

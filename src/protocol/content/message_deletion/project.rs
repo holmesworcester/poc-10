@@ -224,8 +224,8 @@ mod projector_tests {
         layout as endpoint_shared_layout,
     };
     use topo::protocol::content::message::{
+        encode as message_encode,
         fact::{ContentMessageFact, MessageCiphertext},
-        layout as message_layout,
     };
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
     use topo::protocol::content::message_deletion::{layout, project, rows};
@@ -462,12 +462,12 @@ mod projector_tests {
         };
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &message_layout::signing_bytes(&message).expect("message signing bytes"),
+            &message_encode::signing_bytes(&message).expect("message signing bytes"),
         );
         Fact::new(
             crate::protocol::auth::workspace::scope(workspace_id),
             message.created_at_ms,
-            message_layout::encode_fact(&message).expect("encode message"),
+            message_encode::encode_fact(&message).expect("encode message"),
         )
     }
 
