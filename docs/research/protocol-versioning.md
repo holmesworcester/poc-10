@@ -224,6 +224,25 @@ runtime.
   time rolls back beyond tolerance, or has not refreshed within `S`, enter
   **blocked mode** (shared production withheld; local reads and replay
   continue).
+- **Permission ceiling vs. write activation (decision, 2026-06-04).** The
+  ceiling is a *permission* upper bound, never a write trigger: it bounds what a
+  node *may* emit and never forces it to begin emitting a newer shape. The actual
+  write-version is the highest bucket that is both `<= ceiling` and has an
+  `author`/`encode` path compiled into the build — i.e.
+  `min(ceiling, highest-authored-version-in-this-build)`. Writing below the
+  ceiling is always safe (older still-usable peers can read it; adapters bridge
+  it on replay), so a build may deliberately sit below the ceiling. The **read
+  side ships ahead** — `decode`/`authenticate`/`adapt`/`project` land in an
+  earlier release so the node ingests the new shape from non-stalled peers the
+  moment the ceiling allows — while the **write side is gated on the deploy**
+  that ships the family's `author`/`encode`. Emission therefore begins at a
+  release/upgrade (a discrete, locally-controlled event), while the ceiling still
+  guarantees no node ever emits a fact an older still-usable peer cannot read.
+  Net: a deprecation-driven ceiling rise *grants permission*; shipping the author
+  path is the *trigger* (`ceiling-cleared AND release-opted-in`). Chosen
+  implementation: gate purely by **what the build compiles in** (withhold
+  `author`/`encode` until the release that should begin emitting), not a separate
+  manifest opt-in flag.
 
 ### Phase 1b — Observability surface (so the machinery is black-box-testable)
 
@@ -1804,6 +1823,14 @@ version-bucketed: `fact/encode/decode/author/authenticate/adapt/project` per
 version as needed. The version-neutral entry (the CLI run fn / intent handler)
 must dispatch to the **ceiling-appropriate** `author.rs`, never the binary's
 head. Local creation of an above-ceiling fact is **REFUSED** (admission rule).
+**Ceiling-appropriate** means the highest bucket that is both `<= ceiling` and
+has an `author`/`encode` path compiled into this build — i.e.
+`min(ceiling, highest-authored-version)`. A build may sit *below* the ceiling on
+purpose: a ceiling rise only *permits* a newer shape, and emission begins only in
+the release that ships that family's write path, with the read side
+(`decode`/`authenticate`/`adapt`/`project`) shipping ahead. The ceiling permits;
+a deploy triggers. The stall is gated by what the build compiles in, not a
+manifest opt-in flag — see Phase 1, "Permission ceiling vs. write activation."
 Deterministic authors (`auth::key_wrap::create::create_key_wrap_fact` today,
 `sync::need_id::create::fact` today, `sync::compare::create::start_compare_fact`
 today) must reproduce identical bytes on replay (invariant 4).
