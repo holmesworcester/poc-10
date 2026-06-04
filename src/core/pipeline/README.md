@@ -23,6 +23,28 @@ Projectors decide what facts need or offer, what rows they materialize, and
 what follow-up intents to enqueue. Handlers decide what bounded stateful work to
 perform. The pipeline decides when those outputs become durable.
 
+## Read Projection Path
+
+The direction for routed facts is a first-class staged read path:
+
+```text
+fact bytes -> decode -> authenticate -> adapt -> project -> ProjectionOutput
+```
+
+Converted routes declare those stages in `FactRoute.pipeline` as
+`FactPipeline::Staged`. The core projection worker still stays
+protocol-neutral: it loads the fact and context, then invokes the registered
+protocol projector. The protocol router selects the tag route, runs the staged
+helper, and hands the settled `ProjectionOutput` back to the same commit
+boundary.
+
+The legacy path remains for fact-by-fact cutover. Routes marked
+`FactPipeline::ProjectorComposed` still call the family projector directly, and
+that projector may invoke the old composed authentication helper internally.
+That compatibility path should preserve existing fact behavior until a family is
+split into explicit `decode.rs`, `authenticate.rs`, `adapt.rs`, and `project.rs`
+roles.
+
 ## Data Flow
 
 ```text
@@ -32,7 +54,7 @@ submit_fact_to_store
 
 drain_pending_projection
   -> load fact, standing context, matched payload facts, and due time ranges
-  -> run projector
+  -> run staged route or legacy composed projector route
   -> replace context and time wakes for that owner
   -> wake newly matched dependents
   -> commit row mutations, admitted facts, purges, and intents

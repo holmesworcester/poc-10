@@ -571,11 +571,17 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
 
     for required in [
         "## Interface To Core And Protocol",
+        "## Read Projection Path",
         "## Data Flow",
         "## Invariants",
         "## Module Responsibilities",
         "## Projection Commit Boundary",
         "## Handler Commit Boundary",
+        "fact bytes -> decode -> authenticate -> adapt -> project -> ProjectionOutput",
+        "`FactPipeline::Staged`",
+        "run staged route or legacy composed projector route",
+        "`FactPipeline::ProjectorComposed`",
+        "The legacy path remains for fact-by-fact cutover",
         "project_pending_facts.rs",
         "context.rs",
         "dispatch.rs",
