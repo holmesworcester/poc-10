@@ -21,9 +21,14 @@
 
 pub mod bootstrap_request;
 pub mod bootstrap_response;
-pub mod connection_request;
-pub mod connection_response;
 pub mod close;
+pub mod connection_established;
+pub mod connection_request;
+pub mod connection_request_received;
+pub mod connection_request_sent;
+pub mod connection_response;
+pub mod connection_response_received;
+pub mod connection_response_sent;
 pub mod ephemeral_secret;
 pub mod fact_receipt;
 pub mod frame_bundle;
@@ -41,7 +46,5 @@ pub mod create_connection_response;
 pub mod maintain_connections;
 pub mod send_bootstrap_request;
 pub mod send_bootstrap_response;
-pub mod send_connection_request;
-pub mod send_connection_response;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

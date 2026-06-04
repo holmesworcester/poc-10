@@ -11,6 +11,14 @@ use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite::layout as invite_layout;
+use topo::protocol::connection::bootstrap_request::{
+    commands::{create as create_request, CreateConnectionRequest},
+    layout as request_layout,
+};
+use topo::protocol::connection::bootstrap_response::{
+    create::{build_responder_response, BuildResponderResponse},
+    rows::BOOTSTRAP_RESPONSE_ROWS,
+};
 use topo::protocol::connection::close::commands::close;
 use topo::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
@@ -19,14 +27,6 @@ use topo::protocol::connection::ephemeral_secret::{
 use topo::protocol::connection::fact_receipt::{
     fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_RESPONSE},
     layout as receipt_layout,
-};
-use topo::protocol::connection::bootstrap_request::{
-    commands::{create as create_request, CreateConnectionRequest},
-    layout as request_layout,
-};
-use topo::protocol::connection::bootstrap_response::{
-    create::{build_responder_response, BuildResponderResponse},
-    rows::BOOTSTRAP_RESPONSE_ROWS,
 };
 
 struct FixedClock(Cell<u64>);

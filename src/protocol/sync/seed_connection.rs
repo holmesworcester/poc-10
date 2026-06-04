@@ -87,9 +87,9 @@ impl IntentHandler for SeedConnectionSyncHandler {
         if connection_fact.id != input.connection_id {
             return Err("seed_connection_sync context payload id mismatch".into());
         }
-        connection::bootstrap_response::layout::decode_fact(connection_fact.body()).map_err(|_| {
-            HandlerError::fatal("seed_connection_sync context is not a connection response")
-        })?;
+        connection::bootstrap_response::layout::decode_fact(connection_fact.body()).map_err(
+            |_| HandlerError::fatal("seed_connection_sync context is not a connection response"),
+        )?;
         advertise_connection_shareable_facts(context.store()?, input.connection_id)
     }
 }

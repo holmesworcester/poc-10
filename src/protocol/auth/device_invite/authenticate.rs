@@ -63,16 +63,8 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_device_invite_fact(
-            100,
-            [1; 32],
-            [2; 32],
-            None,
-            [3; 32],
-            [4; 32],
-            SIGNER_KEY,
-        )
-        .expect("signed device_invite fact")
+        signed_device_invite_fact(100, [1; 32], [2; 32], None, [3; 32], [4; 32], SIGNER_KEY)
+            .expect("signed device_invite fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, DeviceInviteFact> {
@@ -96,7 +88,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -104,7 +100,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -113,7 +113,11 @@ mod tests {
         let mut bytes = canonical.bytes.clone();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

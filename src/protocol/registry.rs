@@ -531,8 +531,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
     "send_bootstrap_connection_request",
     "send_bootstrap_connection_response",
-    "send_connection_request",
-    "send_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -627,6 +625,11 @@ projector_routes! {
     project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
     project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
+    project_connection_request_sent => connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT, connection::connection_request_sent::project::ConnectionRequestSentProjector, not_replayed;
+    project_connection_request_received => connection::connection_request_received::layout::TYPE_CONNECTION_REQUEST_RECEIVED, connection::connection_request_received::project::ConnectionRequestReceivedProjector, not_replayed;
+    project_connection_response_sent => connection::connection_response_sent::layout::TYPE_CONNECTION_RESPONSE_SENT, connection::connection_response_sent::project::ConnectionResponseSentProjector, not_replayed;
+    project_connection_response_received => connection::connection_response_received::layout::TYPE_CONNECTION_RESPONSE_RECEIVED, connection::connection_response_received::project::ConnectionResponseReceivedProjector, not_replayed;
+    project_connection_established => connection::connection_established::layout::TYPE_CONNECTION_ESTABLISHED, connection::connection_established::project::ConnectionEstablishedProjector, not_replayed;
     project_bootstrap_request => connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST, connection::bootstrap_request::project::BootstrapRequestProjector, not_replayed;
     project_bootstrap_response => connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE, connection::bootstrap_response::project::BootstrapResponseProjector, not_replayed;
     project_connection_request => connection::connection_request::layout::TYPE_CONNECTION_REQUEST, connection::connection_request::project::ConnectionRequestProjector, not_replayed;
@@ -667,8 +670,6 @@ projector_routes! {
     project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
     project_sealed_bootstrap_request => connection::bootstrap_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
     project_sealed_bootstrap_response => connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
-    project_sealed_connection_request => connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
-    project_sealed_connection_response => connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE, crate::protocol::connection_frame::SealedHandshakeFrameProjector;
     project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
     project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
 }
@@ -724,18 +725,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "create_bootstrap_response",
         connection::create_bootstrap_response::CREATE_BOOTSTRAP_RESPONSE,
         connection::create_bootstrap_response::CreateBootstrapResponseHandler,
-        replay = false
-    ),
-    handler_route!(
-        "send_connection_request",
-        connection::send_connection_request::SEND_CONNECTION_REQUEST,
-        connection::send_connection_request::SendConnectionRequestHandler,
-        replay = false
-    ),
-    handler_route!(
-        "send_connection_response",
-        connection::send_connection_response::SEND_CONNECTION_RESPONSE,
-        connection::send_connection_response::SendConnectionResponseHandler,
         replay = false
     ),
     handler_route!(

@@ -153,15 +153,15 @@ use crate::core::intents::{
 };
 use crate::protocol::auth::endpoint::create as local_endpoint;
 use crate::protocol::auth::invite::layout as invite_layout;
-use crate::protocol::connection::ephemeral_secret::{
-    fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
-};
-use crate::protocol::connection::fact_receipt;
 use crate::protocol::connection::bootstrap_request::create as request_create;
 use crate::protocol::connection::bootstrap_request::layout as request_layout;
 use crate::protocol::connection::bootstrap_response::create::{
     build_responder_response, BuildResponderResponse,
 };
+use crate::protocol::connection::ephemeral_secret::{
+    fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
+};
+use crate::protocol::connection::fact_receipt;
 
 #[derive(Debug, Clone, Default)]
 pub struct CreateBootstrapResponseHandler;

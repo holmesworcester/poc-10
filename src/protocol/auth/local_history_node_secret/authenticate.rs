@@ -63,8 +63,8 @@ mod tests {
             tombstone_node_id: [6; 32],
             node_secret: [7; XCHACHA20_POLY1305_KEY_BYTES],
         };
-        let bytes =
-            layout::encode_local_history_node_secret(&node).expect("encode local history node secret");
+        let bytes = layout::encode_local_history_node_secret(&node)
+            .expect("encode local history node secret");
         Fact::new(FactScope::Local, 123, bytes)
     }
 
@@ -89,7 +89,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -97,7 +101,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

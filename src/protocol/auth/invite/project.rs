@@ -38,7 +38,9 @@ impl Projector for InviteSecretProjector {
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::InviteSecretAuthenticator> for InviteSecretProjector {
+impl AuthenticatedProjector<super::authenticate::InviteSecretAuthenticator>
+    for InviteSecretProjector
+{
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, super::fact::InviteSecretFact>,

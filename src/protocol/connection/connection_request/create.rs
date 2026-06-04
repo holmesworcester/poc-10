@@ -41,8 +41,10 @@ pub fn sign_request(
     if endpoint.endpoint != request.from_endpoint {
         return Err("membership connection request signer is not the initiator".to_string());
     }
-    request.endpoint_signature =
-        crypto::ed25519_sign(&endpoint.signing_secret, &endpoint_signing_transcript(request)?);
+    request.endpoint_signature = crypto::ed25519_sign(
+        &endpoint.signing_secret,
+        &endpoint_signing_transcript(request)?,
+    );
     Ok(())
 }
 
@@ -57,7 +59,9 @@ pub fn validate_endpoint_signature(
         &endpoint_signing_transcript(request)?,
         &request.endpoint_signature,
     ) {
-        return Err("membership connection request endpoint signature is not authorized".to_string());
+        return Err(
+            "membership connection request endpoint signature is not authorized".to_string(),
+        );
     }
     Ok(())
 }

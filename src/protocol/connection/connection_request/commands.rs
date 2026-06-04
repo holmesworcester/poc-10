@@ -1,10 +1,10 @@
 //! User-facing constructor for membership connection requests.
 //!
 //! `connect` to a known endpoint creates the local facts that start a membership
-//! handshake: an initiator ephemeral secret and a global connection request
-//! signed by the local endpoint signing key. There is no invite material; the
-//! request carries the initiator's `endpoint_shared` membership id as its
-//! authorization witness.
+//! handshake: an initiator ephemeral secret and a `connection_request_sent`
+//! observation containing the exact sealed request bytes. There is no local
+//! protocol `connection_request` fact on the sender; that fact is projected by
+//! the receiver after it opens the sealed bytes.
 //!
 //! Commands do not project, open sockets, or send bytes. Projection decides when
 //! the request is admissible and emits the network send; this file owns only
@@ -22,6 +22,9 @@ use crate::protocol::auth::endpoint::fact::EndpointFact;
 use super::queries::choose_connection_mode;
 
 pub const CONNECT_USAGE: &str = "connect ENDPOINT_ID_HEX";
+use crate::protocol::connection::connection_request_sent::{
+    fact::ConnectionRequestSentFact, layout as request_sent_layout,
+};
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
 
@@ -48,7 +51,10 @@ pub fn create(
     input: CreateConnectionRequest,
 ) -> Result<CommandOutput<CreateConnectionRequestReceipt>, String> {
     validate_id("remote_endpoint", &input.remote_endpoint)?;
-    validate_id("initiator_endpoint_shared_id", &input.initiator_endpoint_shared_id)?;
+    validate_id(
+        "initiator_endpoint_shared_id",
+        &input.initiator_endpoint_shared_id,
+    )?;
 
     let ephemeral_private_key = crypto::random_x25519_private_key();
     let ephemeral = ConnectionEphemeralSecretFact {
@@ -75,17 +81,33 @@ pub fn create(
         to_listen_addr: input.to_listen_addr,
     };
     request_create::sign_request(&mut request, &input.local_endpoint)?;
-    let request_fact = Fact::new(
+    let sealed_request_bytes = layout::seal_fact(&request, &ephemeral.ephemeral_private_key)?;
+    let request_id = crate::core::facts::fact_id(&sealed_request_bytes);
+    let sealed_request_bytes = sealed_request_bytes.as_slice().try_into().map_err(|_| {
+        "sealed membership connection request has unexpected byte length".to_string()
+    })?;
+    let peer_addr = input
+        .to_listen_addr
+        .ok_or_else(|| "membership connection request requires a peer address".to_string())?;
+    let request_sent = ConnectionRequestSentFact {
+        request_id,
+        initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
+        peer_addr,
+        request,
+        sealed_request_bytes,
+        created_at_ms: input.created_at_ms.saturating_add(2),
+    };
+    let request_sent_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        layout::encode_fact(&request)?,
+        request_sent_layout::encode_fact(&request_sent)?,
     );
 
     Ok(CommandOutput::new(CreateConnectionRequestReceipt {
-        request_id: request_fact.id,
+        request_id,
         initiator_ephemeral_secret_id: ephemeral_fact.id,
     })
-    .with_facts(vec![ephemeral_fact, request_fact]))
+    .with_facts(vec![ephemeral_fact, request_sent_fact]))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,8 +187,14 @@ mod tests {
             output.receipt.initiator_ephemeral_secret_id,
             output.effects.facts[0].id
         );
-        assert_eq!(output.receipt.request_id, output.effects.facts[1].id);
-        let request = layout::decode_fact(&output.effects.facts[1].bytes).expect("decode request");
+        let sent = request_sent_layout::decode_fact(&output.effects.facts[1].bytes)
+            .expect("decode request_sent");
+        let request = sent.request;
+        assert_eq!(sent.request_id, output.receipt.request_id);
+        assert_eq!(
+            sent.sealed_request_bytes[0],
+            layout::TYPE_CONNECTION_REQUEST
+        );
         request_create::validate_endpoint_signature(&request, &local.signing_public_key)
             .expect("signature verifies against local membership signing key");
     }

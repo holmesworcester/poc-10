@@ -75,19 +75,19 @@ pub fn choose_connection_mode(
 }
 
 /// One local outbound membership request still awaiting a connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingMembershipRequest {
+    pub request_sent_id: FactId,
     pub request_id: FactId,
     pub initiator_ephemeral_secret_id: FactId,
     pub addr: SocketAddr,
+    pub sealed_request_bytes: Vec<u8>,
 }
 
 /// Local outbound membership request rows whose request id has no connection
 /// (response) row yet. The live `maintain_connections` loop queues one send per
 /// entry; an answered request drops out so a connected peer stops being retried.
-pub fn pending_membership_requests(
-    store: &Store,
-) -> Result<Vec<PendingMembershipRequest>, String> {
+pub fn pending_membership_requests(store: &Store) -> Result<Vec<PendingMembershipRequest>, String> {
     let answered =
         crate::protocol::connection::bootstrap_response::rows::answered_request_ids(store)?;
     let mut pending = Vec::new();
@@ -103,9 +103,11 @@ pub fn pending_membership_requests(
             continue;
         }
         pending.push(PendingMembershipRequest {
+            request_sent_id: row.request_sent_id,
             request_id: row.request_id,
             initiator_ephemeral_secret_id: row.initiator_ephemeral_secret_fact_id,
             addr,
+            sealed_request_bytes: row.sealed_request_bytes,
         });
     }
     Ok(pending)
@@ -128,6 +130,9 @@ mod tests {
         let store =
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("store");
-        assert_eq!(choose_connection_mode(&store, [9; 32]).expect("query"), None);
+        assert_eq!(
+            choose_connection_mode(&store, [9; 32]).expect("query"),
+            None
+        );
     }
 }

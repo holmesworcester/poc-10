@@ -30,8 +30,8 @@ use crate::core::projectors::{
 };
 
 use crate::protocol::auth::invite;
-use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
 use crate::protocol::connection::bootstrap_request as request;
+use crate::protocol::connection::fact_receipt::{self, fact::RECEIVE_PATH_CONNECTION_RESPONSE};
 use crate::protocol::connection::send_bootstrap_response::{
     send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
 };
@@ -397,6 +397,11 @@ mod projector_tests {
     use topo::core::projectors::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth::endpoint::fact::EndpointFact;
     use topo::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
+    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
+    use topo::protocol::connection::bootstrap_request::{
+        fact::BootstrapRequestFact, layout as request_layout,
+    };
+    use topo::protocol::connection::bootstrap_response::{create, layout, project, rows};
     use topo::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
@@ -404,11 +409,6 @@ mod projector_tests {
         fact::{ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_RESPONSE},
         layout as received_layout,
     };
-    use topo::protocol::connection::bootstrap_request::create::encode_optional_addr;
-    use topo::protocol::connection::bootstrap_request::{
-        fact::BootstrapRequestFact, layout as request_layout,
-    };
-    use topo::protocol::connection::bootstrap_response::{create, layout, project, rows};
     use topo::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 
     struct Scenario {

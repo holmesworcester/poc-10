@@ -192,8 +192,6 @@ fn replay_classification_marks_only_deterministic_rebuild_handlers() {
         "send_bootstrap_connection_request",
         "send_bootstrap_connection_response",
         "create_bootstrap_response",
-        "send_connection_request",
-        "send_connection_response",
         "create_connection_response",
         "send_network_frame",
         "receive_network_frame",
@@ -230,9 +228,9 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
     // Durable facts whose projection materializes live session/negotiation state
     // must be retained but not re-projected on replay, so a rebuild never
     // resurrects a dead connection or a stale sync negotiation. The handshake
-    // request and the connection itself, plus the sync need/have advertisements,
-    // are this category. Everything else is durable truth that replay rebuilds
-    // deterministically.
+    // request/response facts, membership local lifecycle facts, and sync
+    // need/have advertisements are this category. Everything else is durable
+    // truth that replay rebuilds deterministically.
     let not_replayed: BTreeSet<u8> = MATCH_RUNTIME
         .fact_routes
         .iter()
@@ -244,6 +242,11 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
         connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE,
         connection::connection_request::layout::TYPE_CONNECTION_REQUEST,
         connection::connection_response::layout::TYPE_CONNECTION_RESPONSE,
+        connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT,
+        connection::connection_request_received::layout::TYPE_CONNECTION_REQUEST_RECEIVED,
+        connection::connection_response_sent::layout::TYPE_CONNECTION_RESPONSE_SENT,
+        connection::connection_response_received::layout::TYPE_CONNECTION_RESPONSE_RECEIVED,
+        connection::connection_established::layout::TYPE_CONNECTION_ESTABLISHED,
         sync::have_id::layout::TYPE_SYNC_HAVE_ID,
         sync::need_id::layout::TYPE_SYNC_NEED_ID,
     ]

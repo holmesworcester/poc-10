@@ -6,7 +6,7 @@ use std::io::Read;
 use std::net::TcpListener;
 use std::thread;
 
-use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
+use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
 use topo::core::network;
@@ -14,10 +14,10 @@ use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
-use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
-use topo::protocol::connection::bootstrap_request::layout as connection_request_layout;
 use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
 use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
+use topo::protocol::connection::bootstrap_response::rows as connection_response_rows;
+use topo::protocol::connection::observed_endpoint_address::rows as observed_endpoint_rows;
 use topo::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame, SendNetworkFrameHandler, SEND_NETWORK_FRAME,
 };
@@ -40,7 +40,8 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
         .expect("seed local endpoint");
-    let (connection_fact, request_fact) = routed_connection(addr, local_endpoint.endpoint);
+    let (connection_fact, connection, route) = routed_connection(addr, local_endpoint.endpoint);
+    seed_connection_route(&store, connection_fact.id, &connection, route);
     let input = SendNetworkFrame {
         routing_key: connection_fact.id,
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
@@ -52,7 +53,7 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
     let output = handler
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact, request_fact]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact]).with_store(&store),
         )
         .expect("network send should write frame");
 
@@ -88,7 +89,8 @@ fn unreachable_peer_requests_retry_without_consuming_intent() {
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
         .expect("seed local endpoint");
-    let (connection_fact, request_fact) = routed_connection(addr, local_endpoint.endpoint);
+    let (connection_fact, connection, route) = routed_connection(addr, local_endpoint.endpoint);
+    seed_connection_route(&store, connection_fact.id, &connection, route);
     let intent = send_network_frame_intent(SendNetworkFrame {
         routing_key: connection_fact.id,
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
@@ -97,7 +99,7 @@ fn unreachable_peer_requests_retry_without_consuming_intent() {
     let err = SendNetworkFrameHandler::new()
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact, request_fact]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact]).with_store(&store),
         )
         .expect_err("unreachable peer should request retry");
 
@@ -112,7 +114,9 @@ fn missing_route_requests_retry_without_consuming_intent() {
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
         .expect("seed local endpoint");
-    let (connection_fact, request_fact) = connection_without_return_route(local_endpoint.endpoint);
+    let (connection_fact, connection, route) =
+        connection_without_return_route(local_endpoint.endpoint);
+    seed_connection_route(&store, connection_fact.id, &connection, route);
     let intent = send_network_frame_intent(SendNetworkFrame {
         routing_key: connection_fact.id,
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
@@ -121,7 +125,7 @@ fn missing_route_requests_retry_without_consuming_intent() {
     let err = SendNetworkFrameHandler::new()
         .handle(
             &intent,
-            &HandlerContext::with_facts([connection_fact, request_fact]).with_store(&store),
+            &HandlerContext::with_facts([connection_fact]).with_store(&store),
         )
         .expect_err("missing route should request retry");
 
@@ -149,42 +153,29 @@ fn test_store() -> Store {
     .expect("store")
 }
 
-fn routed_connection(addr: std::net::SocketAddr, local_endpoint: [u8; 32]) -> (Fact, Fact) {
+fn routed_connection(
+    addr: std::net::SocketAddr,
+    local_endpoint: [u8; 32],
+) -> (Fact, BootstrapResponseFact, Option<std::net::SocketAddr>) {
     connection_with_return_route(Some(addr), local_endpoint)
 }
 
-fn connection_without_return_route(local_endpoint: [u8; 32]) -> (Fact, Fact) {
+fn connection_without_return_route(
+    local_endpoint: [u8; 32],
+) -> (Fact, BootstrapResponseFact, Option<std::net::SocketAddr>) {
     connection_with_return_route(None, local_endpoint)
 }
 
 fn connection_with_return_route(
     return_addr: Option<std::net::SocketAddr>,
     local_endpoint: [u8; 32],
-) -> (Fact, Fact) {
-    let request = BootstrapRequestFact {
-        from_endpoint: [10; 32],
-        to_endpoint: local_endpoint,
-        nonce: [12; 32],
-        invite_fact_id: [13; 32],
-        bootstrap_hash: [14; 32],
-        invite_signature: [15; ED25519_SIGNATURE_BYTES],
+) -> (Fact, BootstrapResponseFact, Option<std::net::SocketAddr>) {
+    let connection = BootstrapResponseFact {
+        from_endpoint: local_endpoint,
+        to_endpoint: [10; 32],
+        request_id: [11; 32],
         invite_secret_fact_id: [16; 32],
         initiator_ephemeral_secret_fact_id: [17; 32],
-        initiator_ephemeral_public_key: [18; 32],
-        from_listen_addr: return_addr,
-        to_listen_addr: None,
-    };
-    let request_fact = Fact::new(
-        FactScope::Global,
-        1,
-        connection_request_layout::encode_fact(&request).expect("request"),
-    );
-    let connection = BootstrapResponseFact {
-        from_endpoint: request.to_endpoint,
-        to_endpoint: request.from_endpoint,
-        request_id: request_fact.id,
-        invite_secret_fact_id: request.invite_secret_fact_id,
-        initiator_ephemeral_secret_fact_id: request.initiator_ephemeral_secret_fact_id,
         responder_ephemeral_secret_fact_id: [19; 32],
         responder_ephemeral_public_key: [20; 32],
         handshake_hash: [21; 32],
@@ -195,5 +186,27 @@ fn connection_with_return_route(
         1,
         connection_response_layout::encode_fact(&connection).expect("response"),
     );
-    (connection_fact, request_fact)
+    (connection_fact, connection, return_addr)
+}
+
+fn seed_connection_route(
+    store: &Store,
+    connection_id: [u8; 32],
+    connection: &BootstrapResponseFact,
+    route: Option<std::net::SocketAddr>,
+) {
+    let mut rows =
+        vec![
+            connection_response_rows::bootstrap_response_row(connection_id, connection)
+                .expect("connection row"),
+        ];
+    if let Some(addr) = route {
+        rows.push(
+            observed_endpoint_rows::observed_endpoint_address_row(connection.to_endpoint, addr)
+                .expect("observed route"),
+        );
+    }
+    store
+        .insert_table_rows(rows)
+        .expect("seed connection route");
 }

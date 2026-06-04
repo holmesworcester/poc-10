@@ -43,7 +43,9 @@ impl Projector for InviteServerProjector {
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::InviteServerAuthenticator> for InviteServerProjector {
+impl AuthenticatedProjector<super::authenticate::InviteServerAuthenticator>
+    for InviteServerProjector
+{
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, InviteServerFact>,

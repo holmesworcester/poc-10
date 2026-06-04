@@ -7,6 +7,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cli_harness::*;
+use topo::core::cli::decode_hex_32;
+use topo::core::schema::CORE_SCHEMA_SOURCE;
+use topo::core::store::Store;
+use topo::protocol::auth::{admin, workspace as auth_workspace};
+use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
 fn two_endpoints_sync_multiple_mutual_workspaces() {
@@ -341,6 +346,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
         true,
         30_000,
     );
+    poll_for_local_admin(&carol, &workspace, 30_000);
     poll_for_key_access(&carol, &workspace, &removal_frontier_id, "yes", 30_000);
 
     let carol_send = assert_success(topo(&[
@@ -945,6 +951,39 @@ fn poll_for_key_access(
         thread::sleep(Duration::from_millis(250));
     }
     panic!("key-access did not reach {expected} in {db}; last output:\n{last}");
+}
+
+fn poll_for_local_admin(db: &str, workspace_id_hex: &str, timeout_ms: u64) {
+    let workspace_id = decode_hex_32(workspace_id_hex).expect("workspace id");
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        match local_admin_visible(db, workspace_id) {
+            Ok(true) => return,
+            Ok(false) => last = "admin row not visible".to_string(),
+            Err(err) => last = err,
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("local admin did not converge in {db}; last state:\n{last}");
+}
+
+fn local_admin_visible(db: &str, workspace_id: [u8; 32]) -> Result<bool, String> {
+    let store =
+        Store::open_disk_with_schema_sources(db, &[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+            .map_err(|err| format!("open store: {err}"))?;
+    let membership = auth_workspace::queries::local_membership(&store, workspace_id)?
+        .ok_or_else(|| "local endpoint has not joined workspace".to_string())?;
+    let rows = store
+        .table_rows_with_key_prefix(admin::rows::ADMIN_ROWS, &workspace_id, usize::MAX)
+        .map_err(|err| format!("load admin rows: {err}"))?;
+    for (key, value) in rows {
+        let row = admin::rows::decode_admin_row(&key, &value)?;
+        if row.user_fact_id == membership.user_authority_fact_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn poll_for_message_text(db: &str, workspace_id: &str, expected_text: &str, timeout_ms: u64) {

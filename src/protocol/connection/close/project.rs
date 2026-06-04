@@ -18,7 +18,7 @@ use crate::core::projectors::{
     ProjectionOutput, Projector,
 };
 
-use crate::protocol::connection::bootstrap_response as response;
+use crate::protocol::connection::{bootstrap_response as response, connection_established};
 
 const CONNECTION_CLOSED_ROLE: &str = "connection_closed";
 const CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE: &str = "connection_ephemeral_secret_closed";
@@ -109,14 +109,28 @@ impl AuthenticatedProjector<super::authenticate::ConnectionCloseAuthenticator>
         let Some(connection_fact) = context.payload_for(&connection_need) else {
             return Ok(ProjectionOutput::new().need(connection_need));
         };
-        if connection_fact.id != close.connection_id {
-            return Err("connection close context id does not match close".to_string());
-        }
         if connection_fact.scope != FactScope::Local {
             return Err("connection close context must be local".to_string());
         }
-        let connection = response::decode_fact_payload(connection_fact.body())
-            .map_err(|_| "connection close context is not a connection response".to_string())?;
+        let (initiator_ephemeral_secret_fact_id, responder_ephemeral_secret_fact_id) =
+            if let Ok(connection) = response::decode_fact_payload(connection_fact.body()) {
+                (
+                    connection.initiator_ephemeral_secret_fact_id,
+                    connection.responder_ephemeral_secret_fact_id,
+                )
+            } else {
+                let established = connection_established::decode_fact_payload(
+                    connection_fact.body(),
+                )
+                .map_err(|_| "connection close context is not a connection response".to_string())?;
+                if established.connection_id != close.connection_id {
+                    return Err("connection close context targets another connection".to_string());
+                }
+                (
+                    established.initiator_ephemeral_secret_fact_id,
+                    established.responder_ephemeral_secret_fact_id,
+                )
+            };
 
         // 3. Materialize close context for the target owners.
         Ok(ProjectionOutput::new()
@@ -124,11 +138,11 @@ impl AuthenticatedProjector<super::authenticate::ConnectionCloseAuthenticator>
             .offer(connection_closed_offer(fact.id, close.connection_id))
             .offer(ephemeral_secret_closed_offer(
                 fact.id,
-                connection.initiator_ephemeral_secret_fact_id,
+                initiator_ephemeral_secret_fact_id,
             ))
             .offer(ephemeral_secret_closed_offer(
                 fact.id,
-                connection.responder_ephemeral_secret_fact_id,
+                responder_ephemeral_secret_fact_id,
             )))
     }
 }

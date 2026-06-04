@@ -19,22 +19,22 @@ use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
 use topo::protocol::auth::invite::layout as invite_layout;
+use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+use topo::protocol::connection::bootstrap_request::layout as request_layout;
+use topo::protocol::connection::bootstrap_response::layout as response_layout;
 use topo::protocol::connection::bootstrap_response::transit as bootstrap_response;
 use topo::protocol::connection::create_bootstrap_response::{
     create_bootstrap_response_intent, CreateBootstrapResponse, CreateBootstrapResponseHandler,
 };
 use topo::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
-use topo::protocol::connection::send_bootstrap_response::{
-    send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
-    SendBootstrapConnectionResponseHandler,
-};
 use topo::protocol::connection::fact_receipt::fact::{
     ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST,
 };
 use topo::protocol::connection::fact_receipt::layout as received_layout;
-use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
-use topo::protocol::connection::bootstrap_request::layout as request_layout;
-use topo::protocol::connection::bootstrap_response::layout as response_layout;
+use topo::protocol::connection::send_bootstrap_response::{
+    send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
+    SendBootstrapConnectionResponseHandler,
+};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
@@ -64,7 +64,10 @@ fn create_handler_emits_responder_material_and_response_fact_without_sending() {
 
     assert_eq!(output.facts.len(), 2);
     assert!(output.intents.is_empty(), "create handler chains no intent");
-    assert!(output.local_intents.is_empty(), "create handler sends nothing");
+    assert!(
+        output.local_intents.is_empty(),
+        "create handler sends nothing"
+    );
     let ephemeral_fact = responder_ephemeral_fact(&output);
     let response_fact = response_fact(&output);
     let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body()).expect("ephemeral");
@@ -73,7 +76,10 @@ fn create_handler_emits_responder_material_and_response_fact_without_sending() {
     assert_eq!(ephemeral.owner_endpoint, scenario.responder_endpoint);
     assert_eq!(ephemeral.created_at_ms, scenario.received_at);
     assert_ne!(ephemeral.ephemeral_private_key, [0u8; 32]);
-    assert_eq!(response.responder_ephemeral_secret_fact_id, ephemeral_fact.id);
+    assert_eq!(
+        response.responder_ephemeral_secret_fact_id,
+        ephemeral_fact.id
+    );
     assert_eq!(
         response.responder_ephemeral_public_key,
         ephemeral.ephemeral_public_key

@@ -443,26 +443,27 @@ fn process_pending_fact(
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<(), String> {
     let fact_id = pending_fact.fact_id;
-    let effects = match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-        prepare_projection_effects(
-            projector,
-            pending_fact,
-            store,
-            allowed_tables,
-            intent_policy,
-        )
-    }) {
-        Ok(effects) => effects,
-        Err(_rejection) => {
-            // Ephemeral input rejected by projection/authentication: drop the
-            // transient input so one bad input never halts the drain. Ephemeral
-            // facts are never durable, so there is nothing to purge or keep.
-            store
-                .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
-                .map_err(|err| format!("drop rejected ephemeral projection input: {err}"))?;
-            return Ok(());
-        }
-    };
+    let effects =
+        match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
+            prepare_projection_effects(
+                projector,
+                pending_fact,
+                store,
+                allowed_tables,
+                intent_policy,
+            )
+        }) {
+            Ok(effects) => effects,
+            Err(_rejection) => {
+                // Ephemeral input rejected by projection/authentication: drop the
+                // transient input so one bad input never halts the drain. Ephemeral
+                // facts are never durable, so there is nothing to purge or keep.
+                store
+                    .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
+                    .map_err(|err| format!("drop rejected ephemeral projection input: {err}"))?;
+                return Ok(());
+            }
+        };
     let suppressed_intents =
         crate::core::perf_profile::measure_result("projection_commit_effects", || {
             commit_projection_effects(store, &effects, projector, allowed_tables, intent_policy)
@@ -482,21 +483,22 @@ fn process_pending_fact_in_tx(
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> rusqlite::Result<()> {
     let fact_id = pending_fact.fact_id;
-    let effects = match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-        prepare_projection_effects(projector, pending_fact, tx, allowed_tables, intent_policy)
-    }) {
-        Ok(effects) => effects,
-        Err(_rejection) => {
-            // Projection or authentication rejected this one fact. Preparation
-            // writes no rows, so there is nothing to roll back: isolate the fact
-            // and continue, so a single bad fact never aborts the rest of the
-            // batch. Infrastructure failures arise only in load/commit below and
-            // still propagate. (`isolate_rejected_durable_fact_in_tx` decides
-            // whether the fact is purged or kept.)
-            isolate_rejected_durable_fact_in_tx(tx, fact_id, projector)?;
-            return Ok(());
-        }
-    };
+    let effects =
+        match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
+            prepare_projection_effects(projector, pending_fact, tx, allowed_tables, intent_policy)
+        }) {
+            Ok(effects) => effects,
+            Err(_rejection) => {
+                // Projection or authentication rejected this one fact. Preparation
+                // writes no rows, so there is nothing to roll back: isolate the fact
+                // and continue, so a single bad fact never aborts the rest of the
+                // batch. Infrastructure failures arise only in load/commit below and
+                // still propagate. (`isolate_rejected_durable_fact_in_tx` decides
+                // whether the fact is purged or kept.)
+                isolate_rejected_durable_fact_in_tx(tx, fact_id, projector)?;
+                return Ok(());
+            }
+        };
     let suppressed_intents =
         crate::core::perf_profile::measure_result("projection_commit_effects", || {
             commit_projection_effects_in_tx(
@@ -1430,11 +1432,9 @@ mod tests {
         // The failing fact fails regardless of context (context-free), so it is
         // purged: not retried and its bytes dropped.
         assert_eq!(pending_projection_count(&store, failing.id), 0);
-        assert!(
-            crate::core::fact_store::persisted_fact(&store, &failing.id)
-                .expect("load failing fact")
-                .is_none()
-        );
+        assert!(crate::core::fact_store::persisted_fact(&store, &failing.id)
+            .expect("load failing fact")
+            .is_none());
     }
 
     #[test]
@@ -1470,11 +1470,9 @@ mod tests {
         // context), so the rejection was inconsistent *context*: it is kept as
         // evidence (bytes retained) and just not retried (pending cleared).
         assert_eq!(pending_projection_count(&store, failing.id), 0);
-        assert!(
-            crate::core::fact_store::persisted_fact(&store, &failing.id)
-                .expect("load failing fact")
-                .is_some()
-        );
+        assert!(crate::core::fact_store::persisted_fact(&store, &failing.id)
+            .expect("load failing fact")
+            .is_some());
     }
 
     #[test]

@@ -117,10 +117,11 @@ impl IntentHandler for SendBootstrapConnectionRequestHandler {
                     .into(),
             );
         }
-        let sealed = crate::protocol::connection::bootstrap_request::transit::seal_connection_request(
-            request_fact.body(),
-            &ephemeral.ephemeral_private_key,
-        )?;
+        let sealed =
+            crate::protocol::connection::bootstrap_request::transit::seal_connection_request(
+                request_fact.body(),
+                &ephemeral.ephemeral_private_key,
+            )?;
         let target = NetworkTarget::new(input.addr);
         if network::send(context.store()?, target, OutboundFrame { bytes: sealed }).is_err() {
             return Ok(PipelineEffects::new());
@@ -151,11 +152,11 @@ mod tests {
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
+    use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
     use crate::protocol::connection::bootstrap_request::transit as request_transit;
     use crate::protocol::connection::ephemeral_secret::{
         fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
     };
-    use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     #[test]

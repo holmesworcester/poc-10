@@ -170,8 +170,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "receive_network_frame",
                 "send_bootstrap_request",
                 "send_bootstrap_response",
-                "send_connection_request",
-                "send_connection_response",
                 "send_facts_on_connection",
                 "send_network_frame",
             ],
@@ -465,9 +463,9 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
         // `project_authenticated::<super::authenticate::_, _>()` and implements
         // `AuthenticatedProjector<super::authenticate::_>`, so it starts from an
         // already-authenticated fact and never parses its own primary bytes.
-        let routes_authenticated =
-            production.contains("project_authenticated::<super::authenticate::")
-                && production.contains("impl AuthenticatedProjector<super::authenticate::");
+        let routes_authenticated = production
+            .contains("project_authenticated::<super::authenticate::")
+            && production.contains("impl AuthenticatedProjector<super::authenticate::");
         if !routes_authenticated {
             missing_delegation.push(relative.clone());
         }
@@ -1183,7 +1181,8 @@ const STANDARD_FAMILY_FILES: [&str; 10] = [
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local directories that are deliberately not fact families.
-const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] = ["content/purge", "connection/observed_endpoint_address"];
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 2] =
+    ["content/purge", "connection/observed_endpoint_address"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {

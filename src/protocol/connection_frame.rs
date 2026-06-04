@@ -65,10 +65,13 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST
             | connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE
-            | connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST
-            | connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE
             | connection::connection_request::layout::TYPE_CONNECTION_REQUEST
             | connection::connection_response::layout::TYPE_CONNECTION_RESPONSE
+            | connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT
+            | connection::connection_request_received::layout::TYPE_CONNECTION_REQUEST_RECEIVED
+            | connection::connection_response_sent::layout::TYPE_CONNECTION_RESPONSE_SENT
+            | connection::connection_response_received::layout::TYPE_CONNECTION_RESPONSE_RECEIVED
+            | connection::connection_established::layout::TYPE_CONNECTION_ESTABLISHED
             | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
             | auth::invite::layout::TYPE_INVITE_SECRET
             | auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET
@@ -118,7 +121,9 @@ pub fn received_connection_request_fact_effect(
     received_at_local_ms: u64,
     frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(request) = typed_payload_from_bytes::<connection::bootstrap_request::Codec>(request_bytes) else {
+    let Ok(request) =
+        typed_payload_from_bytes::<connection::bootstrap_request::Codec>(request_bytes)
+    else {
         return Ok(PipelineEffects::new());
     };
     let request_fact = Fact::new(
@@ -146,7 +151,8 @@ pub fn received_connection_response_fact_effect(
     received_at_local_ms: u64,
     frame_hash: [u8; 32],
 ) -> Result<PipelineEffects, String> {
-    let Ok(response) = typed_payload_from_bytes::<connection::bootstrap_response::Codec>(response_bytes)
+    let Ok(response) =
+        typed_payload_from_bytes::<connection::bootstrap_response::Codec>(response_bytes)
     else {
         return Ok(PipelineEffects::new());
     };
@@ -180,7 +186,11 @@ pub fn received_membership_connection_request_fact_effect(
     else {
         return Ok(PipelineEffects::new());
     };
-    let request_fact = Fact::new(FactScope::Global, received_at_local_ms, request_bytes.to_vec());
+    let request_fact = Fact::new(
+        FactScope::Global,
+        received_at_local_ms,
+        request_bytes.to_vec(),
+    );
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: request_fact.id,
         origin_addr,
@@ -206,7 +216,11 @@ pub fn received_membership_connection_response_fact_effect(
     else {
         return Ok(PipelineEffects::new());
     };
-    let response_fact = Fact::new(FactScope::Local, received_at_local_ms, response_bytes.to_vec());
+    let response_fact = Fact::new(
+        FactScope::Local,
+        received_at_local_ms,
+        response_bytes.to_vec(),
+    );
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
         received_fact_id: response_fact.id,
         origin_addr,
@@ -256,6 +270,49 @@ pub fn observed_frame_effect(
     Ok(PipelineEffects::new()
         .fact(observation)
         .ephemeral_fact(frame_fact))
+}
+
+pub fn observed_handshake_fact_effect(
+    frame_fact: Fact,
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+) -> Result<PipelineEffects, String> {
+    let observation = connection::frame_observation::create::fact_from_observation(
+        frame_fact.id,
+        origin_addr,
+        received_at_local_ms,
+    )?;
+    Ok(PipelineEffects::new().fact(observation).fact(frame_fact))
+}
+
+pub fn observed_membership_request_fact_effect(
+    frame_bytes: Vec<u8>,
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+) -> Result<PipelineEffects, String> {
+    if !connection::connection_request::layout::is_sealed_fact(&frame_bytes) {
+        return Ok(PipelineEffects::new());
+    }
+    observed_handshake_fact_effect(
+        Fact::new(FactScope::Global, received_at_local_ms, frame_bytes),
+        origin_addr,
+        received_at_local_ms,
+    )
+}
+
+pub fn observed_membership_response_fact_effect(
+    frame_bytes: Vec<u8>,
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+) -> Result<PipelineEffects, String> {
+    if !connection::connection_response::layout::is_sealed_fact(&frame_bytes) {
+        return Ok(PipelineEffects::new());
+    }
+    observed_handshake_fact_effect(
+        Fact::new(FactScope::Local, received_at_local_ms, frame_bytes),
+        origin_addr,
+        received_at_local_ms,
+    )
 }
 
 /// Build the ephemeral fact for a received sealed handshake frame. Its type tag
@@ -326,9 +383,6 @@ pub fn project_observed_frame(
     let Some(connection_fact) = context.payload_for(&connection_need) else {
         return Ok(ProjectionOutput::new().need(connection_need));
     };
-    if connection_fact.id != connection_id {
-        return Err("connection frame context id does not match frame".to_string());
-    }
     if connection_fact.scope != FactScope::Local {
         return Err("connection frame context must be local".to_string());
     }
@@ -414,8 +468,9 @@ impl Projector for SealedHandshakeFrameProjector {
         if endpoint_fact.scope != FactScope::Local {
             return Err("sealed handshake frame endpoint context must be local".to_string());
         }
-        let endpoint = auth::endpoint::decode_fact_payload(endpoint_fact.body())
-            .map_err(|_| "sealed handshake frame endpoint context is not a local endpoint".to_string())?;
+        let endpoint = auth::endpoint::decode_fact_payload(endpoint_fact.body()).map_err(|_| {
+            "sealed handshake frame endpoint context is not a local endpoint".to_string()
+        })?;
 
         let origin = observation.origin_addr.bytes();
         let received_at_local_ms = observation.received_at_local_ms;
@@ -429,7 +484,12 @@ impl Projector for SealedHandshakeFrameProjector {
                 ) else {
                     return Ok(ProjectionOutput::new());
                 };
-                received_connection_request_fact_effect(&bytes, origin, received_at_local_ms, frame_hash)?
+                received_connection_request_fact_effect(
+                    &bytes,
+                    origin,
+                    received_at_local_ms,
+                    frame_hash,
+                )?
             }
             connection::bootstrap_response::transit::TYPE_SEALED_CONNECTION_RESPONSE => {
                 let Ok(bytes) = connection::bootstrap_response::transit::open_connection_response(
@@ -438,30 +498,7 @@ impl Projector for SealedHandshakeFrameProjector {
                 ) else {
                     return Ok(ProjectionOutput::new());
                 };
-                received_connection_response_fact_effect(&bytes, origin, received_at_local_ms, frame_hash)?
-            }
-            connection::connection_request::transit::TYPE_SEALED_CONNECTION_REQUEST => {
-                let Ok(bytes) = connection::connection_request::transit::open_connection_request(
-                    fact.body(),
-                    &endpoint,
-                ) else {
-                    return Ok(ProjectionOutput::new());
-                };
-                received_membership_connection_request_fact_effect(
-                    &bytes,
-                    origin,
-                    received_at_local_ms,
-                    frame_hash,
-                )?
-            }
-            connection::connection_response::transit::TYPE_SEALED_CONNECTION_RESPONSE => {
-                let Ok(bytes) = connection::connection_response::transit::open_connection_response(
-                    fact.body(),
-                    &endpoint,
-                ) else {
-                    return Ok(ProjectionOutput::new());
-                };
-                received_membership_connection_response_fact_effect(
+                received_connection_response_fact_effect(
                     &bytes,
                     origin,
                     received_at_local_ms,
@@ -483,9 +520,9 @@ fn facts_output(facts: Vec<Fact>) -> ProjectionOutput {
 }
 
 pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, String> {
-    let connection = connection::bootstrap_response::Codec::decode_fact(input.connection_fact)?;
+    let connection = connection_material_from_fact(input.connection_fact)?;
     let opened = wire::open_connection_frame(input.frame, &connection.connection_secret)?;
-    if input.connection_fact.id != opened.connection_id {
+    if connection.connection_id != opened.connection_id {
         return Err(
             "connection::frame frame connection id does not match connection fact".to_string(),
         );
@@ -514,6 +551,35 @@ pub fn open_received_frame(input: OpenReceivedFrame<'_>) -> Result<Vec<Fact>, St
         facts.push(receipt);
     }
     Ok(facts)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConnectionMaterial {
+    connection_id: FactId,
+    from_endpoint: FactId,
+    to_endpoint: FactId,
+    request_id: FactId,
+    connection_secret: [u8; 32],
+}
+
+fn connection_material_from_fact(fact: &Fact) -> Result<ConnectionMaterial, String> {
+    if let Ok(connection) = connection::bootstrap_response::Codec::decode_fact(fact) {
+        return Ok(ConnectionMaterial {
+            connection_id: fact.id,
+            from_endpoint: connection.from_endpoint,
+            to_endpoint: connection.to_endpoint,
+            request_id: connection.request_id,
+            connection_secret: connection.connection_secret,
+        });
+    }
+    let established = connection::connection_established::Codec::decode_fact(fact)?;
+    Ok(ConnectionMaterial {
+        connection_id: established.connection_id,
+        from_endpoint: established.from_endpoint,
+        to_endpoint: established.to_endpoint,
+        request_id: established.request_id,
+        connection_secret: established.connection_secret,
+    })
 }
 
 fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
@@ -718,19 +784,21 @@ fn workspace_scope(workspace_id: FactId) -> FactScope {
     crate::protocol::auth::workspace::scope(workspace_id)
 }
 
-struct ConnectionFactReceiptInput<'a> {
-    received_fact_id: FactId,
-    origin_addr: &'a [u8],
-    local_endpoint_id: FactId,
-    sender_endpoint_id: FactId,
-    receive_path: u8,
-    connection_id: Option<FactId>,
-    request_id: Option<FactId>,
-    frame_hash: [u8; 32],
-    received_at_local_ms: u64,
+pub struct ConnectionFactReceiptInput<'a> {
+    pub received_fact_id: FactId,
+    pub origin_addr: &'a [u8],
+    pub local_endpoint_id: FactId,
+    pub sender_endpoint_id: FactId,
+    pub receive_path: u8,
+    pub connection_id: Option<FactId>,
+    pub request_id: Option<FactId>,
+    pub frame_hash: [u8; 32],
+    pub received_at_local_ms: u64,
 }
 
-fn connection_fact_receipt_for_path(input: ConnectionFactReceiptInput<'_>) -> Result<Fact, String> {
+pub fn connection_fact_receipt_for_path(
+    input: ConnectionFactReceiptInput<'_>,
+) -> Result<Fact, String> {
     let fact = connection::fact_receipt::fact::ConnectionFactReceipt {
         received_fact_id: input.received_fact_id,
         origin_addr: connection::fact_receipt::fact::OriginAddr::new(input.origin_addr)
@@ -751,7 +819,7 @@ fn connection_fact_receipt_for_path(input: ConnectionFactReceiptInput<'_>) -> Re
 }
 
 fn require_connection_endpoints(
-    connection: &connection::bootstrap_response::fact::BootstrapResponseFact,
+    connection: &ConnectionMaterial,
     sender_endpoint_id: FactId,
     receiver_endpoint_id: FactId,
 ) -> Result<(), String> {

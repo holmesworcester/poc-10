@@ -134,10 +134,17 @@ use crate::core::intents::{
 };
 use crate::protocol::auth::endpoint::create as local_endpoint;
 use crate::protocol::auth::endpoint_shared;
+use crate::protocol::connection::connection_established::{
+    fact::ConnectionEstablishedFact, layout as established_layout,
+};
 use crate::protocol::connection::connection_request::create as request_create;
 use crate::protocol::connection::connection_request::layout as request_layout;
 use crate::protocol::connection::connection_response::create::{
     build_responder_response, BuildResponderResponse,
+};
+use crate::protocol::connection::connection_response::layout as response_layout;
+use crate::protocol::connection::connection_response_sent::{
+    fact::ConnectionResponseSentFact, layout as response_sent_layout,
 };
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
@@ -169,31 +176,42 @@ impl IntentHandler for CreateConnectionResponseHandler {
         let shared_fact = context.require_fact(&input.initiator_endpoint_shared_id)?;
         let receive_fact = context.require_fact(&input.receive_id)?;
 
-        let request = request_layout::decode_fact(request_fact.body())?;
-        let initiator_shared = endpoint_shared::decode_fact_payload(shared_fact.body())
-            .map_err(|_| HandlerError::fatal("create_connection_response context is not endpoint_shared"))?;
+        let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {
+            HandlerError::fatal("create_connection_response requires local endpoint state")
+        })?;
+        let request = request_layout::open_fact(request_fact.body(), &endpoint)?;
+        let initiator_shared =
+            endpoint_shared::decode_fact_payload(shared_fact.body()).map_err(|_| {
+                HandlerError::fatal("create_connection_response context is not endpoint_shared")
+            })?;
         let received = fact_receipt::decode_fact_payload(receive_fact.body()).map_err(|_| {
-            HandlerError::fatal("create_connection_response receive context is not connection fact receipt")
+            HandlerError::fatal(
+                "create_connection_response receive context is not connection fact receipt",
+            )
         })?;
 
         if request.initiator_endpoint_shared_id != input.initiator_endpoint_shared_id {
-            return Err("create_connection_response endpoint_shared id does not match request".into());
+            return Err(
+                "create_connection_response endpoint_shared id does not match request".into(),
+            );
         }
         if shared_fact.scope != FactScope::Global {
             return Err("create_connection_response endpoint_shared context must be global".into());
         }
         if initiator_shared.endpoint_id != request.from_endpoint {
-            return Err("create_connection_response endpoint_shared does not bind the sender".into());
+            return Err(
+                "create_connection_response endpoint_shared does not bind the sender".into(),
+            );
         }
         if receive_fact.scope != FactScope::Local {
             return Err("create_connection_response receive context must be local".into());
         }
-        request_create::validate_endpoint_signature(&request, &initiator_shared.signing_public_key)?;
+        request_create::validate_endpoint_signature(
+            &request,
+            &initiator_shared.signing_public_key,
+        )?;
         validate_fact_receipt(input.request_id, &request, &received)?;
 
-        let endpoint = local_endpoint::local_endpoint(context.store()?)?.ok_or_else(|| {
-            HandlerError::fatal("create_connection_response requires local endpoint state")
-        })?;
         if endpoint.endpoint != request.to_endpoint
             || endpoint.endpoint != received.local_endpoint_id
         {
@@ -224,10 +242,51 @@ impl IntentHandler for CreateConnectionResponseHandler {
             responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
             created_at_ms: received.received_at_local_ms,
         })?;
+        let sealed_response_bytes =
+            response_layout::seal_fact(&built.response, &responder_ephemeral_private_key)?;
+        let response_id = crate::core::facts::fact_id(&sealed_response_bytes);
+        let sealed_response_bytes = sealed_response_bytes.as_slice().try_into().map_err(|_| {
+            "sealed membership connection response has unexpected byte length".to_string()
+        })?;
+        let peer_addr = request
+            .from_listen_addr
+            .ok_or_else(|| "create_connection_response response route is missing".to_string())?;
+        let response_sent = ConnectionResponseSentFact {
+            response_id,
+            request_id: input.request_id,
+            responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
+            peer_addr,
+            response: built.response,
+            sealed_response_bytes,
+            created_at_ms: received.received_at_local_ms,
+        };
+        let response_sent_fact = Fact::new(
+            FactScope::Local,
+            received.received_at_local_ms,
+            response_sent_layout::encode_fact(&response_sent)?,
+        );
+        let established = ConnectionEstablishedFact {
+            connection_id: response_id,
+            from_endpoint: built.response.from_endpoint,
+            to_endpoint: built.response.to_endpoint,
+            request_id: built.response.request_id,
+            initiator_ephemeral_secret_fact_id: built.response.initiator_ephemeral_secret_fact_id,
+            responder_ephemeral_secret_fact_id: built.response.responder_ephemeral_secret_fact_id,
+            responder_ephemeral_public_key: built.response.responder_ephemeral_public_key,
+            handshake_hash: built.response.handshake_hash,
+            connection_secret: built.response.connection_secret,
+            established_at_ms: received.received_at_local_ms,
+        };
+        let established_fact = Fact::new(
+            FactScope::Local,
+            received.received_at_local_ms,
+            established_layout::encode_fact(&established)?,
+        );
 
         Ok(PipelineEffects::new()
             .fact(responder_ephemeral_fact)
-            .fact(built.fact))
+            .fact(response_sent_fact)
+            .fact(established_fact))
     }
 }
 

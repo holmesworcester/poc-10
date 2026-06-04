@@ -215,12 +215,7 @@ fn root_admin_fact(
         signer_public_key: crypto::ed25519_public_key(&signer_private_key),
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    auth::admin::create::signed_admin_fact(
-        created_at_ms,
-        workspace_id,
-        signer_private_key,
-        payload,
-    )
+    auth::admin::create::signed_admin_fact(created_at_ms, workspace_id, signer_private_key, payload)
 }
 
 fn creator_admin_fact(

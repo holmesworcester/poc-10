@@ -19,8 +19,8 @@ use super::fact::BootstrapResponseFact;
 use super::layout;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
-use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
+use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 
 const HANDSHAKE_PURPOSE: &[u8] = b"topo-connection-handshake-v1";
 const CONNECTION_SECRET_PURPOSE: &[u8] = b"topo-connection-secret-v1";

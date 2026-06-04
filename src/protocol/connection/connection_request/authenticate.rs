@@ -18,8 +18,9 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
-    verify_fact_id, AuthenticatedFact, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, AuthenticatedFact, Authentication, Authenticator, ProjectionContext,
 };
+use crate::protocol::auth::endpoint;
 use crate::protocol::auth::endpoint_shared;
 
 use super::create::validate_endpoint_signature;
@@ -34,12 +35,36 @@ impl Authenticator for ConnectionRequestAuthenticator {
         fact: &'a Fact,
         context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        // 1. Layout.
-        let request = match super::Codec::decode_fact(fact) {
+        // 1. Sealed layout and id.
+        if let Err(error) = verify_fact_id(fact) {
+            return Authentication::Invalid(error);
+        }
+        if let Err(error) = super::layout::validate_sealed_fact(fact.body()) {
+            return Authentication::Invalid(error);
+        }
+        let endpoint_need = ContextNeed::range(
+            fact.id,
+            "auth_local_endpoint",
+            FactScope::Local,
+            [0u8; 32],
+            [0xffu8; 32],
+        );
+        let Some(endpoint_ctx) = context.payload_for(&endpoint_need) else {
+            return Authentication::NeedsAuthentication(endpoint_need);
+        };
+        let local_endpoint = match endpoint::decode_fact_payload(endpoint_ctx.body()) {
+            Ok(endpoint) => endpoint,
+            Err(_) => {
+                return Authentication::Invalid(
+                    "membership connection request endpoint context is malformed".to_string(),
+                )
+            }
+        };
+        let request = match super::layout::open_fact(fact.body(), &local_endpoint) {
             Ok(request) => request,
             Err(error) => return Authentication::Invalid(error),
         };
-        // 2. Id and 3. intrinsic fields.
+        // 2. Intrinsic fields.
         if let Err(error) = authenticate_request_shape(fact, &request) {
             return Authentication::Invalid(error);
         }
@@ -60,7 +85,8 @@ impl Authenticator for ConnectionRequestAuthenticator {
             Ok(shared) => shared,
             Err(_) => {
                 return Authentication::Invalid(
-                    "membership connection request endpoint_shared context is malformed".to_string(),
+                    "membership connection request endpoint_shared context is malformed"
+                        .to_string(),
                 )
             }
         };
@@ -73,9 +99,7 @@ impl Authenticator for ConnectionRequestAuthenticator {
     }
 }
 
-fn authenticate_request_shape(fact: &Fact, request: &ConnectionRequestFact) -> Result<(), String> {
-    // 2. Id.
-    verify_fact_id(fact)?;
+fn authenticate_request_shape(_fact: &Fact, request: &ConnectionRequestFact) -> Result<(), String> {
     // 3. Intrinsic fields.
     validate_request_fields(request)?;
     if request.from_endpoint == request.to_endpoint {
@@ -93,7 +117,8 @@ fn validate_request_fields(request: &ConnectionRequestFact) -> Result<(), String
     }
     if request.initiator_endpoint_shared_id == [0; 32] {
         return Err(
-            "membership connection request initiator_endpoint_shared_id cannot be empty".to_string(),
+            "membership connection request initiator_endpoint_shared_id cannot be empty"
+                .to_string(),
         );
     }
     if request.initiator_ephemeral_secret_fact_id == [0; 32] {
@@ -127,13 +152,18 @@ mod tests {
 
     fn canonical_fact() -> Fact {
         let from_endpoint = [1; 32];
+        let to_secret = [9; 32];
+        let to_endpoint = crypto::x25519_public_key(&to_secret);
+        let initiator_ephemeral_private_key = [10; 32];
         let mut request = ConnectionRequestFact {
             from_endpoint,
-            to_endpoint: [2; 32],
+            to_endpoint,
             nonce: [3; 32],
             initiator_endpoint_shared_id: [4; 32],
             initiator_ephemeral_secret_fact_id: [5; 32],
-            initiator_ephemeral_public_key: [6; 32],
+            initiator_ephemeral_public_key: crypto::x25519_public_key(
+                &initiator_ephemeral_private_key,
+            ),
             endpoint_signature: [0; ED25519_SIGNATURE_BYTES],
             from_listen_addr: None,
             to_listen_addr: None,
@@ -145,7 +175,8 @@ mod tests {
             signing_secret: SIGNING_SECRET,
         };
         sign_request(&mut request, &endpoint).expect("sign membership connection request");
-        let bytes = layout::encode_fact(&request).expect("encode connection_request fact");
+        let bytes = layout::seal_fact(&request, &initiator_ephemeral_private_key)
+            .expect("seal connection_request fact");
         Fact::new(FactScope::Global, 100, bytes)
     }
 
@@ -171,7 +202,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes[0] ^= 0xff;
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]
@@ -179,7 +214,11 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(canonical.scope, canonical.timestamp, bytes)));
+        assert!(is_invalid(&Fact::new(
+            canonical.scope,
+            canonical.timestamp,
+            bytes
+        )));
     }
 
     #[test]

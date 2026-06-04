@@ -111,7 +111,10 @@ pub fn initiator_material(
         &initiator_ephemeral.ephemeral_private_key,
         responder_ephemeral_public_key,
     );
-    let es = x25519_diffie_hellman(&initiator_ephemeral.ephemeral_private_key, &request.to_endpoint);
+    let es = x25519_diffie_hellman(
+        &initiator_ephemeral.ephemeral_private_key,
+        &request.to_endpoint,
+    );
     Ok(material(
         request_id,
         request,

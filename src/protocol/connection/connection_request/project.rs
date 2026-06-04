@@ -1,25 +1,23 @@
 //! Membership connection-request projector.
 //!
 //! Request projection validates a durable membership handshake request. Both
-//! branches first prove the initiator's `endpoint_shared` membership (context
+//! The receiver first proves the initiator's `endpoint_shared` membership (context
 //! role `auth_endpoint_shared`) and verify the request endpoint signature
-//! against that membership signing key. Local requests then prove initiator
-//! ephemeral context and emit the network-send intent for the sealed request
-//! bytes. Received requests additionally prove that the local endpoint is a
-//! member of the same workspace (role `content_signer`, mutual membership) plus
-//! a fact receipt, then emit deferred response creation.
+//! against that membership signing key. Received requests additionally prove
+//! that the local endpoint is a member of the same workspace (role
+//! `content_signer`, mutual membership) plus the socket observation, then emit a
+//! receipt fact, a `connection_request_received` fact, and deferred response
+//! creation.
 //!
 //! POLICY. A connection_request is admitted iff:
 //!   1. STRUCTURAL. The fact is local or global, fields are non-empty, endpoints
 //!      differ.
 //!   2. MEMBERSHIP. The initiator `endpoint_shared` is held, binds the sender
 //!      endpoint, and its signing key verifies the endpoint signature.
-//!   3. BRANCH CONTEXT. Local requests prove initiator ephemeral secret.
-//!      Received requests prove local endpoint ownership, mutual workspace
-//!      membership (PARK if not yet synced), and a connection request receipt.
-//!   4. MATERIALIZE. Offer request context; local requests schedule peer-retry
-//!      sends until a response appears; received requests emit deferred response
-//!      creation and learn the initiator's reachable address.
+//!   3. CONTEXT. Received requests prove local endpoint ownership, mutual
+//!      workspace membership (PARK if not yet synced), and a frame observation.
+//!   4. MATERIALIZE. Offer request context, emit receive history, emit deferred
+//!      response creation, and learn the initiator's reachable address.
 //!
 //! There is no invite material on this path. Change this projector for
 //! membership admission and branch context; byte layout lives in `layout.rs`,
@@ -29,20 +27,23 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::projectors::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
+    project_authenticated, AuthenticatedFact, AuthenticatedProjector, FactCodec, ProjectionContext,
     ProjectionOutput, Projector,
 };
 
 use crate::protocol::auth::{endpoint, endpoint_shared, workspace};
+use crate::protocol::connection::connection_request_received;
+use crate::protocol::connection::connection_request_received::fact::ConnectionRequestReceivedFact;
 use crate::protocol::connection::create_connection_response::{
     create_connection_response_intent, CreateConnectionResponse,
 };
-use crate::protocol::connection::ephemeral_secret;
-use crate::protocol::connection::fact_receipt;
+use crate::protocol::connection::frame_observation;
 use crate::protocol::connection::observed_endpoint_address::rows::observed_endpoint_address_row;
+use crate::protocol::connection_frame::{
+    connection_fact_receipt_for_path, ConnectionFactReceiptInput,
+};
 
 use super::fact::ConnectionRequestFact;
-use super::rows::connection_request_row;
 
 const MEMBERSHIP_CONNECTION_REQUEST_ROLE: &str = "membership_connection_request";
 const MEMBERSHIP_CONNECTION_RESPONSE_FOR_REQUEST_ROLE: &str =
@@ -162,77 +163,17 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
             })?;
         if initiator_shared.endpoint_id != request.from_endpoint {
             return Err(
-                "membership connection request endpoint_shared does not bind the sender".to_string(),
+                "membership connection request endpoint_shared does not bind the sender"
+                    .to_string(),
             );
         }
         let workspace_id = initiator_shared.workspace_id;
 
-        if fact.scope == FactScope::Local {
-            // 3a. Local send path: prove initiator ephemeral material.
-            let ephemeral_need = crate::core::context::ContextNeed::range(
-                fact.id,
-                "connection_ephemeral_secret",
-                FactScope::Local,
-                request.initiator_ephemeral_secret_fact_id,
-                request.initiator_ephemeral_secret_fact_id,
-            );
-            let Some(ephemeral) = projection_context.payload_for(&ephemeral_need) else {
-                return Ok(waiting_output([shared_need, ephemeral_need]));
-            };
-            let ephemeral_secret =
-                ephemeral_secret::decode_fact_payload(&ephemeral.bytes).map_err(|_| {
-                    "membership connection request dependency is not an ephemeral secret"
-                        .to_string()
-                })?;
-            if ephemeral.id != request.initiator_ephemeral_secret_fact_id {
-                return Err(
-                    "membership connection request ephemeral context id does not match".to_string(),
-                );
-            }
-            if ephemeral.scope != FactScope::Local {
-                return Err(
-                    "membership connection request ephemeral context must be local".to_string(),
-                );
-            }
-            if ephemeral_secret.owner_endpoint != request.from_endpoint {
-                return Err(
-                    "membership connection request ephemeral owner does not match sender"
-                        .to_string(),
-                );
-            }
-            if ephemeral_secret.ephemeral_public_key != request.initiator_ephemeral_public_key {
-                return Err(
-                    "membership connection request ephemeral public key does not match dependency"
-                        .to_string(),
-                );
-            }
-            // 4. Materialize local request.
-            let response_need = connection_response_for_request_need(fact.id, fact.id);
-            if let Some(response_fact) = projection_context.payload_for(&response_need) {
-                if response_fact.scope != FactScope::Local {
-                    return Err(
-                        "membership connection request response context must be local".to_string(),
-                    );
-                }
-                let response = crate::protocol::connection::connection_response::decode_fact_payload(
-                    response_fact.body(),
-                )
-                .map_err(|_| {
-                    "membership connection request response context is not a response fact"
-                        .to_string()
-                })?;
-                if response.request_id != fact.id {
-                    return Err(
-                        "membership connection request response context targets another request"
-                            .to_string(),
-                    );
-                }
-                return Ok(materialized_output(fact.id));
-            }
-            return Ok(local_outbound_output(fact, &request, response_need)?);
+        if fact.scope != FactScope::Global {
+            return Err("membership connection request fact must be received/global".to_string());
         }
 
-        // 3b. Received membership request path.
+        // 3. Received membership request path.
         let endpoint_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_local_endpoint",
@@ -241,9 +182,9 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
             request.to_endpoint,
         );
         let membership_need = content_signer_need(fact.id, workspace_id, request.to_endpoint);
-        let receive_need = crate::core::context::ContextNeed::range(
+        let observation_need = crate::core::context::ContextNeed::range(
             fact.id,
-            "connection_fact_receipt",
+            "connection_frame_observation",
             FactScope::Local,
             fact.id,
             fact.id,
@@ -253,7 +194,7 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
                 shared_need,
                 endpoint_need,
                 membership_need,
-                receive_need,
+                observation_need,
             ]));
         };
         if endpoint_context.scope != FactScope::Local {
@@ -275,7 +216,7 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
                 shared_need,
                 endpoint_need,
                 membership_need,
-                receive_need,
+                observation_need,
             ]));
         };
         let member_shared =
@@ -294,56 +235,40 @@ impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
                     .to_string(),
             );
         }
-        let Some(receive) = projection_context
-            .matched_payloads_for(&receive_need)
-            .map(|(_, fact)| fact)
-            .min_by_key(|fact| fact.id)
-        else {
+        let Some(observation_fact) = projection_context.payload_for(&observation_need) else {
             return Ok(waiting_output([
                 shared_need,
                 endpoint_need,
                 membership_need,
-                receive_need,
+                observation_need,
             ]));
         };
-        if receive.scope != FactScope::Local {
-            return Err("membership connection request receive context must be local".to_string());
-        }
-        let received = fact_receipt::decode_fact_payload(receive.body()).map_err(|_| {
-            "membership connection request receive context is not connection fact receipt"
-                .to_string()
-        })?;
-        if received.received_fact_id != fact.id {
+        if observation_fact.scope != FactScope::Local {
             return Err(
-                "membership connection request receive context targets another fact".to_string(),
+                "membership connection request observation context must be local".to_string(),
             );
         }
-        if received.receive_path != fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST {
+        let observation =
+            frame_observation::Codec::decode_fact(observation_fact).map_err(|_| {
+                "membership connection request observation context is malformed".to_string()
+            })?;
+        if observation.frame_fact_id != fact.id {
             return Err(
-                "membership connection request requires connection request receipt".to_string(),
+                "membership connection request observation targets another fact".to_string(),
             );
-        }
-        if received.local_endpoint_id != request.to_endpoint {
-            return Err("membership connection request addressed to a different endpoint".to_string());
-        }
-        if received.sender_endpoint_id != request.from_endpoint {
-            return Err(
-                "membership connection request sender does not match receive sender".to_string(),
-            );
-        }
-        if let Some(request_id) = received.request_id {
-            if request_id != fact.id {
-                return Err(
-                    "membership connection request fact receipt names another request".to_string(),
-                );
-            }
         }
         if request.from_listen_addr.is_none() {
             return Err("membership connection request response route is missing".to_string());
         }
 
         // 4. Materialize received request and schedule response creation.
-        received_materialized_output(fact.id, &request, receive.id)
+        received_materialized_output(
+            fact.id,
+            &request,
+            observation.origin_addr.bytes(),
+            crate::core::crypto::hash(fact.body()),
+            observation.received_at_local_ms,
+        )
     }
 }
 
@@ -378,50 +303,42 @@ fn materialized_output(request_id: [u8; 32]) -> ProjectionOutput {
     ProjectionOutput::new().offer(connection_request_offer(request_id, request_id))
 }
 
-/// Local outbound membership request: materialize the request row carrying the
-/// peer address, learn the peer's reachable address, and keep the
-/// response-for-request need so the row drops out of maintenance once answered.
-///
-/// As with bootstrap, the send is not emitted here: a projector-emitted send is
-/// a live-only intent that replay suppresses and never re-issues. The live
-/// `maintain_connections` recurring loop re-queries unanswered local outbound
-/// membership rows each tick and queues the send.
-fn local_outbound_output(
-    fact: &Fact,
-    request: &ConnectionRequestFact,
-    response_need: crate::core::context::ContextNeed,
-) -> Result<ProjectionOutput, String> {
-    let mut output = materialized_output(fact.id).need(response_need);
-    let Some(addr) = request.to_listen_addr else {
-        return Ok(output);
-    };
-    // The request row lets maintenance re-send; the learned-address row lets a
-    // later reconnect resolve the peer. `PutRow` is insert-or-ignore, so
-    // reprojecting the same request is a no-op.
-    output = output
-        .row_mutation(RowMutation::PutRow(connection_request_row(
-            fact.id,
-            request.initiator_ephemeral_secret_fact_id,
-            Some(addr),
-        )?))
-        .row_mutation(RowMutation::PutRow(observed_endpoint_address_row(
-            request.to_endpoint,
-            addr,
-        )?));
-    Ok(output)
-}
-
 fn received_materialized_output(
     request_id: [u8; 32],
     request: &ConnectionRequestFact,
-    receive_id: [u8; 32],
+    origin_addr: &[u8],
+    frame_hash: [u8; 32],
+    received_at_local_ms: u64,
 ) -> Result<ProjectionOutput, String> {
-    let mut output =
-        materialized_output(request_id).intent(create_connection_response_intent(
+    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+        received_fact_id: request_id,
+        origin_addr,
+        local_endpoint_id: request.to_endpoint,
+        sender_endpoint_id: request.from_endpoint,
+        receive_path:
+            crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_REQUEST,
+        connection_id: None,
+        request_id: Some(request_id),
+        frame_hash,
+        received_at_local_ms,
+    })?;
+    let received = crate::core::facts::Fact::new(
+        FactScope::Local,
+        received_at_local_ms,
+        connection_request_received::layout::encode_fact(&ConnectionRequestReceivedFact {
+            request_id,
+            receive_id: receipt.id,
+            received_at_local_ms,
+        })?,
+    );
+    let mut output = materialized_output(request_id)
+        .fact(receipt.clone())
+        .fact(received)
+        .intent(create_connection_response_intent(
             CreateConnectionResponse {
                 request_id,
                 initiator_endpoint_shared_id: request.initiator_endpoint_shared_id,
-                receive_id,
+                receive_id: receipt.id,
             },
         ));
     if let Some(addr) = request.from_listen_addr {

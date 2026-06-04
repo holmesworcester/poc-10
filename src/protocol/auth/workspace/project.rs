@@ -32,9 +32,7 @@ impl Projector for WorkspaceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::WorkspaceAuthenticator, _>(
-            self, fact, context,
-        )
+        project_authenticated::<super::authenticate::WorkspaceAuthenticator, _>(self, fact, context)
     }
 }
 

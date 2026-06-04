@@ -133,10 +133,23 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         // type tag is the sealed type) plus a frame observation. Its projector
         // unseals it with the local endpoint secret from `auth_local_endpoint`
         // context — the boundary does no unsealing itself.
+        if connection_request::layout::is_sealed_fact(&input.frame) {
+            return Ok(connection_frame::observed_membership_request_fact_effect(
+                input.frame.clone(),
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?);
+        }
+        if connection_response::layout::is_sealed_fact(&input.frame) {
+            return Ok(connection_frame::observed_membership_response_fact_effect(
+                input.frame.clone(),
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?);
+        }
+
         if request::transit::is_sealed_request_frame(&input.frame)
             || response::transit::is_sealed_response_frame(&input.frame)
-            || connection_request::transit::is_sealed_request_frame(&input.frame)
-            || connection_response::transit::is_sealed_response_frame(&input.frame)
         {
             let frame_fact = connection_frame::sealed_handshake_frame_fact(
                 input.frame.clone(),
@@ -169,4 +182,3 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         })
     }
 }
-

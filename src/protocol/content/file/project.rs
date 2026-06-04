@@ -48,7 +48,9 @@ impl Projector for ContentFileProjector {
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ContentFileAuthenticator> for ContentFileProjector {
+impl AuthenticatedProjector<super::authenticate::ContentFileAuthenticator>
+    for ContentFileProjector
+{
     fn project_authenticated(
         &self,
         authenticated: AuthenticatedFact<'_, super::fact::ContentFileFact>,
