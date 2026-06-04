@@ -21,6 +21,8 @@ use topo::protocol::connection::bootstrap_request::transit as request_transit;
 use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
 use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
 use topo::protocol::connection::bootstrap_response::transit as response_transit;
+use topo::protocol::connection::connection_established::fact::ConnectionEstablishedFact;
+use topo::protocol::connection::connection_established::layout as connection_established_layout;
 use topo::protocol::connection::fact_receipt::layout as fact_receipt_layout;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
 use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
@@ -184,33 +186,36 @@ fn local_endpoint_match(frame_fact_id: [u8; 32], endpoint: &EndpointFact) -> Mat
 }
 
 fn observed_connection_context(frame_fact: &Fact, connection_fact: Fact) -> ProjectionContext {
+    let established = connection_established_layout::decode_fact(connection_fact.body())
+        .expect("decode connection_established context");
     ProjectionContext::from_matches(vec![
         observation_match(frame_fact),
         exact_match(
             frame_fact.id,
-            "connection_response",
-            connection_fact.id,
+            "connection_established",
+            established.connection_id,
             connection_fact,
         ),
     ])
 }
 
-fn connection_fact() -> (Fact, BootstrapResponseFact) {
-    let connection = BootstrapResponseFact {
+fn connection_fact() -> (Fact, ConnectionEstablishedFact) {
+    let connection = ConnectionEstablishedFact {
+        connection_id: [9; 32],
         from_endpoint: [10; 32],
         to_endpoint: [11; 32],
         request_id: [12; 32],
-        invite_secret_fact_id: [13; 32],
         initiator_ephemeral_secret_fact_id: [14; 32],
         responder_ephemeral_secret_fact_id: [15; 32],
         responder_ephemeral_public_key: [16; 32],
         handshake_hash: [17; 32],
         connection_secret: [18; 32],
+        established_at_ms: 19,
     };
     let fact = Fact::new(
         FactScope::Local,
         1,
-        connection_response_layout::encode_fact(&connection).expect("connection response"),
+        connection_established_layout::encode_fact(&connection).expect("connection established"),
     );
     (fact, connection)
 }
@@ -238,11 +243,11 @@ fn key_wrap_bytes() -> Vec<u8> {
     auth_layout::encode_key_wrap(&wrap).expect("key wrap")
 }
 
-fn encrypted_small_frame() -> (Vec<u8>, Fact, BootstrapResponseFact, Vec<u8>) {
+fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionEstablishedFact, Vec<u8>) {
     let (connection_fact, connection) = connection_fact();
     let signed_wrap = key_wrap_bytes();
     let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-        connection_id: connection_fact.id,
+        connection_id: connection.connection_id,
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
@@ -569,7 +574,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
     assert_eq!(receipt.origin_addr, ORIGIN);
     assert_eq!(receipt.local_endpoint_id, connection.to_endpoint);
     assert_eq!(receipt.sender_endpoint_id, connection.from_endpoint);
-    assert_eq!(receipt.connection_id, Some(connection_fact.id));
+    assert_eq!(receipt.connection_id, Some(connection.connection_id));
     assert_eq!(receipt.request_id, Some(connection.request_id));
     assert_eq!(receipt.frame_hash, crypto::hash(&frame));
     assert_eq!(receipt.received_at_local_ms, RECEIVED_AT);
@@ -593,7 +598,7 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
 fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
     let (connection_fact, connection) = connection_fact();
     let compare_bytes = sync_compare_layout::encode_fact(&SyncCompareFact {
-        connection_id: connection_fact.id,
+        connection_id: connection.connection_id,
         range: TimestampRange { start: 10, end: 20 },
         summary: RangeSummary {
             count: 0,
@@ -603,7 +608,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
     })
     .expect("sync compare");
     let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-        connection_id: connection_fact.id,
+        connection_id: connection.connection_id,
         sender_endpoint_id: connection.from_endpoint,
         receiver_endpoint_id: connection.to_endpoint,
         connection_secret: connection.connection_secret,
@@ -633,10 +638,10 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 #[test]
 fn well_formed_bundle_frame_without_observation_context_emits_transient_need_only() {
     on_big_stack(|| {
-        let (connection_fact, _) = connection_fact();
+        let (_, connection) = connection_fact();
         let frame = frame_wire::encode_frame_bytes(
             CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-            FixedBytes(connection_fact.id),
+            FixedBytes(connection.connection_id),
             FixedBytes([19; 24]),
             b"not-opened-without-context",
         )
@@ -657,10 +662,10 @@ fn well_formed_bundle_frame_without_observation_context_emits_transient_need_onl
 #[test]
 fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only() {
     on_big_stack(|| {
-        let (connection_fact, _) = connection_fact();
+        let (_, connection) = connection_fact();
         let frame = frame_wire::encode_frame_bytes(
             CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
-            FixedBytes(connection_fact.id),
+            FixedBytes(connection.connection_id),
             FixedBytes([19; 24]),
             b"not-opened-without-context",
         )
@@ -671,7 +676,7 @@ fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only
         let output = project_connection_frame_fact(&input_fact, context);
 
         assert_eq!(output.needs.len(), 1);
-        assert_eq!(output.needs[0].role.as_str(), "connection_response");
+        assert_eq!(output.needs[0].role.as_str(), "connection_established");
         assert!(output.effects.facts.is_empty());
     });
 }

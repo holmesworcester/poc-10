@@ -1,13 +1,14 @@
 //! User-facing constructors for connection requests.
 //!
 //! Accepting an invite creates the local facts needed to start a handshake:
-//! scoped invite secret, initiator ephemeral secret, and global connection
-//! request. The command returns those facts plus a typed receipt so the caller
-//! can submit them through the normal runtime path.
+//! scoped invite secret, initiator ephemeral secret, and a local
+//! `bootstrap_request_sent` lifecycle fact containing the semantic request and
+//! exact sealed bytes. The command returns those facts plus a typed receipt so
+//! the caller can submit them through the normal runtime path.
 //!
 //! Commands do not project, open sockets, or send bytes. Projection decides when
-//! the request is admissible and emits bootstrap network work; this file owns
-//! only user-facing construction and receipt shape.
+//! the request is admissible and emits bootstrap network work from the lifecycle
+//! fact; this file owns only user-facing construction and receipt shape.
 
 use std::net::SocketAddr;
 
@@ -17,11 +18,14 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::connection::bootstrap_request_sent::{
+    fact::BootstrapRequestSentFact, layout as request_sent_layout,
+};
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
 
 use super::fact::BootstrapRequestFact;
-use super::{create as request_create, layout};
+use super::{create as request_create, layout, transit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateConnectionRequest {
@@ -94,18 +98,37 @@ pub fn create(
         &invite_secret.bootstrap_secret,
         &request_create::invite_signing_transcript(&request)?,
     );
-    let request_fact = Fact::new(
+    let request_bytes = layout::encode_fact(&request)?;
+    let request_id = crate::core::facts::fact_id(&request_bytes);
+    let sealed_request_bytes =
+        transit::seal_connection_request(&request_bytes, &ephemeral.ephemeral_private_key)?;
+    let sealed_request_bytes = sealed_request_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "sealed bootstrap request has unexpected byte length".to_string())?;
+    let peer_addr = input
+        .to_listen_addr
+        .ok_or_else(|| "bootstrap connection request requires a peer address".to_string())?;
+    let request_sent = BootstrapRequestSentFact {
+        request_id,
+        initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
+        peer_addr,
+        request,
+        sealed_request_bytes,
+        created_at_ms: input.created_at_ms.saturating_add(2),
+    };
+    let request_sent_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        layout::encode_fact(&request)?,
+        request_sent_layout::encode_fact(&request_sent)?,
     );
 
     Ok(CommandOutput::new(CreateConnectionRequestReceipt {
-        request_id: request_fact.id,
+        request_id,
         invite_secret_id: invite_secret_fact.id,
         initiator_ephemeral_secret_id: ephemeral_fact.id,
     })
-    .with_facts(vec![invite_secret_fact, ephemeral_fact, request_fact]))
+    .with_facts(vec![invite_secret_fact, ephemeral_fact, request_sent_fact]))
 }
 
 fn validate_id(name: &str, id: &FactId) -> Result<(), String> {
@@ -152,8 +175,14 @@ mod tests {
             output.receipt.initiator_ephemeral_secret_id,
             output.effects.facts[1].id
         );
-        assert_eq!(output.receipt.request_id, output.effects.facts[2].id);
-        let request = layout::decode_fact(&output.effects.facts[2].bytes).expect("decode request");
+        let sent = request_sent_layout::decode_fact(&output.effects.facts[2].bytes)
+            .expect("decode request sent");
+        assert_eq!(output.receipt.request_id, sent.request_id);
+        assert_eq!(
+            sent.sealed_request_bytes[0],
+            transit::TYPE_SEALED_CONNECTION_REQUEST
+        );
+        let request = sent.request;
         let public_key = crypto::ed25519_public_key(&[7; 32]);
         assert!(crypto::ed25519_verify(
             &public_key,

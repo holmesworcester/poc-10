@@ -116,10 +116,9 @@ fn matching_lines_with_comment_mode(
 const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
-const INTENT_HANDLER_FILES: [&str; 12] = [
+const INTENT_HANDLER_FILES: [&str; 11] = [
     "src/protocol/connection/create_bootstrap_response.rs",
     "src/protocol/connection/receive_network_frame.rs",
-    "src/protocol/connection/send_bootstrap_request.rs",
     "src/protocol/connection/send_facts_on_connection.rs",
     "src/protocol/connection/send_network_frame.rs",
     "src/protocol/auth/create_key_wrap.rs",
@@ -1096,7 +1095,6 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
     let network_io_files = [
-        "src/protocol/connection/send_bootstrap_request.rs",
         "src/protocol/connection/send_network_frame.rs",
         "src/protocol/connection/receive_network_frame.rs",
     ];
@@ -1110,7 +1108,7 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
             ));
         }
     }
-    if !maintenance.contains(".local_intent(send_bootstrap_connection_request_intent") {
+    if !maintenance.contains(".local_intent(send_network_frame_intent") {
         offenders.push(
             "connection maintenance does not emit bootstrap sends as local intents".to_string(),
         );

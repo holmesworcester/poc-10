@@ -16,10 +16,12 @@
 //!   2. CONTEXT. Projection validates exact request-sent context, the socket
 //!      observation, and the local initiator secret.
 //!   3. MATERIALIZE. Valid responses emit response-received history,
-//!      connection-established state, and seed the initial sync.
+//!      connection-established state. The established projector seeds sync once
+//!      the live connection row exists.
 //!
-//! Change this projector for membership response admission and sync seeding.
-//! Byte layout lives in `layout.rs`; key-schedule construction in `create.rs`.
+//! Change this projector for membership response admission and established-state
+//! emission. Byte layout lives in `layout.rs`; key-schedule construction in
+//! `create.rs`.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::projectors::{
@@ -27,6 +29,7 @@ use crate::core::projectors::{
     ProjectionOutput, Projector,
 };
 
+use crate::protocol::connection::close;
 use crate::protocol::connection::connection_established;
 use crate::protocol::connection::connection_established::fact::ConnectionEstablishedFact;
 use crate::protocol::connection::connection_response_received;
@@ -40,7 +43,6 @@ use crate::protocol::connection::{
 use crate::protocol::connection_frame::{
     connection_fact_receipt_for_path, ConnectionFactReceiptInput,
 };
-use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
 
 use super::create;
 use super::fact::ConnectionResponseFact;
@@ -82,6 +84,13 @@ impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("membership connection response fact must have local scope".to_string());
+        }
+        let close_need = close::connection_closed_need(fact.id, fact.id);
+        if let Some(close_fact) = projection_context.payload_for(&close_need) {
+            if close_fact.scope != FactScope::Local {
+                return Err("membership connection response close context must be local".into());
+            }
+            return Ok(ProjectionOutput::new().purge_self(fact.id));
         }
 
         // 2. Local request-sent context.
@@ -176,6 +185,7 @@ impl AuthenticatedProjector<super::authenticate::ConnectionResponseAuthenticator
             observation.origin_addr.bytes(),
             crate::core::crypto::hash(fact.body()),
             observation.received_at_local_ms,
+            close_need,
         )
     }
 }
@@ -216,6 +226,7 @@ fn materialized_output(
     origin_addr: &[u8],
     frame_hash: [u8; 32],
     received_at_local_ms: u64,
+    close_need: crate::core::context::ContextNeed,
 ) -> Result<ProjectionOutput, String> {
     let response_id = fact.id;
     let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
@@ -256,12 +267,10 @@ fn materialized_output(
         })?,
     );
     Ok(ProjectionOutput::new()
+        .need(close_need)
         .fact(receipt)
         .fact(response_received)
-        .fact(established)
-        .intent(seed_connection_sync_intent(SeedConnectionSync {
-            connection_id: response_id,
-        })))
+        .fact(established))
 }
 
 fn waiting_output<const N: usize>(

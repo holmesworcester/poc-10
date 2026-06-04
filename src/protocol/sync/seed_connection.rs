@@ -75,22 +75,22 @@ impl SeedConnectionSyncHandler {
 
 impl IntentHandler for SeedConnectionSyncHandler {
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
-        let input = decode_seed_connection_sync(intent)?;
-        Ok(vec![input.connection_id])
+        decode_seed_connection_sync(intent)?;
+        Ok(Vec::new())
     }
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_seed_connection_sync(raw)?;
-        let Some(connection_fact) = context.fact(&input.connection_id) else {
+        let store = context.store()?;
+        let Some(_) =
+            connection::bootstrap_response::queries::connection_by_id(store, &input.connection_id)
+                .map_err(|err| {
+                    HandlerError::fatal(format!("seed_connection_sync connection row: {err}"))
+                })?
+        else {
             return Ok(PipelineEffects::new());
         };
-        if connection_fact.id != input.connection_id {
-            return Err("seed_connection_sync context payload id mismatch".into());
-        }
-        connection::bootstrap_response::layout::decode_fact(connection_fact.body()).map_err(
-            |_| HandlerError::fatal("seed_connection_sync context is not a connection response"),
-        )?;
-        advertise_connection_shareable_facts(context.store()?, input.connection_id)
+        advertise_connection_shareable_facts(store, input.connection_id)
     }
 }
 
@@ -171,6 +171,60 @@ mod tests {
         let intent = seed_connection_sync_intent(input.clone());
 
         assert_eq!(decode_seed_connection_sync(&intent).unwrap(), input);
+    }
+
+    #[test]
+    fn seed_connection_sync_handler_depends_on_connection_row_not_response_fact() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        let connection_id = [8; 32];
+        store
+            .insert_table_rows(vec![
+                connection::bootstrap_response::rows::bootstrap_response_row(
+                    connection_id,
+                    &connection::bootstrap_response::fact::BootstrapResponseFact {
+                        from_endpoint: [1; 32],
+                        to_endpoint: [2; 32],
+                        request_id: [3; 32],
+                        invite_secret_fact_id: [4; 32],
+                        initiator_ephemeral_secret_fact_id: [5; 32],
+                        responder_ephemeral_secret_fact_id: [6; 32],
+                        responder_ephemeral_public_key: [7; 32],
+                        handshake_hash: [8; 32],
+                        connection_secret: [9; 32],
+                    },
+                )
+                .expect("connection row"),
+            ])
+            .expect("insert rows");
+        let intent = seed_connection_sync_intent(SeedConnectionSync { connection_id });
+        let handler = SeedConnectionSyncHandler::new();
+
+        assert!(handler.input_fact_ids(&intent).expect("inputs").is_empty());
+        let output = handler
+            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .expect("handle seed");
+
+        assert_eq!(output.facts.len(), 1);
+        assert_eq!(output.intents.len(), 1);
+    }
+
+    #[test]
+    fn seed_connection_sync_handler_waits_until_connection_row_exists() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        let intent = seed_connection_sync_intent(SeedConnectionSync {
+            connection_id: [8; 32],
+        });
+
+        let output = SeedConnectionSyncHandler::new()
+            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .expect("handle seed without row");
+
+        assert!(output.facts.is_empty());
+        assert!(output.intents.is_empty());
     }
 
     #[test]

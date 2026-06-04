@@ -9,6 +9,7 @@ use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
 use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
+use topo::protocol::connection::bootstrap_response::rows as connection_response_rows;
 use topo::protocol::connection::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
@@ -41,6 +42,16 @@ fn connection_fact() -> (Fact, BootstrapResponseFact) {
     (fact, connection)
 }
 
+fn seed_connection_row(store: &Store, connection_id: [u8; 32], connection: &BootstrapResponseFact) {
+    store
+        .insert_table_rows(vec![connection_response_rows::bootstrap_response_row(
+            connection_id,
+            connection,
+        )
+        .expect("connection row")])
+        .expect("seed connection row");
+}
+
 #[test]
 fn send_facts_on_connection_names_ordered_fact_bundle() {
     let intent = send_facts_on_connection_intent(SendFactsOnConnection {
@@ -56,7 +67,9 @@ fn send_facts_on_connection_names_ordered_fact_bundle() {
 
 #[test]
 fn send_facts_on_connection_refuses_forged_local_fact_reference() {
-    let (connection_fact, _) = connection_fact();
+    let store = store_with_local_endpoint();
+    let (connection_fact, connection) = connection_fact();
+    seed_connection_row(&store, connection_fact.id, &connection);
     let fact = Fact::new(
         FactScope::Local,
         1,
@@ -70,7 +83,7 @@ fn send_facts_on_connection_refuses_forged_local_fact_reference() {
         connection_id: connection_fact.id,
         fact_ids: vec![fact.id],
     });
-    let context = HandlerContext::with_facts([connection_fact, fact]);
+    let context = HandlerContext::with_facts([connection_fact, fact]).with_store(&store);
 
     let err = SendFactsOnConnectionHandler::new()
         .handle(&intent, &context)
@@ -84,7 +97,9 @@ fn send_facts_on_connection_refuses_forged_local_fact_reference() {
 
 #[test]
 fn send_facts_on_connection_refuses_forged_private_tag_reference() {
-    let (connection_fact, _) = connection_fact();
+    let store = store_with_local_endpoint();
+    let (connection_fact, connection) = connection_fact();
+    seed_connection_row(&store, connection_fact.id, &connection);
     for private_tag in [
         auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET,
         auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET,
@@ -100,7 +115,8 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
             connection_id: connection_fact.id,
             fact_ids: vec![fact.id],
         });
-        let context = HandlerContext::with_facts([connection_fact.clone(), fact]);
+        let context =
+            HandlerContext::with_facts([connection_fact.clone(), fact]).with_store(&store);
 
         let err = SendFactsOnConnectionHandler::new()
             .handle(&intent, &context)
@@ -117,6 +133,7 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
 fn send_facts_on_connection_accepts_normal_shared_facts() {
     let store = store_with_local_endpoint();
     let (connection_fact, connection) = connection_fact();
+    seed_connection_row(&store, connection_fact.id, &connection);
     let fact = Fact::new(
         topo::protocol::auth::workspace::scope([7; 32]),
         1,

@@ -17,11 +17,13 @@ use crate::protocol::connection::bootstrap_response::rows::answered_request_ids;
 use super::rows::{decode_bootstrap_request_row, BOOTSTRAP_REQUEST_ROWS};
 
 /// One local outbound bootstrap request still awaiting a connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingBootstrapRequest {
+    pub request_sent_id: FactId,
     pub request_id: FactId,
     pub initiator_ephemeral_secret_id: FactId,
     pub addr: SocketAddr,
+    pub sealed_request_bytes: Vec<u8>,
 }
 
 pub fn pending_bootstrap_requests(store: &Store) -> Result<Vec<PendingBootstrapRequest>, String> {
@@ -39,9 +41,11 @@ pub fn pending_bootstrap_requests(store: &Store) -> Result<Vec<PendingBootstrapR
             continue;
         }
         pending.push(PendingBootstrapRequest {
+            request_sent_id: row.request_sent_id,
             request_id: row.request_id,
             initiator_ephemeral_secret_id: row.initiator_ephemeral_secret_fact_id,
             addr,
+            sealed_request_bytes: row.sealed_request_bytes,
         });
     }
     Ok(pending)
@@ -88,12 +92,31 @@ mod tests {
         // A: local outbound with a route, unanswered -> pending.
         // C: local outbound with a route, but answered -> not pending.
         // B: a received request (no peer address) -> never re-sent.
-        let row_a = bootstrap_request_row([0xA1; 32], &request_fact([0xAE; 32], Some(addr)), true)
-            .expect("row a");
-        let row_c = bootstrap_request_row([0xC3; 32], &request_fact([0xCE; 32], Some(addr)), true)
-            .expect("row c");
-        let row_b = bootstrap_request_row([0xB2; 32], &request_fact([0xBE; 32], Some(addr)), false)
-            .expect("row b");
+        let sealed = vec![0; super::super::transit::SEALED_CONNECTION_REQUEST_BYTES];
+        let row_a = bootstrap_request_row(
+            [0xA1; 32],
+            [0xA2; 32],
+            &request_fact([0xAE; 32], Some(addr)),
+            Some(addr),
+            &sealed,
+        )
+        .expect("row a");
+        let row_c = bootstrap_request_row(
+            [0xC3; 32],
+            [0xC4; 32],
+            &request_fact([0xCE; 32], Some(addr)),
+            Some(addr),
+            &sealed,
+        )
+        .expect("row c");
+        let row_b = bootstrap_request_row(
+            [0xB2; 32],
+            [0xB3; 32],
+            &request_fact([0xBE; 32], Some(addr)),
+            None,
+            &sealed,
+        )
+        .expect("row b");
         let answered_c = connection_row(ConnectionRowFields {
             connection_id: [0xCC; 32],
             from_endpoint: [2; 32],
@@ -115,6 +138,7 @@ mod tests {
             "only the unanswered local outbound request"
         );
         assert_eq!(pending[0].request_id, [0xA1; 32]);
+        assert_eq!(pending[0].request_sent_id, [0xA2; 32]);
         assert_eq!(pending[0].initiator_ephemeral_secret_id, [0xAE; 32]);
         assert_eq!(pending[0].addr, addr);
     }

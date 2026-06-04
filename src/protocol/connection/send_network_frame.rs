@@ -139,6 +139,15 @@ fn resolve_target(
     context: &HandlerContext,
 ) -> Result<NetworkTarget, HandlerError> {
     if let Some(route_fact) = persisted_fact(context.store()?, connection_id)? {
+        if let Ok(sent) = connection::bootstrap_request_sent::decode_fact_payload(route_fact.body())
+        {
+            return Ok(NetworkTarget::new(sent.peer_addr));
+        }
+        if let Ok(sent) =
+            connection::bootstrap_response_sent::decode_fact_payload(route_fact.body())
+        {
+            return Ok(NetworkTarget::new(sent.peer_addr));
+        }
         if let Ok(sent) =
             connection::connection_request_sent::decode_fact_payload(route_fact.body())
         {
@@ -149,13 +158,20 @@ fn resolve_target(
         {
             return Ok(NetworkTarget::new(sent.peer_addr));
         }
-        if let Ok(connection) =
-            connection::bootstrap_response::layout::decode_fact(route_fact.body())
-        {
-            return resolve_bootstrap_response_target(connection_id, &connection, context);
+    }
+    match resolve_connection_row_target(connection_id, context) {
+        Ok(target) => return Ok(target),
+        Err(row_err) => {
+            if let Some(route_fact) = persisted_fact(context.store()?, connection_id)? {
+                if let Ok(connection) =
+                    connection::bootstrap_response::layout::decode_fact(route_fact.body())
+                {
+                    return resolve_bootstrap_response_target(connection_id, &connection, context);
+                }
+            }
+            return Err(row_err);
         }
     }
-    resolve_connection_row_target(connection_id, context)
 }
 
 fn resolve_bootstrap_response_target(

@@ -4,14 +4,13 @@
 //! request projection. The request projector emits this intent with the
 //! request, invite-secret, and receive-receipt fact ids; the handler loads
 //! exactly those facts, creates fresh responder ephemeral material, builds the
-//! canonical local `connection::response` fact, sends a sealed bootstrap
-//! response wrapper over TCP, and emits follow-up work through the normal
-//! pipeline.
+//! canonical response body, and emits local `bootstrap_response_sent` plus
+//! `connection_established` facts through the normal pipeline.
 //!
 //! The payload is three fixed 32-byte ids in order: request id, invite-secret
 //! id, and fact-receipt id. This file owns intent identity, idempotence,
 //! input-fact declaration, and bounded handler orchestration. The native
-//! handshake schedule lives in `response::create`; request and receipt
+//! handshake schedule lives in `bootstrap_response::create`; request and receipt
 //! admission live in their projectors.
 
 use crate::core::effects::PipelineEffects;
@@ -158,6 +157,13 @@ use crate::protocol::connection::bootstrap_request::layout as request_layout;
 use crate::protocol::connection::bootstrap_response::create::{
     build_responder_response, BuildResponderResponse,
 };
+use crate::protocol::connection::bootstrap_response::transit as response_transit;
+use crate::protocol::connection::bootstrap_response_sent::{
+    fact::BootstrapResponseSentFact, layout as response_sent_layout,
+};
+use crate::protocol::connection::connection_established::{
+    fact::ConnectionEstablishedFact, layout as established_layout,
+};
 use crate::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
 };
@@ -240,17 +246,53 @@ impl IntentHandler for CreateBootstrapResponseHandler {
             responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
             created_at_ms: received.received_at_local_ms,
         })?;
-        // The route is required so the response can be sent, but the send itself
-        // is not done here: flat-intent rule keeps this handler to fact creation.
-        // The local bootstrap_response projector emits the send intent once the
-        // response fact is admitted.
-        if request.from_listen_addr.is_none() {
-            return Err("create_bootstrap_response response route is missing".into());
-        }
+        let sealed_response_bytes = response_transit::seal_connection_response(
+            built.fact.body(),
+            &responder_ephemeral_private_key,
+        )?;
+        let sealed_response_bytes = sealed_response_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "sealed bootstrap response has unexpected byte length".to_string())?;
+        let peer_addr = request
+            .from_listen_addr
+            .ok_or_else(|| "create_bootstrap_response response route is missing".to_string())?;
+        let response_sent = BootstrapResponseSentFact {
+            response_id: built.fact.id,
+            request_id: input.request_id,
+            responder_ephemeral_secret_fact_id: responder_ephemeral_fact.id,
+            peer_addr,
+            response: built.response,
+            sealed_response_bytes,
+            created_at_ms: received.received_at_local_ms,
+        };
+        let response_sent_fact = Fact::new(
+            FactScope::Local,
+            received.received_at_local_ms,
+            response_sent_layout::encode_fact(&response_sent)?,
+        );
+        let established = ConnectionEstablishedFact {
+            connection_id: built.fact.id,
+            from_endpoint: built.response.from_endpoint,
+            to_endpoint: built.response.to_endpoint,
+            request_id: built.response.request_id,
+            initiator_ephemeral_secret_fact_id: built.response.initiator_ephemeral_secret_fact_id,
+            responder_ephemeral_secret_fact_id: built.response.responder_ephemeral_secret_fact_id,
+            responder_ephemeral_public_key: built.response.responder_ephemeral_public_key,
+            handshake_hash: built.response.handshake_hash,
+            connection_secret: built.response.connection_secret,
+            established_at_ms: received.received_at_local_ms,
+        };
+        let established_fact = Fact::new(
+            FactScope::Local,
+            received.received_at_local_ms,
+            established_layout::encode_fact(&established)?,
+        );
 
         Ok(PipelineEffects::new()
             .fact(responder_ephemeral_fact)
-            .fact(built.fact))
+            .fact(response_sent_fact)
+            .fact(established_fact))
     }
 }
 

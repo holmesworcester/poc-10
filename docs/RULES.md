@@ -37,10 +37,11 @@ in `src/core` or `src/protocol`.
   that fact's **projector**, so "what does admitting this fact enqueue?" is
   answerable by reading one projector, and a replayable intent can never smuggle
   in a non-replayable one. Concretely, `create_bootstrap_response` and
-  `create_connection_response` only create the responder ephemeral and response
-  facts; the local response fact's projector emits the network send.
+  `create_connection_response` create responder ephemeral, response-sent, and
+  `connection_established` facts; the response-sent fact's projector emits the
+  network send.
 - Replayability decides where a send is emitted. A response send is reactive to
-  a received request and is emitted by the response fact's projector. A *request*
+  a received request and is emitted by the response-sent fact's projector. A *request*
   send is operational liveness, not durable truth: a projector-emitted request
   send would be a live-only intent that replay suppresses and never re-issues, so
   request sends are driven by the live recurring `maintain_connections` loop,
@@ -319,7 +320,7 @@ no separate envelope or transit-wrapper fact in another module.
 - Unsealing is a context need. A receiver opens a sealed connection fact in that
   fact's own projector, which declares a context need for its unseal key —
   `auth_local_endpoint` (the local endpoint secret) for handshake facts,
-  `connection_response` (the `connection_secret`) for established frames — and
+  `connection_established` (the `connection_secret`) for established frames — and
   unseals from it, exactly as the established-frame projector already does. The
   receive boundary admits the typed wire bytes and does no unsealing itself;
   there is no inline unseal handler and no key plumbing at the boundary.

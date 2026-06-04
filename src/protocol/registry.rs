@@ -529,8 +529,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
-    "send_bootstrap_connection_request",
-    "send_bootstrap_connection_response",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -625,6 +623,10 @@ projector_routes! {
     project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
     project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
     project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
+    project_bootstrap_request_sent => connection::bootstrap_request_sent::layout::TYPE_BOOTSTRAP_REQUEST_SENT, connection::bootstrap_request_sent::project::BootstrapRequestSentProjector, not_replayed;
+    project_bootstrap_request_received => connection::bootstrap_request_received::layout::TYPE_BOOTSTRAP_REQUEST_RECEIVED, connection::bootstrap_request_received::project::BootstrapRequestReceivedProjector, not_replayed;
+    project_bootstrap_response_sent => connection::bootstrap_response_sent::layout::TYPE_BOOTSTRAP_RESPONSE_SENT, connection::bootstrap_response_sent::project::BootstrapResponseSentProjector, not_replayed;
+    project_bootstrap_response_received => connection::bootstrap_response_received::layout::TYPE_BOOTSTRAP_RESPONSE_RECEIVED, connection::bootstrap_response_received::project::BootstrapResponseReceivedProjector, not_replayed;
     project_connection_request_sent => connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT, connection::connection_request_sent::project::ConnectionRequestSentProjector, not_replayed;
     project_connection_request_received => connection::connection_request_received::layout::TYPE_CONNECTION_REQUEST_RECEIVED, connection::connection_request_received::project::ConnectionRequestReceivedProjector, not_replayed;
     project_connection_response_sent => connection::connection_response_sent::layout::TYPE_CONNECTION_RESPONSE_SENT, connection::connection_response_sent::project::ConnectionResponseSentProjector, not_replayed;
@@ -709,18 +711,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // Handshake/sync sends and the response builders are operational IO over a
     // live session, rebuilt from committed request/response facts after the
     // barrier — never replay-time work.
-    handler_route!(
-        "send_bootstrap_connection_request",
-        connection::send_bootstrap_request::SEND_BOOTSTRAP_CONNECTION_REQUEST,
-        connection::send_bootstrap_request::SendBootstrapConnectionRequestHandler,
-        replay = false
-    ),
-    handler_route!(
-        "send_bootstrap_connection_response",
-        connection::send_bootstrap_response::SEND_BOOTSTRAP_CONNECTION_RESPONSE,
-        connection::send_bootstrap_response::SendBootstrapConnectionResponseHandler,
-        replay = false
-    ),
     handler_route!(
         "create_bootstrap_response",
         connection::create_bootstrap_response::CREATE_BOOTSTRAP_RESPONSE,

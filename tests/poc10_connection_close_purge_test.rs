@@ -11,10 +11,10 @@ use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite::layout as invite_layout;
-use topo::protocol::connection::bootstrap_request::{
-    commands::{create as create_request, CreateConnectionRequest},
-    layout as request_layout,
+use topo::protocol::connection::bootstrap_request::commands::{
+    create as create_request, CreateConnectionRequest,
 };
+use topo::protocol::connection::bootstrap_request_sent::layout as request_sent_layout;
 use topo::protocol::connection::bootstrap_response::{
     create::{build_responder_response, BuildResponderResponse},
     rows::BOOTSTRAP_RESPONSE_ROWS,
@@ -71,16 +71,18 @@ fn closing_connection_purges_ephemeral_secret_facts_and_rows() {
         workspace_id: None,
         invite_fact_id: [32; 32],
         from_listen_addr: None,
-        to_listen_addr: None,
+        to_listen_addr: Some("127.0.0.1:41002".parse().expect("peer addr")),
     })
     .expect("create request");
     let initiator_ephemeral_id = request_output.receipt.initiator_ephemeral_secret_id;
     let request_id = request_output.receipt.request_id;
     let invite_fact = request_output.effects.facts[0].clone();
     let initiator_ephemeral_fact = request_output.effects.facts[1].clone();
-    let request_fact = request_output.effects.facts[2].clone();
+    let request_sent_fact = request_output.effects.facts[2].clone();
     let invite = invite_layout::decode_fact(&invite_fact.bytes).expect("decode invite");
-    let request = request_layout::decode_fact(&request_fact.bytes).expect("decode request");
+    let request_sent =
+        request_sent_layout::decode_fact(&request_sent_fact.bytes).expect("decode request_sent");
+    let request = request_sent.request;
 
     runtime
         .submit_command_output(request_output)
@@ -206,7 +208,7 @@ fn closing_connection_purges_ephemeral_secret_facts_and_rows() {
     assert_eq!(runtime.pending_intent_count(), 0);
 
     assert!(
-        runtime.facts().any(|fact| fact.id == request_fact.id),
+        runtime.facts().any(|fact| fact.id == request_sent_fact.id),
         "closing the connection must not purge the request history"
     );
     assert_eq!(initiator_ephemeral_fact.id, initiator_ephemeral_id);

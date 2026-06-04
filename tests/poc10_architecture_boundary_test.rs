@@ -124,8 +124,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             &[
                 "create_bootstrap_response.rs",
                 "receive_network_frame.rs",
-                "send_bootstrap_request.rs",
-                "send_bootstrap_response.rs",
                 "send_facts_on_connection.rs",
                 "send_network_frame.rs",
             ],
@@ -664,15 +662,15 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 
     assert!(
-        !accept_commands.contains("send_bootstrap_connection_request_intent"),
+        !accept_commands.contains("send_network_frame_intent"),
         "accept/link commands should create connection_request facts, not enqueue bootstrap IO directly"
     );
     assert!(
-        maintenance.contains("send_bootstrap_connection_request_intent"),
+        maintenance.contains("send_network_frame_intent"),
         "the live maintenance loop should schedule bootstrap IO for unanswered local requests"
     );
     assert!(
-        !request_projector.contains("send_bootstrap_connection_request_intent"),
+        !request_projector.contains("send_network_frame_intent"),
         "request sends are driven by the maintenance loop so they survive replay; the request projector must not emit them"
     );
 }

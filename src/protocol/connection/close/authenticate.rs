@@ -6,7 +6,7 @@
 //!   2. ID. The content id equals `hash(bytes)`.
 //!   FIELDS. The named connection id is non-empty.
 //!
-//! It proves nothing else. Admission scope (`Local`) and the connection_response
+//! It proves nothing else. Admission scope (`Local`) and the connection_established
 //! context proof are interpretation the projector owns.
 
 use crate::core::facts::Fact;

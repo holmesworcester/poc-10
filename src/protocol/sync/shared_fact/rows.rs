@@ -767,6 +767,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn received_bootstrap_request_invite_authorizes_responder_connection_sync() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let connection_id = [8; 32];
+        let local_secret = [11; 32];
+        let local_endpoint = crypto::x25519_public_key(&local_secret);
+        let remote_endpoint = [2; 32];
+        let invite = auth::invite::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
+        let invite_fact = Fact::new(
+            FactScope::Local,
+            1,
+            auth::invite::layout::encode_fact(&invite).expect("encode invite"),
+        );
+        let request_fact = Fact::new(
+            FactScope::Global,
+            2,
+            connection::bootstrap_request::layout::encode_fact(
+                &connection::bootstrap_request::fact::BootstrapRequestFact {
+                    from_endpoint: remote_endpoint,
+                    to_endpoint: local_endpoint,
+                    nonce: [23; 32],
+                    invite_fact_id: invite.invite_fact_id.expect("invite fact id"),
+                    bootstrap_hash: invite.bootstrap_hash,
+                    invite_signature: [24; crypto::ED25519_SIGNATURE_BYTES],
+                    invite_secret_fact_id: invite_fact.id,
+                    initiator_ephemeral_secret_fact_id: [25; 32],
+                    initiator_ephemeral_public_key: [26; 32],
+                    from_listen_addr: None,
+                    to_listen_addr: None,
+                },
+            )
+            .expect("encode request"),
+        );
+        let shareable = fact(workspace_id, 42, 1);
+
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &request_fact)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &shareable)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        let mut rows = endpoint_rows::endpoint_rows(&EndpointFact {
+            endpoint: local_endpoint,
+            secret: local_secret,
+            signing_public_key: crypto::ed25519_public_key(&[13; 32]),
+            signing_secret: [13; 32],
+        });
+        rows.push(
+            connection::bootstrap_response::rows::bootstrap_response_row(
+                connection_id,
+                &connection::bootstrap_response::fact::BootstrapResponseFact {
+                    from_endpoint: local_endpoint,
+                    to_endpoint: remote_endpoint,
+                    request_id: request_fact.id,
+                    invite_secret_fact_id: invite_fact.id,
+                    initiator_ephemeral_secret_fact_id: [25; 32],
+                    responder_ephemeral_secret_fact_id: [27; 32],
+                    responder_ephemeral_public_key: [28; 32],
+                    handshake_hash: [29; 32],
+                    connection_secret: [30; 32],
+                },
+            )
+            .expect("connection row"),
+        );
+        store.insert_table_rows(rows).expect("seed rows");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &shareable, Vec::new()),
+            Some(&shareable),
+        )
+        .expect("share fact");
+
+        let summary = range_summary_for_connection(&store, connection_id, TimestampRange::ROOT)
+            .expect("connection summary");
+        let visible = shareable_facts_for_connection(&store, connection_id)
+            .expect("visible connection facts");
+
+        assert_eq!(summary.count, 1);
+        assert_eq!(
+            visible.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![shareable.id]
+        );
+    }
+
     fn seed_authorized_connection(store: &Store, workspace_id: FactId) -> FactId {
         let connection_id = [8; 32];
         let local_secret = [11; 32];
@@ -1203,11 +1290,13 @@ fn connection_invite_secret_id(
     connection: &connection::bootstrap_response::rows::BootstrapResponseRow,
 ) -> Result<Option<FactId>, String> {
     if let Some(response_fact) = persisted_fact(store, &connection.connection_id)? {
-        let response = connection::bootstrap_response::layout::decode_fact(&response_fact.bytes)
-            .map_err(|_| "connection response fact row is not a connection response".to_string())?;
-        return Ok(Some(response.invite_secret_fact_id));
+        if let Ok(response) =
+            connection::bootstrap_response::layout::decode_fact(&response_fact.bytes)
+        {
+            return Ok(Some(response.invite_secret_fact_id));
+        }
     }
-    store
+    if let Some(invite_secret_fact_id) = store
         .table_row(
             connection::bootstrap_request::rows::BOOTSTRAP_REQUEST_ROWS,
             &connection.request_id,
@@ -1220,7 +1309,17 @@ fn connection_invite_secret_id(
             )
             .map(|row| row.invite_secret_fact_id)
         })
-        .transpose()
+        .transpose()?
+    {
+        return Ok(Some(invite_secret_fact_id));
+    }
+    if let Some(request_fact) = persisted_fact(store, &connection.request_id)? {
+        if let Ok(request) = connection::bootstrap_request::layout::decode_fact(&request_fact.bytes)
+        {
+            return Ok(Some(request.invite_secret_fact_id));
+        }
+    }
+    Ok(None)
 }
 
 pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, String> {

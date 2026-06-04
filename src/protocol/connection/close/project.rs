@@ -1,13 +1,13 @@
 //! Connection-close projector.
 //!
 //! Close projection validates that a local close fact names a materialized
-//! connection response. It then publishes close context keyed by the connection
-//! id and by both ephemeral-secret fact ids carried by that response.
+//! established connection. It then publishes close context keyed by the
+//! connection id and by both ephemeral-secret fact ids carried by that state.
 //!
 //! POLICY. A connection_close is admitted iff:
 //!   1. STRUCTURAL. The fact is local and names a non-empty connection id.
-//!   2. CONTEXT. The exact local connection_response context for that id is
-//!      present and decodes as the referenced response fact.
+//!   2. CONTEXT. The exact local connection_established context for that id is
+//!      present and decodes as the referenced established-connection fact.
 //!   3. MATERIALIZE. Publish close offers only; target facts own their own row
 //!      deletion and self-purge when those offers wake them.
 
@@ -18,7 +18,7 @@ use crate::core::projectors::{
     ProjectionOutput, Projector,
 };
 
-use crate::protocol::connection::{bootstrap_response as response, connection_established};
+use crate::protocol::connection::connection_established;
 
 const CONNECTION_CLOSED_ROLE: &str = "connection_closed";
 const CONNECTION_EPHEMERAL_SECRET_CLOSED_ROLE: &str = "connection_ephemeral_secret_closed";
@@ -99,11 +99,8 @@ impl AuthenticatedProjector<super::authenticate::ConnectionCloseAuthenticator>
         }
 
         // 2. Context.
-        let connection_need = crate::core::context::ContextNeed::range(
+        let connection_need = connection_established::project::connection_established_need(
             fact.id,
-            "connection_response",
-            FactScope::Local,
-            close.connection_id,
             close.connection_id,
         );
         let Some(connection_fact) = context.payload_for(&connection_need) else {
@@ -112,25 +109,13 @@ impl AuthenticatedProjector<super::authenticate::ConnectionCloseAuthenticator>
         if connection_fact.scope != FactScope::Local {
             return Err("connection close context must be local".to_string());
         }
-        let (initiator_ephemeral_secret_fact_id, responder_ephemeral_secret_fact_id) =
-            if let Ok(connection) = response::decode_fact_payload(connection_fact.body()) {
-                (
-                    connection.initiator_ephemeral_secret_fact_id,
-                    connection.responder_ephemeral_secret_fact_id,
-                )
-            } else {
-                let established = connection_established::decode_fact_payload(
-                    connection_fact.body(),
-                )
-                .map_err(|_| "connection close context is not a connection response".to_string())?;
-                if established.connection_id != close.connection_id {
-                    return Err("connection close context targets another connection".to_string());
-                }
-                (
-                    established.initiator_ephemeral_secret_fact_id,
-                    established.responder_ephemeral_secret_fact_id,
-                )
-            };
+        let established = connection_established::decode_fact_payload(connection_fact.body())
+            .map_err(|_| "connection close context is not connection_established".to_string())?;
+        if established.connection_id != close.connection_id {
+            return Err("connection close context targets another connection".to_string());
+        }
+        let initiator_ephemeral_secret_fact_id = established.initiator_ephemeral_secret_fact_id;
+        let responder_ephemeral_secret_fact_id = established.responder_ephemeral_secret_fact_id;
 
         // 3. Materialize close context for the target owners.
         Ok(ProjectionOutput::new()

@@ -29,7 +29,7 @@ fn accept_handshake_does_not_create_durable_facts() {
     wait_for_connection_count(&alice, 1);
     wait_for_connection_count(&bob, 1);
     wait_for_connection_fact_count(&alice, 2);
-    wait_for_connection_fact_count(&bob, 2);
+    wait_for_connection_fact_count(&bob, 1);
 
     assert_eq!(
         sync_fact_count(&alice),
@@ -44,7 +44,7 @@ fn accept_handshake_does_not_create_durable_facts() {
     assert_eq!(connection_count(&alice), 1);
     assert_eq!(connection_count(&bob), 1);
     assert_eq!(connection_fact_count(&alice), 2);
-    assert_eq!(connection_fact_count(&bob), 2);
+    assert_eq!(connection_fact_count(&bob), 1);
 }
 
 #[test]

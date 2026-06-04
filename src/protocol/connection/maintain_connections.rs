@@ -24,9 +24,6 @@ use crate::core::store::Store;
 
 use crate::protocol::connection::bootstrap_request::queries::pending_bootstrap_requests;
 use crate::protocol::connection::connection_request::queries::pending_membership_requests;
-use crate::protocol::connection::send_bootstrap_request::{
-    send_bootstrap_connection_request_intent, SendBootstrapConnectionRequest,
-};
 use crate::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame,
 };
@@ -75,13 +72,10 @@ impl IntentHandler for MaintainConnectionsHandler {
         // Queue one local send per pending request. Sends are local-only, so they
         // never survive replay; the next tick re-queries and re-queues.
         for pending in pending_bootstrap_requests(store)? {
-            effects = effects.local_intent(send_bootstrap_connection_request_intent(
-                SendBootstrapConnectionRequest {
-                    request_id: pending.request_id,
-                    initiator_ephemeral_secret_id: pending.initiator_ephemeral_secret_id,
-                    addr: pending.addr,
-                },
-            )?);
+            effects = effects.local_intent(send_network_frame_intent(SendNetworkFrame {
+                routing_key: pending.request_sent_id,
+                frame: pending.sealed_request_bytes,
+            }));
         }
         for pending in pending_membership_requests(store)? {
             effects = effects.local_intent(send_network_frame_intent(SendNetworkFrame {

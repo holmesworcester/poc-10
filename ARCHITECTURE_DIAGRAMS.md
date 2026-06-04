@@ -103,7 +103,7 @@ flowchart LR
       RECIPIENT["recipient_key"]
       COVERAGE["secret_coverage"]
       CONN_REQUEST["connection_request"]
-      CONN_RESPONSE["connection_response"]
+      CONN_ESTABLISHED["connection_established"]
     end
 
     CONTEXT[("core context matcher")]
@@ -130,7 +130,7 @@ flowchart LR
     RECIPIENT --> CONTEXT
     COVERAGE --> CONTEXT
     CONN_REQUEST --> CONTEXT
-    CONN_RESPONSE --> CONTEXT
+    CONN_ESTABLISHED --> CONTEXT
 
     CONTEXT --> MSG_NEEDS
     CONTEXT --> FILE_NEEDS
@@ -163,7 +163,8 @@ flowchart TD
     REQ --> CREATE_RESP["create_bootstrap_response"]
     REC1 --> CREATE_RESP
     CREATE_RESP --> RESP_SECRET["responder ephemeral_secret"]
-    CREATE_RESP --> RESP["response"]
+    CREATE_RESP --> RESP_SENT["bootstrap_response_sent"]
+    CREATE_RESP --> ESTABLISHED_A["connection_established"]
     CREATE_RESP --> BOOT_RESP_OUT["sealed bootstrap_response bytes"]
     BOOT_RESP_OUT --> PEER["remote node"]
 
@@ -172,11 +173,14 @@ flowchart TD
     RECEIVE --> BOOT_RESP["bootstrap_response"]
     BOOT_RESP --> RESP_LOCAL["response"]
     BOOT_RESP --> REC2["fact_receipt for response"]
-    RESP_LOCAL --> SEED["seed_connection_sync"]
+    BOOT_RESP --> RESP_RECEIVED["bootstrap_response_received"]
+    BOOT_RESP --> ESTABLISHED_B["connection_established"]
+    ESTABLISHED_B --> RESP_RECEIVED
+    RESP_RECEIVED --> SEED["seed_connection_sync"]
 
     subgraph ESTABLISHED["Established connection"]
       SYNC_IDS["sync-selected fact ids"] --> SEND_IDS["send_facts_on_connection"]
-      RESP_LOCAL --> SEND_IDS
+      ESTABLISHED_B --> SEND_IDS
       FACT_STORE[("fact store payload bytes")] --> SEND_IDS
       SEND_IDS --> FRAME_OUT["frame_small or frame_file_slice"]
       FRAME_OUT --> NETWORK["send_network_frame"]
@@ -186,7 +190,7 @@ flowchart TD
       RECEIVE --> OBS["frame_observation"]
       RECEIVE --> FRAME_IN["frame_small or frame_file_slice"]
       OBS --> FRAME_IN
-      RESP_LOCAL --> FRAME_IN
+      ESTABLISHED_B --> FRAME_IN
       FRAME_IN --> CHILD["child facts"]
       FRAME_IN --> REC_CHILD["connection_fact_receipt per child"]
     end
@@ -197,26 +201,32 @@ flowchart TD
 
 ## 4) Sync Seed, Live Tail, And Catch-Up
 
-Sync plans replication over established connection facts. A connection response
-becomes durable only after its projector validates request, invite, receipt,
-and ephemeral-secret context. That projection emits `seed_connection_sync`,
-which creates the first compare. Later share contributions live-tail to
-established authorized connections. Periodic daemon ticks drain queued compare,
-have, need, send, and time-wake work when catch-up remains.
+Sync plans replication over established connection facts. A received connection
+response becomes durable only after its projector validates request-sent, invite,
+receipt, and ephemeral-secret context. That projection emits
+`connection_established`; the established projector writes the live connection
+row, and the response-received lifecycle projector emits `seed_connection_sync`
+once established context is available. That seed creates the first compare. Later
+share contributions live-tail to established authorized connections. Periodic
+daemon ticks drain queued compare, have, need, send, and time-wake work when
+catch-up remains.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 340}} }%%
 flowchart TD
     BOOT_RESP["bootstrap_response opens sealed bytes"] --> RESP_FACT["response fact"]
-    RESPONDER["create_bootstrap_response handler"] --> RESP_FACT
-    REQUEST_CTX["connection_request context"] --> RESP_PROJECTOR["response projector"]
+    RESPONDER["create_bootstrap_response handler"] --> RESP_SENT["response-sent fact"]
+    RESPONDER --> ESTABLISHED_AUTHOR["connection_established fact"]
+    REQUEST_CTX["bootstrap_request_sent context"] --> RESP_PROJECTOR["response projector"]
     INVITE_CTX["connection_invite_secret context"] --> RESP_PROJECTOR
     RECEIPT_CTX["connection_fact_receipt context"] --> RESP_PROJECTOR
     EPHEMERAL_CTX["connection_ephemeral_secret context"] --> RESP_PROJECTOR
     RESP_FACT --> RESP_PROJECTOR
-    RESP_PROJECTOR --> RESPONSE_ROWS["connection_response rows"]
-    RESP_PROJECTOR --> RESPONSE_CTX["connection_response context"]
-    RESP_PROJECTOR --> SEED["seed_connection_sync"]
+    RESP_PROJECTOR --> ESTABLISHED_FACT["connection_established fact"]
+    RESP_PROJECTOR --> RESP_RECEIVED["response-received fact"]
+    ESTABLISHED_FACT --> ESTABLISHED_ROWS["connection_established rows"]
+    ESTABLISHED_ROWS --> RESP_RECEIVED
+    RESP_RECEIVED --> SEED["seed_connection_sync"]
     SEED --> ROOT_COMPARE["root compare fact"]
     ROOT_COMPARE --> SEND_COMPARE["send_facts_on_connection"]
     SEND_COMPARE --> PEER["remote node"]

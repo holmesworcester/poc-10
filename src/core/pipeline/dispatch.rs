@@ -168,7 +168,7 @@ fn next_queued_intent_in_table(
         .map(|idx| format!("?{idx}"))
         .collect::<Vec<_>>()
         .join(", ");
-    store
+    let queued = store
         .conn()
         .query_row(
             &format!(
@@ -192,7 +192,8 @@ fn next_queued_intent_in_table(
             },
         )
         .optional()
-        .map_err(|err| format!("load queued intent: {err}"))
+        .map_err(|err| format!("load queued intent: {err}"))?;
+    Ok(queued)
 }
 
 /// Build the fact/store view a stored-intent handler requested.

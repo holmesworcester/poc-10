@@ -9,6 +9,7 @@ use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection::bootstrap_response::fact::BootstrapResponseFact;
 use topo::protocol::connection::bootstrap_response::layout as connection_response_layout;
+use topo::protocol::connection::bootstrap_response::rows as connection_response_rows;
 use topo::protocol::connection::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -43,6 +44,13 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
     let store = store_with_local_endpoint();
     let local_endpoint = local_endpoint();
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
+    store
+        .insert_table_rows(vec![connection_response_rows::bootstrap_response_row(
+            connection_fact.id,
+            &connection,
+        )
+        .expect("connection row")])
+        .expect("seed connection row");
     let fact = Fact::new(
         topo::protocol::auth::workspace::scope([7; 32]),
         1,

@@ -10,10 +10,10 @@
 //!   2. CONTEXT. Projection watches for local close context keyed by the
 //!      connection id; close context tears down the live row and purges this
 //!      local state fact.
-//!   3. MATERIALIZE. Valid facts offer connection-established and
-//!      connection-response context, then write the live connection row used by
-//!      encrypted frame send/receive. The fact carries no role; initiator or
-//!      responder history is inferred from request/response lifecycle facts.
+//!   3. MATERIALIZE. Valid facts offer connection-established context, then
+//!      write the live connection row used by encrypted frame send/receive. The
+//!      fact carries no role; initiator or responder history is inferred from
+//!      request/response lifecycle facts.
 //!
 //! Change this projector for established-connection row ownership or close
 //! teardown. Handshake derivation belongs in response authoring/receipt paths.
@@ -38,6 +38,19 @@ pub fn connection_established_offer(
     connection_id: [u8; 32],
 ) -> crate::core::context::ContextOffer {
     crate::core::context::ContextOffer::range(
+        owner,
+        CONNECTION_ESTABLISHED_ROLE,
+        FactScope::Local,
+        connection_id,
+        connection_id,
+    )
+}
+
+pub fn connection_established_need(
+    owner: [u8; 32],
+    connection_id: [u8; 32],
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
         owner,
         CONNECTION_ESTABLISHED_ROLE,
         FactScope::Local,
@@ -100,13 +113,6 @@ impl AuthenticatedProjector<super::authenticate::ConnectionEstablishedAuthentica
                 fact.id,
                 established.connection_id,
             ))
-            .offer(crate::core::context::ContextOffer::range(
-                fact.id,
-                "connection_response",
-                FactScope::Local,
-                established.connection_id,
-                established.connection_id,
-            ))
             .row_mutation(RowMutation::PutRow(connection_row(ConnectionRowFields {
                 connection_id: established.connection_id,
                 from_endpoint: established.from_endpoint,
@@ -116,5 +122,78 @@ impl AuthenticatedProjector<super::authenticate::ConnectionEstablishedAuthentica
                 handshake_hash: established.handshake_hash,
                 connection_secret: established.connection_secret,
             })?)))
+    }
+}
+
+#[cfg(test)]
+mod projector_tests {
+    use crate::core::context::ContextOffer;
+    use crate::core::facts::{Fact, FactScope};
+    use crate::core::projectors::{MatchedContext, ProjectionContext, Projector};
+    use crate::protocol::connection::close;
+
+    use super::*;
+
+    fn established_fact() -> Fact {
+        Fact::new(
+            FactScope::Local,
+            1_700_000_000,
+            crate::protocol::connection::connection_established::layout::encode_fact(
+                &ConnectionEstablishedFact {
+                    connection_id: [1; 32],
+                    from_endpoint: [2; 32],
+                    to_endpoint: [3; 32],
+                    request_id: [4; 32],
+                    initiator_ephemeral_secret_fact_id: [5; 32],
+                    responder_ephemeral_secret_fact_id: [6; 32],
+                    responder_ephemeral_public_key: [7; 32],
+                    handshake_hash: [8; 32],
+                    connection_secret: [9; 32],
+                    established_at_ms: 1_700_000_000,
+                },
+            )
+            .expect("encode established"),
+        )
+    }
+
+    #[test]
+    fn established_connection_writes_live_row_and_offers_context() {
+        let fact = established_fact();
+
+        let output = ConnectionEstablishedProjector::new()
+            .project(&fact, &ProjectionContext::new(Vec::new()))
+            .expect("project established");
+
+        assert_eq!(output.offers.len(), 1);
+        assert_eq!(output.offers[0].role.as_str(), "connection_established");
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert!(output.effects.intents.is_empty());
+    }
+
+    #[test]
+    fn closed_connection_deletes_live_row_without_seeding_sync() {
+        let fact = established_fact();
+        let close_need = close::connection_closed_need(fact.id, [1; 32]);
+        let close_fact = Fact::new(FactScope::Local, 1_700_000_001, vec![99]);
+        let context = ProjectionContext::from_matches(vec![MatchedContext {
+            need: close_need.clone(),
+            offer: ContextOffer {
+                owner: close_fact.id,
+                role: close_need.role.clone(),
+                scope: FactScope::Local,
+                start_key: close_need.start_key.clone(),
+                end_key: close_need.end_key.clone(),
+            },
+            payload: close_fact,
+        }]);
+
+        let output = ConnectionEstablishedProjector::new()
+            .project(&fact, &context)
+            .expect("project closed established");
+
+        assert!(output.offers.is_empty());
+        assert_eq!(output.effects.row_mutations.len(), 1);
+        assert_eq!(output.effects.purged_facts, vec![fact.id]);
+        assert!(output.effects.intents.is_empty());
     }
 }

@@ -143,11 +143,7 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
         "runtime handler route names must be unique"
     );
 
-    for required in [
-        "send_bootstrap_connection_request",
-        "send_network_frame",
-        "receive_network_frame",
-    ] {
+    for required in ["send_network_frame", "receive_network_frame"] {
         assert!(
             names.contains(required),
             "runtime handler route missing {required}"
@@ -155,7 +151,6 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
     }
 
     for excluded in [
-        "send_bootstrap_connection_request",
         "send_facts_on_connection",
         "send_network_frame",
         "receive_network_frame",
@@ -189,8 +184,6 @@ fn replay_classification_marks_only_deterministic_rebuild_handlers() {
     );
 
     for live_only in [
-        "send_bootstrap_connection_request",
-        "send_bootstrap_connection_response",
         "create_bootstrap_response",
         "create_connection_response",
         "send_network_frame",
@@ -240,6 +233,10 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
     let expected: BTreeSet<u8> = [
         connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST,
         connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE,
+        connection::bootstrap_request_sent::layout::TYPE_BOOTSTRAP_REQUEST_SENT,
+        connection::bootstrap_request_received::layout::TYPE_BOOTSTRAP_REQUEST_RECEIVED,
+        connection::bootstrap_response_sent::layout::TYPE_BOOTSTRAP_RESPONSE_SENT,
+        connection::bootstrap_response_received::layout::TYPE_BOOTSTRAP_RESPONSE_RECEIVED,
         connection::connection_request::layout::TYPE_CONNECTION_REQUEST,
         connection::connection_response::layout::TYPE_CONNECTION_RESPONSE,
         connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT,

@@ -171,10 +171,11 @@ It should not own an operational retry loop and should not emit
 connection-maintenance decisions.
 
 `create_bootstrap_response` needs an atomicity fix. It must not send network
-bytes before the responder ephemeral fact and `connection_response` fact commit.
+bytes before the responder ephemeral, response-sent, and
+`connection_established` facts commit.
 The safe shape is:
 
-- create or reuse the durable local response facts;
+- create or reuse the durable local response-sent and established facts;
 - commit them first;
 - queue a local send derived from the committed response;
 - if the send is lost, later live request retry or connection maintenance can

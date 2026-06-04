@@ -20,7 +20,11 @@
 //! of child facts opened from a frame.
 
 pub mod bootstrap_request;
+pub mod bootstrap_request_received;
+pub mod bootstrap_request_sent;
 pub mod bootstrap_response;
+pub mod bootstrap_response_received;
+pub mod bootstrap_response_sent;
 pub mod close;
 pub mod connection_established;
 pub mod connection_request;
@@ -44,7 +48,5 @@ pub mod receive_network_frame;
 pub mod create_bootstrap_response;
 pub mod create_connection_response;
 pub mod maintain_connections;
-pub mod send_bootstrap_request;
-pub mod send_bootstrap_response;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

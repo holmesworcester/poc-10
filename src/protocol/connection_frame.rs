@@ -65,6 +65,10 @@ pub fn is_private_local_fact_tag(tag: u8) -> bool {
             | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
             | connection::bootstrap_request::layout::TYPE_BOOTSTRAP_REQUEST
             | connection::bootstrap_response::layout::TYPE_BOOTSTRAP_RESPONSE
+            | connection::bootstrap_request_sent::layout::TYPE_BOOTSTRAP_REQUEST_SENT
+            | connection::bootstrap_request_received::layout::TYPE_BOOTSTRAP_REQUEST_RECEIVED
+            | connection::bootstrap_response_sent::layout::TYPE_BOOTSTRAP_RESPONSE_SENT
+            | connection::bootstrap_response_received::layout::TYPE_BOOTSTRAP_RESPONSE_RECEIVED
             | connection::connection_request::layout::TYPE_CONNECTION_REQUEST
             | connection::connection_response::layout::TYPE_CONNECTION_RESPONSE
             | connection::connection_request_sent::layout::TYPE_CONNECTION_REQUEST_SENT
@@ -374,10 +378,8 @@ pub fn project_observed_frame(
         return Err("connection frame observation does not name frame fact".to_string());
     }
 
-    let connection_need = exact_need(
+    let connection_need = connection::connection_established::project::connection_established_need(
         fact.id,
-        "connection_response",
-        FactScope::Local,
         connection_id,
     );
     let Some(connection_fact) = context.payload_for(&connection_need) else {

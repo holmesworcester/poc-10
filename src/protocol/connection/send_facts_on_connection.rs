@@ -20,7 +20,7 @@ use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::{
     auth::endpoint,
-    connection::bootstrap_response as response,
+    connection::bootstrap_response,
     connection_frame::{
         self as frame_policy, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
         CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
@@ -257,26 +257,22 @@ impl SendFactsOnConnectionHandler {
 impl IntentHandler for SendFactsOnConnectionHandler {
     fn input_fact_ids(&self, intent: &Intent) -> Result<Vec<HandlerFactId>, String> {
         Ok(match decode_send_facts_on_connection_work(intent)? {
-            SendFactsOnConnectionWork::Explicit(input) => {
-                let mut ids = Vec::with_capacity(1 + input.fact_ids.len());
-                ids.push(input.connection_id);
-                ids.extend(input.fact_ids);
-                ids
-            }
-            SendFactsOnConnectionWork::ShareableRange(input) => vec![input.connection_id],
+            SendFactsOnConnectionWork::Explicit(input) => input.fact_ids,
+            SendFactsOnConnectionWork::ShareableRange(_) => Vec::new(),
         })
     }
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let work = decode_send_facts_on_connection_work(intent)?;
         let connection_id = work.connection_id();
-        let Some(connection_fact) = context.fact(&connection_id) else {
+        let Some(connection) =
+            bootstrap_response::queries::connection_by_id(context.store()?, &connection_id)
+                .map_err(|err| {
+                    HandlerError::fatal(format!("send_facts_on_connection connection row: {err}"))
+                })?
+        else {
             return Ok(PipelineEffects::new());
         };
-        let connection = response::layout::decode_fact(connection_fact.body())?;
-        if connection_fact.id != connection_id {
-            return Err("send_facts_on_connection connection fact id mismatch".into());
-        }
         let batches = fact_batches(facts_for_work(work, context)?)?;
 
         let local_endpoint =
@@ -308,8 +304,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
                 &fact_ids,
                 bundle,
             )?;
-            let frame_fact =
-                frame_policy::frame_fact_from_wire(&sealed_frame, connection_fact.timestamp)?;
+            let frame_fact = frame_policy::frame_fact_from_wire(&sealed_frame, 0)?;
             let frame = frame_policy::wire_from_frame_fact(&frame_fact)?;
             output = output.local_intent(send_network_frame::send_network_frame_intent(
                 SendNetworkFrame {

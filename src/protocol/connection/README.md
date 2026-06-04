@@ -24,11 +24,11 @@ than one polymorphic request:
   Diffie-Hellman only — no invite material — so membership connections survive
   invite-link expiry.
 
-Neither path uses a separate envelope fact: each wire fact seals itself in its
-own layout, and the receiving projector unseals it with the key from a context
-need rather than the receive handler unsealing inline. Both `*_response` facts are "the
-connection" and write the same shared connection-row table keyed by connection
-id, so established frames and sync treat the two kinds identically.
+Both paths derive a response id that becomes the connection id. Local lifecycle
+facts record which request/response bytes were sent or received, and the
+symmetric `connection_established` fact writes the shared connection-row table
+keyed by that id, so established frames and sync treat bootstrap and membership
+connections identically.
 
 **Transition.** First contact is always bootstrap (the endpoint cannot validate us
 yet). Bootstrap sync propagates `endpoint_shared` membership both ways plus a
@@ -52,11 +52,13 @@ Projection and handlers return:
 
 - child facts opened from bootstrap or established frames;
 - context offers such as `connection_ephemeral_secret`, `connection_request`,
-  `connection_response`, `connection_response_for_request`,
+  `bootstrap_request_sent`, `bootstrap_request_received`,
+  `bootstrap_response_sent`, `bootstrap_response_received`,
+  `connection_established`, `connection_response_for_request`,
   `connection_fact_receipt`, `connection_closed`, and
   `connection_ephemeral_secret_closed`;
-- local and durable intents for bootstrap sends, response creation, sync
-  seeding, fact batching, and socket writes.
+- local and durable intents for response creation, sync seeding, fact batching,
+  and socket writes.
 
 Core owns queueing, fact storage, local-intent retry/removal, socket table
 mechanics, and transaction boundaries. Connection owns packet classification,
@@ -80,12 +82,12 @@ below.
 ### Context Interface
 
 Auth supplies local endpoint and invite-secret context. Bootstrap frame
-projectors use `auth_daemon_endpoint`; request/response projection uses
-`connection_invite_secret` and `auth_local_endpoint`. Connection publishes
-context such as `connection_request`, `connection_response`,
-`connection_response_for_request`, and `connection_fact_receipt` so later
-connection projectors can validate request/response/frame paths without direct
-row scans.
+projectors use `auth_local_endpoint`; request/response projection uses
+`connection_invite_secret`, request-sent lifecycle context, and fact receipts.
+Connection publishes context such as `connection_request`,
+`connection_established`, `connection_response_for_request`, and
+`connection_fact_receipt` so later connection projectors can validate
+request/response/frame paths without direct row scans.
 
 ### Other Interfaces
 
@@ -121,9 +123,9 @@ or child fact by themselves. The target projector validates that the receipt
 path, local endpoint, sender endpoint, request id, connection id, and frame hash
 match the target fact.
 
-Close is also target-owned. A close fact publishes close context. The response
-and ephemeral-secret projectors consume it and delete/purge their own rows and
-facts.
+Close is also target-owned. A close fact publishes close context. The
+established-connection, response, and ephemeral-secret projectors consume it and
+delete/purge their own rows and facts.
 
 ## Intent Handlers
 
@@ -131,49 +133,44 @@ facts.
 It normalizes origin metadata and admits the typed wire bytes as their fact; it
 does no unsealing itself. Each sealed request/response/frame fact is unsealed by
 its own projector, which gets the key from a context need (`auth_local_endpoint`
-for handshake facts, `connection_response` for established frames). There is no
+for handshake facts, `connection_established` for established frames). There is no
 separate envelope fact and no inline unseal at the boundary.
 
-`send_bootstrap_connection_request` sends a sealed pre-connection request. It
-loads the request and initiator ephemeral secret, proves the secret matches the
-request, seals the request bytes, stages them through core networking, and
-attempts one TCP write. Failed connection attempts are consumed; retry timing is
-owned by request projection time wakes.
+`maintain_connections` drives outbound bootstrap request sends from
+`bootstrap_request_sent` rows. The request command creates invite material,
+initiator ephemeral material, the semantic request, and the exact sealed request
+bytes in one local lifecycle fact; maintenance re-queues `send_network_frame`
+for unanswered rows.
 
 `create_bootstrap_response` is responder-side handshake work. It loads the
 request, invite secret, and receive receipt, validates the invite signature and
-receipt path, creates responder ephemeral material, builds the canonical local
-response fact, and returns the responder ephemeral fact plus response fact. It
-sends nothing itself (flat-intent rule): the local `bootstrap_response`
-projector emits the `send_bootstrap_connection_response` intent once the response
-fact is admitted.
-
-`send_bootstrap_connection_response` ships the sealed response. It loads the
-committed response fact and its responder ephemeral secret, seals the response
-responder-ephemeral → initiator-endpoint, and attempts one bounded write to the
-initiator's bootstrap return address. A lost send is recovered by a later live
-retry from the committed response fact.
+receipt path, creates responder ephemeral material, builds the canonical
+response body, and returns `bootstrap_response_sent` plus
+`connection_established` facts. It sends nothing itself (flat-intent rule): the
+`bootstrap_response_sent` projector emits the `send_network_frame` local intent
+for the exact sealed response bytes.
 
 `send_facts_on_connection` packages facts chosen by sync. It loads the
 connection and payload facts, rejects local/private facts, batches small facts
 or file slices into frame classes, seals each batch with the connection secret,
 and emits local `send_network_frame` intents.
 
-`send_network_frame` is the final outbound socket boundary. It loads the
-connection fact, resolves the endpoint address from the original request and local
-endpoint, validates frame size, stages the opaque bytes, and retries the intent
-on socket or route failure.
+`send_network_frame` is the final outbound socket boundary. It loads the route
+key, resolves the endpoint address from lifecycle or established connection
+state, validates frame size, stages the opaque bytes, and retries the intent on
+socket or route failure.
 
 ## Facts
 
 ### `bootstrap_request` (tag 42)
 
-Invite-authorized handshake request: the first contact with an endpoint that
-does not know us yet. Local requests are outbound work and may schedule
-bootstrap send retries until a response arrives. Global requests are received
-bootstrap requests and emit `create_bootstrap_response` once invite, endpoint,
-and receipt context validate. Both branches write `bootstrap_request_rows` and
-offer `connection_request` context.
+Invite-authorized semantic handshake request: the first contact with an
+endpoint that does not know us yet. This fact is projected only for
+received/global requests after the sealed request frame has been opened.
+Projection emits `bootstrap_request_received`, offers `connection_request`,
+learns the initiator's return address, and emits `create_bootstrap_response`
+once invite, local endpoint, and receipt context validate. Local outbound
+request state lives in `bootstrap_request_sent`.
 
 ```text
 request {
@@ -209,13 +206,14 @@ ephemeral_secret {
 
 ### `bootstrap_response` (tag 44)
 
-Local connection fact answering a `bootstrap_request`. Projection validates
-request, invite, receipt, and ephemeral-secret context, writes
-`bootstrap_response_rows`, offers `connection_response` and
-`connection_response_for_request` context, emits the
-`send_bootstrap_connection_response` send for the local response, and emits
-`seed_connection_sync` for received responses. Close context deletes/purges the
-response.
+Local semantic response answering a `bootstrap_request` on the initiator side.
+Projection validates exact `bootstrap_request_sent`, invite, receipt, and
+initiator ephemeral-secret context, then emits `bootstrap_response_received`,
+and `connection_established`. The `bootstrap_response_received` projector seeds
+sync after `connection_established` context proves the live row exists. The
+responder authoring path does not commit a raw local `bootstrap_response`; it
+commits `bootstrap_response_sent` plus `connection_established`. Close context
+purges the local response fact because it carries connection secret material.
 
 ```text
 response {
@@ -233,17 +231,54 @@ response {
 
 ### `close` (tag 45)
 
-Local close signal for one connection response fact. Projection requires local
-scope and `connection_response` context, then offers `connection_closed` for
-the response and `connection_ephemeral_secret_closed` for both handshake
+Local close signal for one connection id. Projection requires local scope and
+`connection_established` context, then offers `connection_closed` for the
+connection id and `connection_ephemeral_secret_closed` for both handshake
 secrets.
 
 ```text
 close {
-  connection_id: fact:connection_response_ab
+  connection_id: fact:connection_id_ab
   closed_at_ms: 1715000500000
 }
 ```
+
+### `connection_established` (tag 178)
+
+Symmetric local connection state created by successful response authoring on the
+responder and successful response receipt on the initiator. Projection offers
+`connection_established`, writes the shared live connection row keyed by
+`connection_id`, and consumes `connection_closed` to delete the row and purge
+itself. Response-received lifecycle projectors seed sync after this context is
+available.
+
+### `bootstrap_request_sent` (tag 179)
+
+Local lifecycle fact for an outbound bootstrap request. It contains the semantic
+request, request id, initiator ephemeral secret id, peer address, and exact
+sealed request bytes. Projection offers `bootstrap_request_sent`, writes the
+pending request row used by `maintain_connections`, and remembers the peer
+address.
+
+### `bootstrap_request_received` (tag 180)
+
+Local lifecycle fact recording that a sealed bootstrap request was received and
+accepted far enough to schedule responder work. Projection offers
+`bootstrap_request_received`.
+
+### `bootstrap_response_sent` (tag 181)
+
+Local lifecycle fact for a responder-authored bootstrap response. It contains
+the semantic response, response id, responder ephemeral secret id, peer address,
+and exact sealed response bytes. Projection offers `bootstrap_response_sent` and
+emits one `send_network_frame` local intent keyed by this lifecycle fact.
+
+### `bootstrap_response_received` (tag 182)
+
+Local lifecycle fact recording that a sealed bootstrap response was received and
+accepted far enough to establish the connection. Projection offers
+`bootstrap_response_received`, needs matching `connection_established` context,
+and emits `seed_connection_sync` once the live row is available.
 
 ### Fact sealing (each fact seals itself; unseal is a context need)
 
@@ -255,7 +290,7 @@ response) are sealed asymmetrically to the recipient endpoint, and established
 frames are sealed with the connection secret. On receipt the typed wire bytes
 are admitted and a receiving projector unseals it with the key from a context
 need — `auth_local_endpoint` (the local endpoint secret) for handshake facts,
-`connection_response` (the connection secret) for established frames — exactly as
+`connection_established` (the connection secret) for established frames — exactly as
 the established-frame projector already opens frames. The receive boundary admits
 the bytes and does no unsealing itself; there is no inline unseal.
 
@@ -282,9 +317,9 @@ fact_receipt {
 ### `frame_small` (tag 168)
 
 Local wire fact for one established small encrypted frame. Projection needs a
-matching local `frame_observation` plus the referenced local connection
-response, opens the frame, emits durable child facts, and emits one receipt per
-child.
+matching local `frame_observation` plus the referenced local
+`connection_established`, opens the frame, emits durable child facts, and emits
+one receipt per child.
 
 ```text
 frame_small {
@@ -335,9 +370,8 @@ frame_observation {
 ```text
 outbound initiator dependency graph:
   invite_secret + initiator ephemeral_secret
-    -> local request
-       needs connection_response_for_request until answered
-       time wake -> send_bootstrap_connection_request
+    -> bootstrap_request_sent
+       rows drive maintain_connections until answered
        network output: sealed bootstrap request bytes
 
 inbound responder transport observation:
@@ -357,9 +391,9 @@ inbound responder dependency graph:
   create_bootstrap_response
     loads request + invite_secret + fact_receipt
     reads local endpoint state
-    -> responder ephemeral_secret + local response (committed first)
-  local bootstrap_response projector
-    -> send_bootstrap_connection_response intent
+    -> responder ephemeral_secret + bootstrap_response_sent + connection_established
+  bootstrap_response_sent projector
+    -> send_network_frame intent
     -> network output: sealed response bytes
 
 inbound initiator transport observation:
@@ -370,12 +404,18 @@ inbound initiator transport observation:
 
 inbound initiator dependency graph:
   response
-    needs connection_request(request_id)
+    needs bootstrap_request_sent(request_id)
     needs connection_invite_secret(invite_secret)
     needs connection_fact_receipt(response)
     needs initiator ephemeral_secret
-    -> materializes connection_response
-    -> seed_connection_sync
+    -> bootstrap_response_received + connection_established
+
+connection_established
+  -> live connection row
+
+bootstrap_response_received
+  needs connection_established
+  -> seed_connection_sync
 
 established connection transfer:
   sync selected facts
@@ -383,13 +423,14 @@ established connection transfer:
     -> send_network_frame
     -> remote frame_small/frame_bundle/frame_file_slice wire fact
     -> remote frame_observation metadata fact
-       need frame_observation + connection_response
+       need frame_observation + connection_established
        open to child facts + fact_receipts
 ```
 
 Each handshake fact seals itself in its own layout; the receiving projector
 unseals it with the key from a context need (`auth_local_endpoint`). The
-`request`, `response`, and `fact_receipt` facts then carry the dependency edges used by
-request and response projection. The connection response fact is the connection
-id; sync and network send handlers treat that id as the routing key, while
-semantic child validation stays with auth, content, and sync projectors.
+`request`, `response`, lifecycle, and `fact_receipt` facts then carry the
+dependency edges used by request and response projection. The response id is the
+connection id; `connection_established` materializes the live row, and sync and
+network send handlers treat that id as the routing key while semantic child
+validation stays with auth, content, and sync projectors.

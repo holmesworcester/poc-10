@@ -245,9 +245,10 @@ upserts or retracts one owner fact's durable sync visibility, refreshes the
 affected range-summary rows, and triggers live-tail advertisement while
 skipping the origin connection that supplied the fact.
 
-`seed_connection_sync` runs after a connection response becomes durable. It
-loads the connection fact, computes the root range summary for facts visible on
-that connection, creates a root `compare` fact, and asks connection to send it.
+`seed_connection_sync` is emitted by response-received lifecycle projection after
+`connection_established` context proves the live connection row exists. It
+computes the root range summary for facts visible on that connection, creates a
+root `compare` fact, and asks connection to send it.
 
 `send_sync_compare_response` handles one `compare` fact. It loads connection
 visible shareable facts, computes local summaries for the requested range,
@@ -373,7 +374,7 @@ auth/content projector admits message_hello
   -> share_fact_with_sync(upsert message_hello, context_have=[endpoint, user, key])
   -> sync_shareable_fact_rows + negentropy rows
 
-connection_response_ab
+connection_response_received_ab + connection_established_ab
   -> seed_connection_sync
   -> compare(root summary)
   -> send_facts_on_connection(compare)

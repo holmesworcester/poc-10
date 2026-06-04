@@ -2,17 +2,14 @@
 //!
 //! The request projector schedules this handler only after exact invite and
 //! fact-receipt context exists. The handler rechecks that context,
-//! creates local responder ephemeral material, emits the response fact, and
-//! sends the response bytes back to the request's bootstrap return address.
-
-use std::io::Read;
-use std::net::TcpListener;
-use std::thread;
+//! creates local responder ephemeral material, emits response-sent lifecycle
+//! state, and leaves network send ownership to that lifecycle fact's projector.
 
 use topo::core::crypto::{self, ED25519_SIGNATURE_BYTES};
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
+use topo::core::projectors::Projector;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
@@ -23,6 +20,9 @@ use topo::protocol::connection::bootstrap_request::fact::BootstrapRequestFact;
 use topo::protocol::connection::bootstrap_request::layout as request_layout;
 use topo::protocol::connection::bootstrap_response::layout as response_layout;
 use topo::protocol::connection::bootstrap_response::transit as bootstrap_response;
+use topo::protocol::connection::bootstrap_response_sent::layout as response_sent_layout;
+use topo::protocol::connection::bootstrap_response_sent::project::BootstrapResponseSentProjector;
+use topo::protocol::connection::connection_established::layout as established_layout;
 use topo::protocol::connection::create_bootstrap_response::{
     create_bootstrap_response_intent, CreateBootstrapResponse, CreateBootstrapResponseHandler,
 };
@@ -31,14 +31,11 @@ use topo::protocol::connection::fact_receipt::fact::{
     ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST,
 };
 use topo::protocol::connection::fact_receipt::layout as received_layout;
-use topo::protocol::connection::send_bootstrap_response::{
-    send_bootstrap_connection_response_intent, SendBootstrapConnectionResponse,
-    SendBootstrapConnectionResponseHandler,
-};
+use topo::protocol::connection::send_network_frame::decode_send_network_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
-fn create_handler_emits_responder_material_and_response_fact_without_sending() {
+fn create_handler_emits_responder_material_response_sent_and_established_without_sending() {
     // Flat-intent rule: create_bootstrap_response only creates the responder
     // ephemeral + response facts. It performs no send and chains no intent; the
     // local response projector emits the send once the response fact is admitted.
@@ -62,16 +59,21 @@ fn create_handler_emits_responder_material_and_response_fact_without_sending() {
         .handle(&scenario.intent, &context)
         .expect("handler produces response fact");
 
-    assert_eq!(output.facts.len(), 2);
+    assert_eq!(output.facts.len(), 3);
     assert!(output.intents.is_empty(), "create handler chains no intent");
     assert!(
         output.local_intents.is_empty(),
         "create handler sends nothing"
     );
     let ephemeral_fact = responder_ephemeral_fact(&output);
-    let response_fact = response_fact(&output);
+    let response_sent_fact = response_sent_fact(&output);
+    let established_fact = established_fact(&output);
     let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body()).expect("ephemeral");
-    let response = response_layout::decode_fact(response_fact.body()).expect("decode response");
+    let sent =
+        response_sent_layout::decode_fact(response_sent_fact.body()).expect("decode response sent");
+    let response = sent.response;
+    let established =
+        established_layout::decode_fact(established_fact.body()).expect("decode established");
 
     assert_eq!(ephemeral.owner_endpoint, scenario.responder_endpoint);
     assert_eq!(ephemeral.created_at_ms, scenario.received_at);
@@ -89,20 +91,13 @@ fn create_handler_emits_responder_material_and_response_fact_without_sending() {
     assert_eq!(response.to_endpoint, scenario.initiator_endpoint);
     assert_ne!(response.handshake_hash, [0u8; 32]);
     assert_ne!(response.connection_secret, [0u8; 32]);
+    assert_eq!(sent.response_id, established.connection_id);
+    assert_eq!(established.connection_secret, response.connection_secret);
 }
 
 #[test]
-fn send_bootstrap_response_handler_seals_committed_response_to_initiator() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-    let return_addr = listener.local_addr().expect("listener addr");
-    let reader = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept response");
-        let mut len = [0u8; 4];
-        stream.read_exact(&mut len).expect("read len");
-        let mut body = vec![0; u32::from_be_bytes(len) as usize];
-        stream.read_exact(&mut body).expect("read body");
-        body
-    });
+fn bootstrap_response_sent_projector_emits_sealed_send_network_frame() {
+    let return_addr = "127.0.0.1:41099".parse().expect("addr");
     let scenario = synthesize_scenario(SynthOpts {
         request_return_addr: Some(return_addr),
         ..SynthOpts::default()
@@ -124,30 +119,29 @@ fn send_bootstrap_response_handler_seals_committed_response_to_initiator() {
             .with_store(&store),
         )
         .expect("create response facts");
-    let ephemeral_fact = responder_ephemeral_fact(&create_output).clone();
-    let response_fact = response_fact(&create_output).clone();
-    let response = response_layout::decode_fact(response_fact.body()).expect("decode response");
+    let response_sent_fact = response_sent_fact(&create_output).clone();
+    let sent =
+        response_sent_layout::decode_fact(response_sent_fact.body()).expect("decode response sent");
 
-    // Stage two: the projector-emitted send intent seals the committed response.
-    let send_intent = send_bootstrap_connection_response_intent(SendBootstrapConnectionResponse {
-        response_id: response_fact.id,
-        responder_ephemeral_secret_id: ephemeral_fact.id,
-        addr: return_addr,
-    })
-    .expect("send intent");
-    SendBootstrapConnectionResponseHandler::new()
-        .handle(
-            &send_intent,
-            &HandlerContext::with_facts([response_fact.clone(), ephemeral_fact]).with_store(&store),
+    let output = BootstrapResponseSentProjector::new()
+        .project(
+            &response_sent_fact,
+            &topo::core::projectors::ProjectionContext::default(),
         )
-        .expect("send sealed response");
+        .expect("project response_sent");
 
-    let sent = reader.join().expect("reader");
-    assert_eq!(sent[0], bootstrap_response::TYPE_SEALED_CONNECTION_RESPONSE);
-    assert_ne!(sent, response_fact.bytes);
-    assert!(!sent
-        .windows(response.connection_secret.len())
-        .any(|window| window == response.connection_secret));
+    assert_eq!(output.effects.local_intents.len(), 1);
+    let network_send =
+        decode_send_network_frame(&output.effects.local_intents[0]).expect("network send");
+    assert_eq!(network_send.routing_key, response_sent_fact.id);
+    assert_eq!(
+        network_send.frame[0],
+        bootstrap_response::TYPE_SEALED_CONNECTION_RESPONSE
+    );
+    assert!(!network_send
+        .frame
+        .windows(sent.response.connection_secret.len())
+        .any(|window| window == sent.response.connection_secret));
     let initiator_endpoint = EndpointFact {
         endpoint: scenario.initiator_endpoint,
         secret: scenario.initiator_secret,
@@ -155,9 +149,9 @@ fn send_bootstrap_response_handler_seals_committed_response_to_initiator() {
         signing_secret: [111; 32],
     };
     assert_eq!(
-        bootstrap_response::open_connection_response(&sent, &initiator_endpoint)
+        bootstrap_response::open_connection_response(&network_send.frame, &initiator_endpoint)
             .expect("open sealed response"),
-        response_fact.bytes
+        response_layout::encode_fact(&sent.response).expect("response bytes")
     );
 }
 
@@ -171,12 +165,24 @@ fn responder_ephemeral_fact(output: &topo::core::effects::PipelineEffects) -> &F
         .expect("responder ephemeral fact")
 }
 
-fn response_fact(output: &topo::core::effects::PipelineEffects) -> &Fact {
+fn response_sent_fact(output: &topo::core::effects::PipelineEffects) -> &Fact {
     output
         .facts
         .iter()
-        .find(|fact| fact.body().first().copied() == Some(response_layout::TYPE_BOOTSTRAP_RESPONSE))
-        .expect("connection response fact")
+        .find(|fact| {
+            fact.body().first().copied() == Some(response_sent_layout::TYPE_BOOTSTRAP_RESPONSE_SENT)
+        })
+        .expect("bootstrap response sent fact")
+}
+
+fn established_fact(output: &topo::core::effects::PipelineEffects) -> &Fact {
+    output
+        .facts
+        .iter()
+        .find(|fact| {
+            fact.body().first().copied() == Some(established_layout::TYPE_CONNECTION_ESTABLISHED)
+        })
+        .expect("connection established fact")
 }
 
 #[test]

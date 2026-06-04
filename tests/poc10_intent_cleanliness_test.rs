@@ -168,8 +168,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
                 "create_connection_response",
                 "maintain_connections",
                 "receive_network_frame",
-                "send_bootstrap_request",
-                "send_bootstrap_response",
                 "send_facts_on_connection",
                 "send_network_frame",
             ],
@@ -2260,7 +2258,6 @@ fn create_response_handlers_only_create_facts_and_chain_no_intents() {
             ".local_intent(",
             "network::send",
             "send_network_frame",
-            "send_bootstrap_response::",
             "send_connection_response::",
         ] {
             if text.contains(forbidden) {
