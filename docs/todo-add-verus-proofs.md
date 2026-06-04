@@ -45,22 +45,24 @@ signature transcript, key coordinate, BAO proof, or context selector.
 ## File Layout
 
 Verus proof code should live close to the code whose invariant it proves, with a
-small shared proof surface in core. The current source tree has flat manifests,
-scope modules, fact-family directories, and verb-named handler files; proof
-layout should follow that shape and keep `mod.rs` out of the tree.
+small shared proof surface in core. Proof layout follows the target staged
+fact-family roles: decode, authenticate, adapt, project, and effects. The
+current source tree has flat manifests, scope modules, fact-family directories,
+and verb-named handler files; proof layout should follow that shape and keep
+`mod.rs` out of the tree.
 
 ```text
 src/core/proof.rs
 src/core/context_proof.rs
-src/core/projectors_proof.rs
 src/core/pipeline/proof.rs
 
 src/protocol/<scope>/<fact_family>/proof.rs
 src/protocol/<scope>/<fact_family>/proof/
-  layout.rs
-  projector.rs
+  authenticate.rs
+  adapt.rs
+  project.rs
   authority.rs
-  rows.rs
+  effects.rs
 
 src/protocol/<scope>/<verb_object>_proof.rs
 ```
@@ -79,10 +81,13 @@ Verb-named intent handlers such as `auth/create_key_wrap.rs` and
 `src/protocol/auth/create_key_wrap_proof.rs` rather than creating handler
 subdirectories.
 
-Proofs should not live directly in `project.rs`, `commands.rs`, `create.rs`,
-`rows.rs`, or handler files by default. Those files are the production
-implementation surface. They should remain readable as protocol code: decode,
-validate, emit needs, offers, row mutations, facts, purges, or intents.
+Proofs should not live directly in `project.rs`, `commands.rs`, `author.rs`,
+`encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, `create.rs`,
+`layout.rs`, `rows.rs`, or handler files by default. Those files are the
+production implementation surface. They should remain readable as protocol code:
+decode, validate, emit needs, offers, row mutations, facts, purges, or intents.
+`create.rs`, `layout.rs`, and `rows.rs` are transitional implementation or
+inventory names, not target proof homes for new work.
 
 The exception is a small specification hook that must sit on the executable item
 being verified. A pure helper may carry a Verus precondition, postcondition, or

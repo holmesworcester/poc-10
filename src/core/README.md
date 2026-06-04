@@ -234,8 +234,9 @@ use core syntax and contracts, but core must not import their semantic rules.
 - `pipeline/adapt.rs`: adapter-stage trait for moving from authenticated source
   shape to the semantic value projected at the active head version.
 - `pipeline/project.rs`: project-stage contracts and staged runners. It exposes
-  `AuthenticatedProjector`, `SemanticProjector`, `project_authenticated`, and
-  `project_staged`.
+  `SemanticProjector` and `project_staged`; compatibility
+  `AuthenticatedProjector` / `project_authenticated` remains only for the
+  fact-by-fact cutover to staged routes.
 - `pipeline/context.rs`: in-memory `ProjectionContext`, matched payload facts,
   due time ranges, and typed payload helpers visible while one fact is being
   processed.

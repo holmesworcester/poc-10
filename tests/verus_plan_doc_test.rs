@@ -13,12 +13,16 @@ fn verus_plan_uses_current_fact_layout_and_context_terms() {
     let plan = verus_plan();
     let required = [
         "src/protocol/<scope>/<fact_family>/proof.rs",
+        "Proof layout follows the target staged",
+        "fact-family roles: decode, authenticate, adapt, project, and effects",
         "src/protocol/<scope>/<verb_object>_proof.rs",
         "src/protocol/connection/request/proof.rs",
         "src/protocol/connection/response/proof.rs",
         "src/protocol/auth/admin/proof.rs",
         "src/protocol/content/file_slice/proof.rs",
         "src/protocol/auth/create_key_wrap_proof.rs",
+        "`create.rs`, `layout.rs`, and `rows.rs` are transitional implementation or",
+        "not target proof homes for new work.",
         "matched payloads are loaded from the offer owner's fact id",
         "offer-owner payload",
         "connection_invite_secret",
@@ -39,6 +43,7 @@ fn verus_plan_uses_current_fact_layout_and_context_terms() {
     let forbidden = [
         "src/protocol/facts/",
         "src/protocol/intents/",
+        "src/core/projectors_proof.rs",
         "src/core/matchers/proof.rs",
         "src/core/projection/proof.rs",
         "src/core/wake_loop/proof.rs",

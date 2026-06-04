@@ -7,20 +7,22 @@ Single authoritative note: the model and phased implementation plan (Part I), th
 This is the authoritative, consolidated plan for protocol versioning in poc-10.
 It starts from two landed prerequisites: the replay runtime
 (`poc10-replay-intent-shape.md`) and the **fact-authenticator split**
-(`fact-validators.md`) — the bottom of the `authenticate → adapt → project`
-pipeline, landed before any ceiling/adapter work. Its exhaustive test matrix lives
-in Part II below.
+(`fact-validators.md`) — the bottom of the `decode → authenticate → adapt →
+project` pipeline, landed before any ceiling/adapter work. Its exhaustive test
+matrix lives in Part II below.
 
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
 
-- Tag-routed facts: `FactRoute { tag, projector, replayed }` and the
+- Tag-routed facts: `FactRoute { tag, projector, pipeline, replayed }` and the
   `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
-  `core::projectors::RouterProjector`.
+  `core::pipeline::RouterProjector`.
 - Per-family authenticators: each routed family has `authenticate.rs`.
   Converted families route through a core-managed staged `FactRoute` runner;
   unconverted families still compose authentication into projection with
-  `project_authenticated::<Authenticator, _>`.
+  `project_authenticated::<Authenticator, _>` only during the fact-by-fact
+  cutover. The complete conversion and old-model cleanup checklist lives in
+  `fact-validators.md`.
 - Replay runtime: `replay`, `state-summary`, `replay-check`,
   `intent-registry`, and `recurring-intents` are in `src`.
 - Container frame facts: `connection::{frame_small,frame_bundle,frame_file_slice}`
@@ -34,11 +36,17 @@ the plan reuses:
 
 What does **not** exist yet: a protocol version / ceiling, any version gating on
 routes, a release manifest, trusted time, scope-owned ceiling adapters,
-`intro_version` on routes/handlers/commands, derived context payloads through
-`decode -> adapt`, and the pending admission state for wire-admitted bytes that
-cannot yet become active facts. A core-managed staged `FactRoute` runner is
-available for converted facts; unconverted facts still use projector-composed
-routes.
+`intro_version` on routes/handlers/commands, ceiling-selected context payload
+adaptation, and the pending admission state for wire-admitted bytes that cannot
+yet become active facts. A core-managed staged `FactRoute` runner is available
+for converted facts; unconverted facts still use projector-composed routes until
+the all-family cutover in `fact-validators.md` removes that compatibility path.
+
+Agent note: Part II contains historical/current-code inventory refs captured
+while planning. When those refs conflict with the current staged pipeline model,
+use `fact-validators.md` and `src/core/pipeline/README.md` as the source of
+truth. Do not use `core::projectors`, `project_authenticated`, `layout.rs`,
+`create.rs`, or `rows.rs` as target shapes.
 
 ## 1. Summary — the model in one breath
 
@@ -283,12 +291,15 @@ trusted to the AEAD/DH primitive, not to poc-10.
 
 ### Phase 2 — Staged routes, then route gating
 
-The first implementation step in this phase is the staged `FactRoute` runner. It
-should land before real adapters, manifests, trusted time, or ceiling filtering:
-current behavior is preserved by registering an identity adapt slot for every
-existing family. That gives core ownership of the `authenticate -> adapt ->
-project` pipeline now, so later versioning work fills in non-identity adapt edges
-and ceiling filters instead of moving the projector boundary again.
+The first implementation step in this phase was the staged `FactRoute` runner.
+It landed before real adapters, manifests, trusted time, or ceiling filtering:
+current behavior is preserved by registering identity adapt slots for converted
+families. The remaining all-family cutover is tracked in `fact-validators.md`.
+The target cutover includes an identity adapt slot for every existing family
+that does not yet need a real version adapter.
+That gives core ownership of the `decode -> authenticate -> adapt -> project`
+pipeline now, so later versioning work fills in non-identity adapt edges and
+ceiling filters instead of moving the projector boundary again.
 
 Before the broad fan-out, build model family examples for the target file shape
 and review them. The examples should cover the main family styles — a
@@ -303,7 +314,7 @@ remaining families mechanically.
 - `FactRoute` becomes the core-owned staged pipeline for one tag: `tag`,
   `intro_version: u32`, `replayed`, decoder, authenticator, adapt path, author
   entry when local creation exists, and projector.
-- Core runs `authenticate -> adapt -> project` as three labelled stages.
+- Core runs `decode -> authenticate -> adapt -> project` as four labelled stages.
   `AuthenticationNeed` parks/wakes the authentication stage; projector
   context/time needs park/wake the projection stage for an already authenticated
   and adapted fact. A future adapt need would park/wake the adapt stage, but the
@@ -352,8 +363,8 @@ remaining families mechanically.
   negentropy by id/bytes so supported peers can avoid download loops during
   ceiling skew. They are still inert locally. When the manifest/ceiling changes,
   verifier/opening context arrives, or the binary updates to know the tag, the
-  pending bytes re-enter the normal `authenticate -> adapt -> project` admission
-  path. If they then authenticate and are ceiling-active, they become active
+  pending bytes re-enter the normal `decode -> authenticate -> adapt -> project`
+  admission path. If they then authenticate and are ceiling-active, they become active
   facts and project normally; if they fail authentication or remain unsupported,
   they stay pending or are rejected according to the admission result.
 - **Local creation** of an above-ceiling fact is refused at the command/admission
@@ -364,17 +375,18 @@ remaining families mechanically.
   **pending ingress**. Pending ingress is raw admitted bytes waiting to become an active
   authenticated fact; projector-pending is an active fact waiting on ordinary
   context needs.
-- **Known-route authentication.** The landed implementation composes
-  authentication into projection with `project_authenticated`; the next
-  implementation step hoists that work into the core-managed `FactRoute` runner.
-  Once a tag is registered, core routes the raw bytes to that tag's authenticator
-  as the first stage. Ceiling filtering later decides which registered tags can
-  become active. The authenticator returns
+- **Known-route authentication.** The staged runner exists in `core::pipeline`
+  and converted families already route through it; remaining families still use
+  `project_authenticated` only as a cutover bridge. Once a tag is registered and
+  converted, core routes raw bytes through that tag's decode, authentication,
+  adapt, and project stages. Ceiling filtering later decides which registered
+  tags can become active. The authenticator returns
   `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or
   `NeedsAuthentication(AuthenticationNeed)` for verifier/opening context.
-  Projectors stop invoking `project_authenticated` themselves; that composition
-  becomes route-runner logic around the typed authenticator, adapt, and projector.
-  Projectors, not authenticators, express semantic context, authority
+  In the final fact-family cutover, projectors stop invoking
+  `project_authenticated` themselves; that composition is route-runner logic
+  around decode, typed authentication, adapt, and projection. Projectors, not
+  authenticators, express semantic context, authority
   requirements, parking, purge rules, and reproject needs. A fact version
   chooses whether verifier key material is embedded or referenced; the runtime
   contract must support `NeedsAuthentication` either way so future versions can
@@ -397,9 +409,10 @@ closed:
   construction (produce no match if the owner fact does not load) and delete the
   checked/unchecked accessor split, so every projector gets one always-safe
   payload. After the staged route lands, core derives the matched owner's
-  payload shape through that owner's route-owned `decode -> adapt` path. This is
-  a decoder path, not the authentication gate: the offer exists only because the
-  owner fact already passed its own primary route.
+  payload shape through that owner's route-owned `decode -> adapt` path after
+  the all-family cutover. This is a decoder/adapter path, not the authentication
+  gate: the offer exists only because the owner fact already passed its own
+  primary route.
 - **Scope is pinned to the owning fact (core).** `FactScope` is unhashed
   admission metadata the emitter currently sets freely, and the emission gate
   (`enforce_owner_is_self`) pins only `owner`. Extend it to reject any emitted
@@ -451,8 +464,10 @@ closed:
     ceiling; absent ⇒ reuse previous. Its absence asserts that the prior parser's
     collected parameters fully determine the new `author.rs` entry's required
     inputs.
-  - `rows.rs` / `queries.rs`: shared at head; a v2 fact projects into the current
-    row shape (ceiling-era rows). A genuinely new table is the rare exception.
+  - row schemas / `queries.rs`: shared at head; a v2 fact projects into the
+    current row shape (ceiling-era rows). A genuinely new table is the rare
+    exception. Handwritten fact-family `rows.rs` files are a migration bridge,
+    not the target version-bucket shape.
 - Lineage lives in data and the registry, not the tree: a `supersedes_*` field /
   context offer plus the `intro_version` index. Shared field codecs are reached
   through a module-owned typed helper, never another module's raw layout codec.
@@ -508,13 +523,14 @@ rejects according to normal context rules.
 
 Context payloads are adapted too, but they do not re-enter the authentication
 gate. A projector's needs and offers match on stable role/scope/range
-coordinates. For a matched offer, core loads the owner fact and derives the
-payload through that owner's route-owned `decode -> adapt` path. The consuming
-projector receives context payloads in the semantic version it expects at the
-active ceiling, not the raw historical layout that happened to satisfy the
-offer. This keeps version adaptation out of projectors without re-verifying
-context signatures: a ceiling-v2 content projector that needs an auth context
-sees the auth ceiling-v2 semantic value, even if the retained auth fact was
+coordinates. For a matched offer, core loads the owner fact and, after the
+all-family cutover, derives the payload through that owner's route-owned
+`decode -> adapt` path. The consuming projector receives context payloads in the
+semantic version it expects at the active ceiling, not the raw historical layout
+that happened to satisfy the offer. This keeps version adaptation out of
+projectors without re-verifying context signatures: a ceiling-v2 content
+projector that needs an auth context sees the auth ceiling-v2 semantic value,
+even if the retained auth fact was
 authored as v0 and reached that value through the auth adapt chain.
 
 This replaces "keep every old projector forever" with a narrower obligation:
@@ -595,9 +611,9 @@ scope.
   the key hint. The carrier authenticator/opener proves and opens the frame
   boundary with connection context; the projector materializes the recovered
   inner fact bytes and receipts. Those inner facts then re-enter the normal
-  `authenticate -> adapt -> project` pipeline by their own tags. The `TRNS` 4-byte magic is a
-  stream recognizer owned by the framing substrate (`core/network.rs`), not a
-  fact-version device.
+  `decode -> authenticate -> adapt -> project` pipeline by their own tags. The
+  `TRNS` 4-byte magic is a stream recognizer owned by the framing substrate
+  (`core/network.rs`), not a fact-version device.
 - **Negotiate up** between capable peers (highest common frame version inside the
   authenticated session). **Initiate at the operational floor** when the peer is
   unknown. **Answer in the request's version** for a still-usable older peer.
@@ -1276,7 +1292,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 ### TIME-29 — pending above-ceiling input activates on next wipe+replay once the ceiling rises  `replay-cli`
 - **Setup:** (proposed) client previously retained a wire-admitted fact with a future tag as pending; client subsequently leaves blocked mode AND ceiling rises (e.g. blocking release expired) to cover that tag.
 - **Action:** raise ceiling, then wipe+replay.
-- **Expect:** the pending bytes re-enter `authenticate -> adapt -> project`, route to the tag's kept-forever adapter, and project if authentication and semantic context succeed. No network resend is required for bytes already retained as pending.
+- **Expect:** the pending bytes re-enter `decode -> authenticate -> adapt -> project`, route to the tag's kept-forever adapter, and project if authentication and semantic context succeed. No network resend is required for bytes already retained as pending.
 - **Defends:** ADMISSION pending activation after ceiling rise; INVARIANT 4 (replay determinism over retained facts only).
 - **Refs:** ADMISSION model; ceiling-filtered routing by own tag; design rules 4/5.
 
@@ -1592,20 +1608,19 @@ per scope where the scope changes the answer.
 - **Refs:** ceiling-active predicate; `connection_frame_wire.rs` carrier; intro_version on routes (`FACT_ROUTES` / `RouterProjector`).
 ## 4. Fact routing, admission, pending, intro_version
 
-These tests defend the model's admission/pending/routing rules. Today's
-code has three structural gaps these tests are written to drive out and then
-lock: (a) `FactRoute { tag, projector, replayed }` carries no `intro_version`;
-(b) `RouterProjector` is not ceiling-filtered — it dispatches every registered
-tag unconditionally; (c) authentication is currently composed into projection
-with `project_authenticated`, with no core-managed route runner that treats
-authentication, adapting, and projection as separate stages. Versioning adds an
-admission gate ahead of projection: wire-invalid input drops; wire-admitted
-unknown or above-ceiling bytes become pending; and ceiling-active known tags
-authenticate by tag, pass through the route's adapt slot, then project. Tests below
-that assert pending ingress and ceiling-filtering are
-RED against the current tree and define the target
-behavior; tests that assert global tag uniqueness / registry shape are GREEN
-guardrails that extend `fact_route_tags_are_globally_unique`.
+These tests defend the model's admission/pending/routing rules. Today's code has
+two remaining structural gaps these tests are written to drive out and then
+lock: (a) `FactRoute { tag, projector, pipeline, replayed }` carries no
+`intro_version`; (b) `RouterProjector` is not ceiling-filtered — it dispatches
+every registered tag unconditionally. The staged route runner exists now for
+converted families, while the all-family conversion in `fact-validators.md`
+removes the remaining projector-composed routes. Versioning adds an admission
+gate ahead of projection: wire-invalid input drops; wire-admitted unknown or
+above-ceiling bytes become pending; and ceiling-active known tags authenticate by
+tag, pass through the route's adapt slot, then project. Tests below that assert
+pending ingress and ceiling-filtering are RED against the current tree and
+define the target behavior; tests that assert global tag uniqueness / registry
+shape are GREEN guardrails that extend `fact_route_tags_are_globally_unique`.
 
 Conventions used below: "ceiling C" = the active protocol-version ceiling
 computed from the signed `ReleaseManifestEntry` fleet at `trusted_time`.

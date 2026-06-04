@@ -10,17 +10,18 @@ builds on this layer (its `decode → authenticate → adapt → project` pipeli
 reuses these authenticators unchanged), but the split is useful on its own
 today.
 
-**Status: landed through model staged routes.** Change 1: every routed fact
-family has an `authenticate.rs`; projectors consume an `AuthenticatedFact` and
-verify no signatures; the old `project_typed` / `TypedProjector` path is
-removed; the full suite is green and behaviour is unchanged. Change 2 (the
-behaviour-changing follow-on — per-fact projection isolation + purge/keep
-classification) is described under *Error isolation and purge* below and also
-landed. Change 3: `core::pipeline` now exposes first-class route, decode,
-authenticate, adapt, project, effects, and commit contracts. Converted facts
-declare `decode`, `authenticate`, `adapt`, and `project` as first-class
-`FactRoute.pipeline` stages while unconverted facts keep the legacy
-projector-composed route shape for fact-by-fact cutover.
+**Status: core staged runner and model routes landed; full family conversion
+remains.** Change 1: every routed fact family has an `authenticate.rs`;
+projectors consume an `AuthenticatedFact` and verify no signatures; the old
+`project_typed` / `TypedProjector` path is removed; the full suite is green and
+behaviour is unchanged. Change 2 (the behaviour-changing follow-on — per-fact
+projection isolation + purge/keep classification) is described under *Error
+isolation and purge* below and also landed. Change 3: `core::pipeline` now
+exposes first-class route, decode, authenticate, adapt, project, effects, and
+commit contracts. `content/message` and `auth/workspace` are staged model
+routes. The remaining work is to convert every routed fact family to
+`FactPipeline::Staged`, remove the projector-composed compatibility model, and
+keep the complete check suite green.
 
 This note was originally named "fact validators." The design insight is that the
 pre-projector layer should not claim full protocol validity. It proves that a
@@ -83,6 +84,8 @@ An authenticator **does** (and only):
 
 - decode the fixed layout through the family's `FactCodec` — rejecting wrong tag,
   wrong length, trailing bytes, non-canonical padding, and invalid enum values;
+- return `NeedsAuthentication(AuthenticationNeed)` only when the current fact
+  boundary needs narrow verifier context before it can be proven authentic;
 - recompute and check the fact id against `hash(bytes)`;
 - verify the fact's intrinsic cryptographic authenticity when that proof belongs
   to the primary fact boundary — usually a signature over the canonical bytes and
@@ -270,8 +273,8 @@ deterministic handler-authored sync/auth family.
   rules, and authentication parking. In staged routes it receives the decoded
   source value and does not re-decode.
 - `adapt.rs` maps authenticated source values to the active semantic shape. It
-  is identity for both model facts, but the physical file and route label are
-  present so future version splits have a reviewable conversion point.
+  is an identity adapt slot for both model facts, but the physical file and route
+  label are present so future version splits have a reviewable conversion point.
 - `project.rs` receives semantic values and owns unsigned scope checks, context,
   authority, rows, offers, needs, time wakes, intents, deletion, retention, and
   purge. It does not decode or authenticate primary bytes.
@@ -397,131 +400,194 @@ a split whose structure a reviewer cannot follow is not done.
   projectors interpret and validate context; inline comments attach to
   invariants, ownership, and security conditions, and never narrate obvious code.
 
-## Scope — complete in one pass
+## Execution plan for the remaining cutover
 
-This is a fact-by-fact cutover with a compatibility requirement. Do not create a
-third pattern: converted families use staged route metadata and role files;
-unconverted families remain on the existing composed projector path until they
-are migrated. The per-family order below is internal sequencing so the tree
-compiles and the suite stays green at each conversion.
+This plan is an instruction-quality checklist for completing the staged model.
+It is not complete when only a subset of facts has moved. It is complete only
+when **all routed fact families are staged, the old composed model is removed,
+and every check below passes**.
 
-Per family (order: `auth` → `connection` → `content` → `sync`):
+The compatibility rule while working is narrow: during the conversion,
+unconverted families may continue using the existing composed projector path so
+the tree compiles after each family. Do not create a third pattern. The final
+state has no `FactPipeline::ProjectorComposed`, no `project_authenticated`
+family delegation, and no `core::projectors` re-export facade.
 
-1. Move the policy's section 1 (STRUCTURAL / AUTHENTICATED +
-   `verify_signature` + intrinsic field checks) into `authenticate.rs`,
-   returning `Authenticated`, `NeedsAuthentication`, or `Invalid`.
-2. Re-type the projector body to take an authenticated or semantic value; it now
-   begins at section 2 (CONTEXT).
-3. Point `Projector::project` at `project_staged::<Codec, Authenticator, Adapter, _>`
-   for converted routes, or at `project_authenticated::<Authenticator, _>` for
-   transitional routes, so core authenticates before projecting (see *Directory
-   and registry*).
-4. Add the per-family authenticator pure-unit tests and the boundary guardrail.
+### 1. Inventory every remaining legacy family
 
-**Model cases first — readability checkpoint.** Before propagating the pattern
-across every family, build the authenticator + re-typed projector for **a few
-especially complex cases** — a signed + encrypted content fact
-(`content::message`, where the signature is outside the encrypted text and text
-decryption stays in projection), an authority-heavy auth fact
-(`auth::endpoint_shared` or `auth::key_wrap`), and a container / frame fact
-(`connection::frame_*`, whose opener may need connection context but whose child
-facts authenticate separately) — and **review their readability and structure
-with the maintainer.** Only after that sign-off, complete the remaining families
-to the agreed template. The model cases set the readability bar and shake out the
-hard shapes (encrypted payloads, authority proofs, container facts) before mass
-production.
+Start by enumerating the protocol routes and legacy call sites:
 
-Then, in the **same** change, do the cross-cutting *Align docs and rules* work
-below. Nothing here depends on the versioning work.
+- routes whose `FactRoute.pipeline` is still `ProjectorComposed`;
+- route macro arms or route constructors that default to `ProjectorComposed`;
+- `project.rs` files importing or calling `project_authenticated`;
+- implementations of compatibility-only `Authenticator` or
+  `AuthenticatedProjector`;
+- family code still importing pipeline contracts through `core::projectors`;
+- fact-family `layout.rs`, `create.rs`, or handwritten `rows.rs` files that are
+  still transitional.
 
-## Tests — all in trusted classes
+This inventory is the worklist. Do not hand off while any routed family remains
+on it.
 
-- **Authenticator pure-unit, per family (the high-value set).** Over crafted
-  bytes: accept the canonical fact; reject wrong tag, wrong length, trailing
-  bytes, non-canonical padding, invalid enum, **bad signature or bad AEAD tag,
-  wrong domain, id mismatch**, and out-of-range intrinsic fields. For any family
-  whose cryptographic proof depends on external context, also prove it returns
-  `NeedsAuthentication` before that context is available and authenticates only
-  after the correct context is supplied. These tests cover the malformed /
-  wrong-type space the CLI cannot generate.
-- **Fuzz target per authenticator** (the repo's `fuzz-targets`): random or
-  mutated bytes never panic and never return `Authenticated` for a
-  non-canonical or forged input.
-- **Projector tests start from `AuthenticatedFact<T>`** built via the **real**
-  authenticator over real bytes — never hand-written — so a projector test
-  cannot pass on input authentication would reject.
-- **Guardrail (extends the boundary tests):** no `project.rs` imports another
-  module's raw layout codec or calls `decode_fact` / `verify_signature` on its
-  primary fact; authentication lives only in `authenticate.rs`.
+### 2. Convert each family to staged route files
 
-## Align docs and rules
+Per family, in route order under `auth`, `connection`, `content`, then `sync`:
 
-Part of this change — **not** a follow-up — is making every doc and rule describe
-the post-refactor reality, so nothing still says "projectors parse or
-authenticate their primary fact":
+1. Ensure the target role files exist and are named for the pipeline:
+   `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, `author.rs` when the
+   family authors facts, `project.rs`, `queries.rs` when it reads rows, and
+   module-owned context helpers where needed.
+2. Move canonical byte parsing into `decode.rs`. The staged `Codec` implements
+   `FactCodec` and checks tag, exact length, padding, enum discriminants, and
+   other canonical layout facts. It does not check id, signatures, verifier
+   context, semantic authority, rows, or context relationships.
+3. Move fact-boundary proof into `authenticate.rs`. The staged authenticator
+   implements `DecodedAuthenticator<Codec>`, receives the decoded source value,
+   checks `verify_fact_id`, proves signatures or boundary crypto, enforces
+   intrinsic single-fact rules, and returns `Authentication::{Authenticated,
+   NeedsAuthentication, Invalid}`. It does not re-decode, materialize rows,
+   prove authority, inspect semantic context except a narrow authentication
+   need, emit projector needs/offers, purge, read clocks, or perform IO.
+4. Add `adapt.rs` even when the adapter is identity. It maps the authenticated
+   source value to the semantic value projected at the active head version and
+   gives future version splits a visible conversion point.
+5. Re-type `project.rs` to implement `SemanticProjector<Semantic>`. The
+   projector begins at scope/context/authority/materialization. It receives the
+   semantic value, never parses primary bytes, never checks the fact id, never
+   verifies primary or context signatures, and owns rows, needs, offers, time
+   wakes, emitted facts, intents, deletion, retention, and purge.
+6. Change the family `Projector::project` implementation and registry route to
+   call `core::pipeline::project_staged::<Codec, Authenticator, Adapter, _>()`.
+   Set `FactRoute.pipeline = FactPipeline::Staged { decode, authenticate,
+   adapt, project }` with labels that match the role files reviewers can open.
+7. Move command-side construction to the write-side twin. `commands.rs` gathers
+   runtime inputs and receipts; `author.rs` signs/encrypts/assembles typed
+   values from explicit inputs; `encode.rs` owns canonical bytes and transcript
+   helpers; authored facts run the staged authentication self-check before
+   admission.
+8. Remove transitional row files as part of the family conversion. Row fields
+   belong in protocol-owned schema metadata (`SchemaSource.row_schemas` or
+   registry typed tables); `project.rs` owns when to emit row mutations, and
+   `queries.rs` owns read semantics. Do not leave a converted family with a
+   handwritten `rows.rs` detour.
+9. Update family docs and top-of-file policy comments so a reviewer can follow
+   the route declaration through `decode`, `authenticate`, `adapt`, `project`,
+   `effects`, and command authoring without guessing what each role owns.
 
-- **`RULES.md`** *(done)* — Projectors / *Projector Style* / *Typed Facts And
-  Foreign Context* / *File Ownership* now describe the `authenticate → project`
-  model: a projector consumes an `AuthenticatedFact`, starts at scope/context,
-  parses no primary bytes, and verifies no signatures (primary or context);
-  `authenticate.rs` is a standard fact-family role file.
-- **`src/core/README.md`** *(done)* — `pipeline.rs` is the source of truth for
-  route/decode/authenticate/adapt/project/effects contracts, and `projectors.rs`
-  is documented only as a transitional re-export facade.
-- **Boundary / guardrail tests** *(done)* — in `poc10_intent_cleanliness_test.rs`:
-  `target_projectors_authenticate_primary_through_core_before_projecting`
-  (delegation to `project_authenticated::<super::authenticate::_, _>` + a sibling
-  `authenticate.rs` per routed family) and `target_projectors_do_not_verify_signatures`
-  (no `verify_signature` in any `project.rs`); `STANDARD_FAMILY_FILES` includes
-  `authenticate.rs`; the policy-narrative guardrail accepts a materialize-only
-  projector.
-- **`protocol-versioning.md`** *(done)* — its `authenticate.rs` references point
-  here as the authority and name the staged `FactRoute` runner as the next
-  versioning-prep step.
-- Any scope README or comment that still describes the projector-does-validation
-  model.
+After each family, run focused tests for that family plus the registry and
+guardrail tests. The final handoff still requires the complete check suite.
 
-## Success criteria (done when)
+### 3. Remove the old composed model
 
-Complete — in one pass — when **all** of the following hold:
+After every routed family is staged:
 
-- Every routed fact family has an `authenticate.rs` whose authenticator returns
-  `Authenticated(AuthenticatedFact<T>)`, `NeedsAuthentication(AuthenticationNeed)`,
-  or `Invalid(AuthenticationError)` and does only decode + id-check + intrinsic
-  field rules + boundary cryptographic proof plus narrow verifier/opener context
-  lookup (no semantic context, authority, rows, offers, purge, IO, or clock).
-- No `project.rs` decodes raw primary bytes, checks the fact id, or calls
-  `verify_signature` at all — primary *or* context (a context fact's authenticity
-  is guaranteed upstream); every projector implements `AuthenticatedProjector`
-  over an `AuthenticatedFact<T>`. The boundary guardrails enforce this and pass.
-- Every routed fact family has an `authenticate.rs` and delegates to it via
-  `project_authenticated`; a guardrail fails if a routed family lacks either.
-  The next route-runner change replaces that per-projector delegation with a
-  core-owned `FactRoute` that carries the authenticator, identity adapt slot, and
-  projector for the tag.
-- Authenticator pure-unit tests (accept canonical; reject the full malformed set:
-  wrong tag / length / trailing / padding / enum, bad signature, wrong domain, id
-  mismatch, out-of-range fields; park then authenticate for external verifier
-  keys) exist for every family; a fuzz target per authenticator exists; projector
-  tests build their inputs through the real authenticator. *(Outstanding: only
-  `auth::endpoint_shared` carries the per-family authenticator unit set today,
-  and the repo has no fuzz harness yet — these are the remaining follow-on tasks
-  for change 1.)*
-- `RULES.md`, the boundary tests, and the affected docs are aligned (above) — no
-  doc or rule still says projectors parse/authenticate primary facts.
-- **Readability bar met.** Every `authenticate.rs` and re-typed `project.rs` follows
-  the guidelines above — numbered policy header; RULES *Documentation* /
-  *Projector Style*; comments on invariants, not obvious code.
-- **Model cases reviewed.** The authenticator + projector for the complex exemplars
-  were built and their readability / structure **reviewed and signed off with the
-  maintainer** before the remaining families were completed.
-- **Behaviour is unchanged.** This is a pure refactor: primary parsing and
-  authentication relocate, but the accept / reject / project outcome for every
-  fact is identical. The full `cargo build` and test suite are green.
+1. Delete all `project_authenticated` call sites from fact families.
+2. Delete compatibility-only `Authenticator` and `AuthenticatedProjector`
+   implementations from protocol code.
+3. Replace authored-fact self-checks that still use the legacy `Authenticator`
+   trait with a staged self-check based on `FactCodec + DecodedAuthenticator`.
+4. Remove `FactPipeline::ProjectorComposed` and any registry macro arms or tests
+   that permit it.
+5. Remove `core::pipeline::project_authenticated`,
+   `core::pipeline::Authenticator`, and `core::pipeline::AuthenticatedProjector`
+   if no non-legacy use remains.
+6. Delete `src/core/projectors.rs`; all imports must use `core::pipeline`.
+7. Tighten guardrails so they fail on reintroduction of `ProjectorComposed`,
+   `project_authenticated`, `AuthenticatedProjector`, `core::projectors`,
+   transitional routed-family `layout.rs` / `create.rs`, or converted-family
+   handwritten `rows.rs`.
+8. Update `RULES.md`, `src/core/README.md`, `src/core/pipeline/README.md`, scope
+   READMEs, and this plan so no live doc describes the composed model as an
+   allowed target.
 
-Hand-off note: this is a **single deliverable with one mid-way checkpoint** —
-build the model cases, get the readability sign-off, then complete the entire
-split *plus* the doc/rule alignment together, not a subset.
+### 4. Required tests and checks
+
+The final change is not review-ready until all of these pass:
+
+- `cargo fmt`
+- `cargo test -p topo core::pipeline --lib`
+- `cargo test --test poc10_protocol_registry_test`
+- `cargo test --test poc10_intent_cleanliness_test`
+- `cargo test --test poc10_architecture_boundary_test`
+- `cargo test --test documentation_layout_test`
+- `cargo test --test typed_row_codecs_todo_doc_test`
+- `cargo test`
+- `git diff --check`
+
+Add or update tests while converting:
+
+- per-family authenticator pure-unit tests for canonical acceptance and the
+  malformed/rejection set;
+- tests for `NeedsAuthentication` families proving park-before-context and
+  authenticate-after-context;
+- projector tests that enter through `Projector::project` or `project_staged`
+  over real authored/encoded bytes, not hand-built authenticated values;
+- registry tests that assert every route is staged and declares readable
+  `decode`, `authenticate`, `adapt`, and `project` labels;
+- guardrails that prove no primary decode/signature/id checks remain in
+  `project.rs`, no old composed route remains, and no compatibility facade is
+  imported.
+
+### 5. Final success criteria
+
+Success means all of the following are true:
+
+- every routed fact family is `FactPipeline::Staged`;
+- every routed family has reviewable `decode.rs`, `authenticate.rs`, `adapt.rs`,
+  and `project.rs` role files, plus `encode.rs` / `author.rs` where facts are
+  locally authored;
+- every family route calls `project_staged`;
+- no routed family calls `project_authenticated`;
+- no protocol code implements or imports compatibility-only `Authenticator` or
+  `AuthenticatedProjector`;
+- no live code imports `core::projectors`;
+- `src/core/projectors.rs` is deleted;
+- `FactPipeline::ProjectorComposed` is deleted;
+- converted families have no transitional `layout.rs`, `create.rs`, or
+  handwritten `rows.rs`;
+- every authenticator has credible malformed-input tests, and any
+  context-waiting authenticator has parking/authentication tests;
+- projector tests exercise the staged path through real bytes;
+- docs and guardrails describe only the staged final model;
+- the complete required check suite passes.
+
+## Per-family test expectations
+
+Each conversion must bring its tests with it:
+
+- authenticator pure-unit tests accept canonical bytes and reject wrong tag,
+  wrong length, trailing bytes, non-canonical padding, invalid enum values, bad
+  signature or bad AEAD tag, wrong domain, id mismatch, and out-of-range
+  intrinsic fields;
+- authenticators that depend on external verifier context prove
+  `NeedsAuthentication` before that context exists and authenticate only after
+  the correct context is supplied;
+- projector tests enter through the staged path (`Projector::project` or
+  `project_staged`) over real authored/encoded bytes so decode and
+  authentication stay in the test path;
+- row tests prove schema-backed row encoding/decoding where the family replaces
+  handwritten row helpers;
+- guardrails fail if `project.rs` imports a raw primary layout codec, calls
+  primary `decode_fact`, calls `verify_fact_id`, verifies signatures, or
+  materializes rows outside the staged projector/effects path.
+
+## Documentation and guardrail alignment
+
+Documentation alignment is part of the conversion, not follow-up cleanup:
+
+- `RULES.md` must describe only the final staged target, with any transitional
+  allowance removed once the last family is converted.
+- `src/core/README.md` and `src/core/pipeline/README.md` must name
+  `core::pipeline` as the source of truth and must not describe
+  `core::projectors` as an import path.
+- Scope READMEs and family top-of-file docs must let a reviewer line up each
+  route's `decode`, `authenticate`, `adapt`, and `project` labels with the
+  actual files.
+- `poc10_intent_cleanliness_test.rs`, `poc10_protocol_registry_test.rs`,
+  `poc10_architecture_boundary_test.rs`, and `documentation_layout_test.rs`
+  must enforce the final state: all routes staged, no composed route, no
+  compatibility facade, no primary authentication in projectors, and no
+  transitional role-file names for converted families.
 
 ## Error isolation and purge (change 2)
 

@@ -329,10 +329,12 @@ and established frame facts — owns its own sealing end to end, in its own
 modules. There is no seal-mode discriminator and no separate envelope or
 transit-wrapper fact in another module.
 
-- `create.rs` seals a fact when it generates it: sealing is wrapping, and
-  wrapping is `create.rs`'s job. Handshake facts are sealed asymmetrically to
-  the recipient endpoint; established frames are sealed with the
-  `connection_secret`.
+- In target code, `author.rs` seals a fact when it generates it: sealing is
+  wrapping, and wrapping is authoring's job. `encode.rs` owns pure transcript
+  and serialization helpers. Handshake facts are sealed asymmetrically to the
+  recipient endpoint; established frames are sealed with the
+  `connection_secret`. `create.rs` is only a transitional name for unmigrated
+  families.
 - Unsealing is a context need. A receiver opens a sealed connection fact in that
   fact's own projector, which declares a context need for its unseal key —
   `auth_local_endpoint` (the local endpoint secret) for handshake facts,
