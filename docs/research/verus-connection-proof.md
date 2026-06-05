@@ -6,14 +6,19 @@ purpose: prove the largest property that follows from the current connection
 and sync visibility shape without pretending that every adjacent subsystem has
 already been modeled in Verus.
 
-The current Verus file is `src/protocol/connection/proof.rs`, verified by
-`scripts/run_verus.sh`.
+The current Verus entrypoint is `src/protocol/proof.rs`, verified by
+`scripts/run_verus.sh`. Local proof files sit beside the executable boundaries
+they model:
+
+- `src/protocol/connection/request/proof.rs`
+- `src/protocol/connection/connection/proof.rs`
+- `src/protocol/sync/shared_fact/proof.rs`
 
 ## Claim
 
-For a workspace message selected by the sync visibility path for a connection,
-the remote endpoint on that connection must have one of these authorization
-witnesses for the workspace:
+For a shareable workspace message selected by the sync visibility path for a
+connection, the remote endpoint on that connection must have one of these
+authorization witnesses for the workspace:
 
 - an `auth_endpoint_shared_rows` membership row for the remote endpoint in the
   workspace; or
@@ -27,15 +32,18 @@ connection.
 ## Proof Boundary
 
 The proof abstracts over real bytes, signatures, X25519, AEAD, and SQL. It
-models the proof-relevant shape:
+models the proof-relevant shape in local certificates and a root composition:
 
-- `ConnectionRow` names a local/remote endpoint pair and a connection id.
-- `remote_endpoint` mirrors `remote_endpoint_for_connection`.
-- endpoint membership mirrors rows emitted by `endpoint_shared` projection.
-- scoped bootstrap invite authorization mirrors `connection_workspaces`, which
-  opens the connection request and maps its invite secret to a workspace.
-- sync message visibility mirrors `shareable_facts_for_connection` for
-  workspace-scoped facts.
+- `connection/request/proof.rs` owns the request-authority certificate:
+  endpoint membership or scoped bootstrap invite.
+- `connection/connection/proof.rs` owns the connection-row certificate:
+  resolve the remote endpoint from a local connection row, then consume request
+  authority for that remote endpoint and workspace.
+- `sync/shared_fact/proof.rs` owns the sync-selection certificate: a workspace
+  message is selected only when it is shareable and the connection authorizes
+  the message workspace.
+- `protocol/proof.rs` composes those certificates into the
+  never-invited-cannot-receive theorem.
 
 The executable obligations left for later proof slices are:
 
@@ -76,11 +84,21 @@ The executable obligations left for later proof slices are:
 
 ## Current Verus Theorems
 
-- `never_invited_remote_cannot_receive_workspace_message_from_sync`: the main
-  theorem for sync-selected workspace messages.
-- `endpoint_membership_is_sufficient_for_sync_visibility`: membership is one
-  legitimate visibility witness.
-- `scoped_bootstrap_invite_is_intentional_memberless_visibility`: bootstrap
-  invite visibility is intentional and prevents overclaiming.
-- `connection_not_involving_local_endpoint_authorizes_no_workspace`: malformed
-  local orientation cannot authorize a workspace.
+- `connection/request/proof.rs`:
+  `never_invited_has_no_connection_request_authority` proves the local request
+  authority predicate denies endpoints with neither membership nor a scoped
+  bootstrap invite.
+- `connection/connection/proof.rs`:
+  `never_invited_connection_authorizes_no_workspace` lifts request-authority
+  denial through the connection row's local/remote endpoint orientation.
+- `sync/shared_fact/proof.rs`:
+  `not_authorized_connection_cannot_select_workspace_message` proves sync
+  cannot select even a shareable workspace message without connection
+  authorization.
+- `protocol/proof.rs`:
+  `never_invited_remote_cannot_receive_workspace_message_from_sync` composes
+  the local proofs into the protocol-level theorem. It also keeps
+  `scoped_bootstrap_invite_is_intentional_memberless_sync_visibility` as the
+  bootstrap counterexample guard and
+  `malformed_local_orientation_cannot_receive_workspace_message_from_sync` as
+  the connection-orientation guard.
