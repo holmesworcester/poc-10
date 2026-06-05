@@ -127,13 +127,14 @@ impl SemanticProjector<AuthenticatedConnection> for ConnectionProjector {
                 responder_secret_need,
                 invite_need,
             } => {
-                let output = add_optional_need(
-                    materialized_output(fact, &connection, close_need)
-                        .need(request_need)
-                        .need(request_opener_need)
-                        .need(responder_secret_need),
+                let needs = ConnectionNeeds::responder(
+                    close_need,
+                    request_need,
+                    request_opener_need,
+                    responder_secret_need,
                     invite_need,
                 );
+                let output = needs.apply_to(materialized_output(fact, &connection));
                 Ok(output
                     .offer(request::project::connection_for_request_offer(
                         fact.id,
@@ -158,12 +159,14 @@ impl SemanticProjector<AuthenticatedConnection> for ConnectionProjector {
                 fact,
                 &connection,
                 context,
-                close_need,
-                request_need,
-                request_opener_need,
-                endpoint_need,
-                initiator_need,
-                invite_need,
+                ConnectionNeeds::initiator(
+                    close_need,
+                    request_need,
+                    request_opener_need,
+                    endpoint_need,
+                    initiator_need,
+                    invite_need,
+                ),
             ),
         }
     }
@@ -173,12 +176,7 @@ fn project_initiator_connection(
     fact: &Fact,
     connection: &ConnectionFact,
     context: &ProjectionContext,
-    close_need: ContextNeed,
-    request_need: ContextNeed,
-    request_opener_need: ContextNeed,
-    endpoint_need: ContextNeed,
-    initiator_need: ContextNeed,
-    invite_need: Option<ContextNeed>,
+    needs: ConnectionNeeds,
 ) -> Result<ProjectionOutput, String> {
     let observation_need = exact_need(
         fact.id,
@@ -186,17 +184,9 @@ fn project_initiator_connection(
         FactScope::Local,
         fact.id,
     );
+    let needs = needs.with_observation(observation_need.clone());
     let Some(observation_fact) = context.payload_for(&observation_need) else {
-        return Ok(add_optional_need(
-            ProjectionOutput::new()
-                .need(close_need)
-                .need(request_need)
-                .need(request_opener_need)
-                .need(endpoint_need)
-                .need(initiator_need)
-                .need(observation_need),
-            invite_need,
-        ));
+        return Ok(needs.apply_to(ProjectionOutput::new()));
     };
     let observation = frame_observation::Codec::decode_fact(observation_fact)
         .map_err(|_| "connection observation context is malformed".to_string())?;
@@ -214,28 +204,16 @@ fn project_initiator_connection(
         frame_hash: crypto::hash(fact.body()),
         received_at_local_ms: observation.received_at_local_ms,
     })?;
-    Ok(add_optional_need(
-        materialized_output(fact, connection, close_need)
-            .need(request_need)
-            .need(request_opener_need)
-            .need(endpoint_need)
-            .need(initiator_need)
-            .need(observation_need),
-        invite_need,
-    )
-    .fact(receipt)
-    .intent(seed_connection_sync_intent(SeedConnectionSync {
-        connection_id: fact.id,
-    })))
+    Ok(needs
+        .apply_to(materialized_output(fact, connection))
+        .fact(receipt)
+        .intent(seed_connection_sync_intent(SeedConnectionSync {
+            connection_id: fact.id,
+        })))
 }
 
-fn materialized_output(
-    fact: &Fact,
-    connection: &ConnectionFact,
-    close_need: ContextNeed,
-) -> ProjectionOutput {
+fn materialized_output(fact: &Fact, connection: &ConnectionFact) -> ProjectionOutput {
     ProjectionOutput::new()
-        .need(close_need)
         .offer(connection_offer(fact.id, fact.id))
         .row_mutation(RowMutation::PutRow(
             connection_row(ConnectionRowFields {
@@ -257,10 +235,80 @@ fn exact_need(owner: FactId, role: &'static str, scope: FactScope, key: FactId) 
     authenticate::exact_need(owner, role, scope, key)
 }
 
-fn add_optional_need(output: ProjectionOutput, need: Option<ContextNeed>) -> ProjectionOutput {
-    if let Some(need) = need {
-        output.need(need)
-    } else {
+#[derive(Debug, Clone)]
+struct ConnectionNeeds {
+    close: ContextNeed,
+    request: ContextNeed,
+    request_opener: ContextNeed,
+    responder_secret: Option<ContextNeed>,
+    endpoint: Option<ContextNeed>,
+    initiator: Option<ContextNeed>,
+    observation: Option<ContextNeed>,
+    invite: Option<ContextNeed>,
+}
+
+impl ConnectionNeeds {
+    fn responder(
+        close: ContextNeed,
+        request: ContextNeed,
+        request_opener: ContextNeed,
+        responder_secret: ContextNeed,
+        invite: Option<ContextNeed>,
+    ) -> Self {
+        Self {
+            close,
+            request,
+            request_opener,
+            responder_secret: Some(responder_secret),
+            endpoint: None,
+            initiator: None,
+            observation: None,
+            invite,
+        }
+    }
+
+    fn initiator(
+        close: ContextNeed,
+        request: ContextNeed,
+        request_opener: ContextNeed,
+        endpoint: ContextNeed,
+        initiator: ContextNeed,
+        invite: Option<ContextNeed>,
+    ) -> Self {
+        Self {
+            close,
+            request,
+            request_opener,
+            responder_secret: None,
+            endpoint: Some(endpoint),
+            initiator: Some(initiator),
+            observation: None,
+            invite,
+        }
+    }
+
+    fn with_observation(mut self, observation: ContextNeed) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
+    fn apply_to(&self, output: ProjectionOutput) -> ProjectionOutput {
+        let mut output = output
+            .need(self.close.clone())
+            .need(self.request.clone())
+            .need(self.request_opener.clone());
+        for need in [
+            &self.responder_secret,
+            &self.endpoint,
+            &self.initiator,
+            &self.observation,
+            &self.invite,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            output = output.need(need.clone());
+        }
         output
     }
 }

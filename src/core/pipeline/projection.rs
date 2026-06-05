@@ -790,7 +790,15 @@ mod tests {
     #[test]
     fn projection_run_rejects_offer_owned_by_another_fact() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadOfferOwnerProjector;
+        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
+            }))
+        });
 
         let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect_err("projection should reject foreign offer owner");
@@ -801,7 +809,15 @@ mod tests {
     #[test]
     fn projection_run_rejects_need_owned_by_another_fact() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadNeedOwnerProjector;
+        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
+            }))
+        });
 
         let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect_err("projection should reject foreign need owner");
@@ -812,7 +828,13 @@ mod tests {
     #[test]
     fn projection_run_rejects_time_wake_owned_by_another_fact() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadTimeWakeOwnerProjector;
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().time_wake(TimeWake {
+                owner: [9; 32],
+                timeline: Timeline::new("test").unwrap(),
+                at: 1,
+            }))
+        });
 
         let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect_err("projection should reject foreign time-wake owner");
@@ -823,7 +845,9 @@ mod tests {
     #[test]
     fn projection_run_rejects_purge_owned_by_another_fact() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = BadPurgeOwnerProjector;
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().purge_self([9; 32]))
+        });
 
         let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect_err("projection should reject foreign purge owner");
@@ -834,7 +858,9 @@ mod tests {
     #[test]
     fn projection_run_allows_self_purge() {
         let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = SelfPurgeProjector;
+        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().purge_self(fact.id))
+        });
 
         let run = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect("projection should allow self purge");
@@ -847,11 +873,7 @@ mod tests {
         let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([9; 32]);
-        let projector = NeedUntilOffer {
-            role,
-            key,
-            intent_kind: IntentKind::new("followup").unwrap(),
-        };
+        let projector = need_until_offer(role, key, IntentKind::new("followup").unwrap());
 
         let first =
             run_projection(&projector, &fact, &ContextSet::new(), Vec::new()).expect("first run");
@@ -870,11 +892,11 @@ mod tests {
         let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([9; 32]);
-        let projector = NeedUntilOffer {
-            role: role.clone(),
-            key: key.clone(),
-            intent_kind: IntentKind::new("followup").unwrap(),
-        };
+        let projector = need_until_offer(
+            role.clone(),
+            key.clone(),
+            IntentKind::new("followup").unwrap(),
+        );
         let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect("previous projection")
             .context;
@@ -925,14 +947,9 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let progress = drain_projection(
-            &PrematureNeedUntilPayload { role, key },
-            &store,
-            &[],
-            None,
-            2,
-        )
-        .expect("drain projection");
+        let projector = need_until_payload(role, key, "ready", Some("premature"));
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
         assert_eq!(progress.projected, 1);
         assert_eq!(
@@ -973,14 +990,9 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let progress = drain_projection(
-            &PrematureNeedUntilPayload { role, key },
-            &store,
-            &[],
-            None,
-            2,
-        )
-        .expect("drain projection");
+        let projector = need_until_payload(role, key, "ready", Some("premature"));
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
         assert_eq!(progress.projected, 1);
         assert_eq!(
@@ -1136,8 +1148,9 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let progress = drain_projection(&WatchNeedProjector { role, key }, &store, &[], None, 2)
-            .expect("drain projection");
+        let projector = watch_need(role, key, "observed");
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
 
         assert_eq!(progress.projected, 2);
         assert_eq!(
@@ -1206,17 +1219,9 @@ mod tests {
 
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([7; 32]);
-        let progress = drain_projection(
-            &EphemeralNeedOnly {
-                role: role.clone(),
-                key: key.clone(),
-            },
-            &store,
-            &[],
-            None,
-            10,
-        )
-        .expect("ephemeral unresolved needs are transient");
+        let projector = need_only(role.clone(), key.clone());
+        let progress = drain_projection(&projector, &store, &[], None, 10)
+            .expect("ephemeral unresolved needs are transient");
 
         assert_eq!(progress.projected, 1);
         assert!(
@@ -1262,17 +1267,9 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let progress = drain_projection(
-            &EphemeralIntentAfterContext {
-                role: role.clone(),
-                key: key.clone(),
-            },
-            &store,
-            &[],
-            None,
-            10,
-        )
-        .expect("drain projection");
+        let projector = need_until_payload(role.clone(), key.clone(), "ephemeral_ready", None);
+        let progress =
+            drain_projection(&projector, &store, &[], None, 10).expect("drain projection");
 
         assert_eq!(progress.projected, 1);
         assert!(
@@ -1301,17 +1298,13 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let err = drain_projection(
-            &EphemeralNeedAndIntentProjector {
-                role: Role::new("exact").unwrap(),
-                key: ContextKey::from_bytes([9; 32]),
-            },
-            &store,
-            &[],
-            None,
-            10,
-        )
-        .expect_err("ephemeral inputs cannot partially succeed with unresolved probes");
+        let projector = need_and_intent(
+            Role::new("exact").unwrap(),
+            ContextKey::from_bytes([9; 32]),
+            "ephemeral_partial",
+        );
+        let err = drain_projection(&projector, &store, &[], None, 10)
+            .expect_err("ephemeral inputs cannot partially succeed with unresolved probes");
 
         assert!(err.contains("transient needs remain"), "{err}");
         assert!(
@@ -1336,7 +1329,8 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let err = drain_projection(&EphemeralOfferProjector, &store, &[], None, 10)
+        let projector = self_offer(Role::new("ephemeral_offer").unwrap());
+        let err = drain_projection(&projector, &store, &[], None, 10)
             .expect_err("ephemeral offers should fail");
 
         assert!(err.contains("ephemeral projection input cannot emit durable offers"));
@@ -1482,29 +1476,57 @@ mod tests {
             .expect("count context edges")
     }
 
-    struct NeedUntilOffer {
-        role: Role,
-        key: ContextKey,
-        intent_kind: IntentKind,
+    fn need_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextNeed {
+        ContextNeed {
+            owner: fact.id,
+            role: role.clone(),
+            scope: fact.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        }
     }
 
-    impl Projector for NeedUntilOffer {
+    fn offer_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextOffer {
+        ContextOffer {
+            owner: fact.id,
+            role: role.clone(),
+            scope: fact.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        }
+    }
+
+    struct TestProjector<F> {
+        project: F,
+    }
+
+    impl<F> Projector for TestProjector<F>
+    where
+        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
+    {
         fn project(
             &self,
             fact: &Fact,
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
+            (self.project)(fact, context)
+        }
+    }
+
+    fn test_projector<F>(project: F) -> TestProjector<F>
+    where
+        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
+    {
+        TestProjector { project }
+    }
+
+    fn need_until_offer(role: Role, key: ContextKey, intent_kind: IntentKind) -> impl Projector {
+        test_projector(move |fact, context| {
             if context.offers().is_empty() {
-                Ok(ProjectionOutput::new().need(ContextNeed {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    start_key: self.key.clone(),
-                    end_key: self.key.clone(),
-                }))
+                Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
             } else {
                 Ok(ProjectionOutput::new().intent(Intent::new(
-                    self.intent_kind.clone(),
+                    intent_kind.clone(),
                     fact.id,
                     context
                         .offers()
@@ -1513,42 +1535,75 @@ mod tests {
                         .unwrap_or(fact.id),
                 )))
             }
-        }
+        })
     }
 
-    struct PrematureNeedUntilPayload {
+    fn need_until_payload(
         role: Role,
         key: ContextKey,
-    }
-
-    impl Projector for PrematureNeedUntilPayload {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            let need = ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                start_key: self.key.clone(),
-                end_key: self.key.clone(),
-            };
-
+        ready_kind: &'static str,
+        premature_kind: Option<&'static str>,
+    ) -> impl Projector {
+        test_projector(move |fact, context| {
+            let need = need_for(fact, &role, &key);
             if let Some(payload) = context.payload_for(&need) {
                 Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("ready").unwrap(),
+                    IntentKind::new(ready_kind).unwrap(),
                     fact.id,
                     payload.id,
                 )))
             } else {
-                Ok(ProjectionOutput::new().need(need).intent(Intent::new(
-                    IntentKind::new("premature").unwrap(),
-                    fact.id,
-                    b"missing".to_vec(),
-                )))
+                let mut output = ProjectionOutput::new().need(need);
+                if let Some(kind) = premature_kind {
+                    output = output.intent(Intent::new(
+                        IntentKind::new(kind).unwrap(),
+                        fact.id,
+                        b"missing".to_vec(),
+                    ));
+                }
+                Ok(output)
             }
-        }
+        })
+    }
+
+    fn watch_need(role: Role, key: ContextKey, intent_kind: &'static str) -> impl Projector {
+        test_projector(move |fact, context| {
+            let need = need_for(fact, &role, &key);
+            let mut output = ProjectionOutput::new().need(need.clone());
+            if context.payload_for(&need).is_some() {
+                output = output.intent(Intent::new(
+                    IntentKind::new(intent_kind).unwrap(),
+                    fact.id,
+                    b"watched".to_vec(),
+                ));
+            }
+            Ok(output)
+        })
+    }
+
+    fn need_only(role: Role, key: ContextKey) -> impl Projector {
+        test_projector(move |fact, _context| {
+            Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
+        })
+    }
+
+    fn need_and_intent(role: Role, key: ContextKey, intent_kind: &'static str) -> impl Projector {
+        test_projector(move |fact, _context| {
+            Ok(ProjectionOutput::new()
+                .need(need_for(fact, &role, &key))
+                .intent(Intent::new(
+                    IntentKind::new(intent_kind).unwrap(),
+                    fact.id,
+                    Vec::new(),
+                )))
+        })
+    }
+
+    fn self_offer(role: Role) -> impl Projector {
+        test_projector(move |fact, _context| {
+            let key = ContextKey::from_bytes(fact.id);
+            Ok(ProjectionOutput::new().offer(offer_for(fact, &role, &key)))
+        })
     }
 
     struct QueueDependencyProjector {
@@ -1565,26 +1620,14 @@ mod tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.offered_id {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    start_key: self.key.clone(),
-                    end_key: self.key.clone(),
-                }));
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
             }
 
             if fact.id != self.dependent_id {
                 return Ok(ProjectionOutput::new());
             }
 
-            let need = ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                start_key: self.key.clone(),
-                end_key: self.key.clone(),
-            };
+            let need = need_for(fact, &self.role, &self.key);
             if let Some(payload) = context.payload_for(&need) {
                 Ok(ProjectionOutput::new().intent(Intent::new(
                     IntentKind::new("queue_ready").unwrap(),
@@ -1611,13 +1654,7 @@ mod tests {
             _context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.offered_id {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    start_key: self.key.clone(),
-                    end_key: self.key.clone(),
-                }));
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
             }
             if fact.id == self.failing_id {
                 return Err("projection failed".to_string());
@@ -1643,134 +1680,16 @@ mod tests {
             context: &ProjectionContext,
         ) -> Result<ProjectionOutput, String> {
             if fact.id == self.offered_id {
-                return Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    start_key: self.key.clone(),
-                    end_key: self.key.clone(),
-                }));
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
             }
             if fact.id == self.failing_id {
-                let need = ContextNeed {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    start_key: self.key.clone(),
-                    end_key: self.key.clone(),
-                };
+                let need = need_for(fact, &self.role, &self.key);
                 if context.payload_for(&need).is_some() {
                     return Err("context inconsistent".to_string());
                 }
                 return Ok(ProjectionOutput::new().need(need));
             }
             Ok(ProjectionOutput::new())
-        }
-    }
-
-    struct WatchNeedProjector {
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for WatchNeedProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            let need = ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                start_key: self.key.clone(),
-                end_key: self.key.clone(),
-            };
-            let mut output = ProjectionOutput::new().need(need.clone());
-            if context.payload_for(&need).is_some() {
-                output = output.intent(Intent::new(
-                    IntentKind::new("observed").unwrap(),
-                    fact.id,
-                    b"watched".to_vec(),
-                ));
-            }
-            Ok(output)
-        }
-    }
-
-    struct BadOfferOwnerProjector;
-
-    impl Projector for BadOfferOwnerProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().offer(ContextOffer {
-                owner: [9; 32],
-                role: Role::new("exact").unwrap(),
-                scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(fact.id),
-                end_key: ContextKey::from_bytes(fact.id),
-            }))
-        }
-    }
-
-    struct BadNeedOwnerProjector;
-
-    impl Projector for BadNeedOwnerProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: [9; 32],
-                role: Role::new("exact").unwrap(),
-                scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(fact.id),
-                end_key: ContextKey::from_bytes(fact.id),
-            }))
-        }
-    }
-
-    struct BadTimeWakeOwnerProjector;
-
-    impl Projector for BadTimeWakeOwnerProjector {
-        fn project(
-            &self,
-            _fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().time_wake(TimeWake {
-                owner: [9; 32],
-                timeline: Timeline::new("test").unwrap(),
-                at: 1,
-            }))
-        }
-    }
-
-    struct BadPurgeOwnerProjector;
-
-    impl Projector for BadPurgeOwnerProjector {
-        fn project(
-            &self,
-            _fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().purge_self([9; 32]))
-        }
-    }
-
-    struct SelfPurgeProjector;
-
-    impl Projector for SelfPurgeProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().purge_self(fact.id))
         }
     }
 
@@ -1799,118 +1718,18 @@ mod tests {
                 return Ok(ProjectionOutput::new());
             }
             match self.child_mode {
-                ChildMode::Offer => Ok(ProjectionOutput::new().offer(ContextOffer {
-                    owner: fact.id,
-                    role: Role::new("child_ready").unwrap(),
-                    scope: fact.scope.clone(),
-                    start_key: ContextKey::from_bytes(fact.id),
-                    end_key: ContextKey::from_bytes(fact.id),
-                })),
-                ChildMode::Need => Ok(ProjectionOutput::new().need(ContextNeed {
-                    owner: fact.id,
-                    role: Role::new("missing_child_context").unwrap(),
-                    scope: fact.scope.clone(),
-                    start_key: ContextKey::from_bytes(fact.id),
-                    end_key: ContextKey::from_bytes(fact.id),
-                })),
+                ChildMode::Offer => {
+                    let role = Role::new("child_ready").unwrap();
+                    let key = ContextKey::from_bytes(fact.id);
+                    Ok(ProjectionOutput::new().offer(offer_for(fact, &role, &key)))
+                }
+                ChildMode::Need => {
+                    let role = Role::new("missing_child_context").unwrap();
+                    let key = ContextKey::from_bytes(fact.id);
+                    Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
+                }
                 ChildMode::Error => Err("child projection failed".to_string()),
             }
-        }
-    }
-
-    struct EphemeralNeedOnly {
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for EphemeralNeedOnly {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                start_key: self.key.clone(),
-                end_key: self.key.clone(),
-            }))
-        }
-    }
-
-    struct EphemeralIntentAfterContext {
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for EphemeralIntentAfterContext {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            let need = ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                start_key: self.key.clone(),
-                end_key: self.key.clone(),
-            };
-            if let Some(payload) = context.payload_for(&need) {
-                Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("ephemeral_ready").unwrap(),
-                    fact.id,
-                    payload.id,
-                )))
-            } else {
-                Ok(ProjectionOutput::new().need(need))
-            }
-        }
-    }
-
-    struct EphemeralOfferProjector;
-
-    impl Projector for EphemeralOfferProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new().offer(ContextOffer {
-                owner: fact.id,
-                role: Role::new("ephemeral_offer").unwrap(),
-                scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(fact.id),
-                end_key: ContextKey::from_bytes(fact.id),
-            }))
-        }
-    }
-
-    struct EphemeralNeedAndIntentProjector {
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for EphemeralNeedAndIntentProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            Ok(ProjectionOutput::new()
-                .need(ContextNeed {
-                    owner: fact.id,
-                    role: self.role.clone(),
-                    scope: fact.scope.clone(),
-                    start_key: self.key.clone(),
-                    end_key: self.key.clone(),
-                })
-                .intent(Intent::new(
-                    IntentKind::new("ephemeral_partial").unwrap(),
-                    fact.id,
-                    Vec::new(),
-                )))
         }
     }
 }

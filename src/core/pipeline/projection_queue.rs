@@ -80,7 +80,12 @@ impl ProjectionQueue<'_> {
                 self.purge_stale_durable_pending(fact_id)?;
                 continue;
             };
-            self.process_durable_projection(pending_fact, &mut progress, intent_policy)?;
+            self.process_projection_item(
+                pending_fact,
+                QueuedProjectionKind::Durable,
+                &mut progress,
+                intent_policy,
+            )?;
         }
 
         if progress.projected < limit {
@@ -100,16 +105,22 @@ impl ProjectionQueue<'_> {
                     drop_stale_ephemeral_input(self.store, fact_id)?;
                     continue;
                 };
-                self.process_ephemeral_projection(pending_fact, &mut progress, intent_policy)?;
+                self.process_projection_item(
+                    pending_fact,
+                    QueuedProjectionKind::Ephemeral,
+                    &mut progress,
+                    intent_policy,
+                )?;
             }
         }
 
         Ok(progress)
     }
 
-    fn process_ephemeral_projection(
+    fn process_projection_item(
         &self,
         pending_fact: super::projection::PendingFact,
+        kind: QueuedProjectionKind,
         progress: &mut ProjectionProgress,
         intent_policy: IntentAdmissionPolicy<'_>,
     ) -> Result<(), String> {
@@ -127,7 +138,7 @@ impl ProjectionQueue<'_> {
             }) {
                 Ok(effects) => effects,
                 Err(_rejection) => {
-                    drop_rejected_ephemeral_input(self.store, fact_id)?;
+                    self.handle_rejected_projection(kind, fact_id)?;
                     return Ok(());
                 }
             };
@@ -146,43 +157,15 @@ impl ProjectionQueue<'_> {
         Ok(())
     }
 
-    fn process_durable_projection(
+    fn handle_rejected_projection(
         &self,
-        pending_fact: super::projection::PendingFact,
-        progress: &mut ProjectionProgress,
-        intent_policy: IntentAdmissionPolicy<'_>,
+        kind: QueuedProjectionKind,
+        fact_id: FactId,
     ) -> Result<(), String> {
-        let fact_id = pending_fact.fact_id();
-        let effects =
-            match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-                prepare_projection_effects(
-                    self.store,
-                    self.projector,
-                    pending_fact,
-                    self.allowed_tables,
-                    self.fact_admission,
-                    intent_policy,
-                )
-            }) {
-                Ok(effects) => effects,
-                Err(_rejection) => {
-                    self.isolate_rejected_durable_fact(fact_id)?;
-                    return Ok(());
-                }
-            };
-        let suppressed_intents =
-            crate::core::perf_profile::measure_result("projection_commit_effects", || {
-                commit_projection_effects(
-                    self.store,
-                    &effects,
-                    self.allowed_tables,
-                    self.fact_admission,
-                )
-            })?;
-        progress.suppressed_intents += suppressed_intents;
-        progress.projected += 1;
-        progress.status.progressed = true;
-        Ok(())
+        match kind {
+            QueuedProjectionKind::Durable => self.isolate_rejected_durable_fact(fact_id),
+            QueuedProjectionKind::Ephemeral => drop_rejected_ephemeral_input(self.store, fact_id),
+        }
     }
 
     fn purge_stale_durable_pending(&self, fact_id: FactId) -> Result<(), String> {
@@ -199,4 +182,10 @@ impl ProjectionQueue<'_> {
             })
             .map_err(|err| format!("isolate rejected durable fact: {err}"))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuedProjectionKind {
+    Durable,
+    Ephemeral,
 }
