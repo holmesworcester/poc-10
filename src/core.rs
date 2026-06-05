@@ -39,4 +39,5 @@ pub mod row_schema;
 pub mod runtime;
 pub mod schema;
 pub mod store;
+pub mod versioning;
 pub mod wire;
