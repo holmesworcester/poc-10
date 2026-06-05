@@ -128,12 +128,8 @@ CREATE TABLE IF NOT EXISTS clock (
 pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
 /// Standing context edge table.
 pub(crate) const CONTEXT_EDGES: TableName = TableName::new("context_edges");
-/// Standing time wake table.
-pub(crate) const TIME_WAKES: TableName = TableName::new("time_wakes");
 /// Pending projection queue table.
 pub(crate) const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
-/// Transient due-time context table.
-pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_ranges");
 /// Durable intent queue table.
 pub(crate) const INTENTS: TableName = TableName::new("intents");
 /// Ephemeral intent queue table.

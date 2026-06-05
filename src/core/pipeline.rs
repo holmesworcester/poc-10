@@ -58,19 +58,21 @@ pub use route::{
 };
 
 use crate::core::command_context::CommandOutput;
-use crate::core::context::ContextOffer;
+use crate::core::context::{ContextOffer, ContextSetDelta};
+use crate::core::fact_store::{
+    delete_ephemeral_fact_in_tx, ephemeral_pending_fact_ids, insert_fact_and_pending_in_tx,
+    purge_fact_in_tx,
+};
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::schema::{EPHEMERAL_PROJECTION_INPUTS, LOCAL_INTENTS, PENDING_PROJECTION};
 use crate::core::store::{Store, TableName};
+use rusqlite::params;
 use std::collections::BTreeSet;
 
-use commit_effects::IntentAdmissionPolicy;
-use pipeline_one::{
-    commit_projected_context_offers, load_pending_fact, pending_durable_fact_ids,
-    pending_ephemeral_fact_ids, process_due_time_range, process_projection_item,
-    purge_fact_from_store, purge_stale_projection_item, submit_facts_to_store, ProjectionSource,
-};
+use commit_effects::{sqlite_string_error, IntentAdmissionPolicy};
+use context_store::{insert_context_offer_in_tx, wake_context_matches_in_tx};
+use pipeline_one::{load_pending_fact, process_projection_item, ProjectionSource};
 
 /// Factory for one protocol intent handler.
 pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
@@ -426,7 +428,7 @@ impl<'a> PipelineEngine<'a> {
         if progress.projected < limit {
             let ephemeral_fact_ids =
                 crate::core::perf_profile::measure_result("projection_ephemeral_load", || {
-                    pending_ephemeral_fact_ids(self.store, limit - progress.projected)
+                    ephemeral_pending_fact_ids(self.store, limit - progress.projected)
                 })?;
             self.drain_projection_items(
                 ProjectionSource::Ephemeral,
@@ -636,12 +638,253 @@ impl<'a> PipelineEngine<'a> {
     }
 }
 
+/// Insert a fact and mark it pending in the same transaction.
+pub(crate) fn submit_fact_to_store(store: &Store, fact: Fact) -> Result<bool, String> {
+    let inserted = store
+        .write_transaction(|tx| insert_fact_and_pending_in_tx(tx, &fact))
+        .map_err(|err| format!("submit fact: {err}"))?;
+    Ok(inserted)
+}
+
+/// Bulk insert facts with one transaction and one pending row per insert.
+pub(crate) fn submit_facts_to_store(
+    store: &Store,
+    facts: impl IntoIterator<Item = Fact>,
+) -> Result<usize, String> {
+    let facts = facts.into_iter().collect::<Vec<_>>();
+    let inserted = store
+        .write_transaction(|tx| {
+            let mut inserted = 0;
+            for fact in &facts {
+                if insert_fact_and_pending_in_tx(tx, fact)? {
+                    inserted += 1;
+                }
+            }
+            Ok(inserted)
+        })
+        .map_err(|err| format!("submit facts: {err}"))?;
+    Ok(inserted)
+}
+
+/// Remove a fact and all core-owned durable rows keyed by its id.
+///
+/// Protocol-owned read-model rows are removed by projector row mutations or
+/// protocol handlers, not by this generic core purge.
+fn purge_fact_from_store(store: &Store, owner: FactId) -> Result<bool, String> {
+    let changed = store
+        .write_transaction(|tx| purge_fact_in_tx(tx, owner))
+        .map_err(|err| format!("purge fact: {err}"))?;
+    Ok(changed)
+}
+
+/// Commit pre-materialized context offers and clear their pending fact rows.
+///
+/// This is a bounded sync/replay shortcut for already-verified rows. Normal
+/// fact projection should go through `pipeline_one`; this helper preserves the
+/// same transaction rule for the shortcut: newly visible context and completed
+/// pending work commit together.
+fn commit_projected_context_offers(
+    store: &Store,
+    offers: &[ContextOffer],
+    completed_fact_ids: &[FactId],
+) -> Result<usize, String> {
+    store
+        .write_transaction(|tx| {
+            let mut added_offers = Vec::new();
+            for offer in offers {
+                if insert_context_offer_in_tx(tx, offer)? {
+                    added_offers.push(offer.clone());
+                }
+            }
+            let woken_facts = wake_context_matches_in_tx(
+                tx,
+                &ContextSetDelta {
+                    added_offers,
+                    ..ContextSetDelta::default()
+                },
+            )
+            .map_err(sqlite_string_error)?;
+            for id in completed_fact_ids {
+                tx.conn().execute(
+                    "DELETE FROM pending_projection WHERE owner = ?1",
+                    params![id.as_slice()],
+                )?;
+            }
+            Ok(woken_facts)
+        })
+        .map_err(|err| format!("commit projected context offers: {err}"))
+}
+
+/// Turn due time wakes into pending projection work plus time context.
+///
+/// Time wakes are upstream of one-item projection. When a caller supplies a due
+/// time window, matching owners are marked pending and receive that `TimeRange`
+/// as projection context when `pipeline_one` later loads the item.
+fn process_due_time_range(
+    store: &Store,
+    timeline: Timeline,
+    start_exclusive: Option<u64>,
+    end_inclusive: u64,
+    limit: usize,
+) -> Result<usize, String> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let range = TimeRange {
+        timeline,
+        start_exclusive,
+        end_inclusive,
+    };
+
+    store
+        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit))
+        .map_err(|err| format!("process due time range: {err}"))
+}
+
+fn enqueue_due_time_wakes_in_tx(
+    store: &Store,
+    range: &TimeRange,
+    limit: usize,
+) -> rusqlite::Result<usize> {
+    let owners = due_time_wake_owners(store, range, limit)?;
+    let has_start = range.start_exclusive.is_some();
+    let has_start_i64 = i64::from(has_start);
+    let start_exclusive = sqlite_u64(range.start_exclusive.unwrap_or(0), "start_exclusive")?;
+    let end_inclusive = sqlite_u64(range.end_inclusive, "end_inclusive")?;
+
+    let mut inserted = 0;
+    for owner in owners {
+        inserted += store.conn().execute(
+            "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
+            params![owner.as_slice()],
+        )?;
+        store.conn().execute(
+            "INSERT OR IGNORE INTO pending_time_ranges
+                (owner, timeline, has_start, start_exclusive, end_inclusive)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                owner.as_slice(),
+                range.timeline.as_str(),
+                has_start_i64,
+                start_exclusive,
+                end_inclusive,
+            ],
+        )?;
+    }
+
+    Ok(inserted)
+}
+
+fn due_time_wake_owners(
+    store: &Store,
+    range: &TimeRange,
+    limit: usize,
+) -> rusqlite::Result<Vec<FactId>> {
+    let has_start = range.start_exclusive.is_some();
+    let has_start_i64 = i64::from(has_start);
+    let start_exclusive = sqlite_u64(range.start_exclusive.unwrap_or(0), "start_exclusive")?;
+    let end_inclusive = sqlite_u64(range.end_inclusive, "end_inclusive")?;
+    let limit = i64::try_from(limit).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(
+            "due time wake limit exceeds SQLite integer range".to_string(),
+        )
+    })?;
+    let mut stmt = store.conn().prepare(
+        r#"
+        SELECT owner
+        FROM time_wakes
+        WHERE timeline = ?1
+          AND (?2 = 0 OR at > ?3)
+          AND at <= ?4
+        ORDER BY at, owner
+        LIMIT ?5
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            range.timeline.as_str(),
+            has_start_i64,
+            start_exclusive,
+            end_inclusive,
+            limit,
+        ],
+        |row| fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner"),
+    )?;
+    rows.collect()
+}
+
+/// Read the next durable pending fact ids without mutating the queue.
+///
+/// The item commit removes the row only after projection succeeds. Missing
+/// facts are handled by the queue driver as stale pending rows.
+fn pending_durable_fact_ids(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
+    let limit =
+        i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
+    let mut stmt = store
+        .conn()
+        .prepare(
+            r#"
+            SELECT p.owner
+            FROM pending_projection p
+            LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
+            ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")
+        })
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load pending projection: {err}"))
+}
+
+fn purge_stale_projection_item(
+    store: &Store,
+    source: ProjectionSource,
+    fact_id: FactId,
+) -> Result<(), String> {
+    match source {
+        ProjectionSource::Durable => purge_stale_durable_pending(store, fact_id),
+        ProjectionSource::Ephemeral => drop_stale_ephemeral_input(store, fact_id),
+    }
+}
+
+fn drop_stale_ephemeral_input(store: &Store, fact_id: FactId) -> Result<(), String> {
+    store
+        .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
+        .map_err(|err| format!("purge stale ephemeral projection input: {err}"))?;
+    Ok(())
+}
+
+fn purge_stale_durable_pending(store: &Store, fact_id: FactId) -> Result<(), String> {
+    store
+        .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
+        .map(|_| ())
+        .map_err(|err| format!("purge stale durable pending fact: {err}"))
+}
+
+fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
+    bytes.try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("{name} is not a 32-byte fact id"))
+    })
+}
+
+fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!(
+            "{name}: SQL value exceeds SQLite integer range"
+        ))
+    })
+}
+
 pub(crate) use commit_effects::commit_pipeline_effects_to_store;
 pub(crate) use dispatch::{
     dispatch_queued_intent, dispatch_queued_intent_filtering_intents, next_queued_intent,
     submit_intent_to_store, submit_local_intent_to_store,
 };
-pub(crate) use pipeline_one::submit_fact_to_store;
 
 #[cfg(test)]
 mod tests {

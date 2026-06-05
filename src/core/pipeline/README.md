@@ -108,8 +108,9 @@ projectors to read the clock.
 ## Module Responsibilities
 
 - `pipeline.rs` owns `WorkStatus`, handler route metadata, handler sets, and
-  `PipelineEngine`, the generic state machine that orders projection, due
-  time-wake admission, and intent dispatch.
+  `PipelineEngine`, the generic state machine that admits facts and due time
+  wakes, drains pending projection over durable and ephemeral inputs, and orders
+  intent dispatch.
 - `route.rs` owns tag route declarations, staged route metadata, and the
   optional protocol-owned fact admission hook type.
 - `decode.rs` owns the decode trait core invokes at the read-stage boundary.
@@ -122,9 +123,9 @@ projectors to read the clock.
 - `context.rs` owns the in-memory `ProjectionContext` and matched payload
   helpers visible while processing one fact.
 - `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
-- `pipeline_one.rs` owns one queued fact pipeline item: fact admission,
-  time-wake queue admission, matched-context loading, staged
-  decode/authenticate/adapt/project execution, and the commit boundary.
+- `pipeline_one.rs` owns one queued fact pipeline item: matched-context and due
+  time-range loading, staged decode/authenticate/adapt/project execution,
+  rejection handling, and the commit boundary.
 - `pipeline.rs` owns pending projection draining over durable facts and
   ephemeral inputs as part of the runtime state machine.
 - `context_store.rs` owns persisted context edges, range-overlap matching, projection

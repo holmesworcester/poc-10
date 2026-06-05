@@ -8,7 +8,7 @@
 //! The mechanism is intentionally smaller than "run arbitrary SQL". The query
 //! text must be a single comment-free `SELECT`, every `FROM` and `JOIN` table
 //! must appear in `allowed_tables`, and every supplied value is bound as a
-//! parameter. This gives context matching and time-wake admission one shared
+//! parameter. This gives context wake fanout a shared
 //! `INSERT OR IGNORE ... SELECT` path without making core accept free-form SQL
 //! from protocol modules.
 //!
@@ -67,17 +67,11 @@ impl Param {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn u64(name: &'static str, value: u64) -> Self {
         Self {
             name,
             value: Value::U64(value),
-        }
-    }
-
-    pub(super) fn bool(name: &'static str, value: bool) -> Self {
-        Self {
-            name,
-            value: Value::Bool(value),
         }
     }
 
