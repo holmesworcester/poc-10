@@ -38,18 +38,64 @@ pub const PIPELINE: FactPipeline = FactPipeline::Staged {
     project: "content::message::project::ContentMessageProjector",
 };
 
+/// Content target families that can be named by generic core `fact_purged`
+/// context.
+///
+/// The byte discriminants are part of content's projection coordinate, not a
+/// protocol fact tag. They only need to sort stably within content purge keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentPurgeTarget {
+    Message,
+    File,
+}
+
+impl ContentPurgeTarget {
+    fn key_byte(self) -> [u8; 1] {
+        match self {
+            Self::Message => [1],
+            Self::File => [2],
+        }
+    }
+}
+
 /// Content's key shape for the generic core `fact_purged` context role.
 ///
 /// This is not a protocol fact family. It is the content projection coordinate
-/// used by deletion facts to wake exactly the target content projector that
-/// owns row cleanup and `purge_self`.
-pub fn fact_purged_key(frontier_id: FactId, minute: u64, target_fact_id: FactId) -> ContextKey {
+/// used by exact deletion facts and range purge producers to wake target
+/// content projectors. Target projectors publish exact needs at their own
+/// coordinates; producers publish exact or range offers over the same sortable
+/// coordinate.
+pub fn fact_purged_key(
+    target: ContentPurgeTarget,
+    minute: u64,
+    target_fact_id: FactId,
+) -> ContextKey {
+    let target = target.key_byte();
     ContextKey::from_parts([
-        ContextKeyPart::bytes(&frontier_id),
+        ContextKeyPart::bytes(&target),
         ContextKeyPart::u64(minute),
         ContextKeyPart::bytes(&target_fact_id),
     ])
     .expect("content purge context key uses bounded fixed-width parts")
+}
+
+pub fn message_fact_purged_key(minute: u64, target_message_id: FactId) -> ContextKey {
+    fact_purged_key(ContentPurgeTarget::Message, minute, target_message_id)
+}
+
+pub fn file_fact_purged_key(minute: u64, target_file_id: FactId) -> ContextKey {
+    fact_purged_key(ContentPurgeTarget::File, minute, target_file_id)
+}
+
+pub fn fact_purged_minute_range_keys(
+    target: ContentPurgeTarget,
+    start_minute: u64,
+    end_minute: u64,
+) -> (ContextKey, ContextKey) {
+    (
+        fact_purged_key(target, start_minute, [0; 32]),
+        fact_purged_key(target, end_minute, [0xff; 32]),
+    )
 }
 
 pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
@@ -214,7 +260,7 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
         let deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            fact_purged_key(message.frontier_id, message.minute, fact.id),
+            message_fact_purged_key(message.minute, fact.id),
         );
         let retention_floor_need = retention_floor_need(fact.id, message.workspace_id);
         let author_need = crate::core::context::ContextNeed::range(
@@ -851,6 +897,44 @@ mod projector_tests {
     }
 
     #[test]
+    fn content_purge_coordinate_supports_exact_and_range_offers() {
+        let scope = FactScope::Local;
+        let owner = [1; 32];
+        let message_id = [9; 32];
+        let message_need = topo::core::pipeline::fact_purged_need(
+            owner,
+            scope.clone(),
+            project::message_fact_purged_key(10, message_id),
+        );
+        let exact_offer = topo::core::pipeline::fact_purged_offer(
+            [2; 32],
+            scope.clone(),
+            project::message_fact_purged_key(10, message_id),
+        );
+        let (range_start, range_end) =
+            project::fact_purged_minute_range_keys(project::ContentPurgeTarget::Message, 9, 11);
+        let range_offer = topo::core::pipeline::fact_purged_range_offer(
+            [3; 32],
+            scope.clone(),
+            range_start,
+            range_end,
+        );
+        let file_need = topo::core::pipeline::fact_purged_need(
+            owner,
+            scope,
+            project::file_fact_purged_key(10, message_id),
+        );
+
+        assert_eq!(message_need.start_key, exact_offer.start_key);
+        assert_eq!(message_need.end_key, exact_offer.end_key);
+        assert!(range_offer.start_key <= message_need.start_key);
+        assert!(range_offer.end_key >= message_need.end_key);
+        assert!(
+            range_offer.end_key < file_need.start_key || range_offer.start_key > file_need.end_key
+        );
+    }
+
+    #[test]
     fn content_message_projector_materializes_after_signer_author_and_secret_context() {
         let author_fact = user_fact([9; 32]);
         let (message, fact, key) = message_fact(author_fact.id, "hello from content message");
@@ -1299,12 +1383,12 @@ mod projector_tests {
             need: crate::core::pipeline::fact_purged_need(
                 message_fact.id,
                 scope.clone(),
-                project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
+                project::message_fact_purged_key(message.minute, message_fact.id),
             ),
             offer: crate::core::pipeline::fact_purged_offer(
                 deletion_fact.id,
                 scope,
-                project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
+                project::message_fact_purged_key(message.minute, message_fact.id),
             ),
             payload: deletion_fact.clone(),
         }

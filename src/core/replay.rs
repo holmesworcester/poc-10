@@ -34,10 +34,9 @@
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
-use crate::core::intents::IntentHandler;
-use crate::core::pipeline;
-use crate::core::pipeline::{FactAdmissionFn, FactRoute, Projector};
-use crate::core::runtime::HandlerRoute;
+use crate::core::pipeline::{
+    FactAdmissionFn, FactRoute, HandlerRoute, HandlerSet, PipelineEngine, Projector,
+};
 use crate::core::store::{quoted_identifier_list, quoted_table_name_str, Store, TableName};
 use rusqlite::types::ValueRef;
 use std::collections::BTreeSet;
@@ -354,12 +353,9 @@ struct ReplayCounters {
 /// replay-allowed dispatch run to a fixpoint together because each can produce
 /// inputs for the others.
 struct ReplayDrive<'a> {
-    store: &'a Store,
-    projector: &'a dyn Projector,
-    allowed_tables: &'a [TableName],
-    fact_admission: Option<FactAdmissionFn>,
+    pipeline: PipelineEngine<'a>,
     replay_time_wakes: &'a [DaemonTimeWake],
-    handlers: Vec<(&'static str, Box<dyn IntentHandler>)>,
+    handlers: HandlerSet,
     kinds: Vec<&'static str>,
 }
 
@@ -372,28 +368,14 @@ impl<'a> ReplayDrive<'a> {
         replay_time_wakes: &'a [DaemonTimeWake],
         routes: &'static [HandlerRoute],
     ) -> Self {
-        let handlers: Vec<(&'static str, Box<dyn IntentHandler>)> = routes
-            .iter()
-            .filter(|route| route.runs_during_replay)
-            .map(|route| (route.intent_kind, (route.factory)()))
-            .collect();
-        let kinds = handlers.iter().map(|(kind, _)| *kind).collect();
+        let handlers = HandlerSet::new_replay(routes);
+        let kinds = handlers.intent_kinds();
         Self {
-            store,
-            projector,
-            allowed_tables,
-            fact_admission,
+            pipeline: PipelineEngine::new(store, projector, allowed_tables, fact_admission),
             replay_time_wakes,
             handlers,
             kinds,
         }
-    }
-
-    fn handler_for(&self, kind: &str) -> Option<&dyn IntentHandler> {
-        self.handlers
-            .iter()
-            .find(|(route_kind, _)| *route_kind == kind)
-            .map(|(_, handler)| handler.as_ref())
     }
 
     fn fixpoint(&self, counters: &mut ReplayCounters) -> Result<(), String> {
@@ -413,14 +395,9 @@ impl<'a> ReplayDrive<'a> {
     fn project_to_idle(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let mut progressed = false;
         loop {
-            let progress = pipeline::drain_pending_projection_filtering_intents(
-                self.projector,
-                self.store,
-                self.allowed_tables,
-                self.fact_admission,
-                REPLAY_WORK_LIMIT,
-                &self.kinds,
-            )?;
+            let progress = self
+                .pipeline
+                .drain_projection_filtering_intents(REPLAY_WORK_LIMIT, &self.kinds)?;
             counters.projected_facts += progress.projected;
             counters.suppressed_live_only_work += progress.suppressed_intents;
             if progress.projected == 0 {
@@ -434,11 +411,10 @@ impl<'a> ReplayDrive<'a> {
     fn admit_time_wakes(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let mut admitted = 0;
         for wake in self.replay_time_wakes {
-            let Some(end_inclusive) = (wake.end_inclusive)(self.store)? else {
+            let Some(end_inclusive) = (wake.end_inclusive)(self.pipeline.store())? else {
                 continue;
             };
-            admitted += pipeline::process_due_time_range(
-                self.store,
+            admitted += self.pipeline.process_due_time_range(
                 (wake.timeline)(),
                 None,
                 end_inclusive,
@@ -453,38 +429,14 @@ impl<'a> ReplayDrive<'a> {
         if self.kinds.is_empty() {
             return Ok(false);
         }
-        let mut progressed = false;
-        for _ in 0..REPLAY_WORK_LIMIT {
-            let Some(queued) = pipeline::next_queued_intent(self.store, &self.kinds)? else {
-                break;
-            };
-            let kind = queued.intent.kind.as_str().to_owned();
-            let handler = self
-                .handler_for(&kind)
-                .ok_or_else(|| format!("no replay handler registered for intent kind {kind}"))?;
-            let report = pipeline::dispatch_queued_intent_filtering_intents(
-                handler,
-                self.store,
-                self.allowed_tables,
-                self.fact_admission,
-                queued,
-                &self.kinds,
-            )?;
-            let status = report.status;
-            counters.suppressed_live_only_work += report.suppressed_intents;
-            if status.retried {
-                // A replay-allowed handler asked to wait for input that a later
-                // projection or dispatch pass should supply. Stop this pass and
-                // let the outer fixpoint advance other work first.
-                break;
-            }
-            if !status.progressed {
-                break;
-            }
-            counters.replay_allowed_intents += 1;
-            progressed = true;
-        }
-        Ok(progressed)
+        let progress = self.pipeline.dispatch_intents_filtering(
+            &self.handlers,
+            REPLAY_WORK_LIMIT,
+            &self.kinds,
+        )?;
+        counters.suppressed_live_only_work += progress.suppressed_intents;
+        counters.replay_allowed_intents += progress.dispatched;
+        Ok(progress.status.progressed)
     }
 }
 

@@ -79,9 +79,17 @@ workspace/scope and whose projector validates admin or bootstrap authority.
 
 Deletion is target-owned. A deletion projector publishes generic core
 `fact_purged` context only after it validates author and target. The target
-message/file/reaction/slice
-projector consumes that context, deletes its own rows, and purges its own fact
-bytes. Projectors do not purge someone else's fact.
+message/file/reaction/slice projector consumes that context, deletes its own
+rows, and purges its own fact bytes. Projectors do not purge someone else's
+fact.
+
+Content encodes `fact_purged` coordinates as
+`content_kind || minute || fact_id`. Target projectors publish exact needs at
+the coordinates that should wake them: messages watch their own message
+coordinate, files watch their own file coordinate and parent message
+coordinate, and reactions/slices watch parent coordinates. Exact deletions
+publish degenerate range offers over one coordinate; retention or compaction
+can publish broader minute-range offers over the same sortable key shape.
 
 Opened message rows are derived state. The message fact is admitted and shared
 after signer/author proof, but `opened_message_rows` are written only when the
@@ -133,8 +141,9 @@ message {
 
 Authorizes removal of one message. Projection requires signer, target
 `content_message_meta`, and author user context, validates the target frontier,
-minute, and author, writes `message_deletion_rows`, offers `fact_purged`,
-and shares the deletion fact.
+minute, and author, writes `message_deletion_rows`, offers exact
+`fact_purged(message, target_minute, target_message_id)`, and shares the
+deletion fact.
 
 ```text
 message_deletion {
@@ -176,7 +185,8 @@ reaction {
 Authorizes removal of one file descriptor. Projection requires signer, exact
 target file, parent message, and author user context. It validates the target
 file author and parent message, writes `file_deletion_rows`, offers
-`fact_purged`, and shares the deletion fact.
+exact `fact_purged(file, target_file_minute, target_file_id)`, and shares the
+deletion fact.
 
 ```text
 file_deletion {
@@ -273,7 +283,7 @@ auth workspace/user/endpoint/key context
             -> file_slice_budget_1
 
 message_deletion_hello
-  -> fact_purged(frontier_alice, minute_hello, message_hello)
+  -> fact_purged(message, minute_hello, message_hello)
   -> message_hello self-purges
   -> reaction_bob self-purges
   -> file_descriptor_budget self-purges

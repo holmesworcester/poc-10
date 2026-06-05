@@ -24,10 +24,9 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::pipeline::{
-    authenticate_authored, FactRoute, ProjectionContext, ProjectionOutput, Projector,
-    RouterProjector,
+    authenticate_authored, FactRoute, HandlerRoute, ProjectionContext, ProjectionOutput, Projector,
+    RecurringIntentSpec, RouterProjector,
 };
-use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};

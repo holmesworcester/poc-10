@@ -16,26 +16,27 @@
 //! daemon tick, sync, or a protocol handler.
 //!
 //! This is the facade a protocol host should use when it wants the whole core
-//! engine. If code wants to change projection scheduling, intent queue
-//! dispatch, command-safe handler filtering, daemon queue draining, or due-time
-//! processing, this file is the place that composes those pieces. The pieces
-//! themselves stay in `pipeline`, `fact_store`, `store`, and protocol modules.
+//! engine. Runtime holds the concrete store, projector, and protocol
+//! description; `pipeline` owns the reusable ordering of projection, due-time
+//! admission, and intent dispatch. Change runtime when host-facing APIs or
+//! protocol declarations change; change pipeline when queue scheduling or commit
+//! ordering changes.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
 use crate::core::context::ContextOffer;
 use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{Intent, IntentHandler};
-use crate::core::pipeline;
-use crate::core::pipeline::{FactAdmissionFn, FactRoute, Projector, Timeline};
-use crate::core::schema::{
-    CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
+use crate::core::intents::Intent;
+use crate::core::pipeline::{
+    FactAdmissionFn, FactRoute, HandlerSet, PipelineEngine, Projector, Timeline,
 };
+use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use crate::core::store::{SchemaSource, Store, TableName};
-use std::collections::BTreeSet;
 use std::path::Path;
 
-pub use crate::core::pipeline::WorkStatus;
+pub use crate::core::pipeline::{
+    HandlerRoute, RecurringIntentBuilder, RecurringIntentSpec, WorkStatus,
+};
 
 /// Factory for the protocol's projector implementation.
 pub type ProjectorFactory = fn() -> Box<dyn Projector>;
@@ -63,168 +64,6 @@ pub struct RuntimeDescription {
     pub handlers: &'static [HandlerRoute],
     /// Handler route names a synchronous command should not run.
     pub command_excluded_handlers: &'static [&'static str],
-}
-
-/// Factory for one protocol intent handler.
-pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
-
-/// Build the current intent for a recurring operational loop.
-///
-/// The daemon calls this while the process is online to mint one tick of live
-/// work. Returning `Ok(None)` means there is nothing to do this tick. The
-/// builder reads the store the same way a handler reads its inputs; it must not
-/// depend on persisted scheduler rows, because recurring schedules are
-/// in-memory only and never replayed.
-pub type RecurringIntentBuilder = fn(&Store) -> Result<Option<Intent>, String>;
-
-/// In-memory schedule for a live-only recurring operational intent.
-///
-/// Recurring intents are not durable state. The daemon installs these schedules
-/// at startup, after replay has finished, and fires them on a fixed cadence
-/// while the process runs. There is nothing to wipe on upgrade and nothing to
-/// replay: operational repetition belongs here, not in durable time wakes or
-/// projectors.
-#[derive(Debug, Clone, Copy)]
-pub struct RecurringIntentSpec {
-    /// Cadence between successive fires once the loop is running.
-    pub interval_ms: u64,
-    /// Delay from daemon startup before the first fire.
-    pub initial_delay_ms: u64,
-    /// Build this tick's intent from current store state, or `None` to skip.
-    pub build_intent: RecurringIntentBuilder,
-}
-
-/// One handler route in the protocol registry.
-///
-/// `name` is a human-facing route name used for exclusion lists. `intent_kind`
-/// is the queue routing key that selects this handler for both durable and
-/// ephemeral intents.
-///
-/// `runs_during_replay` answers one question: if this intent is emitted while
-/// replay is rebuilding facts and rows, may core record and dispatch it before
-/// the replay barrier finishes? Replay-enabled handlers must be deterministic
-/// rebuild work over retained facts: no network IO, no fresh randomness, no
-/// process-global mutable state, and no operational wall-clock decisions. Every
-/// route declares this flag explicitly so adding a route forces a conscious
-/// replay decision.
-///
-/// `recurrence` marks live-only operational repetition. A route with a
-/// recurrence is installed as an in-memory daemon schedule and must not run
-/// during replay.
-#[derive(Debug, Clone, Copy)]
-pub struct HandlerRoute {
-    /// Human-facing route name used for exclusion lists.
-    pub name: &'static str,
-    /// Intent kind handled by this route.
-    pub intent_kind: &'static str,
-    /// Handler factory.
-    pub factory: HandlerFactory,
-    /// Whether core may dispatch this intent before the replay barrier finishes.
-    pub runs_during_replay: bool,
-    /// Live-only recurring schedule installed by the daemon, if any.
-    pub recurrence: Option<RecurringIntentSpec>,
-}
-
-/// Instantiated handlers for one runtime pass.
-///
-/// The set owns concrete handler values so dispatch can borrow trait objects
-/// without rebuilding them for every queued row. Command processing builds a
-/// filtered set to avoid daemon/network side effects.
-struct HandlerSet {
-    entries: Vec<HandlerEntry>,
-}
-
-struct HandlerEntry {
-    intent_kind: &'static str,
-    handler: Box<dyn IntentHandler>,
-}
-
-impl HandlerSet {
-    /// Instantiate all declared routes.
-    pub fn new(routes: &'static [HandlerRoute]) -> Self {
-        Self {
-            entries: routes
-                .iter()
-                .map(|route| HandlerEntry {
-                    intent_kind: route.intent_kind,
-                    handler: (route.factory)(),
-                })
-                .collect(),
-        }
-    }
-
-    /// Instantiate every route except the protocol-declared command exclusions.
-    pub fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
-        Self {
-            entries: routes
-                .iter()
-                .filter(|route| !excluded_names.contains(&route.name))
-                .map(|route| HandlerEntry {
-                    intent_kind: route.intent_kind,
-                    handler: (route.factory)(),
-                })
-                .collect(),
-        }
-    }
-
-    fn intent_kinds(&self) -> Vec<&'static str> {
-        self.entries.iter().map(|entry| entry.intent_kind).collect()
-    }
-
-    fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
-        self.entries
-            .iter()
-            .find(|entry| entry.intent_kind == kind)
-            .map(|entry| entry.handler.as_ref())
-    }
-
-    pub(crate) fn dispatch(
-        &self,
-        store: &Store,
-        allowed_tables: &[TableName],
-        fact_admission: Option<FactAdmissionFn>,
-        limit: usize,
-    ) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        let kinds = self.intent_kinds();
-        let mut retried_local = BTreeSet::<(String, Vec<u8>)>::new();
-        for _ in 0..limit {
-            let Some(queued) = pipeline::next_queued_intent(store, &kinds)? else {
-                break;
-            };
-            let kind = queued.intent.kind.as_str();
-            let local_retry_key = if queued.table == LOCAL_INTENTS {
-                Some((kind.to_owned(), queued.intent.key.clone()))
-            } else {
-                None
-            };
-            if local_retry_key
-                .as_ref()
-                .is_some_and(|key| retried_local.contains(key))
-            {
-                break;
-            }
-            let handler = self
-                .handler_for_kind(kind)
-                .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
-            let status = pipeline::dispatch_queued_intent(
-                handler,
-                store,
-                allowed_tables,
-                fact_admission,
-                queued,
-            )?;
-            total.merge(status);
-            if status.retried {
-                if let Some(key) = local_retry_key {
-                    retried_local.insert(key);
-                    continue;
-                }
-                break;
-            }
-        }
-        Ok(total)
-    }
 }
 
 /// Runtime for one concrete protocol description.
@@ -269,6 +108,15 @@ impl Runtime {
         })
     }
 
+    fn pipeline(&self) -> PipelineEngine<'_> {
+        PipelineEngine::new(
+            &self.store,
+            self.projector.as_ref(),
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+        )
+    }
+
     /// Borrow the runtime's store handle.
     ///
     /// This exposes the concrete SQLite-backed store for query helpers and
@@ -288,13 +136,7 @@ impl Runtime {
 
     /// Count facts currently queued for projection.
     pub fn pending_fact_count(&self) -> usize {
-        self.store
-            .table_row_count(PENDING_PROJECTION)
-            .expect("runtime pending fact count should load from store")
-            + self
-                .store
-                .table_row_count(EPHEMERAL_PROJECTION_INPUTS)
-                .expect("runtime ephemeral projection count should load from store")
+        self.pipeline().pending_fact_count()
     }
 
     /// Count durable plus ephemeral queued intents.
@@ -335,27 +177,20 @@ impl Runtime {
 
     /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
-        if let Some(admit) = self.description.fact_admission {
-            admit(&fact).expect("runtime fact submission should pass admission");
-        }
-        pipeline::submit_fact_to_store(&self.store, fact)
+        self.pipeline()
+            .submit_fact(fact)
             .expect("runtime fact submission should persist")
     }
 
     /// Admit many facts in one transaction.
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
-        let facts = facts.into_iter().collect::<Vec<_>>();
-        if let Some(admit) = self.description.fact_admission {
-            for fact in &facts {
-                admit(fact)?;
-            }
-        }
-        pipeline::submit_facts_to_store(&self.store, facts)
+        self.pipeline().submit_facts(facts)
     }
 
     /// Remove one fact and its core-owned derived rows.
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
-        pipeline::purge_fact_from_store(&self.store, fact_id)
+        self.pipeline()
+            .purge_fact(fact_id)
             .expect("runtime fact purge should persist")
     }
 
@@ -364,7 +199,8 @@ impl Runtime {
         offers: &[ContextOffer],
         completed_fact_ids: &[FactId],
     ) -> Result<usize, String> {
-        pipeline::commit_projected_context_offers(&self.store, offers, completed_fact_ids)
+        self.pipeline()
+            .commit_projected_context_offers(offers, completed_fact_ids)
     }
 
     /// Queue durable idempotent work for the protocol handler registry.
@@ -373,12 +209,12 @@ impl Runtime {
     /// command-safe drain pass. Use `submit_local_intent` for work that is only
     /// valid on this process and should disappear on restart.
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        pipeline::submit_intent_to_store(&self.store, intent)
+        self.pipeline().submit_intent(intent)
     }
 
     /// Queue ephemeral work for this runtime connection.
     pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        pipeline::submit_local_intent_to_store(&self.store, intent)
+        self.pipeline().submit_local_intent(intent)
     }
 
     /// Commit the effects returned by a user-facing command and return its receipt.
@@ -386,28 +222,8 @@ impl Runtime {
     /// Command receipts are not pipeline state. They return directly to the CLI
     /// caller after the command's facts, rows, and intents have been committed.
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
-        let (receipt, effects) = output.into_parts();
-        pipeline::commit_pipeline_effects_to_store(
-            &self.store,
-            &effects,
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            "submit command output",
-        )?;
-        Ok(receipt)
-    }
-
-    fn process_projection_work(
-        &mut self,
-        limit: usize,
-    ) -> Result<pipeline::ProjectionProgress, String> {
-        pipeline::drain_pending_projection(
-            self.projector.as_ref(),
-            &self.store,
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            limit,
-        )
+        self.pipeline()
+            .submit_command_output(output, "submit command output")
     }
 
     /// Drain pending projection until no projection work remains or rounds expire.
@@ -420,20 +236,13 @@ impl Runtime {
         max_rounds: usize,
         limit_per_round: usize,
     ) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        for _ in 0..max_rounds {
-            let progress = self.process_projection_work(limit_per_round)?;
-            total.merge(progress.status);
-            if progress.projected == 0 && self.pending_fact_count() == 0 {
-                return Ok(total);
-            }
-        }
-        Err("projection work did not become idle within the round limit".to_string())
+        self.pipeline()
+            .process_projection_until_idle(max_rounds, limit_per_round)
     }
 
     /// Dispatch queued intents using the full protocol handler set.
     pub fn dispatch_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
-        self.dispatch_with_handlers(&self.handlers, limit)
+        self.pipeline().dispatch_intents(&self.handlers, limit)
     }
 
     /// Run one daemon tick's queue order after IO and time wakes have been handled.
@@ -441,11 +250,8 @@ impl Runtime {
     /// Projection runs before and after intent dispatch because handlers often
     /// emit facts that should become visible before the next quiet sleep.
     pub fn drain_daemon_queues_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        total.merge(self.process_projection_until_idle(4, limit)?);
-        total.merge(self.dispatch_intents(limit)?);
-        total.merge(self.process_projection_until_idle(4, limit)?);
-        Ok(total)
+        self.pipeline()
+            .drain_daemon_queues_once(&self.handlers, limit)
     }
 
     /// Settle all projection and intent work using the protocol's full handler
@@ -457,47 +263,17 @@ impl Runtime {
         max_rounds: usize,
         limit_per_round: usize,
     ) -> Result<WorkStatus, String> {
-        self.process_work_until_idle(max_rounds, limit_per_round, None)
-    }
-
-    fn dispatch_with_handlers(
-        &self,
-        handlers: &HandlerSet,
-        limit: usize,
-    ) -> Result<WorkStatus, String> {
-        handlers.dispatch(
-            &self.store,
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            limit,
-        )
+        self.process_work_until_idle(max_rounds, limit_per_round, &self.handlers)
     }
 
     fn process_work_until_idle(
-        &mut self,
+        &self,
         max_rounds: usize,
         limit_per_round: usize,
-        handlers: Option<&HandlerSet>,
+        handlers: &HandlerSet,
     ) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        for _ in 0..max_rounds {
-            total.merge(crate::core::perf_profile::measure_result(
-                "projection",
-                || self.process_projection_until_idle(8, limit_per_round),
-            )?);
-            let dispatched = crate::core::perf_profile::measure_result("intent_dispatch", || {
-                self.dispatch_with_handlers(handlers.unwrap_or(&self.handlers), limit_per_round)
-            })?;
-            total.merge(dispatched);
-            if dispatched.is_idle() {
-                total.merge(crate::core::perf_profile::measure_result(
-                    "projection",
-                    || self.process_projection_until_idle(8, limit_per_round),
-                )?);
-                return Ok(total);
-            }
-        }
-        Ok(total)
+        self.pipeline()
+            .process_work_until_idle(handlers, max_rounds, limit_per_round)
     }
 
     /// Settle work that a synchronous CLI command should be allowed to observe.
@@ -515,7 +291,7 @@ impl Runtime {
             self.description.handlers,
             self.description.command_excluded_handlers,
         );
-        self.process_work_until_idle(max_rounds, limit_per_round, Some(&handlers))
+        self.process_work_until_idle(max_rounds, limit_per_round, &handlers)
     }
 
     pub fn process_due_time_range(
@@ -525,13 +301,8 @@ impl Runtime {
         end_inclusive: u64,
         limit: usize,
     ) -> Result<usize, String> {
-        pipeline::process_due_time_range(
-            &self.store,
-            timeline,
-            start_exclusive,
-            end_inclusive,
-            limit,
-        )
+        self.pipeline()
+            .process_due_time_range(timeline, start_exclusive, end_inclusive, limit)
     }
 
     /// Run the replay entry point against this runtime's store.

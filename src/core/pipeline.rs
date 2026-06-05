@@ -1,7 +1,7 @@
 //! Core fact lifecycle and SQL-backed runtime pipeline.
 //!
-//! This module is the public facade for the reusable fact pipeline. It names the
-//! first-class read stages:
+//! This module is the public facade and work driver for the reusable fact
+//! pipeline. It names the first-class read stages:
 //!
 //! ```text
 //! route -> decode -> authenticate -> adapt -> project -> effects -> commit
@@ -20,12 +20,13 @@
 //! core pipeline isomorphic with fact-family files without teaching core what a
 //! workspace, message, invite, key wrap, sync range, or connection fact means.
 //!
-//! The SQL-backed worker modules below preserve the runtime mechanics: admitted
-//! facts and intents are queued, projection replaces per-fact context/time-wake
-//! state atomically with effects, handler dispatch commits atomically with queue
+//! The SQL-backed worker modules below implement individual steps. The
+//! `PipelineEngine` in this facade owns the generic state machine: admitted facts
+//! and intents are queued, projection replaces per-fact context/time-wake state
+//! atomically with effects, handler dispatch commits atomically with queue
 //! deletion, handler intent output is committed through the same shared effect
-//! language, and the facade reports only whether a bounded pass progressed or
-//! retried.
+//! language, and command, daemon, and replay modes differ only by handler and
+//! intent-admission policy.
 
 pub mod adapt;
 pub mod authenticate;
@@ -47,14 +48,82 @@ pub use authenticate::{
 pub use context::{MatchedContext, ProjectionContext};
 pub use decode::FactCodec;
 pub use effects::{
-    fact_purged_need, fact_purged_offer, fact_purged_range_need, fact_purged_role,
-    ProjectionOutput, TimeRange, TimeWake, Timeline,
+    fact_purged_need, fact_purged_offer, fact_purged_range_need, fact_purged_range_offer,
+    fact_purged_role, ProjectionOutput, TimeRange, TimeWake, Timeline,
 };
 pub use project::{project_staged, SemanticProjector};
 pub use route::{
     EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactPipeline, FactRoute, Projector,
     ProjectorFn, RouterProjector,
 };
+
+use crate::core::command_context::CommandOutput;
+use crate::core::context::ContextOffer;
+use crate::core::facts::{Fact, FactId};
+use crate::core::intents::{Intent, IntentHandler};
+use crate::core::schema::{EPHEMERAL_PROJECTION_INPUTS, LOCAL_INTENTS, PENDING_PROJECTION};
+use crate::core::store::{Store, TableName};
+use std::collections::BTreeSet;
+
+/// Factory for one protocol intent handler.
+pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
+
+/// Build the current intent for a recurring operational loop.
+///
+/// The daemon calls this while the process is online to mint one tick of live
+/// work. Returning `Ok(None)` means there is nothing to do this tick. The
+/// builder reads the store the same way a handler reads its inputs; it must not
+/// depend on persisted scheduler rows, because recurring schedules are
+/// in-memory only and never replayed.
+pub type RecurringIntentBuilder = fn(&Store) -> Result<Option<Intent>, String>;
+
+/// In-memory schedule for a live-only recurring operational intent.
+///
+/// Recurring intents are not durable state. The daemon installs these schedules
+/// at startup, after replay has finished, and fires them on a fixed cadence
+/// while the process runs. There is nothing to wipe on upgrade and nothing to
+/// replay: operational repetition belongs here, not in durable time wakes or
+/// projectors.
+#[derive(Debug, Clone, Copy)]
+pub struct RecurringIntentSpec {
+    /// Cadence between successive fires once the loop is running.
+    pub interval_ms: u64,
+    /// Delay from daemon startup before the first fire.
+    pub initial_delay_ms: u64,
+    /// Build this tick's intent from current store state, or `None` to skip.
+    pub build_intent: RecurringIntentBuilder,
+}
+
+/// One handler route in the protocol registry.
+///
+/// `name` is a human-facing route name used for exclusion lists. `intent_kind`
+/// is the queue routing key that selects this handler for both durable and
+/// ephemeral intents.
+///
+/// `runs_during_replay` answers one question: if this intent is emitted while
+/// replay is rebuilding facts and rows, may core record and dispatch it before
+/// the replay barrier finishes? Replay-enabled handlers must be deterministic
+/// rebuild work over retained facts: no network IO, no fresh randomness, no
+/// process-global mutable state, and no operational wall-clock decisions. Every
+/// route declares this flag explicitly so adding a route forces a conscious
+/// replay decision.
+///
+/// `recurrence` marks live-only operational repetition. A route with a
+/// recurrence is installed as an in-memory daemon schedule and must not run
+/// during replay.
+#[derive(Debug, Clone, Copy)]
+pub struct HandlerRoute {
+    /// Human-facing route name used for exclusion lists.
+    pub name: &'static str,
+    /// Intent kind handled by this route.
+    pub intent_kind: &'static str,
+    /// Handler factory.
+    pub factory: HandlerFactory,
+    /// Whether core may dispatch this intent before the replay barrier finishes.
+    pub runs_during_replay: bool,
+    /// Live-only recurring schedule installed by the daemon, if any.
+    pub recurrence: Option<RecurringIntentSpec>,
+}
 
 /// Public outcome returned by runtime pipeline calls.
 ///
@@ -94,6 +163,372 @@ impl WorkStatus {
     }
 }
 
+/// Instantiated handlers for one runtime pass.
+///
+/// The set owns concrete handler values so dispatch can borrow trait objects
+/// without rebuilding them for every queued row. Command processing builds a
+/// filtered set to avoid daemon/network side effects; replay builds a filtered
+/// set that contains only replay-allowed routes.
+pub(crate) struct HandlerSet {
+    entries: Vec<HandlerEntry>,
+}
+
+struct HandlerEntry {
+    intent_kind: &'static str,
+    handler: Box<dyn IntentHandler>,
+}
+
+impl HandlerSet {
+    /// Instantiate all declared routes.
+    pub(crate) fn new(routes: &'static [HandlerRoute]) -> Self {
+        Self {
+            entries: routes
+                .iter()
+                .map(|route| HandlerEntry {
+                    intent_kind: route.intent_kind,
+                    handler: (route.factory)(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Instantiate every route except the protocol-declared command exclusions.
+    pub(crate) fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
+        Self {
+            entries: routes
+                .iter()
+                .filter(|route| !excluded_names.contains(&route.name))
+                .map(|route| HandlerEntry {
+                    intent_kind: route.intent_kind,
+                    handler: (route.factory)(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Instantiate only routes allowed to run before the replay barrier.
+    pub(crate) fn new_replay(routes: &'static [HandlerRoute]) -> Self {
+        Self {
+            entries: routes
+                .iter()
+                .filter(|route| route.runs_during_replay)
+                .map(|route| HandlerEntry {
+                    intent_kind: route.intent_kind,
+                    handler: (route.factory)(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn intent_kinds(&self) -> Vec<&'static str> {
+        self.entries.iter().map(|entry| entry.intent_kind).collect()
+    }
+
+    fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
+        self.entries
+            .iter()
+            .find(|entry| entry.intent_kind == kind)
+            .map(|entry| entry.handler.as_ref())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IntentDispatchProgress {
+    pub(crate) status: WorkStatus,
+    pub(crate) dispatched: usize,
+    pub(crate) suppressed_intents: usize,
+}
+
+/// Runtime-independent owner of the core pipeline work order.
+///
+/// `Runtime` holds the protocol description and process-facing API. This engine
+/// owns the generic sequencing: projection drains, intent dispatch, due time-wake
+/// admission, and the fixed ordering used by command, daemon, and replay modes.
+pub(crate) struct PipelineEngine<'a> {
+    store: &'a Store,
+    projector: &'a dyn Projector,
+    allowed_tables: &'a [TableName],
+    fact_admission: Option<FactAdmissionFn>,
+}
+
+impl<'a> PipelineEngine<'a> {
+    pub(crate) fn new(
+        store: &'a Store,
+        projector: &'a dyn Projector,
+        allowed_tables: &'a [TableName],
+        fact_admission: Option<FactAdmissionFn>,
+    ) -> Self {
+        Self {
+            store,
+            projector,
+            allowed_tables,
+            fact_admission,
+        }
+    }
+
+    pub(crate) fn store(&self) -> &'a Store {
+        self.store
+    }
+
+    /// Count durable plus ephemeral facts currently queued for projection.
+    pub(crate) fn pending_fact_count(&self) -> usize {
+        self.store
+            .table_row_count(PENDING_PROJECTION)
+            .expect("pipeline pending fact count should load from store")
+            + self
+                .store
+                .table_row_count(EPHEMERAL_PROJECTION_INPUTS)
+                .expect("pipeline ephemeral projection count should load from store")
+    }
+
+    /// Admit one fact and mark it pending for projection.
+    pub(crate) fn submit_fact(&self, fact: Fact) -> Result<bool, String> {
+        if let Some(admit) = self.fact_admission {
+            admit(&fact)?;
+        }
+        submit_fact_to_store(self.store, fact)
+    }
+
+    /// Admit many facts in one transaction.
+    pub(crate) fn submit_facts(
+        &self,
+        facts: impl IntoIterator<Item = Fact>,
+    ) -> Result<usize, String> {
+        let facts = facts.into_iter().collect::<Vec<_>>();
+        if let Some(admit) = self.fact_admission {
+            for fact in &facts {
+                admit(fact)?;
+            }
+        }
+        submit_facts_to_store(self.store, facts)
+    }
+
+    /// Remove one fact and its core-owned derived rows.
+    pub(crate) fn purge_fact(&self, fact_id: FactId) -> Result<bool, String> {
+        purge_fact_from_store(self.store, fact_id)
+    }
+
+    pub(crate) fn commit_projected_context_offers(
+        &self,
+        offers: &[ContextOffer],
+        completed_fact_ids: &[FactId],
+    ) -> Result<usize, String> {
+        commit_projected_context_offers(self.store, offers, completed_fact_ids)
+    }
+
+    /// Queue durable idempotent handler work.
+    pub(crate) fn submit_intent(&self, intent: Intent) -> Result<bool, String> {
+        submit_intent_to_store(self.store, intent)
+    }
+
+    /// Queue process-local handler work.
+    pub(crate) fn submit_local_intent(&self, intent: Intent) -> Result<bool, String> {
+        submit_local_intent_to_store(self.store, intent)
+    }
+
+    /// Commit command effects and return the command receipt.
+    pub(crate) fn submit_command_output<T>(
+        &self,
+        output: CommandOutput<T>,
+        label: &str,
+    ) -> Result<T, String> {
+        let (receipt, effects) = output.into_parts();
+        commit_pipeline_effects_to_store(
+            self.store,
+            &effects,
+            self.allowed_tables,
+            self.fact_admission,
+            label,
+        )?;
+        Ok(receipt)
+    }
+
+    /// Drive one bounded projection drain pass.
+    pub(crate) fn drain_projection(&self, limit: usize) -> Result<ProjectionProgress, String> {
+        drain_pending_projection(
+            self.projector,
+            self.store,
+            self.allowed_tables,
+            self.fact_admission,
+            limit,
+        )
+    }
+
+    /// Drive one bounded replay-mode projection drain pass.
+    pub(crate) fn drain_projection_filtering_intents(
+        &self,
+        limit: usize,
+        allowed_intent_kinds: &[&'static str],
+    ) -> Result<ProjectionProgress, String> {
+        drain_pending_projection_filtering_intents(
+            self.projector,
+            self.store,
+            self.allowed_tables,
+            self.fact_admission,
+            limit,
+            allowed_intent_kinds,
+        )
+    }
+
+    /// Drain pending projection until no projection work remains or rounds expire.
+    pub(crate) fn process_projection_until_idle(
+        &self,
+        max_rounds: usize,
+        limit_per_round: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        for _ in 0..max_rounds {
+            let progress = self.drain_projection(limit_per_round)?;
+            total.merge(progress.status);
+            if progress.projected == 0 && self.pending_fact_count() == 0 {
+                return Ok(total);
+            }
+        }
+        Err("projection work did not become idle within the round limit".to_string())
+    }
+
+    /// Dispatch queued intents with the provided handler set.
+    pub(crate) fn dispatch_intents(
+        &self,
+        handlers: &HandlerSet,
+        limit: usize,
+    ) -> Result<WorkStatus, String> {
+        Ok(self
+            .dispatch_intents_with_policy(handlers, limit, None)?
+            .status)
+    }
+
+    /// Dispatch queued intents while suppressing inadmissible follow-up work.
+    pub(crate) fn dispatch_intents_filtering(
+        &self,
+        handlers: &HandlerSet,
+        limit: usize,
+        allowed_followup_kinds: &[&'static str],
+    ) -> Result<IntentDispatchProgress, String> {
+        self.dispatch_intents_with_policy(handlers, limit, Some(allowed_followup_kinds))
+    }
+
+    fn dispatch_intents_with_policy(
+        &self,
+        handlers: &HandlerSet,
+        limit: usize,
+        allowed_followup_kinds: Option<&[&'static str]>,
+    ) -> Result<IntentDispatchProgress, String> {
+        let mut progress = IntentDispatchProgress::default();
+        let kinds = handlers.intent_kinds();
+        let mut retried_local = BTreeSet::<(String, Vec<u8>)>::new();
+        for _ in 0..limit {
+            let Some(queued) = next_queued_intent(self.store, &kinds)? else {
+                break;
+            };
+            let kind = queued.intent.kind.as_str();
+            let local_retry_key = if queued.table == LOCAL_INTENTS {
+                Some((kind.to_owned(), queued.intent.key.clone()))
+            } else {
+                None
+            };
+            if local_retry_key
+                .as_ref()
+                .is_some_and(|key| retried_local.contains(key))
+            {
+                break;
+            }
+            let handler = handlers
+                .handler_for_kind(kind)
+                .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
+            let report = if let Some(allowed) = allowed_followup_kinds {
+                dispatch_queued_intent_filtering_intents(
+                    handler,
+                    self.store,
+                    self.allowed_tables,
+                    self.fact_admission,
+                    queued,
+                    allowed,
+                )?
+            } else {
+                dispatch::IntentDispatchReport {
+                    status: dispatch_queued_intent(
+                        handler,
+                        self.store,
+                        self.allowed_tables,
+                        self.fact_admission,
+                        queued,
+                    )?,
+                    suppressed_intents: 0,
+                }
+            };
+            progress.status.merge(report.status);
+            progress.suppressed_intents += report.suppressed_intents;
+            if report.status.progressed {
+                progress.dispatched += 1;
+            }
+            if report.status.retried {
+                if let Some(key) = local_retry_key {
+                    retried_local.insert(key);
+                    continue;
+                }
+                break;
+            }
+        }
+        Ok(progress)
+    }
+
+    /// Run one daemon tick's queue order after IO and time wakes have been handled.
+    ///
+    /// Projection runs before and after intent dispatch because handlers often
+    /// emit facts that should become visible before the next quiet sleep.
+    pub(crate) fn drain_daemon_queues_once(
+        &self,
+        handlers: &HandlerSet,
+        limit: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        total.merge(self.process_projection_until_idle(4, limit)?);
+        total.merge(self.dispatch_intents(handlers, limit)?);
+        total.merge(self.process_projection_until_idle(4, limit)?);
+        Ok(total)
+    }
+
+    /// Settle projection and intent work to the command/live fixed point.
+    pub(crate) fn process_work_until_idle(
+        &self,
+        handlers: &HandlerSet,
+        max_rounds: usize,
+        limit_per_round: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut total = WorkStatus::idle();
+        for _ in 0..max_rounds {
+            total.merge(crate::core::perf_profile::measure_result(
+                "projection",
+                || self.process_projection_until_idle(8, limit_per_round),
+            )?);
+            let dispatched = crate::core::perf_profile::measure_result("intent_dispatch", || {
+                self.dispatch_intents(handlers, limit_per_round)
+            })?;
+            total.merge(dispatched);
+            if dispatched.is_idle() {
+                total.merge(crate::core::perf_profile::measure_result(
+                    "projection",
+                    || self.process_projection_until_idle(8, limit_per_round),
+                )?);
+                return Ok(total);
+            }
+        }
+        Ok(total)
+    }
+
+    /// Turn due time wakes into pending projection work.
+    pub(crate) fn process_due_time_range(
+        &self,
+        timeline: Timeline,
+        start_exclusive: Option<u64>,
+        end_inclusive: u64,
+        limit: usize,
+    ) -> Result<usize, String> {
+        process_due_time_range(self.store, timeline, start_exclusive, end_inclusive, limit)
+    }
+}
+
 pub(crate) use commit_effects::commit_pipeline_effects_to_store;
 pub(crate) use dispatch::{
     dispatch_queued_intent, dispatch_queued_intent_filtering_intents, next_queued_intent,
@@ -110,6 +545,7 @@ mod tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
     use crate::core::facts::{Fact, FactId, FactScope};
+    use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler};
 
     #[test]
     fn projection_output_keeps_context_and_work_separate() {
@@ -350,6 +786,39 @@ mod tests {
         assert_eq!(output.offers.len(), 1);
     }
 
+    #[test]
+    fn handler_sets_filter_command_and_replay_routes() {
+        const ROUTES: &[HandlerRoute] = &[
+            HandlerRoute {
+                name: "semantic",
+                intent_kind: "semantic",
+                factory: noop_handler,
+                runs_during_replay: true,
+                recurrence: None,
+            },
+            HandlerRoute {
+                name: "network",
+                intent_kind: "network",
+                factory: noop_handler,
+                runs_during_replay: false,
+                recurrence: None,
+            },
+        ];
+
+        assert_eq!(
+            HandlerSet::new(ROUTES).intent_kinds(),
+            vec!["semantic", "network"]
+        );
+        assert_eq!(
+            HandlerSet::new_excluding(ROUTES, &["network"]).intent_kinds(),
+            vec!["semantic"]
+        );
+        assert_eq!(
+            HandlerSet::new_replay(ROUTES).intent_kinds(),
+            vec!["semantic"]
+        );
+    }
+
     struct ModelCodec;
 
     impl FactCodec for ModelCodec {
@@ -428,6 +897,18 @@ mod tests {
                 vec![semantic as u8],
             )))
         }
+    }
+
+    struct NoopIntentHandler;
+
+    impl IntentHandler for NoopIntentHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            Ok(crate::core::effects::PipelineEffects::new())
+        }
+    }
+
+    fn noop_handler() -> Box<dyn IntentHandler> {
+        Box::new(NoopIntentHandler)
     }
 
     struct FirstByteCodec;

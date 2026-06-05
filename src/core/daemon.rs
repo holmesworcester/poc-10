@@ -23,8 +23,8 @@
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
 use crate::core::network;
-use crate::core::pipeline::Timeline;
-use crate::core::runtime::{HandlerRoute, RecurringIntentBuilder, Runtime, WorkStatus};
+use crate::core::pipeline::{HandlerRoute, RecurringIntentBuilder, Timeline, WorkStatus};
+use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

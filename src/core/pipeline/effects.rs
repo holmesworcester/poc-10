@@ -61,6 +61,21 @@ pub fn fact_purged_range_need(
     }
 }
 
+pub fn fact_purged_range_offer(
+    owner: FactId,
+    scope: crate::core::facts::FactScope,
+    start_key: ContextKey,
+    end_key: ContextKey,
+) -> ContextOffer {
+    ContextOffer {
+        owner,
+        role: fact_purged_role(),
+        scope,
+        start_key,
+        end_key,
+    }
+}
+
 /// Protocol-defined time-wake namespace.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timeline(String);
@@ -228,5 +243,22 @@ mod tests {
         assert_eq!(need.scope, scope);
         assert!(need.start_key <= offer.start_key);
         assert!(need.end_key >= offer.end_key);
+    }
+
+    #[test]
+    fn purge_range_offer_spans_matching_need_key() {
+        let scope = FactScope::Local;
+        let need = fact_purged_need([1; 32], scope.clone(), ContextKey::from_bytes(vec![2, 9]));
+        let offer = fact_purged_range_offer(
+            [3; 32],
+            scope.clone(),
+            ContextKey::from_bytes(vec![2, 0]),
+            ContextKey::from_bytes(vec![2, 255]),
+        );
+
+        assert_eq!(need.role, offer.role);
+        assert_eq!(need.scope, scope);
+        assert!(offer.start_key <= need.start_key);
+        assert!(offer.end_key >= need.end_key);
     }
 }

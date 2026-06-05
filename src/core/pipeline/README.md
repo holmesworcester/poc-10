@@ -8,7 +8,8 @@ transaction boundaries.
 
 ## Interface To Core And Protocol
 
-The public facade is `src/core/pipeline.rs`. Runtime code calls it to:
+The public facade and work driver is `src/core/pipeline.rs`. Runtime code calls
+it to:
 
 - submit facts to `facts` and `pending_projection`.
 - submit durable intents to `intents`.
@@ -17,6 +18,7 @@ The public facade is `src/core/pipeline.rs`. Runtime code calls it to:
 - drain pending projection with the registered protocol projector.
 - dispatch queued intents with the registered protocol handlers.
 - purge exact facts and their core-owned derived rows.
+- run command, daemon, and replay work orders through one pipeline engine.
 
 Protocol code participates through `Projector`, `FactCodec`,
 `DecodedAuthenticator`, `Adapter`, `SemanticProjector`, `IntentHandler`,
@@ -105,6 +107,9 @@ that range without allowing projectors to read the clock.
 
 ## Module Responsibilities
 
+- `pipeline.rs` owns `WorkStatus`, handler route metadata, handler sets, and
+  `PipelineEngine`, the generic state machine that orders projection, due
+  time-wake admission, and intent dispatch.
 - `route.rs` owns tag route declarations, staged route metadata, and the
   optional protocol-owned fact admission hook type.
 - `decode.rs` owns the decode trait core invokes at the read-stage boundary.
@@ -117,9 +122,9 @@ that range without allowing projectors to read the clock.
 - `context.rs` owns the in-memory `ProjectionContext` and matched payload
   helpers visible while processing one fact.
 - `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
-- `project_pending_facts.rs` owns fact admission, pending projection drain,
-  time-wake admission, projection context fixpoint growth, and the projection
-  commit boundary.
+- `project_pending_facts.rs` owns fact admission, pending projection selection,
+  time-wake queue admission, projection context fixpoint growth, and the
+  projection commit boundary.
 - `context_store.rs` owns persisted context edges, range-overlap matching, projection
   context assembly, and wake fanout.
 - `dispatch.rs` owns intent queue claiming, handler input loading, retry

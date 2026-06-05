@@ -150,8 +150,7 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
                 .offer(crate::core::pipeline::fact_purged_offer(
                     fact.id,
                     scope,
-                    project::fact_purged_key(
-                        deletion.target_frontier_id,
+                    project::message_fact_purged_key(
                         deletion.target_minute,
                         deletion.target_message_id,
                     ),

@@ -13,11 +13,11 @@
 //! modules own byte layouts, authority checks, user-facing commands, and the
 //! meaning of projected rows.
 //!
-//! Start in `runtime` for the engine facade, `pipeline` for queue workers,
-//! `schema` for core tables, and `store` for the SQLite substrate. Use `app`,
-//! `daemon`, and `cli` when working on process or command hosting. If a change
-//! requires knowing what a workspace, message, invite, key wrap, or sync range
-//! means, it belongs under `protocol`, not here.
+//! Start in `runtime` for the host-facing facade, `pipeline` for the queue
+//! engine and fact lifecycle, `schema` for core tables, and `store` for the
+//! SQLite substrate. Use `app`, `daemon`, and `cli` when working on process or
+//! command hosting. If a change requires knowing what a workspace, message,
+//! invite, key wrap, or sync range means, it belongs under `protocol`, not here.
 
 pub mod app;
 pub mod cli;
