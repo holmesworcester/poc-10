@@ -84,12 +84,13 @@ rows, and purges its own fact bytes. Projectors do not purge someone else's
 fact.
 
 Content encodes `fact_purged` coordinates as
-`content_kind || minute || fact_id`. Target projectors publish exact needs at
-the coordinates that should wake them: messages watch their own message
-coordinate, files watch their own file coordinate and parent message
-coordinate, and reactions/slices watch parent coordinates. Exact deletions
-publish degenerate range offers over one coordinate; retention or compaction
-can publish broader minute-range offers over the same sortable key shape.
+`frontier_id || minute || fact_id`. Target encrypted-content projectors publish
+exact needs at the coordinates that should wake them: messages watch their own
+coordinate, files watch their own coordinate and parent message coordinate, and
+reactions/slices watch parent coordinates. Exact deletions publish exact offers
+over one coordinate; retention or compaction can publish broader minute-range
+offers over the same frontier-scoped key shape. Non-encrypted facts do not
+publish these purge needs.
 
 Opened message rows are derived state. The message fact is admitted and shared
 after signer/author proof, but `opened_message_rows` are written only when the

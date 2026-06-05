@@ -137,7 +137,8 @@ impl SemanticProjector<super::fact::ContentFileFact> for ContentFileProjector {
         let file_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            project::file_fact_purged_key(
+            project::fact_purged_key(
+                parent.message.frontier_id,
                 message::fact::unix_minute_for(file.created_at_ms),
                 fact.id,
             ),
@@ -145,7 +146,11 @@ impl SemanticProjector<super::fact::ContentFileFact> for ContentFileProjector {
         let parent_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            project::message_fact_purged_key(parent.message.minute, file.message_id),
+            project::fact_purged_key(
+                parent.message.frontier_id,
+                parent.message.minute,
+                file.message_id,
+            ),
         );
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;

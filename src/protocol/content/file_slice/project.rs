@@ -153,12 +153,20 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
         let file_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            message_project::file_fact_purged_key(unix_minute_for(file.created_at_ms), parent.id),
+            message_project::fact_purged_key(
+                parent_message.frontier_id,
+                unix_minute_for(file.created_at_ms),
+                parent.id,
+            ),
         );
         let parent_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope,
-            message_project::message_fact_purged_key(parent_message.minute, file.message_id),
+            message_project::fact_purged_key(
+                parent_message.frontier_id,
+                parent_message.minute,
+                file.message_id,
+            ),
         );
         if let Some(deletion) = context_payload(
             context,

@@ -137,7 +137,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
                 Some(author_need),
             ]));
         };
-        validate_parent_message(&target, parent_fact, &scope)?;
+        let parent = validate_parent_message(&target, parent_fact, &scope)?;
         let Some(author_fact) = context_payload(context, &author_need, "file deletion author")?
         else {
             return Ok(output_with_needs([
@@ -176,7 +176,8 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
             .offer(crate::core::pipeline::fact_purged_offer(
                 fact.id,
                 scope,
-                project::file_fact_purged_key(
+                project::fact_purged_key(
+                    parent.frontier_id,
                     unix_minute_for(target.created_at_ms),
                     deletion.target_file_id,
                 ),

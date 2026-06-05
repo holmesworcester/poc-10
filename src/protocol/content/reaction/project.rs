@@ -139,7 +139,8 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
         let target_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            project::message_fact_purged_key(
+            project::fact_purged_key(
+                target_context.message.frontier_id,
                 target_context.message.minute,
                 reaction.target_message_id,
             ),
