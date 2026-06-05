@@ -54,15 +54,15 @@ offer
   range: endpoint:alice_phone..endpoint:alice_phone
 
 need
-  owner: fact:connection_response:c810
+  owner: fact:connection:c810
   role: connection_fact_receipt
   scope: local
-  range: fact:connection_response:c810..fact:connection_response:c810
+  range: fact:connection:c810..fact:connection:c810
 offer
   owner: fact:connection_fact_receipt:03db
   role: connection_fact_receipt
   scope: local
-  range: fact:connection_response:c810..fact:connection_response:c810
+  range: fact:connection:c810..fact:connection:c810
 
 need
   owner: fact:content_message:9af3

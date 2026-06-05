@@ -38,7 +38,8 @@ mod dispatch;
 pub mod effects;
 mod insert_select;
 pub mod project;
-mod project_pending_facts;
+mod projection;
+mod projection_queue;
 pub mod route;
 
 pub use adapt::Adapter;
@@ -65,13 +66,10 @@ use crate::core::schema::{EPHEMERAL_PROJECTION_INPUTS, LOCAL_INTENTS, PENDING_PR
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
 
-use commit_effects::{sqlite_string_error, IntentAdmissionPolicy};
-use project_pending_facts::{
-    commit_projected_context_offers, commit_projection_effects, commit_projection_effects_in_tx,
-    drop_rejected_ephemeral_input, drop_stale_ephemeral_input, isolate_rejected_durable_fact_in_tx,
-    load_pending_fact, pending_ephemeral_batch, pending_owner_batch, prepare_projection_effects,
-    process_due_time_range, purge_fact_from_store, purge_stale_durable_pending_in_tx,
-    submit_facts_to_store, ProjectionSource, DURABLE_PROJECTION_TRANSACTION_CHUNK_LIMIT,
+use commit_effects::IntentAdmissionPolicy;
+use projection::{
+    commit_projected_context_offers, process_due_time_range, purge_fact_from_store,
+    submit_facts_to_store,
 };
 
 /// Factory for one protocol intent handler.
@@ -389,213 +387,19 @@ impl<'a> PipelineEngine<'a> {
         )
     }
 
-    /// Drive fact projection until no more work is found.
-    ///
-    /// Projection commits context edges and immediately wakes matching facts.
-    /// The loop stops when no fact projected or the projection limit has been
-    /// reached.
     fn drain_projection_with_policy(
         &self,
         limit: usize,
         intent_policy: IntentAdmissionPolicy<'_>,
     ) -> Result<ProjectionProgress, String> {
-        let mut total = ProjectionProgress::default();
-
-        loop {
-            if total.projected >= limit {
-                break;
-            }
-
-            let projection_report =
-                self.process_projection_batch(limit - total.projected, intent_policy)?;
-            let projected_facts = projection_report.projected > 0;
-            total.merge(projection_report);
-
-            if !projected_facts {
-                break;
-            }
-        }
-
-        Ok(total)
-    }
-
-    /// Process pending durable facts and ephemeral inputs from SQLite until
-    /// there is no work or `limit` inputs have completed projection.
-    fn process_projection_batch(
-        &self,
-        limit: usize,
-        intent_policy: IntentAdmissionPolicy<'_>,
-    ) -> Result<ProjectionProgress, String> {
-        let mut progress = ProjectionProgress::default();
-
-        let durable_fact_ids =
-            crate::core::perf_profile::measure_result("projection_pending_batch_load", || {
-                pending_owner_batch(self.store, limit)
-            })?;
-        if !durable_fact_ids.is_empty() {
-            let chunk_len = durable_fact_ids
-                .len()
-                .min(limit)
-                .min(DURABLE_PROJECTION_TRANSACTION_CHUNK_LIMIT);
-            let durable_progress = self
-                .process_durable_projection_chunk(&durable_fact_ids[..chunk_len], intent_policy)?;
-            progress.merge(durable_progress);
-        }
-
-        if progress.projected < limit {
-            let ephemeral_fact_ids = crate::core::perf_profile::measure_result(
-                "projection_ephemeral_batch_load",
-                || pending_ephemeral_batch(self.store, limit - progress.projected),
-            )?;
-            for fact_id in ephemeral_fact_ids {
-                if progress.projected >= limit {
-                    break;
-                }
-                let Some(pending_fact) = crate::core::perf_profile::measure_result(
-                    "projection_load_pending_fact",
-                    || load_pending_fact(self.store, ProjectionSource::Ephemeral, fact_id),
-                )?
-                else {
-                    drop_stale_ephemeral_input(self.store, fact_id)?;
-                    continue;
-                };
-                self.process_ephemeral_projection(pending_fact, &mut progress, intent_policy)?;
-            }
-        }
-
-        Ok(progress)
-    }
-
-    /// Process a selected durable pending chunk in one SQLite transaction.
-    ///
-    /// The ordering is still load -> prepare -> commit per fact. The
-    /// transaction only removes per-fact fsync overhead and lets later
-    /// same-batch facts see rows committed by earlier same-batch facts.
-    fn process_durable_projection_chunk(
-        &self,
-        fact_ids: &[FactId],
-        intent_policy: IntentAdmissionPolicy<'_>,
-    ) -> Result<ProjectionProgress, String> {
-        crate::core::perf_profile::measure_result("projection_batch_transaction", || {
-            self.store
-                .write_transaction(|tx| {
-                    crate::core::perf_profile::measure_result("projection_commit_tx_body", || {
-                        let mut progress = ProjectionProgress::default();
-                        for fact_id in fact_ids {
-                            let Some(pending_fact) = crate::core::perf_profile::measure_result(
-                                "projection_load_pending_fact",
-                                || load_pending_fact(tx, ProjectionSource::Durable, *fact_id),
-                            )
-                            .map_err(sqlite_string_error)?
-                            else {
-                                purge_stale_durable_pending_in_tx(tx, *fact_id)?;
-                                continue;
-                            };
-                            self.process_durable_projection_in_tx(
-                                tx,
-                                pending_fact,
-                                &mut progress,
-                                intent_policy,
-                            )?;
-                        }
-                        Ok(progress)
-                    })
-                })
-                .map_err(|err| format!("commit durable projection batch: {err}"))
-        })
-    }
-
-    /// Complete all projection work for one ephemeral pending input.
-    ///
-    /// Ephemeral inputs are not durable facts, so projector/authentication
-    /// rejection drops the transient input instead of parking evidence.
-    fn process_ephemeral_projection(
-        &self,
-        pending_fact: project_pending_facts::PendingFact,
-        progress: &mut ProjectionProgress,
-        intent_policy: IntentAdmissionPolicy<'_>,
-    ) -> Result<(), String> {
-        let fact_id = pending_fact.fact_id();
-        let effects =
-            match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-                prepare_projection_effects(
-                    self.projector,
-                    pending_fact,
-                    self.store,
-                    self.allowed_tables,
-                    self.fact_admission,
-                    intent_policy,
-                )
-            }) {
-                Ok(effects) => effects,
-                Err(_rejection) => {
-                    drop_rejected_ephemeral_input(self.store, fact_id)?;
-                    return Ok(());
-                }
-            };
-        let suppressed_intents =
-            crate::core::perf_profile::measure_result("projection_commit_effects", || {
-                commit_projection_effects(
-                    self.store,
-                    &effects,
-                    self.projector,
-                    self.allowed_tables,
-                    self.fact_admission,
-                    intent_policy,
-                )
-            })?;
-        progress.suppressed_intents += suppressed_intents;
-        progress.projected += 1;
-        progress.status.progressed = true;
-        Ok(())
-    }
-
-    /// Complete all projection work for one durable pending fact in the caller's
-    /// transaction.
-    ///
-    /// Rejected durable facts are isolated inside the same transaction so one
-    /// bad fact cannot roll back the rest of the selected chunk.
-    fn process_durable_projection_in_tx(
-        &self,
-        tx: &Store,
-        pending_fact: project_pending_facts::PendingFact,
-        progress: &mut ProjectionProgress,
-        intent_policy: IntentAdmissionPolicy<'_>,
-    ) -> rusqlite::Result<()> {
-        let fact_id = pending_fact.fact_id();
-        let effects =
-            match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-                prepare_projection_effects(
-                    self.projector,
-                    pending_fact,
-                    tx,
-                    self.allowed_tables,
-                    self.fact_admission,
-                    intent_policy,
-                )
-            }) {
-                Ok(effects) => effects,
-                Err(_rejection) => {
-                    isolate_rejected_durable_fact_in_tx(tx, fact_id, self.projector)?;
-                    return Ok(());
-                }
-            };
-        let suppressed_intents =
-            crate::core::perf_profile::measure_result("projection_commit_effects", || {
-                commit_projection_effects_in_tx(
-                    tx,
-                    &effects,
-                    self.projector,
-                    self.allowed_tables,
-                    self.fact_admission,
-                    intent_policy,
-                    0,
-                )
-            })?;
-        progress.suppressed_intents += suppressed_intents;
-        progress.projected += 1;
-        progress.status.progressed = true;
-        Ok(())
+        projection_queue::drain_projection_queue(
+            self.store,
+            self.projector,
+            self.allowed_tables,
+            self.fact_admission,
+            limit,
+            intent_policy,
+        )
     }
 
     /// Drain pending projection until no projection work remains or rounds expire.
@@ -762,7 +566,7 @@ pub(crate) use dispatch::{
     dispatch_queued_intent, dispatch_queued_intent_filtering_intents, next_queued_intent,
     submit_intent_to_store, submit_local_intent_to_store,
 };
-pub(crate) use project_pending_facts::submit_fact_to_store;
+pub(crate) use projection::submit_fact_to_store;
 
 #[cfg(test)]
 mod tests {

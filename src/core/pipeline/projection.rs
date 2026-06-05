@@ -1,42 +1,14 @@
-//! Pending fact projection step helpers.
+//! One-item fact projection.
 //!
-//! Core treats facts as immutable inputs and projection as the only path that
-//! turns a fact into derived runtime state. Commands, handlers, sync, and local
-//! submission may admit facts, but they do not update protocol tables, standing
-//! context, time schedules, or follow-up work themselves. They record the fact
-//! and place its id in `pending_projection`; `PipelineEngine` later drains that
-//! queue and uses these helpers to run each projection step.
+//! A projection item loads one fact, its standing context, any matched payload
+//! facts, and due time ranges. It then runs the protocol projector, resolves
+//! any newly declared needs that already match stored offers, and commits the
+//! settled output once.
 //!
-//! This is the fact-side counterpart to intent dispatch. Dispatch consumes
-//! queued intents and commits handler effects. Pending projection consumes
-//! queued facts and commits projector effects. Both boundaries delay work until
-//! the required inputs can be loaded, keep retries simple by leaving the input
-//! row queued until success, and make output visible only in the transaction
-//! that consumes the input row.
-//!
-//! Projection determines how every durable fact participates in the rest of the
-//! runtime. A new fact enters the queue when commands, handlers, or sync admit
-//! it. An existing fact re-enters when context matching discovers an offer that
-//! may satisfy one of its needs, or when a due time wake gives it time-range
-//! context. This is why projection is separate from both command handling and
-//! intent dispatch: any source of new information can ask the same per-fact
-//! projector to run again.
-//!
-//! This module owns the SQL-backed helper steps used by `PipelineEngine`'s
-//! projection phase. It admits facts into the pending queue, turns due time
-//! wakes into pending projection with time-range context, loads each pending
-//! fact's previous standing context and matched inputs through
-//! `pipeline::context_store`, runs the protocol projector, and commits the
-//! replacement context plus projector `PipelineEffects` in one transaction. The
-//! shared effects are written by `commit_effects`; this file owns the
-//! projection-specific SQL and projector mechanics around them.
-//!
-//! Projection is intentionally per fact. Everything before
-//! `commit_projection_effects` is calculation; that function is the single
-//! durable boundary that clears the pending row, replaces the fact's context
-//! and time wakes, wakes newly matched dependent facts, and commits the
-//! projector's shared effects. Queue order and batching policy belong in
-//! `PipelineEngine`; SQL mechanics for one projection step belong here.
+//! Queue recursion is explicit outside this item. If projection emits child
+//! facts, shared effect commit stores them in `pending_projection`; if a later
+//! item creates a matching offer, context fanout requeues the dependent owner.
+//! `projection_queue` later processes that work like any other fact.
 
 use super::commit_effects::{
     commit_pipeline_effects_in_tx, sqlite_string_error, suppress_disallowed_intents,
@@ -63,8 +35,7 @@ use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
 const TIME_WAKE_TABLES: &[TableName] = &[TIME_WAKES];
-const PROJECTION_CONTEXT_FIXPOINT_LIMIT: usize = 8;
-pub(super) const DURABLE_PROJECTION_TRANSACTION_CHUNK_LIMIT: usize = 256;
+const PROJECTION_CONTEXT_RESOLUTION_LIMIT: usize = 8;
 
 const DUE_TIME_WAKE_OWNER_SQL: &str = r#"
 SELECT owner
@@ -285,20 +256,14 @@ fn durable_fact_fails_without_context(
 /// Run the protocol projector for one fact and split its output.
 ///
 /// No rows are written here. The result is an uncommitted `ProjectionEffects`
-/// value that says what should happen if the projection commits.
-///
-/// This preparation step deliberately runs a small monotonic fixed point before
-/// the transaction. Projectors own the decision about whether context is
-/// required, optional, or just a wake trigger, so core does not interpret any
-/// need. It only asks: "given the needs this run emitted, are there already
-/// stored offers that should be visible to this same projection?" If yes, core
-/// adds those matches to the in-memory projection context and reruns before any
-/// rows, intents, or replacement context are committed. Only the final run below
-/// becomes durable.
+/// value that says what should happen if the projection commits. The projector
+/// may first declare needs; core then loads already-stored matching offers into
+/// this item's in-memory context and reruns until that context stops growing.
+/// Later offers still use ordinary context wake fanout through the queue.
 pub(super) fn prepare_projection_effects(
+    store: &Store,
     projector: &(impl Projector + ?Sized),
     pending_fact: PendingFact,
-    store: &Store,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     intent_policy: IntentAdmissionPolicy<'_>,
@@ -310,12 +275,12 @@ pub(super) fn prepare_projection_effects(
         previous_context,
         mut projection_context,
     } = pending_fact;
-    let run = run_projection_to_context_fixed_point(
+    let run = resolve_projection_context(
+        store,
         projector,
         &fact,
         &previous_context,
         &mut projection_context,
-        store,
         allowed_tables,
         fact_admission,
         intent_policy,
@@ -333,17 +298,17 @@ pub(super) fn prepare_projection_effects(
     })
 }
 
-fn run_projection_to_context_fixed_point(
+fn resolve_projection_context(
+    store: &Store,
     projector: &(impl Projector + ?Sized),
     fact: &Fact,
     previous_context: &ContextSet,
     projection_context: &mut ProjectionContext,
-    store: &Store,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<ProjectionRun, String> {
-    for _ in 0..PROJECTION_CONTEXT_FIXPOINT_LIMIT {
+    for _ in 0..PROJECTION_CONTEXT_RESOLUTION_LIMIT {
         let run = crate::core::perf_profile::measure_result("projection_projector_cpu", || {
             run_projection_with_context(
                 projector,
@@ -362,17 +327,17 @@ fn run_projection_to_context_fixed_point(
             )
         })?;
 
-        let matched_context = crate::core::perf_profile::measure_result(
-            "projection_fixedpoint_context_match",
-            || stored_matching_context(store, &run.context),
-        )?;
+        let matched_context =
+            crate::core::perf_profile::measure_result("projection_context_match", || {
+                stored_matching_context(store, &run.context)
+            })?;
         if !projection_context.extend_with_matches(matched_context) {
             return Ok(run);
         }
     }
 
     Err(format!(
-        "projection context for fact {:x?} did not settle after {PROJECTION_CONTEXT_FIXPOINT_LIMIT} runs",
+        "projection context for fact {:x?} did not settle after {PROJECTION_CONTEXT_RESOLUTION_LIMIT} runs",
         fact.id
     ))
 }
@@ -403,11 +368,6 @@ pub(super) enum ProjectionSource {
 /// If projection fails before this function, the pending row remains queued. If
 /// anything fails inside this transaction, SQLite rolls the whole boundary back.
 ///
-/// Projector-emitted child facts are admitted and projected immediately inside
-/// this same transaction before residual row mutations and intents are written.
-/// That gives a projector one atomic decision: either the child can be stored,
-/// parked on durable context, or the whole projection fails and remains queued.
-///
 /// Transaction contents:
 ///
 /// - Clear this fact's pending row.
@@ -418,47 +378,31 @@ pub(super) enum ProjectionSource {
 /// - Record durable intents.
 /// - Record ephemeral intents in the temp local queue.
 ///
-/// Ephemeral inputs are one-shot. They may emit needs as transient probes so
-/// the projection fixed point can attach context that is already available, but
+/// Ephemeral inputs are one-shot. They may emit needs as transient probes, but
 /// they cannot leave standing offers or time wakes behind after the projection
 /// commits.
 pub(super) fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,
-    projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<usize, String> {
     store
         .write_transaction(|tx| {
             let suppressed_intents =
                 crate::core::perf_profile::measure_result("projection_commit_tx_body", || {
-                    commit_projection_effects_in_tx(
-                        tx,
-                        effects,
-                        projector,
-                        allowed_tables,
-                        fact_admission,
-                        intent_policy,
-                        0,
-                    )
+                    commit_projection_effects_in_tx(tx, effects, allowed_tables, fact_admission)
                 })?;
             Ok(suppressed_intents)
         })
         .map_err(|err| format!("commit projection effects: {err}"))
 }
 
-const CHILD_PROJECTION_DEPTH_LIMIT: usize = 16;
-
 pub(super) fn commit_projection_effects_in_tx(
     tx: &Store,
     effects: &ProjectionEffects,
-    projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    intent_policy: IntentAdmissionPolicy<'_>,
-    depth: usize,
 ) -> rusqlite::Result<usize> {
     match effects.source {
         ProjectionSource::Durable => {
@@ -493,19 +437,10 @@ pub(super) fn commit_projection_effects_in_tx(
         }
     }
 
-    let child_suppressed =
-        crate::core::perf_profile::measure_result("projection_commit_pipeline_effects", || {
-            commit_projector_pipeline_effects_in_tx(
-                tx,
-                projector,
-                allowed_tables,
-                fact_admission,
-                &effects.pipeline,
-                intent_policy,
-                depth,
-            )
-        })?;
-    Ok(effects.suppressed_intents + child_suppressed)
+    crate::core::perf_profile::measure_result("projection_commit_pipeline_effects", || {
+        commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables, fact_admission)
+    })?;
+    Ok(effects.suppressed_intents)
 }
 
 fn validate_ephemeral_projection(effects: &ProjectionEffects) -> Result<(), String> {
@@ -531,78 +466,6 @@ fn pipeline_effects_are_empty(effects: &PipelineEffects) -> bool {
         && effects.row_mutations.is_empty()
         && effects.intents.is_empty()
         && effects.local_intents.is_empty()
-}
-
-fn commit_projector_pipeline_effects_in_tx(
-    tx: &Store,
-    projector: &(impl Projector + ?Sized),
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    pipeline: &PipelineEffects,
-    intent_policy: IntentAdmissionPolicy<'_>,
-    depth: usize,
-) -> rusqlite::Result<usize> {
-    if depth >= CHILD_PROJECTION_DEPTH_LIMIT {
-        return Err(sqlite_string_error(format!(
-            "child fact projection exceeded depth limit {CHILD_PROJECTION_DEPTH_LIMIT}"
-        )));
-    }
-
-    let mut suppressed_intents = 0usize;
-    for fact in &pipeline.facts {
-        suppressed_intents += project_child_fact_in_tx(
-            tx,
-            projector,
-            allowed_tables,
-            fact_admission,
-            fact,
-            intent_policy,
-            depth + 1,
-        )?;
-    }
-
-    let mut residual = pipeline.clone();
-    residual.facts.clear();
-    commit_pipeline_effects_in_tx(tx, &residual, allowed_tables, fact_admission)?;
-    Ok(suppressed_intents)
-}
-
-fn project_child_fact_in_tx(
-    tx: &Store,
-    projector: &(impl Projector + ?Sized),
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    fact: &Fact,
-    intent_policy: IntentAdmissionPolicy<'_>,
-    depth: usize,
-) -> rusqlite::Result<usize> {
-    if let Some(admit) = fact_admission {
-        admit(fact).map_err(sqlite_string_error)?;
-    }
-    if !insert_fact_and_pending_in_tx(tx, fact)? {
-        return Ok(0);
-    }
-    let pending = load_pending_fact(tx, ProjectionSource::Durable, fact.id)
-        .map_err(sqlite_string_error)?
-        .ok_or_else(|| sqlite_string_error("inserted child fact did not load".to_string()))?;
-    let effects = prepare_projection_effects(
-        projector,
-        pending,
-        tx,
-        allowed_tables,
-        fact_admission,
-        intent_policy,
-    )
-    .map_err(sqlite_string_error)?;
-    commit_projection_effects_in_tx(
-        tx,
-        &effects,
-        projector,
-        allowed_tables,
-        fact_admission,
-        intent_policy,
-        depth,
-    )
 }
 
 /// Clear due time ranges after the owner consumes them.
@@ -694,7 +557,7 @@ impl PendingFact {
 ///
 /// The commit step removes the row only after projection succeeds. Missing
 /// facts are handled by the caller as stale pending rows and purged there.
-pub(super) fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
+pub(super) fn pending_durable_fact_ids(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
     let limit =
         i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
     let mut stmt = store
@@ -723,7 +586,10 @@ pub(super) fn pending_owner_batch(store: &Store, limit: usize) -> Result<Vec<Fac
 /// `previous_context` is the fact's standing context before this run.
 /// `projection_context` is the matched input context exposed to the projector
 /// for this run, including any due time ranges.
-pub(super) fn pending_ephemeral_batch(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
+pub(super) fn pending_ephemeral_fact_ids(
+    store: &Store,
+    limit: usize,
+) -> Result<Vec<FactId>, String> {
     ephemeral_pending_fact_ids(store, limit)
 }
 
@@ -1031,13 +897,21 @@ mod tests {
     }
 
     #[test]
-    fn prepare_projection_reruns_on_existing_matches_before_commit() {
+    fn projection_drain_resolves_new_need_that_matches_existing_offer() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
         let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
         let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_store(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
 
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([7; 32]);
@@ -1051,42 +925,41 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let projector = PrematureNeedUntilPayload {
-            role: role.clone(),
-            key: key.clone(),
-        };
-        let pending = PendingFact {
-            source: ProjectionSource::Durable,
-            fact_id: target.id,
-            fact: target,
-            previous_context: ContextSet::new(),
-            projection_context: ProjectionContext::default(),
-        };
-        let effects = prepare_projection_effects(
-            &projector,
-            pending,
+        let progress = drain_projection(
+            &PrematureNeedUntilPayload { role, key },
             &store,
             &[],
             None,
-            IntentAdmissionPolicy::All,
+            2,
         )
-        .expect("prepare projection");
+        .expect("drain projection");
 
-        assert!(effects.next_context.needs.is_empty());
-        assert!(effects.context_delta.is_empty());
-        assert_eq!(effects.pipeline.intents.len(), 1);
-        assert_eq!(effects.pipeline.intents[0].kind.as_str(), "ready");
-        assert_eq!(effects.pipeline.intents[0].payload, offered.id.to_vec());
+        assert_eq!(progress.projected, 1);
+        assert_eq!(
+            intent_payload_for(&store, "ready", &target.id),
+            offered.id.to_vec()
+        );
+        let target_context = stored_context_for_owner(&store, &target.id).expect("target context");
+        assert!(target_context.needs.is_empty());
+        assert_eq!(pending_projection_count(&store, target.id), 0);
     }
 
     #[test]
-    fn prepare_projection_reruns_through_range_match() {
+    fn projection_drain_resolves_new_range_need_that_matches_existing_offer() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
         let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
         let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_store(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
 
         let role = Role::new("range").unwrap();
         let key = ContextKey::from_bytes(b"m");
@@ -1100,64 +973,53 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let pending = PendingFact {
-            source: ProjectionSource::Durable,
-            fact_id: target.id,
-            fact: target,
-            previous_context: ContextSet::new(),
-            projection_context: ProjectionContext::default(),
-        };
-        let projector = PrematureNeedUntilPayload {
-            role: role.clone(),
-            key,
-        };
-        let effects = prepare_projection_effects(
-            &projector,
-            pending,
-            &store,
-            &[],
-            None,
-            IntentAdmissionPolicy::All,
-        )
-        .expect("prepare projection");
-
-        assert!(effects.next_context.needs.is_empty());
-        assert_eq!(effects.pipeline.intents.len(), 1);
-        assert_eq!(effects.pipeline.intents[0].kind.as_str(), "ready");
-        assert_eq!(effects.pipeline.intents[0].payload, offered.id.to_vec());
-    }
-
-    #[test]
-    fn durable_batch_projection_reads_context_written_by_earlier_pending_fact() {
-        let store =
-            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-                .expect("open store");
-        let offered = Fact::new(FactScope::Global, 1, b"batch-offer".to_vec());
-        let dependent = Fact::new(FactScope::Global, 2, b"batch-dependent".to_vec());
-        assert_eq!(
-            submit_facts_to_store(&store, vec![offered.clone(), dependent.clone()])
-                .expect("submit pending facts"),
-            2
-        );
-
-        let role = Role::new("same_batch_dep").unwrap();
-        let key = ContextKey::from_bytes(b"shared-key");
-        let progress = drain_pending_projection(
-            &SameBatchDependencyProjector {
-                offered_id: offered.id,
-                dependent_id: dependent.id,
-                role: role.clone(),
-                key: key.clone(),
-            },
+        let progress = drain_projection(
+            &PrematureNeedUntilPayload { role, key },
             &store,
             &[],
             None,
             2,
         )
-        .expect("drain same-batch dependency");
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 1);
+        assert_eq!(
+            intent_payload_for(&store, "ready", &target.id),
+            offered.id.to_vec()
+        );
+    }
+
+    #[test]
+    fn projection_queue_revisits_dependent_after_offer_commits() {
+        let store =
+            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                .expect("open store");
+        let offered = Fact::new(FactScope::Global, 1, b"queue-offer".to_vec());
+        let dependent = Fact::new(FactScope::Global, 2, b"queue-dependent".to_vec());
+        submit_fact_to_store(&store, dependent.clone()).expect("submit dependent first");
+
+        let role = Role::new("queue_dep").unwrap();
+        let key = ContextKey::from_bytes(b"shared-key");
+        let projector = QueueDependencyProjector {
+            offered_id: offered.id,
+            dependent_id: dependent.id,
+            role: role.clone(),
+            key: key.clone(),
+        };
+        let first = drain_projection(&projector, &store, &[], None, 1)
+            .expect("dependent parks on missing offer");
+
+        assert_eq!(first.projected, 1);
+        assert_eq!(pending_projection_count(&store, dependent.id), 0);
+        let parked_context = stored_context_for_owner(&store, &dependent.id).expect("parked");
+        assert_eq!(parked_context.needs.len(), 1);
+
+        submit_fact_to_store(&store, offered.clone()).expect("submit offer");
+        let progress =
+            drain_projection(&projector, &store, &[], None, 3).expect("drain queued dependency");
 
         assert_eq!(progress.projected, 2);
-        let payload = intent_payload_for(&store, "same_batch_ready", &dependent.id);
+        let payload = intent_payload_for(&store, "queue_ready", &dependent.id);
         assert_eq!(payload, offered.id.to_vec());
         let dependent_context =
             stored_context_for_owner(&store, &dependent.id).expect("dependent context");
@@ -1167,22 +1029,20 @@ mod tests {
     }
 
     #[test]
-    fn durable_batch_isolates_a_failed_fact_without_rolling_back_the_batch() {
+    fn projection_queue_isolates_a_failed_fact_without_rolling_back_previous_items() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
-        let offered = Fact::new(FactScope::Global, 1, b"rollback-batch-offer".to_vec());
-        let failing = Fact::new(FactScope::Global, 2, b"rollback-batch-fail".to_vec());
+        let offered = Fact::new(FactScope::Global, 1, b"rollback-queue-offer".to_vec());
+        let failing = Fact::new(FactScope::Global, 2, b"rollback-queue-fail".to_vec());
         assert_eq!(
             submit_facts_to_store(&store, vec![offered.clone(), failing.clone()])
                 .expect("submit pending facts"),
             2
         );
 
-        // One fact failing projection no longer aborts the batch: it is isolated
-        // and the rest commit.
-        let progress = drain_pending_projection(
-            &RollbackBatchProjector {
+        let progress = drain_projection(
+            &ProjectionFailureProjector {
                 offered_id: offered.id,
                 failing_id: failing.id,
                 role: Role::new("rollback_dep").unwrap(),
@@ -1193,7 +1053,7 @@ mod tests {
             None,
             2,
         )
-        .expect("a failed fact must not abort the batch");
+        .expect("a failed fact must not undo earlier projected items");
 
         // The healthy fact committed — its neighbor's failure did not roll it back.
         assert_eq!(progress.projected, 1);
@@ -1209,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_batch_keeps_a_context_inconsistent_fact_as_evidence() {
+    fn projection_queue_keeps_a_context_inconsistent_fact_as_evidence() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1221,7 +1081,7 @@ mod tests {
             2
         );
 
-        let progress = drain_pending_projection(
+        let progress = drain_projection(
             &ContextInconsistentProjector {
                 offered_id: offered.id,
                 failing_id: failing.id,
@@ -1231,9 +1091,9 @@ mod tests {
             &store,
             &[],
             None,
-            2,
+            3,
         )
-        .expect("a context-inconsistent fact must not abort the batch");
+        .expect("a context-inconsistent fact must not undo earlier projected items");
 
         assert_eq!(progress.projected, 1);
         assert_eq!(pending_projection_count(&store, offered.id), 0);
@@ -1248,13 +1108,21 @@ mod tests {
     }
 
     #[test]
-    fn prepare_projection_leaves_watch_need_in_projector_output() {
+    fn projection_drain_can_keep_watch_need_after_it_matches() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
         let target = Fact::new(FactScope::Global, 1, b"watcher".to_vec());
         let offered = Fact::new(FactScope::Global, 2, b"watched".to_vec());
         submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_store(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
 
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([8; 32]);
@@ -1268,75 +1136,21 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let pending = PendingFact {
-            source: ProjectionSource::Durable,
-            fact_id: target.id,
-            fact: target,
-            previous_context: ContextSet::new(),
-            projection_context: ProjectionContext::default(),
-        };
-        let effects = prepare_projection_effects(
-            &WatchNeedProjector { role, key },
-            pending,
-            &store,
-            &[],
-            None,
-            IntentAdmissionPolicy::All,
-        )
-        .expect("prepare projection");
+        let progress = drain_projection(&WatchNeedProjector { role, key }, &store, &[], None, 2)
+            .expect("drain projection");
 
-        assert_eq!(effects.next_context.needs.len(), 1);
-        assert_eq!(effects.context_delta.added_needs.len(), 1);
-        assert_eq!(effects.pipeline.intents.len(), 1);
-        assert_eq!(effects.pipeline.intents[0].kind.as_str(), "observed");
+        assert_eq!(progress.projected, 2);
+        assert_eq!(
+            intent_payload_for(&store, "observed", &target.id),
+            b"watched".to_vec()
+        );
+        let target_context = stored_context_for_owner(&store, &target.id).expect("target context");
+        assert_eq!(target_context.needs.len(), 1);
+        assert_eq!(pending_projection_count(&store, target.id), 0);
     }
 
     #[test]
-    fn prepare_projection_errors_when_context_keeps_growing() {
-        let store =
-            Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-                .expect("open store");
-        let target = Fact::new(FactScope::Global, 1, b"unbounded".to_vec());
-        let role = Role::new("exact").unwrap();
-
-        for index in 0..=PROJECTION_CONTEXT_FIXPOINT_LIMIT {
-            let offered = Fact::new(FactScope::Global, index as u64 + 2, vec![index as u8]);
-            submit_fact_to_store(&store, offered.clone()).expect("persist offer payload");
-            let offer = ContextOffer {
-                owner: offered.id,
-                role: role.clone(),
-                scope: target.scope.clone(),
-                start_key: ContextKey::from_bytes(vec![index as u8]),
-                end_key: ContextKey::from_bytes(vec![index as u8]),
-            };
-            crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
-                .expect("insert stored offer");
-        }
-
-        let pending = PendingFact {
-            source: ProjectionSource::Durable,
-            fact_id: target.id,
-            fact: target,
-            previous_context: ContextSet::new(),
-            projection_context: ProjectionContext::default(),
-        };
-        let err = match prepare_projection_effects(
-            &GrowingNeedProjector { role },
-            pending,
-            &store,
-            &[],
-            None,
-            IntentAdmissionPolicy::All,
-        ) {
-            Ok(_) => panic!("projection should hit fixed-point bound"),
-            Err(err) => err,
-        };
-
-        assert!(err.contains("did not settle"));
-    }
-
-    #[test]
-    fn ephemeral_input_projects_child_fact_immediately() {
+    fn ephemeral_input_queues_child_fact_for_projection() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1348,7 +1162,7 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let progress = drain_pending_projection(
+        let progress = drain_projection(
             &ParentChildProjector {
                 parent_id: parent.id,
                 child: child.clone(),
@@ -1361,7 +1175,7 @@ mod tests {
         )
         .expect("drain projection");
 
-        assert_eq!(progress.projected, 1);
+        assert_eq!(progress.projected, 2);
         assert!(
             crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
                 .expect("load ephemeral")
@@ -1392,7 +1206,7 @@ mod tests {
 
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([7; 32]);
-        let progress = drain_pending_projection(
+        let progress = drain_projection(
             &EphemeralNeedOnly {
                 role: role.clone(),
                 key: key.clone(),
@@ -1448,7 +1262,7 @@ mod tests {
         crate::core::pipeline::context_store::insert_context_offer_for_test(&store, &offer)
             .expect("insert stored offer");
 
-        let progress = drain_pending_projection(
+        let progress = drain_projection(
             &EphemeralIntentAfterContext {
                 role: role.clone(),
                 key: key.clone(),
@@ -1469,6 +1283,10 @@ mod tests {
         let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
         assert!(context.needs.is_empty());
         assert!(context.offers.is_empty());
+        assert_eq!(
+            intent_payload_for(&store, "ephemeral_ready", &parent.id),
+            offered.id.to_vec()
+        );
     }
 
     #[test]
@@ -1483,7 +1301,7 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let err = drain_pending_projection(
+        let err = drain_projection(
             &EphemeralNeedAndIntentProjector {
                 role: Role::new("exact").unwrap(),
                 key: ContextKey::from_bytes([9; 32]),
@@ -1518,7 +1336,7 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let err = drain_pending_projection(&EphemeralOfferProjector, &store, &[], None, 10)
+        let err = drain_projection(&EphemeralOfferProjector, &store, &[], None, 10)
             .expect_err("ephemeral offers should fail");
 
         assert!(err.contains("ephemeral projection input cannot emit durable offers"));
@@ -1542,7 +1360,7 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let progress = drain_pending_projection(
+        let progress = drain_projection(
             &ParentChildProjector {
                 parent_id: parent.id,
                 child: child.clone(),
@@ -1555,7 +1373,7 @@ mod tests {
         )
         .expect("drain projection");
 
-        assert_eq!(progress.projected, 1);
+        assert_eq!(progress.projected, 2);
         assert!(
             crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
                 .expect("load ephemeral")
@@ -1570,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn child_fact_projection_error_rolls_back_parent_projection() {
+    fn child_fact_projection_error_isolated_after_parent_commits() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1582,7 +1400,7 @@ mod tests {
             })
             .expect("insert ephemeral input");
 
-        let err = drain_pending_projection(
+        let progress = drain_projection(
             &ParentChildProjector {
                 parent_id: parent.id,
                 child: child.clone(),
@@ -1593,13 +1411,13 @@ mod tests {
             None,
             10,
         )
-        .expect_err("child projection should fail");
+        .expect("child projection rejection is isolated");
 
-        assert!(err.contains("child projection failed"));
+        assert_eq!(progress.projected, 1);
         assert!(
             crate::core::fact_store::ephemeral_fact_by_id(&store, &parent.id)
                 .expect("load ephemeral")
-                .is_some()
+                .is_none()
         );
         assert!(crate::core::fact_store::persisted_fact(&store, &child.id)
             .expect("load child")
@@ -1620,7 +1438,7 @@ mod tests {
         )
     }
 
-    fn drain_pending_projection(
+    fn drain_projection(
         projector: &impl Projector,
         store: &Store,
         allowed_tables: &[TableName],
@@ -1733,14 +1551,14 @@ mod tests {
         }
     }
 
-    struct SameBatchDependencyProjector {
+    struct QueueDependencyProjector {
         offered_id: FactId,
         dependent_id: FactId,
         role: Role,
         key: ContextKey,
     }
 
-    impl Projector for SameBatchDependencyProjector {
+    impl Projector for QueueDependencyProjector {
         fn project(
             &self,
             fact: &Fact,
@@ -1769,7 +1587,7 @@ mod tests {
             };
             if let Some(payload) = context.payload_for(&need) {
                 Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("same_batch_ready").unwrap(),
+                    IntentKind::new("queue_ready").unwrap(),
                     fact.id,
                     payload.id,
                 )))
@@ -1779,14 +1597,14 @@ mod tests {
         }
     }
 
-    struct RollbackBatchProjector {
+    struct ProjectionFailureProjector {
         offered_id: FactId,
         failing_id: FactId,
         role: Role,
         key: ContextKey,
     }
 
-    impl Projector for RollbackBatchProjector {
+    impl Projector for ProjectionFailureProjector {
         fn project(
             &self,
             fact: &Fact,
@@ -1802,7 +1620,7 @@ mod tests {
                 }));
             }
             if fact.id == self.failing_id {
-                return Err("batch projection failed".to_string());
+                return Err("projection failed".to_string());
             }
             Ok(ProjectionOutput::new())
         }
@@ -1877,27 +1695,6 @@ mod tests {
                 ));
             }
             Ok(output)
-        }
-    }
-
-    struct GrowingNeedProjector {
-        role: Role,
-    }
-
-    impl Projector for GrowingNeedProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            let next_selector = vec![context.offers().len() as u8];
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: fact.id,
-                role: self.role.clone(),
-                scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(next_selector.clone()),
-                end_key: ContextKey::from_bytes(next_selector),
-            }))
         }
     }
 

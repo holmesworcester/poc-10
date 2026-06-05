@@ -584,8 +584,10 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "intent queue worker",
         "pipeline/insert_select.rs",
         "checked `INSERT OR IGNORE ... SELECT` helper",
-        "pipeline/project_pending_facts.rs",
-        "fact projection worker",
+        "pipeline/projection.rs",
+        "one-item fact projection",
+        "pipeline/projection_queue.rs",
+        "pending projection queue drain",
     ] {
         assert!(
             normalized_core.contains(required),
@@ -608,7 +610,8 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "run staged route",
         "`FactAdmissionFn`",
         "poc-10 installs one that routes every fact tag to the same family `Codec` and `DecodedAuthenticator`",
-        "project_pending_facts.rs",
+        "projection.rs",
+        "projection_queue.rs",
         "context.rs",
         "dispatch.rs",
         "commit_effects.rs",

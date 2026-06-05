@@ -123,31 +123,47 @@ impl SemanticProjector<AuthenticatedConnection> for ConnectionProjector {
             AuthenticatedConnection::Responder {
                 connection,
                 request_need,
+                request_opener_need,
                 responder_secret_need,
-            } => Ok(materialized_output(fact, &connection, close_need)
-                .need(request_need)
-                .need(responder_secret_need)
-                .offer(request::project::connection_for_request_offer(
-                    fact.id,
-                    connection.request_id,
-                ))
-                .local_intent(send_network_frame_intent(SendNetworkFrame {
-                    routing_key: fact.id,
-                    frame: fact.body().to_vec(),
-                }))),
+                invite_need,
+            } => {
+                let output = add_optional_need(
+                    materialized_output(fact, &connection, close_need)
+                        .need(request_need)
+                        .need(request_opener_need)
+                        .need(responder_secret_need),
+                    invite_need,
+                );
+                Ok(output
+                    .offer(request::project::connection_for_request_offer(
+                        fact.id,
+                        connection.request_id,
+                    ))
+                    .intent(seed_connection_sync_intent(SeedConnectionSync {
+                        connection_id: fact.id,
+                    }))
+                    .local_intent(send_network_frame_intent(SendNetworkFrame {
+                        routing_key: fact.id,
+                        frame: fact.body().to_vec(),
+                    })))
+            }
             AuthenticatedConnection::Initiator {
                 connection,
                 request_need,
+                request_opener_need,
                 endpoint_need,
                 initiator_need,
+                invite_need,
             } => project_initiator_connection(
                 fact,
                 &connection,
                 context,
                 close_need,
                 request_need,
+                request_opener_need,
                 endpoint_need,
                 initiator_need,
+                invite_need,
             ),
         }
     }
@@ -159,8 +175,10 @@ fn project_initiator_connection(
     context: &ProjectionContext,
     close_need: ContextNeed,
     request_need: ContextNeed,
+    request_opener_need: ContextNeed,
     endpoint_need: ContextNeed,
     initiator_need: ContextNeed,
+    invite_need: Option<ContextNeed>,
 ) -> Result<ProjectionOutput, String> {
     let observation_need = exact_need(
         fact.id,
@@ -169,12 +187,16 @@ fn project_initiator_connection(
         fact.id,
     );
     let Some(observation_fact) = context.payload_for(&observation_need) else {
-        return Ok(ProjectionOutput::new()
-            .need(close_need)
-            .need(request_need)
-            .need(endpoint_need)
-            .need(initiator_need)
-            .need(observation_need));
+        return Ok(add_optional_need(
+            ProjectionOutput::new()
+                .need(close_need)
+                .need(request_need)
+                .need(request_opener_need)
+                .need(endpoint_need)
+                .need(initiator_need)
+                .need(observation_need),
+            invite_need,
+        ));
     };
     let observation = frame_observation::Codec::decode_fact(observation_fact)
         .map_err(|_| "connection observation context is malformed".to_string())?;
@@ -192,15 +214,19 @@ fn project_initiator_connection(
         frame_hash: crypto::hash(fact.body()),
         received_at_local_ms: observation.received_at_local_ms,
     })?;
-    Ok(materialized_output(fact, connection, close_need)
-        .need(request_need)
-        .need(endpoint_need)
-        .need(initiator_need)
-        .need(observation_need)
-        .fact(receipt)
-        .intent(seed_connection_sync_intent(SeedConnectionSync {
-            connection_id: fact.id,
-        })))
+    Ok(add_optional_need(
+        materialized_output(fact, connection, close_need)
+            .need(request_need)
+            .need(request_opener_need)
+            .need(endpoint_need)
+            .need(initiator_need)
+            .need(observation_need),
+        invite_need,
+    )
+    .fact(receipt)
+    .intent(seed_connection_sync_intent(SeedConnectionSync {
+        connection_id: fact.id,
+    })))
 }
 
 fn materialized_output(
@@ -229,4 +255,77 @@ fn materialized_output(
 
 fn exact_need(owner: FactId, role: &'static str, scope: FactScope, key: FactId) -> ContextNeed {
     authenticate::exact_need(owner, role, scope, key)
+}
+
+fn add_optional_need(output: ProjectionOutput, need: Option<ContextNeed>) -> ProjectionOutput {
+    if let Some(need) = need {
+        output.need(need)
+    } else {
+        output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::connection::send_network_frame::SEND_NETWORK_FRAME;
+    use crate::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
+
+    fn connection_fact() -> ConnectionFact {
+        ConnectionFact {
+            from_endpoint: [1; 32],
+            to_endpoint: [2; 32],
+            request_id: [3; 32],
+            responder_addr: None,
+            initiator_addr: None,
+            initiator_ephemeral_secret_fact_id: [4; 32],
+            responder_ephemeral_secret_fact_id: [5; 32],
+            responder_ephemeral_public_key: [6; 32],
+            handshake_hash: [7; 32],
+            connection_secret: [8; 32],
+        }
+    }
+
+    #[test]
+    fn responder_projection_sends_response_and_seeds_sync() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let request_need = request::project::connection_request_need(fact.id, [3; 32]);
+        let request_opener_need = authenticate::all_local_endpoint_need(fact.id);
+        let responder_secret_need = authenticate::all_ephemeral_secret_need(fact.id);
+        let invite_need = authenticate::exact_need(
+            fact.id,
+            "connection_invite_secret",
+            FactScope::Local,
+            [9; 32],
+        );
+
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                AuthenticatedConnection::Responder {
+                    connection: connection_fact(),
+                    request_need,
+                    request_opener_need,
+                    responder_secret_need,
+                    invite_need: Some(invite_need),
+                },
+                &ProjectionContext::default(),
+            )
+            .expect("project responder connection");
+
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_invite_secret"));
+        assert!(output
+            .effects
+            .intents
+            .iter()
+            .any(|intent| intent.kind.as_str() == SEED_CONNECTION_SYNC));
+        assert!(output
+            .effects
+            .local_intents
+            .iter()
+            .any(|intent| intent.kind.as_str() == SEND_NETWORK_FRAME));
+    }
 }

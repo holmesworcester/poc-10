@@ -9,12 +9,10 @@
 //!
 //! This module is where that model becomes SQL. The public vocabulary lives in
 //! `core::context`: needs, offers, roles, keys, scopes, and complete
-//! replacement `ContextSet`s. Protocol pipeline projectors produce
-//! those sets. The projection loop in `pipeline::project_pending_facts` calls
-//! this file to load a pending fact's previous standing context, assemble the
-//! matched `ProjectionContext` it should see for the next run, replace its
-//! stored needs and offers, and fan out wakeups to facts that may now make
-//! progress.
+//! replacement `ContextSet`s. Protocol pipeline projectors produce those sets.
+//! The projection step calls this file to load previous standing context,
+//! assemble matched `ProjectionContext`, replace stored needs and offers, and
+//! fan out wakeups to facts that may now make progress.
 //!
 //! The stored shape is one `context_edges` row per standing need or offer. The
 //! `owner` column is always the fact whose projection emitted the row. For

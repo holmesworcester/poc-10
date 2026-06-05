@@ -66,9 +66,9 @@ submit_fact_to_store
   -> facts/local_fact_admissions
   -> pending_projection
 
-drain_pending_projection
+drain_projection_queue
   -> load fact, standing context, matched payload facts, and due time ranges
-  -> run staged route
+  -> run staged route and resolve already-satisfied declared needs
   -> replace context and time wakes for that owner
   -> wake newly matched dependents
   -> commit row mutations, admitted facts, purges, and intents
@@ -81,9 +81,9 @@ dispatch_queued_intent
 ```
 
 Time wakes use the same projection path. The daemon asks for a due timeline
-range; `project_pending_facts` inserts matching owners into
-`pending_projection`, stores the due `TimeRange`, and projection context exposes
-that range without allowing projectors to read the clock.
+range; projection inserts matching owners into `pending_projection`, stores the
+due `TimeRange`, and projection context exposes that range without allowing
+projectors to read the clock.
 
 ## Invariants
 
@@ -122,9 +122,11 @@ that range without allowing projectors to read the clock.
 - `context.rs` owns the in-memory `ProjectionContext` and matched payload
   helpers visible while processing one fact.
 - `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
-- `project_pending_facts.rs` owns fact admission, pending projection SQL
-  helpers, time-wake queue admission, projection context fixpoint growth, and
-  the one-fact projection commit boundary used by `PipelineEngine`.
+- `projection.rs` owns one-item fact projection: fact admission, time-wake
+  queue admission, matched-context loading, projector execution, and the
+  projection commit boundary.
+- `projection_queue.rs` owns pending projection draining over durable facts and
+  ephemeral inputs.
 - `context_store.rs` owns persisted context edges, range-overlap matching, projection
   context assembly, and wake fanout.
 - `dispatch.rs` owns intent queue claiming, handler input loading, retry
@@ -141,16 +143,17 @@ One projection commit performs this ordered unit:
 
 ```text
 delete pending row
+clear due time range rows for this owner
 delete old context and time wakes owned by fact
 insert new needs, offers, and time wakes
 wake owners whose needs match newly added offers
 apply PipelineEffects through commit_effects
-clear due time range rows for this owner
 ```
 
 Before that boundary, projector runs are calculation. The projection loop may
-grow `ProjectionContext` and rerun a projector when the just-declared needs
-already match stored offers. Only the settled output commits.
+grow `ProjectionContext` for this one item and rerun the projector when the
+just-declared needs already match stored offers. Only the settled output
+commits.
 
 ## Handler Commit Boundary
 

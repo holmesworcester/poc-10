@@ -64,11 +64,7 @@ impl ProjectionContext {
         }
     }
 
-    /// Add newly matched context discovered while preparing one projection.
-    ///
-    /// This is crate-visible because only core should grow projection context.
-    /// Projectors receive the resulting snapshot but do not query storage or run
-    /// overlap queries themselves.
+    /// Add newly matched context discovered while preparing one projection item.
     pub(crate) fn extend_with_matches(&mut self, other: ProjectionContext) -> bool {
         let mut changed = false;
 

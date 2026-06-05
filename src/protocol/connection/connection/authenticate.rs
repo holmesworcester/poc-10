@@ -28,14 +28,24 @@ pub(crate) enum AuthenticatedConnection {
     Responder {
         connection: ConnectionFact,
         request_need: ContextNeed,
+        request_opener_need: ContextNeed,
         responder_secret_need: ContextNeed,
+        invite_need: Option<ContextNeed>,
     },
     Initiator {
         connection: ConnectionFact,
         request_need: ContextNeed,
+        request_opener_need: ContextNeed,
         endpoint_need: ContextNeed,
         initiator_need: ContextNeed,
+        invite_need: Option<ContextNeed>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct OpenedRequest {
+    request: request::fact::ConnectionRequestFact,
+    opener_need: ContextNeed,
 }
 
 impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
@@ -58,8 +68,8 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
         let Some(request_fact) = context.payload_for(&request_need) else {
             return Authentication::need(request_need);
         };
-        let request = match open_request_from_context(request_fact, context, fact.id) {
-            Ok(request) => request,
+        let opened_request = match open_request_from_context(request_fact, context, fact.id) {
+            Ok(opened_request) => opened_request,
             Err(_) => {
                 return Authentication::needs([
                     request_need,
@@ -68,6 +78,8 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
                 ]);
             }
         };
+        let request = opened_request.request;
+        let request_opener_need = opened_request.opener_need;
 
         let responder_secret_need = all_ephemeral_secret_need(fact.id);
         for (_, secret_fact) in context.matched_payloads_for(&responder_secret_need) {
@@ -93,12 +105,14 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
                     "connection responder secret id does not match".to_string(),
                 );
             }
-            if let Some(invite_need) = bootstrap_invite_need(fact.id, &request) {
-                if context.payload_for(&invite_need).is_none() {
+            let invite_need = bootstrap_invite_need(fact.id, &request);
+            if let Some(invite_need) = &invite_need {
+                if context.payload_for(invite_need).is_none() {
                     return Authentication::needs([
-                        request_need,
+                        request_need.clone(),
+                        request_opener_need.clone(),
                         responder_secret_need.clone(),
-                        invite_need,
+                        invite_need.clone(),
                     ]);
                 }
             }
@@ -109,8 +123,10 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
                 fact,
                 AuthenticatedConnection::Responder {
                     connection,
-                    request_need,
+                    request_need: request_need.clone(),
+                    request_opener_need: request_opener_need.clone(),
                     responder_secret_need: responder_secret_need.clone(),
+                    invite_need,
                 },
             ));
         }
@@ -142,7 +158,8 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
             );
             let Some(initiator_fact) = context.payload_for(&initiator_need) else {
                 return Authentication::needs([
-                    request_need,
+                    request_need.clone(),
+                    request_opener_need.clone(),
                     endpoint_need.clone(),
                     initiator_need,
                 ]);
@@ -154,13 +171,15 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
                     Ok(secret) => secret,
                     Err(error) => return Authentication::Invalid(error),
                 };
-            if let Some(invite_need) = bootstrap_invite_need(fact.id, &request) {
-                if context.payload_for(&invite_need).is_none() {
+            let invite_need = bootstrap_invite_need(fact.id, &request);
+            if let Some(invite_need) = &invite_need {
+                if context.payload_for(invite_need).is_none() {
                     return Authentication::needs([
-                        request_need,
+                        request_need.clone(),
+                        request_opener_need.clone(),
                         endpoint_need.clone(),
                         initiator_need,
-                        invite_need,
+                        invite_need.clone(),
                     ]);
                 }
             }
@@ -177,14 +196,21 @@ impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
                 fact,
                 AuthenticatedConnection::Initiator {
                     connection,
-                    request_need,
+                    request_need: request_need.clone(),
+                    request_opener_need: request_opener_need.clone(),
                     endpoint_need: endpoint_need.clone(),
                     initiator_need,
+                    invite_need,
                 },
             ));
         }
 
-        Authentication::needs([request_need, responder_secret_need, endpoint_need])
+        Authentication::needs([
+            request_need,
+            request_opener_need,
+            responder_secret_need,
+            endpoint_need,
+        ])
     }
 }
 
@@ -192,12 +218,15 @@ fn open_request_from_context(
     request_fact: &Fact,
     context: &ProjectionContext,
     owner: FactId,
-) -> Result<request::fact::ConnectionRequestFact, String> {
+) -> Result<OpenedRequest, String> {
     let endpoint_need = all_local_endpoint_need(owner);
     for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
         if let Ok(endpoint) = endpoint::decode_fact_payload(endpoint_fact.body()) {
             if let Ok(request) = request::decode::open_fact(request_fact.body(), &endpoint) {
-                return Ok(request);
+                return Ok(OpenedRequest {
+                    opener_need: endpoint_need.clone(),
+                    request,
+                });
             }
         }
     }
@@ -206,7 +235,10 @@ fn open_request_from_context(
         if let Ok(secret) = ephemeral_secret::decode_fact_payload(secret_fact.body()) {
             if let Ok(request) = request::decode::open_fact_as_sender(request_fact.body(), &secret)
             {
-                return Ok(request);
+                return Ok(OpenedRequest {
+                    opener_need: secret_need.clone(),
+                    request,
+                });
             }
         }
     }

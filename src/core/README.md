@@ -24,9 +24,10 @@ The command can return human-readable `CliOutput`, but durable protocol state
 must enter through facts, row mutations, or intents.
 
 Projection is core's deterministic reaction step. Core drains
-`pending_projection`, loads one fact and its matched context, calls the
-protocol projector, and commits the settled output. That commit replaces the
-fact's owned needs, offers, and time wakes; applies allowed row mutations;
+`pending_projection`, loads one fact and its matched context, resolves any
+newly declared needs that already match stored offers, calls the protocol
+projector until the item settles, and commits the output. That commit replaces
+the fact's owned needs, offers, and time wakes; applies allowed row mutations;
 admits emitted facts; queues follow-up intents; and wakes other fact owners
 whose standing needs now overlap newly added offers. Core performs the overlap
 query mechanically, but projectors decide what the matched payload proves.
@@ -257,10 +258,13 @@ use core syntax and contracts, but core must not import their semantic rules.
   used by queue fanout. It accepts only static comment-free `SELECT` statements
   over declared source tables and bound parameters, keeping dynamic scheduling
   SQL narrow and auditable.
-- `pipeline/project_pending_facts.rs`: fact projection worker. It admits facts
-  to pending projection, turns due time wakes into pending work, loads matched
-  context, runs the registered projector to a settled output, replaces the
-  owner's context/time wakes, and commits projector effects.
+- `pipeline/projection.rs`: one-item fact projection. It admits facts, turns
+  due time wakes into pending work, loads matched context, resolves already
+  satisfied declared needs, replaces the owner's context/time wakes, and
+  commits projector effects.
+- `pipeline/projection_queue.rs`: pending projection queue drain. It selects
+  durable and ephemeral projection items, applies the one-item projection step,
+  and lets context wakes or emitted child facts re-enter the queue explicitly.
 
 ## Example Runtime Graph
 

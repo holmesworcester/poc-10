@@ -34,8 +34,8 @@
 //! stable.
 //!
 //! That row-table rule is not the rule for all projection state. Context rows
-//! and time wakes are replaced by owner in `pipeline::context_store` and
-//! `pipeline::project_pending_facts` before this helper commits shared effects.
+//! and time wakes are replaced by owner in the projection commit boundary
+//! before this helper commits shared effects.
 //! Typed-table projections can also change visible state by emitting explicit
 //! `DeleteWhere` and `InsertValues` mutations in the desired order. The opaque
 //! `PutRow` path is narrower: it is for facts whose derived row key should
