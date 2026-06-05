@@ -6,25 +6,22 @@
 //! row materialization; higher-level file selection and output live in
 //! `content::file` queries and CLI helpers.
 
+pub mod adapt;
 pub mod authenticate;
-pub mod create;
+pub mod author;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
-pub mod rows;
+pub mod queries;
 
-pub const TYPE_CONTENT_FILE_SLICE: u8 = layout::TYPE_CONTENT_FILE_SLICE;
+pub(crate) use decode::Codec;
+
+pub const TYPE_CONTENT_FILE_SLICE: u8 = encode::TYPE_CONTENT_FILE_SLICE;
+
+pub const FILE_SLICE_ROWS: crate::core::store::TableName =
+    crate::protocol::registry::read_models::FILE_SLICE_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileSliceFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::ContentFileSliceFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+    decode::decode_fact(bytes)
 }

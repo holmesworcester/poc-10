@@ -11,27 +11,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ConnectionCloseFact;
 
 pub(crate) struct ConnectionCloseAuthenticator;
 
-impl Authenticator for ConnectionCloseAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ConnectionCloseAuthenticator {
     type Authenticated = ConnectionCloseFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        close: ConnectionCloseFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_close(fact))
+        Authentication::from_result(fact, prove_decoded_close(fact, close))
     }
 }
 
-fn authenticate_close(fact: &Fact) -> Result<ConnectionCloseFact, String> {
-    // 1. Layout.
-    let close = super::Codec::decode_fact(fact)?;
+fn prove_decoded_close(
+    fact: &Fact,
+    close: ConnectionCloseFact,
+) -> Result<ConnectionCloseFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // Intrinsic fields.
@@ -44,9 +46,11 @@ fn authenticate_close(fact: &Fact) -> Result<ConnectionCloseFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::connection::close::encode;
     use crate::protocol::connection::close::fact::ConnectionCloseFact;
-    use crate::protocol::connection::close::layout;
 
     use super::ConnectionCloseAuthenticator;
 
@@ -55,12 +59,19 @@ mod tests {
             connection_id: [1; 32],
             closed_at_ms: 2,
         };
-        let bytes = layout::encode_fact(&close).expect("encode connection_close fact");
+        let bytes = encode::encode_fact(&close).expect("encode connection_close fact");
         Fact::new(FactScope::Local, 100, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionCloseFact> {
-        ConnectionCloseAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ConnectionCloseAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

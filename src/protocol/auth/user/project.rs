@@ -11,13 +11,20 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::user_invite;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::rows::user_row;
+use super::user_row;
+
+/// Staged read pipeline for the user fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::user::Codec",
+    authenticate: "auth::user::authenticate::UserAuthenticator",
+    adapt: "auth::user::adapt::UserAdapter",
+    project: "auth::user::project::UserProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct UserProjector;
@@ -34,17 +41,22 @@ impl Projector for UserProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::UserAuthenticator, _>(self, fact, context)
+        project_staged::<
+            super::Codec,
+            super::authenticate::UserAuthenticator,
+            super::adapt::UserAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::UserAuthenticator> for UserProjector {
-    fn project_authenticated(
+impl SemanticProjector<super::fact::UserFact> for UserProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::UserFact>,
+        fact: &Fact,
+        user: super::fact::UserFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, user) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user fact must have global scope".to_string());

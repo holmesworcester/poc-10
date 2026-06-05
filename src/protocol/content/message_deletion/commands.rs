@@ -6,7 +6,7 @@
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::FactId;
 
-use super::create;
+use super::author;
 use super::fact::{AuthorId, WorkspaceId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,14 +29,14 @@ pub fn delete_message(
     author_user_id: AuthorId,
 ) -> Result<CommandOutput<DeleteMessageReceipt>, String> {
     let created_at_ms = ctx.next_timestamp();
-    create::validate_delete_message(
+    author::validate_delete_message(
         workspace_id,
         target_message_id,
         target_frontier_id,
         author_user_id,
     )?;
     let signing = ctx.local_signing_capability(workspace_id)?;
-    let fact = create::delete_message(
+    let fact = author::delete_message(
         &signing,
         workspace_id,
         created_at_ms,

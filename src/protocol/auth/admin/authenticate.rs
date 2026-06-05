@@ -13,31 +13,30 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::AdminFact;
 
 pub(crate) struct AdminAuthenticator;
 
-impl Authenticator for AdminAuthenticator {
+impl DecodedAuthenticator<super::Codec> for AdminAuthenticator {
     type Authenticated = AdminFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        admin: AdminFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_admin(fact))
+        Authentication::from_result(fact, prove_decoded_admin(fact, admin))
     }
 }
 
-fn authenticate_admin(fact: &Fact) -> Result<AdminFact, String> {
-    // 1. Layout.
-    let admin = super::Codec::decode_fact(fact)?;
+fn prove_decoded_admin(fact: &Fact, admin: AdminFact) -> Result<AdminFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&admin)?;
+    verify_signature(&admin)?;
     // 4. Non-zero selector fields.
     if admin.workspace_id == [0u8; 32] {
         return Err("admin workspace_id must not be zero".to_string());
@@ -54,12 +53,28 @@ fn authenticate_admin(fact: &Fact) -> Result<AdminFact, String> {
     Ok(admin)
 }
 
+/// Verify the admin grant's signature over its canonical envelope. The verifier
+/// key is embedded in the fact, so this is a context-free fact-boundary proof.
+pub fn verify_signature(fact: &AdminFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "admin",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::admin::create::signed_admin_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::admin::author::signed_admin_fact;
     use crate::protocol::auth::admin::fact::AdminFact;
 
     use super::AdminAuthenticator;
@@ -80,8 +95,17 @@ mod tests {
         signed_admin_fact(100, [3; 32], SIGNER_KEY, grant).expect("signed admin fact")
     }
 
+    // Enter through the staged path (codec decode -> authenticate_decoded) so the
+    // tests exercise the same boundary core runs.
     fn authenticate(fact: &Fact) -> Authentication<'_, AdminFact> {
-        AdminAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => AdminAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

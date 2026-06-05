@@ -36,7 +36,7 @@ use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::intents::IntentHandler;
 use crate::core::pipeline;
-use crate::core::pipeline::{FactRoute, Projector};
+use crate::core::pipeline::{FactAdmissionFn, FactRoute, Projector};
 use crate::core::runtime::HandlerRoute;
 use crate::core::store::{quoted_identifier_list, quoted_table_name_str, Store, TableName};
 use rusqlite::types::ValueRef;
@@ -235,6 +235,7 @@ pub fn run_replay(
     routes: &'static [HandlerRoute],
     fact_routes: &[FactRoute],
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
     replay_time_wakes: &[DaemonTimeWake],
     order: ReplayOrder,
 ) -> Result<ReplayReport, String> {
@@ -257,7 +258,14 @@ pub fn run_replay(
     report.wiped_tables = wipe_derived_state(store)?;
     report.retained_facts = table_count(store, "facts")?;
 
-    let drive = ReplayDrive::new(store, projector, allowed_tables, replay_time_wakes, routes);
+    let drive = ReplayDrive::new(
+        store,
+        projector,
+        allowed_tables,
+        fact_admission,
+        replay_time_wakes,
+        routes,
+    );
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
@@ -349,6 +357,7 @@ struct ReplayDrive<'a> {
     store: &'a Store,
     projector: &'a dyn Projector,
     allowed_tables: &'a [TableName],
+    fact_admission: Option<FactAdmissionFn>,
     replay_time_wakes: &'a [DaemonTimeWake],
     handlers: Vec<(&'static str, Box<dyn IntentHandler>)>,
     kinds: Vec<&'static str>,
@@ -359,6 +368,7 @@ impl<'a> ReplayDrive<'a> {
         store: &'a Store,
         projector: &'a dyn Projector,
         allowed_tables: &'a [TableName],
+        fact_admission: Option<FactAdmissionFn>,
         replay_time_wakes: &'a [DaemonTimeWake],
         routes: &'static [HandlerRoute],
     ) -> Self {
@@ -372,6 +382,7 @@ impl<'a> ReplayDrive<'a> {
             store,
             projector,
             allowed_tables,
+            fact_admission,
             replay_time_wakes,
             handlers,
             kinds,
@@ -406,6 +417,7 @@ impl<'a> ReplayDrive<'a> {
                 self.projector,
                 self.store,
                 self.allowed_tables,
+                self.fact_admission,
                 REPLAY_WORK_LIMIT,
                 &self.kinds,
             )?;
@@ -454,6 +466,7 @@ impl<'a> ReplayDrive<'a> {
                 handler,
                 self.store,
                 self.allowed_tables,
+                self.fact_admission,
                 queued,
                 &self.kinds,
             )?;

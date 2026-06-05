@@ -12,27 +12,26 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::KeyWrapFact;
 
 pub(crate) struct KeyWrapAuthenticator;
 
-impl Authenticator for KeyWrapAuthenticator {
+impl DecodedAuthenticator<super::Codec> for KeyWrapAuthenticator {
     type Authenticated = KeyWrapFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        wrap: KeyWrapFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_key_wrap(fact))
+        Authentication::from_result(fact, prove_decoded_key_wrap(fact, wrap))
     }
 }
 
-fn authenticate_key_wrap(fact: &Fact) -> Result<KeyWrapFact, String> {
-    // 1. Layout.
-    let wrap = super::Codec::decode_fact(fact)?;
+fn prove_decoded_key_wrap(fact: &Fact, wrap: KeyWrapFact) -> Result<KeyWrapFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(wrap)
@@ -42,12 +41,14 @@ fn authenticate_key_wrap(fact: &Fact) -> Result<KeyWrapFact, String> {
 mod tests {
     use crate::core::crypto::{X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES};
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::key_wrap::create::admit_key_wrap_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::key_wrap::author::admit_key_wrap_fact;
+    use crate::protocol::auth::key_wrap::encode;
     use crate::protocol::auth::key_wrap::fact::{
         KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
     };
-    use crate::protocol::auth::key_wrap::layout;
 
     use super::KeyWrapAuthenticator;
 
@@ -70,12 +71,19 @@ mod tests {
             nonce: [7; XCHACHA20_POLY1305_NONCE_BYTES],
             ciphertext: [8; KEY_WRAP_CIPHERTEXT_BYTES],
         };
-        let bytes = layout::encode_key_wrap(&wrap).expect("encode key wrap");
+        let bytes = encode::encode_key_wrap(&wrap).expect("encode key wrap");
         admit_key_wrap_fact(bytes).expect("admit key wrap fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, KeyWrapFact> {
-        KeyWrapAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => KeyWrapAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

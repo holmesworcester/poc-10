@@ -12,8 +12,7 @@ use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret;
@@ -24,7 +23,8 @@ use crate::protocol::auth::unwrap_key_wrap::{unwrap_key_wrap_intent, UnwrapKeyWr
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyWrapFact;
-use super::rows::{key_wrap_row, KeyWrapRow};
+use super::key_wrap_row;
+use super::queries::KeyWrapRow;
 
 // ---------------------------------------------------------------------------
 // Wrap-source coordinate scheme.
@@ -519,6 +519,14 @@ fn validate_wrap_source_payload(
 // Key wrap projector.
 // ---------------------------------------------------------------------------
 
+/// Staged read pipeline for the key_wrap fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::key_wrap::Codec",
+    authenticate: "auth::key_wrap::authenticate::KeyWrapAuthenticator",
+    adapt: "auth::key_wrap::adapt::KeyWrapAdapter",
+    project: "auth::key_wrap::project::KeyWrapProjector",
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct KeyWrapProjector;
 
@@ -534,17 +542,22 @@ impl Projector for KeyWrapProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::KeyWrapAuthenticator, _>(self, fact, context)
+        project_staged::<
+            super::Codec,
+            super::authenticate::KeyWrapAuthenticator,
+            super::adapt::KeyWrapAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::KeyWrapAuthenticator> for KeyWrapProjector {
-    fn project_authenticated(
+impl SemanticProjector<KeyWrapFact> for KeyWrapProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, KeyWrapFact>,
+        fact: &Fact,
+        wrap: KeyWrapFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, wrap) = authenticated.into_parts();
         key_wrap(fact, context, wrap)
     }
 }

@@ -691,7 +691,8 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 fn cutover_auth_family_facade_delegates_to_named_fact_slices() {
     let root = root();
     // Each auth key-material fact family is its own module: a `<family>.rs` manifest
-    // plus a `<family>/` directory that owns the family's layout and projector.
+    // plus a `<family>/` directory that owns the family's byte codecs (decode.rs /
+    // encode.rs) and projector.
     let required_families = [
         "recipient_key",
         "local_recipient_key",
@@ -707,7 +708,8 @@ fn cutover_auth_family_facade_delegates_to_named_fact_slices() {
         for path in [
             format!("src/protocol/auth/{family}.rs"),
             format!("src/protocol/auth/{family}/project.rs"),
-            format!("src/protocol/auth/{family}/layout.rs"),
+            format!("src/protocol/auth/{family}/decode.rs"),
+            format!("src/protocol/auth/{family}/encode.rs"),
         ] {
             if !root.join(&path).exists() {
                 missing.push(path);

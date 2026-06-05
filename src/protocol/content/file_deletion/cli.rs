@@ -9,7 +9,7 @@
 use crate::core::cli::{decode_hex_32_named, encode_hex_32, CliOutput};
 use crate::core::facts::FactId;
 use crate::core::store::Store;
-use crate::protocol::content::file::{queries, rows::ContentFileRow};
+use crate::protocol::content::file::queries::{self, ContentFileRow};
 
 use super::commands::DeleteFileReceipt;
 

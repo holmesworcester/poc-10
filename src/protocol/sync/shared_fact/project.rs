@@ -11,12 +11,19 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use std::collections::BTreeSet;
 
 use crate::protocol::sync::share_fact_with_sync as share_sync;
+
+/// Staged read pipeline for the shared_fact fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "sync::shared_fact::Codec",
+    authenticate: "sync::shared_fact::authenticate::SyncSharedFactAuthenticator",
+    adapt: "sync::shared_fact::adapt::SyncSharedFactAdapter",
+    project: "sync::shared_fact::project::SyncSharedFactProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;
@@ -33,23 +40,22 @@ impl Projector for SyncSharedFactProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::SyncSharedFactAuthenticator, _>(
-            self,
-            fact,
-            projection_context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::SyncSharedFactAuthenticator,
+            super::adapt::SyncSharedFactAdapter,
+            _,
+        >(self, fact, projection_context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::SyncSharedFactAuthenticator>
-    for SyncSharedFactProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::SharedFact> for SyncSharedFactProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::SharedFact>,
+        fact: &Fact,
+        shared: super::fact::SharedFact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, shared) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(shared.workspace_id);
         require_fact_scope(fact, &scope)?;

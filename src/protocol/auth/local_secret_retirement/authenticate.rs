@@ -12,27 +12,32 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::LocalSecretRetirementFact;
 
 pub(crate) struct LocalSecretRetirementAuthenticator;
 
-impl Authenticator for LocalSecretRetirementAuthenticator {
+impl DecodedAuthenticator<super::Codec> for LocalSecretRetirementAuthenticator {
     type Authenticated = LocalSecretRetirementFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        retirement: LocalSecretRetirementFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_local_secret_retirement(fact))
+        Authentication::from_result(
+            fact,
+            prove_decoded_local_secret_retirement(fact, retirement),
+        )
     }
 }
 
-fn authenticate_local_secret_retirement(fact: &Fact) -> Result<LocalSecretRetirementFact, String> {
-    // 1. Layout.
-    let retirement = super::Codec::decode_fact(fact)?;
+fn prove_decoded_local_secret_retirement(
+    fact: &Fact,
+    retirement: LocalSecretRetirementFact,
+) -> Result<LocalSecretRetirementFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(retirement)
@@ -41,11 +46,13 @@ fn authenticate_local_secret_retirement(fact: &Fact) -> Result<LocalSecretRetire
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::local_secret_retirement::encode;
     use crate::protocol::auth::local_secret_retirement::fact::{
         LocalSecretRetirementFact, RETIRE_REASON_CHOP,
     };
-    use crate::protocol::auth::local_secret_retirement::layout;
 
     use super::LocalSecretRetirementAuthenticator;
 
@@ -57,12 +64,19 @@ mod tests {
             floor_minute: 10,
             created_at_ms: 123,
         };
-        let bytes = layout::encode_fact(&retirement).expect("encode local secret retirement");
+        let bytes = encode::encode_fact(&retirement).expect("encode local secret retirement");
         Fact::new(FactScope::Local, 123, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, LocalSecretRetirementFact> {
-        LocalSecretRetirementAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => LocalSecretRetirementAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

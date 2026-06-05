@@ -10,8 +10,15 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
+};
+
+/// Staged read pipeline for the cascade_test_fact fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "sync::cascade_test_fact::Codec",
+    authenticate: "sync::cascade_test_fact::authenticate::CascadeTestFactAuthenticator",
+    adapt: "sync::cascade_test_fact::adapt::CascadeTestFactAdapter",
+    project: "sync::cascade_test_fact::project::CascadeTestFactProjector",
 };
 
 #[derive(Debug, Clone, Default)]
@@ -29,21 +36,22 @@ impl Projector for CascadeTestFactProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::CascadeTestFactAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::CascadeTestFactAuthenticator,
+            super::adapt::CascadeTestFactAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::CascadeTestFactAuthenticator>
-    for CascadeTestFactProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::CascadeTestFact> for CascadeTestFactProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::CascadeTestFact>,
+        fact: &Fact,
+        decoded: super::fact::CascadeTestFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, decoded) = authenticated.into_parts();
         // 2. Context.
         let mut output = ProjectionOutput::new();
         for dependency_id in decoded.dependencies.iter() {

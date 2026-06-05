@@ -175,7 +175,7 @@ fn resolve_connection_row_target(
             "send_network_frame route: send_network_frame missing connection row",
         ));
     };
-    let local_endpoint = endpoint::create::local_endpoint(context.store()?)?
+    let local_endpoint = endpoint::author::local_endpoint(context.store()?)?
         .ok_or_else(|| HandlerError::fatal("send_network_frame requires local endpoint state"))?;
     let addr = if local_endpoint.endpoint == connection.from_endpoint {
         connection.initiator_addr

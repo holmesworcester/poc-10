@@ -5,11 +5,11 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth;
+use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
-use topo::protocol::auth::endpoint::rows as endpoint_rows;
+use topo::protocol::connection::connection as connection_rows;
+use topo::protocol::connection::connection::encode as connection_layout;
 use topo::protocol::connection::connection::fact::ConnectionFact;
-use topo::protocol::connection::connection::layout as connection_layout;
-use topo::protocol::connection::connection::rows as connection_rows;
 use topo::protocol::connection::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
@@ -19,7 +19,7 @@ use topo::protocol::connection::send_network_frame::{
 };
 use topo::protocol::connection_frame_wire as connection_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
-use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
+use topo::protocol::sync::shared_fact::{encode as shared_fact_layout, fact::SharedFact};
 
 fn connection_fact() -> (Fact, ConnectionFact) {
     let local_endpoint = local_endpoint();
@@ -111,10 +111,10 @@ fn send_facts_on_connection_refuses_forged_private_tag_reference() {
     let (connection_fact, connection) = connection_fact();
     seed_connection_row(&store, connection_fact.id, &connection);
     for private_tag in [
-        auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET,
-        auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET,
-        auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET,
-        auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY,
+        auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET,
+        auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET,
+        auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET,
+        auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY,
     ] {
         let fact = Fact::new(
             topo::protocol::auth::workspace::scope([7; 32]),

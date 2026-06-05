@@ -11,8 +11,8 @@ use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth;
 
+use super::encode;
 use super::fact::InviteAcceptedFact;
-use super::layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptInvite {
@@ -43,7 +43,7 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>,
     let secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        auth::invite::layout::encode_fact(&secret)?,
+        auth::invite::encode::encode_fact(&secret)?,
     );
 
     let accepted = InviteAcceptedFact {
@@ -56,7 +56,7 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>,
     let accepted_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms.saturating_add(1),
-        layout::encode_fact(&accepted)?,
+        encode::encode_fact(&accepted)?,
     );
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
@@ -76,7 +76,7 @@ fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::auth::invite::layout as invite_layout;
+    use crate::protocol::auth::invite::decode as invite_decode;
 
     use super::*;
 
@@ -102,7 +102,7 @@ mod tests {
         );
 
         let secret =
-            invite_layout::decode_fact(&output.effects.facts[0].bytes).expect("decode secret");
+            invite_decode::decode_fact(&output.effects.facts[0].bytes).expect("decode secret");
         assert_eq!(secret.workspace_id, Some([1; 32]));
         assert_eq!(secret.invite_fact_id, Some([2; 32]));
     }

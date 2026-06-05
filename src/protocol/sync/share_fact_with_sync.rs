@@ -251,10 +251,10 @@ mod tests {
     use crate::core::intents::{HandlerContext, IntentHandler};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
-    use crate::protocol::auth::endpoint::{fact::EndpointFact, rows as endpoint_rows};
+    use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
     use crate::protocol::auth::endpoint_shared::{
+        self as endpoint_shared_rows,
         fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
-        rows as endpoint_shared_rows,
     };
     use crate::protocol::connection;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -304,8 +304,8 @@ mod tests {
         );
         for connection_id in [origin_connection_id, other_connection_id] {
             rows.push(
-                connection::connection::rows::connection_row(
-                    connection::connection::rows::ConnectionRowFields::without_addresses(
+                connection::connection::connection_row(
+                    connection::connection::ConnectionRowFields::without_addresses(
                         connection_id,
                         local_endpoint,
                         remote_endpoint,
@@ -318,21 +318,24 @@ mod tests {
                 .expect("connection row"),
             );
         }
-        rows.push(connection::fact_receipt::rows::connection_fact_receipt_row(
-            [15; 32],
-            &connection::fact_receipt::fact::ConnectionFactReceipt {
-                received_fact_id: owner.id,
-                origin_addr: connection::fact_receipt::fact::OriginAddr::new(b"127.0.0.1:1")
-                    .expect("origin addr"),
-                local_endpoint_id: local_endpoint,
-                sender_endpoint_id: remote_endpoint,
-                receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
-                connection_id: Some(origin_connection_id),
-                request_id: Some([8; 32]),
-                frame_hash: [16; 32],
-                received_at_local_ms: 43,
-            },
-        ));
+        rows.push(
+            connection::fact_receipt::connection_fact_receipt_row(
+                [15; 32],
+                &connection::fact_receipt::fact::ConnectionFactReceipt {
+                    received_fact_id: owner.id,
+                    origin_addr: connection::fact_receipt::fact::OriginAddr::new(b"127.0.0.1:1")
+                        .expect("origin addr"),
+                    local_endpoint_id: local_endpoint,
+                    sender_endpoint_id: remote_endpoint,
+                    receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
+                    connection_id: Some(origin_connection_id),
+                    request_id: Some([8; 32]),
+                    frame_hash: [16; 32],
+                    received_at_local_ms: 43,
+                },
+            )
+            .expect("connection fact receipt row"),
+        );
         store.insert_table_rows(rows).expect("seed rows");
 
         let intent = share_fact_with_sync_intent_for_fact(

@@ -13,7 +13,7 @@
 //!
 //! Commands are not the reactive path. Automatic behavior should be expressed
 //! by projectors, context needs/offers, and intent handlers, and should share
-//! deterministic constructors from `create.rs` rather than calling command
+//! deterministic constructors from `author.rs` rather than calling command
 //! workflows. A user-facing command may query before or after a runtime drain
 //! only when the operation explicitly knows the prior state is present.
 //!

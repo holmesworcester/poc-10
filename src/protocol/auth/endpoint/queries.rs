@@ -7,7 +7,7 @@
 use crate::core::facts::FactId;
 use crate::core::store::Store;
 
-use super::rows;
+use super::{LOCAL_ENDPOINT_ROWS, LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS, LOCAL_KEY};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalEndpointPublic {
@@ -17,13 +17,10 @@ pub struct LocalEndpointPublic {
 
 pub fn local_endpoint_public(store: &Store) -> Result<Option<LocalEndpointPublic>, String> {
     let endpoint = store
-        .table_row(rows::LOCAL_ENDPOINT_ROWS, rows::LOCAL_KEY)
+        .table_row(LOCAL_ENDPOINT_ROWS, LOCAL_KEY)
         .map_err(|err| format!("load local endpoint: {err}"))?;
     let signing_public_key = store
-        .table_row(
-            rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-            rows::LOCAL_KEY,
-        )
+        .table_row(LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS, LOCAL_KEY)
         .map_err(|err| format!("load local endpoint signing public key: {err}"))?;
 
     match (endpoint, signing_public_key) {

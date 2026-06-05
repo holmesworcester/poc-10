@@ -49,7 +49,9 @@ pub fn create_workspace_with_identity(
     let endpoint = endpoint_output.receipt.endpoint;
     let user_public = endpoint.signing_public_key;
     let workspace = author::create_workspace(created_at_ms, endpoint.signing_secret, name)?;
-    authenticate_authored::<super::authenticate::WorkspaceAuthenticator>(&workspace)?;
+    authenticate_authored::<super::decode::Codec, super::authenticate::WorkspaceAuthenticator>(
+        &workspace,
+    )?;
     let workspace_id = workspace.id;
 
     let user_invite = user_invite_fact(
@@ -137,19 +139,19 @@ struct EndpointSharedFactInput<'a> {
 
 fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, String> {
     let endpoint_id = if let Some(endpoint_fact) = input.new_endpoint_fact {
-        auth::endpoint::layout::decode_fact(&endpoint_fact.bytes)?.endpoint
+        auth::endpoint::decode::decode_fact(&endpoint_fact.bytes)?.endpoint
     } else {
         let value = input
             .store
             .table_row(
-                auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
-                auth::endpoint::rows::LOCAL_KEY,
+                auth::endpoint::LOCAL_ENDPOINT_ROWS,
+                auth::endpoint::LOCAL_KEY,
             )
             .map_err(|err| format!("load local endpoint: {err}"))?
             .ok_or_else(|| "local endpoint row is missing".to_string())?;
         id32(&value, "local endpoint")?
     };
-    auth::endpoint_shared::create::signed_endpoint_shared_fact(
+    auth::endpoint_shared::author::signed_endpoint_shared_fact(
         input.created_at_ms,
         input.workspace_id,
         input.user_id,
@@ -174,7 +176,7 @@ fn user_invite_fact(
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
-    auth::user_invite::create::signed_user_invite_fact(
+    auth::user_invite::author::signed_user_invite_fact(
         created_at_ms,
         public_key,
         workspace_id,
@@ -191,7 +193,7 @@ fn user_fact(
     signer_private_key: [u8; 32],
     username: &str,
 ) -> Result<Fact, String> {
-    auth::user::create::signed_user_fact(
+    auth::user::author::signed_user_fact(
         created_at_ms,
         workspace_id,
         crypto::ed25519_public_key(&signer_private_key),
@@ -217,7 +219,7 @@ fn root_admin_fact(
         signer_public_key: crypto::ed25519_public_key(&signer_private_key),
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    auth::admin::create::signed_admin_fact(created_at_ms, workspace_id, signer_private_key, payload)
+    auth::admin::author::signed_admin_fact(created_at_ms, workspace_id, signer_private_key, payload)
 }
 
 fn creator_admin_fact(
@@ -238,7 +240,7 @@ fn creator_admin_fact(
         signer_public_key: crypto::ed25519_public_key(&signer_private_key),
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    auth::admin::create::signed_admin_fact(
+    auth::admin::author::signed_admin_fact(
         created_at_ms,
         authority_fact_id,
         signer_private_key,
@@ -254,7 +256,7 @@ fn device_invite_fact(
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
-    auth::device_invite::create::signed_device_invite_fact(
+    auth::device_invite::author::signed_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_authority_fact_id,
@@ -271,7 +273,7 @@ fn initial_retention_policy_fact(
     ttl_minutes: u32,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
-    content::retention_policy::create::signed_retention_policy_fact(
+    content::retention_policy::author::signed_retention_policy_fact(
         workspace_id,
         None,
         ttl_minutes,

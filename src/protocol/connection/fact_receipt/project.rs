@@ -19,8 +19,15 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
+};
+
+/// Staged read pipeline for the fact_receipt fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "connection::fact_receipt::Codec",
+    authenticate: "connection::fact_receipt::authenticate::ConnectionFactReceiptAuthenticator",
+    adapt: "connection::fact_receipt::adapt::ConnectionFactReceiptAdapter",
+    project: "connection::fact_receipt::project::ConnectionFactReceiptProjector",
 };
 
 #[derive(Debug, Clone, Default)]
@@ -38,21 +45,22 @@ impl Projector for ConnectionFactReceiptProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionFactReceiptAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ConnectionFactReceiptAuthenticator,
+            super::adapt::ConnectionFactReceiptAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ConnectionFactReceiptAuthenticator>
-    for ConnectionFactReceiptProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::ConnectionFactReceipt> for ConnectionFactReceiptProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ConnectionFactReceipt>,
+        fact: &Fact,
+        received: super::fact::ConnectionFactReceipt,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, received) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("connection fact receipt must have FactScope::Local".to_string());
@@ -66,8 +74,8 @@ impl AuthenticatedProjector<super::authenticate::ConnectionFactReceiptAuthentica
                 received.received_fact_id,
                 received.received_fact_id,
             ))
-            .row_mutation(RowMutation::PutRow(
-                super::rows::connection_fact_receipt_row(fact.id, &received),
-            )))
+            .row_mutation(RowMutation::PutRow(super::connection_fact_receipt_row(
+                fact.id, &received,
+            )?)))
     }
 }

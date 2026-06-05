@@ -11,9 +11,9 @@ use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth;
 
-use super::create;
+use super::author;
 use super::fact::AdminFact;
-use super::rows;
+use super::queries;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrantAdmin {
@@ -35,10 +35,10 @@ pub fn grant_admin(
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let authority_admin_id = ctx
         .store()
-        .table_rows_with_key_prefix(rows::ADMIN_ROWS, &input.workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(super::ADMIN_ROWS, &input.workspace_id, usize::MAX)
         .map_err(|err| format!("load admin rows: {err}"))?
         .into_iter()
-        .map(|(key, value)| rows::decode_admin_row(&key, &value))
+        .map(|(key, value)| queries::decode_admin_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .find(|admin| admin.user_fact_id == membership.user_authority_fact_id)
@@ -48,7 +48,7 @@ pub fn grant_admin(
         .into_iter()
         .find(|user| user.user_id == input.user_id)
         .ok_or_else(|| "target user is not in this workspace".to_string())?;
-    let local_endpoint = auth::endpoint::create::local_endpoint(ctx.store())?
+    let local_endpoint = auth::endpoint::author::local_endpoint(ctx.store())?
         .ok_or_else(|| "local endpoint has not been created".to_string())?;
     let grant = AdminFact {
         created_at_ms: input.created_at_ms,
@@ -60,7 +60,7 @@ pub fn grant_admin(
         signer_public_key: local_endpoint.signing_public_key,
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let fact = create::signed_admin_fact(
+    let fact = author::signed_admin_fact(
         input.created_at_ms,
         authority_admin_id,
         local_endpoint.signing_secret,
@@ -75,5 +75,5 @@ pub fn signed_admin_fact(
     signer_private_key: Ed25519PrivateKey,
     grant: AdminFact,
 ) -> Result<Fact, String> {
-    create::signed_admin_fact(created_at_ms, signer_id, signer_private_key, grant)
+    author::signed_admin_fact(created_at_ms, signer_id, signer_private_key, grant)
 }

@@ -21,8 +21,8 @@ use topo::protocol::connection_frame_wire::{
     CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, CONNECTION_FRAME_SMALL_WIRE_BYTES,
     CONNECTION_FRAME_TAG, CONNECTION_FRAME_VERSION,
 };
-use topo::protocol::content::file::layout::CONTENT_FILE_BYTES;
-use topo::protocol::content::file_slice::layout::CONTENT_FILE_SLICE_BYTES;
+use topo::protocol::content::file::encode::CONTENT_FILE_BYTES;
+use topo::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES;
 
 const SENDER: [u8; 32] = [0x11; 32];
 const RECEIVER: [u8; 32] = [0x22; 32];

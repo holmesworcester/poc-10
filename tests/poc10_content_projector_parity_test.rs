@@ -40,7 +40,7 @@ fn raw_content_events_reject_projection() {
     let reaction = Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         reaction.created_at_ms,
-        content::reaction::layout::encode_fact(&reaction).expect("encode reaction"),
+        content::reaction::encode::encode_fact(&reaction).expect("encode reaction"),
     );
     assert_must_be_signed(
         content::reaction::project::ContentReactionProjector::new()
@@ -62,7 +62,7 @@ fn raw_content_events_reject_projection() {
     let deletion = Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         deletion.created_at_ms,
-        content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
+        content::message_deletion::encode::encode_fact(&deletion).expect("encode deletion"),
     );
     assert_must_be_signed(
         content::message_deletion::project::ContentMessageDeletionProjector::new()
@@ -82,7 +82,7 @@ fn raw_content_events_reject_projection() {
     let deletion = Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         deletion.created_at_ms,
-        content::file_deletion::layout::encode_fact(&deletion).expect("encode file deletion"),
+        content::file_deletion::encode::encode_fact(&deletion).expect("encode file deletion"),
     );
     assert_must_be_signed(
         content::file_deletion::project::ContentFileDeletionProjector::new()
@@ -154,7 +154,7 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
-        content::file::layout::encode_fact(&file).expect("encode file"),
+        content::file::encode::encode_fact(&file).expect("encode file"),
         file.created_at_ms,
     );
 
@@ -199,7 +199,7 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
-        content::file::layout::encode_fact(&file).expect("encode file"),
+        content::file::encode::encode_fact(&file).expect("encode file"),
         file.created_at_ms,
     );
 
@@ -235,7 +235,7 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
-        content::reaction::layout::encode_fact(&reaction).expect("encode reaction"),
+        content::reaction::encode::encode_fact(&reaction).expect("encode reaction"),
         reaction.created_at_ms,
     );
 
@@ -267,7 +267,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
-        content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
+        content::message_deletion::encode::encode_fact(&deletion).expect("encode deletion"),
         deletion.created_at_ms,
     );
 
@@ -312,7 +312,7 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
-        content::file_deletion::layout::encode_fact(&deletion).expect("encode deletion"),
+        content::file_deletion::encode::encode_fact(&deletion).expect("encode deletion"),
         deletion.created_at_ms,
     );
 
@@ -346,9 +346,13 @@ fn endpoint_shared_fact(
     };
     endpoint.signature = crypto::ed25519_sign(
         &ENDPOINT_AUTHORITY_KEY,
-        &auth::endpoint_shared::layout::signing_bytes(&endpoint).expect("endpoint signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &endpoint,
+            auth::endpoint_shared::encode::encode_fact,
+        )
+        .expect("endpoint signing bytes"),
     );
-    let bytes = auth::endpoint_shared::layout::encode_fact(&endpoint).expect("endpoint_shared");
+    let bytes = auth::endpoint_shared::encode::encode_fact(&endpoint).expect("endpoint_shared");
     Fact::new(FactScope::Global, endpoint.created_at_ms, bytes)
 }
 
@@ -365,12 +369,16 @@ fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact
     };
     user.signature = crypto::ed25519_sign(
         &user_private,
-        &auth::user::layout::signing_bytes(&user).expect("user signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &user,
+            auth::user::encode::encode_fact,
+        )
+        .expect("user signing bytes"),
     );
     Fact::new(
         FactScope::Global,
         user.created_at_ms,
-        auth::user::layout::encode_fact(&user).expect("encode user"),
+        auth::user::encode::encode_fact(&user).expect("encode user"),
     )
 }
 
@@ -396,7 +404,11 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     };
     message.signature = crypto::ed25519_sign(
         &CONTENT_SIGNING_KEY,
-        &content::message::encode::signing_bytes(&message).expect("message signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &message,
+            content::message::encode::encode_fact,
+        )
+        .expect("message signing bytes"),
     );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
@@ -451,12 +463,16 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     };
     file.signature = crypto::ed25519_sign(
         &CONTENT_SIGNING_KEY,
-        &content::file::layout::signing_bytes(&file).expect("file signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &file,
+            content::file::encode::encode_fact,
+        )
+        .expect("file signing bytes"),
     );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         file.created_at_ms,
-        content::file::layout::encode_fact(&file).expect("encode file"),
+        content::file::encode::encode_fact(&file).expect("encode file"),
     )
 }
 
@@ -480,7 +496,7 @@ fn unsigned_file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         file.created_at_ms,
-        content::file::layout::encode_fact(&file).expect("encode file"),
+        content::file::encode::encode_fact(&file).expect("encode file"),
     )
 }
 
@@ -506,47 +522,64 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &content::message::encode::signing_bytes(&fact)?,
+                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                    &fact,
+                    content::message::encode::encode_fact,
+                )?,
             );
             content::message::encode::encode_fact(&fact)
         }
         Some(content::file::TYPE_CONTENT_FILE) => {
-            let mut fact = content::file::layout::decode_fact(&payload)?;
+            let mut fact = content::file::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-            fact.signature =
-                crypto::ed25519_sign(&private_key, &content::file::layout::signing_bytes(&fact)?);
-            content::file::layout::encode_fact(&fact)
+            fact.signature = crypto::ed25519_sign(
+                &private_key,
+                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                    &fact,
+                    content::file::encode::encode_fact,
+                )?,
+            );
+            content::file::encode::encode_fact(&fact)
         }
         Some(content::reaction::TYPE_CONTENT_REACTION) => {
-            let mut fact = content::reaction::layout::decode_fact(&payload)?;
+            let mut fact = content::reaction::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &content::reaction::layout::signing_bytes(&fact)?,
+                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                    &fact,
+                    content::reaction::encode::encode_fact,
+                )?,
             );
-            content::reaction::layout::encode_fact(&fact)
+            content::reaction::encode::encode_fact(&fact)
         }
         Some(content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION) => {
-            let mut fact = content::message_deletion::layout::decode_fact(&payload)?;
+            let mut fact = content::message_deletion::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &content::message_deletion::layout::signing_bytes(&fact)?,
+                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                    &fact,
+                    content::message_deletion::encode::encode_fact,
+                )?,
             );
-            content::message_deletion::layout::encode_fact(&fact)
+            content::message_deletion::encode::encode_fact(&fact)
         }
         Some(content::file_deletion::TYPE_CONTENT_FILE_DELETION) => {
-            let mut fact = content::file_deletion::layout::decode_fact(&payload)?;
+            let mut fact = content::file_deletion::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &content::file_deletion::layout::signing_bytes(&fact)?,
+                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                    &fact,
+                    content::file_deletion::encode::encode_fact,
+                )?,
             );
-            content::file_deletion::layout::encode_fact(&fact)
+            content::file_deletion::encode::encode_fact(&fact)
         }
         _ => Err("unsupported test payload type".to_string()),
     }

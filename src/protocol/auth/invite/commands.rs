@@ -136,7 +136,7 @@ pub fn create(
     let invite_secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        super::layout::encode_fact(&invite_secret)?,
+        super::encode::encode_fact(&invite_secret)?,
     );
     facts.push(invite_secret_fact.clone());
     facts.splice(0..0, endpoint_output.effects.facts);
@@ -182,7 +182,7 @@ pub fn create_device_link(
         .ok_or_else(|| "local endpoint user is missing".to_string())?;
 
     let invite_private_key = crypto::random_ed25519_private_key();
-    let device_invite_fact = auth::device_invite::create::signed_device_invite_fact(
+    let device_invite_fact = auth::device_invite::author::signed_device_invite_fact(
         input.created_at_ms.saturating_add(1),
         input.workspace_id,
         user.user_id,
@@ -199,7 +199,7 @@ pub fn create_device_link(
     let invite_secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        super::layout::encode_fact(&invite_secret)?,
+        super::encode::encode_fact(&invite_secret)?,
     );
     let mut facts = endpoint_output.effects.facts;
     facts.push(device_invite_fact.clone());
@@ -234,7 +234,7 @@ pub fn create_invite_server(
     let local = endpoint_output.receipt.endpoint;
     let authority = local_admin_id(ctx.store(), input.workspace_id, local.signing_public_key)?;
     let invite_private_key = crypto::random_ed25519_private_key();
-    let invite_server_fact = auth::invite_server::create::signed_invite_server_fact(
+    let invite_server_fact = auth::invite_server::author::signed_invite_server_fact(
         input.created_at_ms.saturating_add(1),
         crypto::ed25519_public_key(&invite_private_key),
         input.workspace_id,
@@ -251,7 +251,7 @@ pub fn create_invite_server(
     let invite_secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        super::layout::encode_fact(&invite_secret)?,
+        super::encode::encode_fact(&invite_secret)?,
     );
     let mut facts = endpoint_output.effects.facts;
     facts.push(invite_server_fact.clone());
@@ -423,7 +423,7 @@ fn workspace_accept_device_invite_fact(
     user_invite_fact_id: FactId,
     bootstrap_secret: [u8; 32],
 ) -> Result<Fact, String> {
-    auth::device_invite::create::signed_device_invite_fact(
+    auth::device_invite::author::signed_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_id,
@@ -602,13 +602,16 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
     let mut endpoint = endpoint;
     let (_, signature) = crypto::ed25519_sign_canonical(
         &input.signer_private_key,
-        &auth::endpoint_shared::layout::signing_bytes(&endpoint)?,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &endpoint,
+            auth::endpoint_shared::encode::encode_fact,
+        )?,
     );
     endpoint.signature = signature;
     Ok(Fact::new(
         FactScope::Global,
         input.created_at_ms,
-        auth::endpoint_shared::layout::encode_fact(&endpoint)?,
+        auth::endpoint_shared::encode::encode_fact(&endpoint)?,
     ))
 }
 
@@ -728,10 +731,10 @@ fn local_admin_id(
     }
 
     store
-        .table_rows_with_key_prefix(auth::admin::rows::ADMIN_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(auth::admin::ADMIN_ROWS, &workspace_id, usize::MAX)
         .map_err(|err| format!("load admin rows: {err}"))?
         .into_iter()
-        .map(|(key, value)| auth::admin::rows::decode_admin_row(&key, &value))
+        .map(|(key, value)| auth::admin::queries::decode_admin_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .find(|admin| admin.user_fact_id == membership.user_authority_fact_id)
@@ -751,11 +754,7 @@ fn reject_duplicate_join(
     prefix.extend_from_slice(&endpoint_id);
     prefix.extend_from_slice(&workspace_id);
     if !store
-        .table_rows_with_key_prefix(
-            auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
-            &prefix,
-            1,
-        )
+        .table_rows_with_key_prefix(auth::invite_accepted::INVITE_ACCEPTED_ROWS, &prefix, 1)
         .map_err(|err| format!("load accepted invites: {err}"))?
         .is_empty()
     {

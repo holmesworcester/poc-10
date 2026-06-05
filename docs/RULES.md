@@ -56,17 +56,17 @@ in `src/core` or `src/protocol`.
   matchers, projection contracts, intents, handler dispatch, store, wire,
   crypto, network queues, TCP, clock, and schema declarations.
 - `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
-  fact shape (`fact.rs`), canonical byte construction and transcripts
-  (`encode.rs`), byte parsing (`decode.rs`), primary-fact authentication
-  (`authenticate.rs`), semantic adaptation (`adapt.rs`), local authoring
-  (`author.rs`), commands (`commands.rs`), projection, schema-backed row
-  materialization, queries, CLI adapters, and context helpers as applicable.
-- `layout.rs` and `create.rs` are transitional names for unmigrated families.
-  In target code, byte rules move to `encode.rs` and `decode.rs`, and pure fact
-  construction moves to `author.rs`; runtime gathering remains in
-  `commands.rs`. Handwritten fact-family `rows.rs` files are transitional too:
-  converted families declare row shape through schema metadata and keep
-  materialization policy in `project.rs` and read semantics in `queries.rs`.
+  fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), byte parsing
+  (`decode.rs`), primary-fact authentication (`authenticate.rs`), semantic
+  adaptation (`adapt.rs`), local authoring (`author.rs`), commands
+  (`commands.rs`), projection, schema-backed row materialization, queries, CLI
+  adapters, and context helpers as applicable.
+- Routed fact families do not use `layout.rs`, `create.rs`, or handwritten
+  fact-family `rows.rs` files. Byte rules live in `encode.rs` and `decode.rs`;
+  pure fact construction, signing, encryption, and assembly live in
+  `author.rs`; runtime gathering remains in `commands.rs`; row shape is declared
+  through schema metadata or clearly named non-family modules such as sync
+  `index.rs` / `staging.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
@@ -150,25 +150,20 @@ explicitly archived or the user asks for history.
 
 Non-trivial projectors should make their proof shape obvious to a reviewer:
 
-1. Authenticate in `authenticate.rs`: a reviewable policy (decoded bytes or
-   legacy decode, fact id, signature, intrinsic field rules) that returns an
-   `AuthenticatedFact`. Keep its shape uniform; it owns no context, authority,
-   or rows.
-2. Converted families implement `Projector::project()` as a small call through
+1. Authenticate in `authenticate.rs`: a reviewable policy (decoded bytes, fact
+   id, signature/container proof, intrinsic field rules, and narrow
+   authentication needs) that returns an `AuthenticatedFact` or parks on
+   `NeedsAuthentication`. It owns no authority, rows, or materialization.
+2. Fact families implement `Projector::project()` as a small call through
    `core::pipeline::project_staged::<ModuleCodec, ModuleAuthenticator, ModuleAdapter, _>()`
-   and set the route's `FactPipeline::Staged` metadata. Transitional families
-   may still call
-   `core::pipeline::project_authenticated::<ModuleAuthenticator, _>()`. The
-   staged runner owns `decode -> authenticate -> adapt -> project`; projector
-   files keep only the typed projector body.
-3. Put the real proof in
-   `AuthenticatedProjector<ModuleAuthenticator>::project_authenticated()`,
-   or `SemanticProjector<SemanticFact>::project_semantic()` for staged routes,
-   binding `let (fact, payload) = authenticated.into_parts();` when using the
-   compatibility authenticated body. Body comments should explain the block
-   they guard; do not require numbered references back to the module policy.
-   The top-of-file policy still names the projector's proof shape, while
-   structural/authentication proof lives in `authenticate.rs`.
+   and set the route's `FactPipeline::Staged` metadata. The staged runner owns
+   `decode -> authenticate -> adapt -> project`; projector files keep only the
+   typed semantic projector body.
+3. Put semantic proof in
+   `SemanticProjector<SemanticFact>::project_semantic()`. Body comments should
+   explain the block they guard; do not require numbered references back to the
+   module policy. The top-of-file policy still names the projector's proof
+   shape, while structural/authentication proof lives in `authenticate.rs`.
 4. Name every security-sensitive context need in a small struct or local
    binding. Avoid positional `needs[0]` contracts.
 5. Split real authority branches into path-specific functions whose names say
@@ -294,10 +289,10 @@ projection rows directly, run projectors, or become a second command layer.
 ### Wire And Codec Style
 
 Wire layouts are protocol contracts. In converted families, `encode.rs` owns
-canonical bytes and pure transcript helpers, while `decode.rs` owns tag checks,
-byte lengths, enum validation, and canonical padding. `author.rs` owns actual
-signing, encryption, assembly, and calls to `encode.rs`. Core wire primitives
-supply syntax; the fact module supplies meaning.
+canonical bytes only, while `decode.rs` owns tag checks, byte lengths, enum
+validation, and canonical padding. `author.rs` owns actual signing, encryption,
+assembly, and calls to `encode.rs`. Core wire primitives supply syntax; the
+fact module supplies meaning.
 
 ## Sync And Connection Frames
 
@@ -330,11 +325,10 @@ modules. There is no seal-mode discriminator and no separate envelope or
 transit-wrapper fact in another module.
 
 - In target code, `author.rs` seals a fact when it generates it: sealing is
-  wrapping, and wrapping is authoring's job. `encode.rs` owns pure transcript
-  and serialization helpers. Handshake facts are sealed asymmetrically to the
-  recipient endpoint; established frames are sealed with the
-  `connection_secret`. `create.rs` is only a transitional name for unmigrated
-  families.
+  wrapping, and wrapping is authoring's job. `encode.rs` owns canonical byte
+  serialization only. Handshake facts are sealed asymmetrically to the recipient
+  endpoint; established frames are sealed with the `connection_secret`.
+  `create.rs` is only a transitional name for unmigrated families.
 - Unsealing is a context need. A receiver opens a sealed connection fact in that
   fact's own projector, which declares a context need for its unseal key —
   `auth_local_endpoint` (the local endpoint secret) for handshake facts,

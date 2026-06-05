@@ -6,27 +6,24 @@
 //! file coordinate. Keep deletion authorization here; file metadata and slice
 //! projection only consume the resulting context and remove their own state.
 
+pub mod adapt;
 pub mod authenticate;
+pub mod author;
 pub mod cli;
 pub mod commands;
-pub mod create;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
-pub mod rows;
+pub mod queries;
 
-pub const TYPE_CONTENT_FILE_DELETION: u8 = layout::TYPE_CONTENT_FILE_DELETION;
+pub(crate) use decode::Codec;
+
+pub const TYPE_CONTENT_FILE_DELETION: u8 = encode::TYPE_CONTENT_FILE_DELETION;
+
+pub const FILE_DELETION_ROWS: crate::core::store::TableName =
+    crate::protocol::registry::read_models::FILE_DELETION_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileDeletionFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::ContentFileDeletionFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+    decode::decode_fact(bytes)
 }

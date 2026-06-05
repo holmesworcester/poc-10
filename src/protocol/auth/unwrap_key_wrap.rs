@@ -12,7 +12,7 @@ use crate::core::intents::{
 
 type FactId = HandlerFactId;
 
-use crate::protocol::auth::key_wrap::create;
+use crate::protocol::auth::key_wrap::author;
 
 pub const UNWRAP_KEY_WRAP: &str = "unwrap_key_wrap";
 
@@ -104,7 +104,7 @@ impl IntentHandler for UnwrapKeyWrapHandler {
         let local_recipient_key = context.require_fact(&input.local_recipient_key_id)?;
         let recipient = context.require_fact(&input.recipient_key_id)?;
         let frontier = context.require_fact(&input.frontier_id)?;
-        let secret = create::unwrap_key_wrap_fact(
+        let secret = author::unwrap_key_wrap_fact(
             &input,
             key_wrap,
             local_recipient_key,

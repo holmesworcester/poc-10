@@ -11,15 +11,15 @@ use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth;
-use crate::protocol::auth::endpoint::create::local_endpoint;
+use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::connection::ephemeral_secret::encode as ephemeral_encode;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
-use crate::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 use super::queries::choose_connection_mode;
-use super::{create as request_create, layout};
+use super::{author as request_create, encode};
 
 pub const CONNECT_USAGE: &str = "connect ENDPOINT_ID_HEX ADDR";
 
@@ -71,7 +71,7 @@ pub fn create_bootstrap(
     let invite_secret_fact = Fact::new(
         FactScope::Local,
         input.created_at_ms,
-        auth::invite::layout::encode_fact(&invite_secret)?,
+        auth::invite::encode::encode_fact(&invite_secret)?,
     );
     let (ephemeral, ephemeral_fact) = ephemeral_fact(
         input.local_endpoint.endpoint,
@@ -201,7 +201,7 @@ fn ephemeral_fact(
     let fact = Fact::new(
         FactScope::Local,
         created_at_ms,
-        ephemeral_layout::encode_fact(&ephemeral)?,
+        ephemeral_encode::encode_fact(&ephemeral)?,
     );
     Ok((ephemeral, fact))
 }
@@ -212,7 +212,7 @@ fn sealed_request_fact(
     created_at_ms: u64,
 ) -> Result<Fact, String> {
     request_create::validate_mode_shape(request)?;
-    let sealed = layout::seal_fact(request, ephemeral_private_key)?;
+    let sealed = encode::seal_fact(request, ephemeral_private_key)?;
     Ok(Fact::new(FactScope::Global, created_at_ms, sealed))
 }
 
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(output.receipt.request_id, output.effects.facts[1].id);
         assert_eq!(
             output.effects.facts[1].body()[0],
-            layout::TYPE_CONNECTION_REQUEST
+            encode::TYPE_CONNECTION_REQUEST
         );
     }
 

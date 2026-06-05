@@ -17,8 +17,8 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::pipeline::{
-    project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
-    Projector, SemanticProjector, TimeWake,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
+    SemanticProjector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -31,6 +31,14 @@ use crate::protocol::sync::shared_fact::project::{
 };
 
 use super::fact::{AuthorId, ContentMessageFact, SignerId, WorkspaceId, UNIX_MINUTE_MS};
+
+/// Staged read pipeline for the content-message fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "content::message::decode::Codec",
+    authenticate: "content::message::authenticate::ContentMessageAuthenticator",
+    adapt: "content::message::adapt::ContentMessageAdapter",
+    project: "content::message::project::ContentMessageProjector",
+};
 
 pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
 
@@ -173,24 +181,11 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
         message: super::fact::ContentMessageFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        self.project_authenticated(AuthenticatedFact::new(fact, message), context)
-    }
-}
-
-impl AuthenticatedProjector<super::authenticate::ContentMessageAuthenticator>
-    for ContentMessageProjector
-{
-    fn project_authenticated(
-        &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ContentMessageFact>,
-        context: &ProjectionContext,
-    ) -> Result<ProjectionOutput, String> {
         // Authentication (see authenticate.rs) proved canonical bytes and the
         // author signature. Scope is interpretation, not authentication — it
         // gates on unsigned admission metadata — so it is checked here, behind
         // the lens and the single ceiling projector, where the workspace-id
         // shape and this rule can evolve.
-        let (fact, message) = authenticated.into_parts();
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         if fact.scope != scope {
             return Err("content message fact scope does not match body workspace".to_string());
@@ -447,8 +442,8 @@ fn matched_secret_payload<'a>(
         if !coverage::secret_coverage_offer_valid_for_need(need, offer) {
             return Err("content message secret context offer does not match need".to_string());
         }
-        if auth::local_key_secret::layout::decode_local_key_secret(payload.body()).is_ok()
-            || auth::local_history_node_secret::layout::decode_local_history_node_secret(
+        if auth::local_key_secret::decode::decode_local_key_secret(payload.body()).is_ok()
+            || auth::local_history_node_secret::decode::decode_local_history_node_secret(
                 payload.body(),
             )
             .is_ok()
@@ -464,7 +459,7 @@ fn decrypt_text(
     secret_payload: &Fact,
 ) -> Result<String, String> {
     let key = if let Ok(secret) =
-        auth::local_key_secret::layout::decode_local_key_secret(secret_payload.body())
+        auth::local_key_secret::decode::decode_local_key_secret(secret_payload.body())
     {
         if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
         {
@@ -472,7 +467,7 @@ fn decrypt_text(
         }
         secret.key_secret
     } else {
-        let node = auth::local_history_node_secret::layout::decode_local_history_node_secret(
+        let node = auth::local_history_node_secret::decode::decode_local_history_node_secret(
             secret_payload.body(),
         )
         .map_err(|_| "content message secret context is not local key material".to_string())?;
@@ -733,19 +728,19 @@ mod projector_tests {
     use topo::core::intents::RowMutation;
     use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint_shared::{
+        encode as endpoint_shared_layout,
         fact::{EndpointRole, EndpointSharedFact},
-        layout as endpoint_shared_layout,
     };
     use topo::protocol::auth::local_history_node_secret::project as coverage;
-    use topo::protocol::auth::local_key_secret::{fact::LocalKeySecretFact, layout as auth_layout};
+    use topo::protocol::auth::local_key_secret::{encode as auth_layout, fact::LocalKeySecretFact};
     use topo::protocol::content::message::fact::{ContentMessageFact, MessageCiphertext};
     use topo::protocol::content::message::{author, encode, project};
+    use topo::protocol::content::message_deletion::encode as deletion_layout;
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
-    use topo::protocol::content::message_deletion::layout as deletion_layout;
     use topo::protocol::content::purge::project as content_purge;
     use topo::protocol::registry::read_models;
 
-    use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
+    use topo::protocol::auth::user::{encode as user_layout, fact::UserFact};
 
     const CONTENT_SIGNING_KEY: [u8; 32] = [7; 32];
     const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [13; 32];
@@ -957,7 +952,11 @@ mod projector_tests {
         message.expires_at_minute = message.minute + 1;
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &encode::signing_bytes(&message).expect("message signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &message,
+                encode::encode_fact,
+            )
+            .expect("message signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
@@ -1043,7 +1042,11 @@ mod projector_tests {
         };
         deletion.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &deletion_layout::signing_bytes(&deletion).expect("deletion signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &deletion,
+                deletion_layout::encode_fact,
+            )
+            .expect("deletion signing bytes"),
         );
         let deletion_fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
@@ -1092,7 +1095,11 @@ mod projector_tests {
         };
         user.signature = crypto::ed25519_sign(
             &signing_key,
-            &user_layout::signing_bytes(&user).expect("user signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &user,
+                user_layout::encode_fact,
+            )
+            .expect("user signing bytes"),
         );
         Fact::new(
             FactScope::Global,
@@ -1132,7 +1139,11 @@ mod projector_tests {
         };
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &encode::signing_bytes(&message).expect("message signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &message,
+                encode::encode_fact,
+            )
+            .expect("message signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
@@ -1160,7 +1171,11 @@ mod projector_tests {
         };
         signer.signature = crypto::ed25519_sign(
             &ENDPOINT_AUTHORITY_KEY,
-            &endpoint_shared_layout::signing_bytes(&signer).expect("endpoint signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &signer,
+                endpoint_shared_layout::encode_fact,
+            )
+            .expect("endpoint signing bytes"),
         );
         Fact::new(
             FactScope::Global,

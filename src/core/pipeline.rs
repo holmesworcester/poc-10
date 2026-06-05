@@ -42,17 +42,15 @@ pub mod route;
 
 pub use adapt::Adapter;
 pub use authenticate::{
-    authenticate_authored, verify_fact_id, AuthenticatedFact, Authentication, Authenticator,
-    DecodedAuthenticator,
+    authenticate_authored, verify_fact_id, AuthenticatedFact, Authentication, DecodedAuthenticator,
 };
 pub use context::{MatchedContext, ProjectionContext};
 pub use decode::FactCodec;
 pub use effects::{ProjectionOutput, TimeRange, TimeWake, Timeline};
-pub use project::{
-    project_authenticated, project_staged, AuthenticatedProjector, SemanticProjector,
-};
+pub use project::{project_staged, SemanticProjector};
 pub use route::{
-    EffectiveTagFn, EnvelopeRoute, FactPipeline, FactRoute, Projector, ProjectorFn, RouterProjector,
+    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactPipeline, FactRoute, Projector,
+    ProjectorFn, RouterProjector,
 };
 
 /// Public outcome returned by runtime pipeline calls.
@@ -297,6 +295,25 @@ mod tests {
     }
 
     #[test]
+    fn staged_pipeline_preserves_multiple_authentication_needs() {
+        let fact = Fact::new(FactScope::Global, 1, vec![200, 3]);
+        let output =
+            project_staged::<ModelCodec, ModelAuthenticator, ModelAdapter, ModelProjector>(
+                &ModelProjector,
+                &fact,
+                &ProjectionContext::default(),
+            )
+            .expect("authentication needs park");
+
+        assert_eq!(output.needs.len(), 2);
+        assert_eq!(output.needs[0].role.as_str(), "model_auth");
+        assert_eq!(output.needs[0].start_key.as_bytes(), &[3]);
+        assert_eq!(output.needs[1].role.as_str(), "model_auth_fallback");
+        assert_eq!(output.needs[1].start_key.as_bytes(), &[4]);
+        assert!(output.offers.is_empty());
+    }
+
+    #[test]
     fn fact_route_records_staged_pipeline_metadata() {
         fn model_projector(
             fact: &Fact,
@@ -358,13 +375,23 @@ mod tests {
         ) -> Authentication<'a, Self::Authenticated> {
             match decoded {
                 0 => Authentication::Invalid("zero is not authentic".to_string()),
-                2 => Authentication::NeedsAuthentication(ContextNeed::range(
+                2 => Authentication::need(ContextNeed::range(
                     fact.id,
                     "model_auth",
                     FactScope::Global,
                     vec![2],
                     vec![2],
                 )),
+                3 => Authentication::needs([
+                    ContextNeed::range(fact.id, "model_auth", FactScope::Global, vec![3], vec![3]),
+                    ContextNeed::range(
+                        fact.id,
+                        "model_auth_fallback",
+                        FactScope::Global,
+                        vec![4],
+                        vec![4],
+                    ),
+                ]),
                 value => Authentication::Authenticated(AuthenticatedFact::new(fact, value)),
             }
         }

@@ -8,8 +8,7 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
@@ -19,6 +18,14 @@ use crate::protocol::auth::local_secret_retirement;
 use crate::protocol::auth::removal_frontier;
 
 use super::fact::LocalKeySecretFact;
+
+/// Staged read pipeline for the local_key_secret fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::local_key_secret::Codec",
+    authenticate: "auth::local_key_secret::authenticate::LocalKeySecretAuthenticator",
+    adapt: "auth::local_key_secret::adapt::LocalKeySecretAdapter",
+    project: "auth::local_key_secret::project::LocalKeySecretProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalKeySecretProjector;
@@ -35,21 +42,22 @@ impl Projector for LocalKeySecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::LocalKeySecretAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::LocalKeySecretAuthenticator,
+            super::adapt::LocalKeySecretAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::LocalKeySecretAuthenticator>
-    for LocalKeySecretProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<LocalKeySecretFact> for LocalKeySecretProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, LocalKeySecretFact>,
+        fact: &Fact,
+        secret: LocalKeySecretFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, secret) = authenticated.into_parts();
         project_local_key_secret(fact, context, secret)
     }
 }

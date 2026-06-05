@@ -12,27 +12,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ConnectionFactReceipt;
 
 pub(crate) struct ConnectionFactReceiptAuthenticator;
 
-impl Authenticator for ConnectionFactReceiptAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ConnectionFactReceiptAuthenticator {
     type Authenticated = ConnectionFactReceipt;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        received: ConnectionFactReceipt,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_fact_receipt(fact))
+        Authentication::from_result(fact, prove_decoded_fact_receipt(fact, received))
     }
 }
 
-fn authenticate_fact_receipt(fact: &Fact) -> Result<ConnectionFactReceipt, String> {
-    // 1. Layout.
-    let received = super::Codec::decode_fact(fact)?;
+fn prove_decoded_fact_receipt(
+    fact: &Fact,
+    received: ConnectionFactReceipt,
+) -> Result<ConnectionFactReceipt, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(received)
@@ -41,11 +43,13 @@ fn authenticate_fact_receipt(fact: &Fact) -> Result<ConnectionFactReceipt, Strin
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::connection::fact_receipt::encode;
     use crate::protocol::connection::fact_receipt::fact::{
         ConnectionFactReceipt, OriginAddr, RECEIVE_PATH_CONNECTION,
     };
-    use crate::protocol::connection::fact_receipt::layout;
 
     use super::ConnectionFactReceiptAuthenticator;
 
@@ -64,12 +68,19 @@ mod tests {
         Fact::new(
             FactScope::Local,
             100,
-            layout::encode_fact(&receipt).expect("encode receipt"),
+            encode::encode_fact(&receipt).expect("encode receipt"),
         )
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFactReceipt> {
-        ConnectionFactReceiptAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ConnectionFactReceiptAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

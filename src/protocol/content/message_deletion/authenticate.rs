@@ -14,33 +14,49 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ContentMessageDeletionFact;
 
 pub(crate) struct ContentMessageDeletionAuthenticator;
 
-impl Authenticator for ContentMessageDeletionAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ContentMessageDeletionAuthenticator {
     type Authenticated = ContentMessageDeletionFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        deletion: ContentMessageDeletionFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_message_deletion(fact))
+        Authentication::from_result(fact, prove_decoded_message_deletion(fact, deletion))
     }
 }
 
-/// Prove a content-message-deletion fact authentic over its own bytes.
-fn authenticate_message_deletion(fact: &Fact) -> Result<ContentMessageDeletionFact, String> {
-    // 1. Layout.
-    let deletion = super::Codec::decode_fact(fact)?;
+fn prove_decoded_message_deletion(
+    fact: &Fact,
+    deletion: ContentMessageDeletionFact,
+) -> Result<ContentMessageDeletionFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&deletion)?;
+    verify_signature(&deletion)?;
     Ok(deletion)
+}
+
+/// Verify the message deletion's signature over its canonical envelope. The
+/// verifier key is embedded in the fact, so this is a context-free fact-boundary
+/// proof.
+pub fn verify_signature(fact: &ContentMessageDeletionFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "content message deletion",
+    )
 }
 
 #[cfg(test)]
@@ -48,8 +64,10 @@ mod tests {
     use crate::core::command_context::LocalSigningCapability;
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::content::message_deletion::create::delete_message;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::content::message_deletion::author::delete_message;
     use crate::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
 
     use super::ContentMessageDeletionAuthenticator;
@@ -80,7 +98,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentMessageDeletionFact> {
-        ContentMessageDeletionAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ContentMessageDeletionAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

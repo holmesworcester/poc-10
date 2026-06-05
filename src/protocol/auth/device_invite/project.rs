@@ -13,14 +13,21 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, user, user_invite, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::rows::device_invite_row;
+use super::device_invite_row;
+
+/// Staged read pipeline for the device_invite fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::device_invite::Codec",
+    authenticate: "auth::device_invite::authenticate::DeviceInviteAuthenticator",
+    adapt: "auth::device_invite::adapt::DeviceInviteAdapter",
+    project: "auth::device_invite::project::DeviceInviteProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct DeviceInviteProjector;
@@ -37,21 +44,22 @@ impl Projector for DeviceInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::DeviceInviteAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::DeviceInviteAuthenticator,
+            super::adapt::DeviceInviteAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::DeviceInviteAuthenticator>
-    for DeviceInviteProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<DeviceInviteFact> for DeviceInviteProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, DeviceInviteFact>,
+        fact: &Fact,
+        device_invite: DeviceInviteFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, device_invite) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Global {
             return Err("device_invite fact must have global scope".to_string());

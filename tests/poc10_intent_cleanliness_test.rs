@@ -443,6 +443,7 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut missing_delegation = Vec::new();
     let mut missing_module = Vec::new();
+    let mut legacy_surface = Vec::new();
 
     for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
@@ -455,24 +456,29 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
         }
 
         // Primary decode + authentication belong to the family authenticator.
-        // Old families delegate to `project_authenticated::<Authenticator, _>`;
-        // staged families delegate to
-        // `project_staged::<Codec, Authenticator, Adapter, _>`.
-        let delegates_authenticated =
-            production.contains("project_authenticated::<super::authenticate::");
+        // Every family delegates `Projector::project` to
+        // `project_staged::<Codec, Authenticator, Adapter, _>` and implements
+        // `SemanticProjector`; the composed model has been removed.
         let delegates_staged = production.contains("project_staged::<")
-            && production.contains("super::decode::")
             && production.contains("super::authenticate::")
             && production.contains("super::adapt::")
             && production.contains("impl SemanticProjector<");
-        let routes_authenticated = delegates_staged
-            || (delegates_authenticated
-                && production.contains("impl AuthenticatedProjector<super::authenticate::"));
-        if !routes_authenticated {
+        if !delegates_staged {
             missing_delegation.push(relative.clone());
         }
 
-        // The family it delegates to must actually exist.
+        // The removed composed-model surface must not reappear.
+        for legacy in [
+            "project_authenticated",
+            "AuthenticatedProjector",
+            "ProjectorComposed",
+        ] {
+            if production.contains(legacy) {
+                legacy_surface.push(format!("{relative} still references {legacy}"));
+            }
+        }
+
+        // The family authenticator it delegates to must actually exist.
         if !path.with_file_name("authenticate.rs").is_file() {
             missing_module.push(relative);
         }
@@ -480,10 +486,16 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
 
     assert!(
         missing_delegation.is_empty(),
-        "every fact-module projector must delegate Projector::project to project_staged \
-         or project_authenticated with its family authenticate.rs, so primary bytes are \
-         decoded/authenticated before projector policy runs:\n{}",
+        "every fact-module projector must delegate Projector::project to \
+         project_staged::<Codec, Authenticator, Adapter, _> and implement SemanticProjector, \
+         so primary bytes are decoded/authenticated before projector policy runs:\n{}",
         missing_delegation.join("\n")
+    );
+    assert!(
+        legacy_surface.is_empty(),
+        "the composed model is removed; no project.rs may reference project_authenticated, \
+         AuthenticatedProjector, or ProjectorComposed:\n{}",
+        legacy_surface.join("\n")
     );
     assert!(
         missing_module.is_empty(),
@@ -527,7 +539,7 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
         for marker in [
-            "::layout::decode_fact",
+            "::decode::decode_fact",
             "layout as ",
             "_layout::decode_fact",
             "_layout::decode_",
@@ -1160,25 +1172,25 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 14] = [
+const STANDARD_FAMILY_FILES: [&str; 13] = [
     "fact.rs",
     "encode.rs",
     "decode.rs",
     "adapt.rs",
     "author.rs",
-    "layout.rs",
     // Primary-fact authentication: decode + id-check + fact-boundary signature
     // or container opening + intrinsic field rules, ahead of projection.
     "authenticate.rs",
     "project.rs",
-    "rows.rs",
     "queries.rs",
-    "create.rs",
     "commands.rs",
     "cli.rs",
+    // Sync support roles that are not fact-family row detours.
+    "index.rs",
+    "staging.rs",
     // Wire-transport encoding for a fact family whose canonical bytes are sent
     // sealed on the wire (request/connection), kept separate from the
-    // durable `layout.rs`.
+    // durable `encode.rs`.
     "transit.rs",
 ];
 
@@ -1532,21 +1544,21 @@ fn received_connection_frame_families_have_create_role_files() {
             .join("src/protocol/connection")
             .join(format!("{family}.rs"));
         let dir = root.join("src/protocol/connection").join(family);
-        if !dir.join("create.rs").is_file() {
+        if !dir.join("author.rs").is_file() {
             offenders.push(format!(
-                "src/protocol/connection/{family}/create.rs is missing"
+                "src/protocol/connection/{family}/author.rs is missing"
             ));
         }
-        if !source_text(&manifest).contains("pub mod create;") {
+        if !source_text(&manifest).contains("pub mod author;") {
             offenders.push(format!(
-                "src/protocol/connection/{family}.rs does not declare create"
+                "src/protocol/connection/{family}.rs does not declare author"
             ));
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "received connection-frame fact families must keep boundary construction in create.rs:\n{}",
+        "received connection-frame fact families must keep boundary construction in author.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -1606,13 +1618,13 @@ fn connection_frame_send_and_receive_paths_use_frame_fact_create_helpers() {
     let mut offenders = Vec::new();
 
     for family in ["frame_small", "frame_file_slice", "frame_bundle"] {
-        let direct_create = format!("{family}::create::fact_from_wire");
+        let direct_create = format!("{family}::author::fact_from_wire");
         if !receive.contains(&direct_create) {
             offenders.push(format!(
                 "receive_network_frame.rs does not create {family} through create.rs"
             ));
         }
-        let policy_create = format!("connection::{family}::create::fact_from_wire");
+        let policy_create = format!("connection::{family}::author::fact_from_wire");
         if !frame_policy.contains(&policy_create) {
             offenders.push(format!(
                 "connection_frame.rs does not route send frame bytes through {family}::create"

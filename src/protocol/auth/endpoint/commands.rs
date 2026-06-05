@@ -2,12 +2,12 @@
 //!
 //! Endpoint commands are local identity work. They return a local endpoint
 //! fact when no complete local keypair exists yet, reusing the constructors and
-//! capability access in `create.rs`.
+//! capability access in `author.rs`.
 
 use crate::core::command_context::CommandOutput;
 use crate::core::store::Store;
 
-use super::create::{create_local_endpoint, endpoint_fact, local_endpoint};
+use super::author::{create_local_endpoint, endpoint_fact, local_endpoint};
 use super::fact::EndpointFact;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,10 +42,10 @@ mod tests {
     use crate::core::facts::FactScope;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
-    use crate::protocol::auth::endpoint::layout;
+    use crate::protocol::auth::endpoint::decode;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
-    use super::super::create::create_local_endpoint;
+    use super::super::author::create_local_endpoint;
     use super::*;
 
     #[test]
@@ -61,7 +61,7 @@ mod tests {
         assert_eq!(output.effects.facts[0].scope, FactScope::Local);
         assert_eq!(output.effects.facts[0].timestamp, 10);
         assert_eq!(
-            layout::decode_fact(&output.effects.facts[0].bytes).expect("decode"),
+            decode::decode_fact(&output.effects.facts[0].bytes).expect("decode"),
             output.receipt.endpoint
         );
     }
@@ -72,7 +72,7 @@ mod tests {
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("open store");
         let endpoint = create_local_endpoint();
-        let fact = super::super::create::endpoint_fact(10, endpoint).expect("endpoint fact");
+        let fact = super::super::author::endpoint_fact(10, endpoint).expect("endpoint fact");
         crate::core::pipeline::submit_fact_to_store(&store, fact).expect("submit fact");
 
         let output = local_or_create(&store, 20).expect("reuse endpoint");

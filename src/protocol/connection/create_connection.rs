@@ -126,19 +126,19 @@ use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
-use crate::protocol::auth::endpoint::create as local_endpoint;
+use crate::protocol::auth::endpoint::author as local_endpoint;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::invite;
-use crate::protocol::connection::connection::create::{
+use crate::protocol::connection::connection::author::{
     build_responder_connection, BuildResponderConnection,
 };
 use crate::protocol::connection::ephemeral_secret::{
-    fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
+    encode as ephemeral_layout, fact::ConnectionEphemeralSecretFact,
 };
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::request::create as request_create;
+use crate::protocol::connection::request::author as request_create;
+use crate::protocol::connection::request::decode as request_layout;
 use crate::protocol::connection::request::fact::{REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
-use crate::protocol::connection::request::layout as request_layout;
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Default)]

@@ -13,8 +13,7 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
@@ -213,6 +212,15 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 // Local history-node secret projector.
 // ---------------------------------------------------------------------------
 
+/// Staged read pipeline for the local_history_node_secret fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::local_history_node_secret::Codec",
+    authenticate:
+        "auth::local_history_node_secret::authenticate::LocalHistoryNodeSecretAuthenticator",
+    adapt: "auth::local_history_node_secret::adapt::LocalHistoryNodeSecretAdapter",
+    project: "auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector",
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct LocalHistoryNodeSecretProjector;
 
@@ -228,21 +236,22 @@ impl Projector for LocalHistoryNodeSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::LocalHistoryNodeSecretAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::LocalHistoryNodeSecretAuthenticator,
+            super::adapt::LocalHistoryNodeSecretAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::LocalHistoryNodeSecretAuthenticator>
-    for LocalHistoryNodeSecretProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<LocalHistoryNodeSecretFact> for LocalHistoryNodeSecretProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, LocalHistoryNodeSecretFact>,
+        fact: &Fact,
+        node: LocalHistoryNodeSecretFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, node) = authenticated.into_parts();
         project_local_history_node_secret(fact, context, node)
     }
 }

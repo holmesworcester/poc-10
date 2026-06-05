@@ -5,26 +5,53 @@
 //! work to send the fact when this store has it. The requested payload remains
 //! validated by its owning fact family after receipt.
 
+pub mod adapt;
 pub mod authenticate;
-pub mod create;
+pub mod author;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
+pub mod queries;
 
-pub const TYPE_SYNC_NEED_ID: u8 = layout::TYPE_SYNC_NEED_ID;
+use crate::core::facts::FactId;
+use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
+use crate::core::store::{TableName, TableRow};
+
+pub(crate) use decode::Codec;
+
+pub const TYPE_SYNC_NEED_ID: u8 = encode::TYPE_SYNC_NEED_ID;
+
+/// Sync need-id projection rows, keyed by `connection_id || fact_id`; the value
+/// stores the requested fact id. Keeping the fact id in the key keeps repeated
+/// needs for the same fact id distinct across compare rounds.
+pub const SYNC_NEED_ID_ROWS: TableName = TableName::new("sync_need_id_rows");
+
+const SYNC_NEED_ID_ROW_KEY_FIELDS: &[RowField] = &[
+    RowField::bytes32("connection_id"),
+    RowField::bytes32("fact_id"),
+];
+const SYNC_NEED_ID_ROW_VALUE_FIELDS: &[RowField] = &[RowField::bytes32("requested_fact_id")];
+
+pub const SYNC_NEED_ID_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
+    SYNC_NEED_ID_ROWS,
+    SYNC_NEED_ID_ROW_KEY_FIELDS,
+    SYNC_NEED_ID_ROW_VALUE_FIELDS,
+);
+
+pub fn sync_need_id_row(
+    row_fact_id: FactId,
+    fact: &fact::SyncNeedIdFact,
+) -> Result<TableRow, String> {
+    SYNC_NEED_ID_ROW_SCHEMA.row(
+        &[
+            RowValue::Bytes(fact.connection_id.to_vec()),
+            RowValue::Bytes(row_fact_id.to_vec()),
+        ],
+        &[RowValue::Bytes(fact.fact_id.to_vec())],
+    )
+}
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncNeedIdFact, String> {
-    layout::decode_fact(bytes)
+    decode::decode_fact(bytes)
 }
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::SyncNeedIdFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
-}
-
-pub mod rows;

@@ -12,31 +12,33 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::InviteServerFact;
 
 pub(crate) struct InviteServerAuthenticator;
 
-impl Authenticator for InviteServerAuthenticator {
+impl DecodedAuthenticator<super::Codec> for InviteServerAuthenticator {
     type Authenticated = InviteServerFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        invite_server: InviteServerFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_invite_server(fact))
+        Authentication::from_result(fact, prove_decoded_invite_server(fact, invite_server))
     }
 }
 
-fn authenticate_invite_server(fact: &Fact) -> Result<InviteServerFact, String> {
-    // 1. Layout.
-    let invite_server = super::Codec::decode_fact(fact)?;
+fn prove_decoded_invite_server(
+    fact: &Fact,
+    invite_server: InviteServerFact,
+) -> Result<InviteServerFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&invite_server)?;
+    verify_signature(&invite_server)?;
     // 4. Non-zero selector fields.
     if invite_server.workspace_id == [0; 32] {
         return Err("invite_server fact has empty workspace_id".to_string());
@@ -50,12 +52,29 @@ fn authenticate_invite_server(fact: &Fact) -> Result<InviteServerFact, String> {
     Ok(invite_server)
 }
 
+/// Verify the invite-server's signature over its canonical envelope. The
+/// verifier key is embedded in the fact, so this is a context-free
+/// fact-boundary proof.
+pub fn verify_signature(fact: &InviteServerFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "invite server",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::invite_server::create::signed_invite_server_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::invite_server::author::signed_invite_server_fact;
     use crate::protocol::auth::invite_server::fact::InviteServerFact;
 
     use super::InviteServerAuthenticator;
@@ -76,7 +95,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, InviteServerFact> {
-        InviteServerAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => InviteServerAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

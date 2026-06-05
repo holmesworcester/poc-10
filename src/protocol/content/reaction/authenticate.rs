@@ -14,40 +14,57 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ContentReactionFact;
 
 pub(crate) struct ContentReactionAuthenticator;
 
-impl Authenticator for ContentReactionAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ContentReactionAuthenticator {
     type Authenticated = ContentReactionFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        reaction: ContentReactionFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_reaction(fact))
+        Authentication::from_result(fact, prove_decoded_reaction(fact, reaction))
     }
 }
 
-/// Prove a content-reaction fact authentic over its own bytes.
-fn authenticate_reaction(fact: &Fact) -> Result<ContentReactionFact, String> {
-    // 1. Layout.
-    let reaction = super::Codec::decode_fact(fact)?;
+fn prove_decoded_reaction(
+    fact: &Fact,
+    reaction: ContentReactionFact,
+) -> Result<ContentReactionFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&reaction)?;
+    verify_signature(&reaction)?;
     Ok(reaction)
+}
+
+/// Verify the reaction's signature over its canonical envelope. The verifier
+/// key is embedded in the fact, so this is a context-free fact-boundary proof.
+pub fn verify_signature(fact: &ContentReactionFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "content reaction",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::content::reaction::create::signed_reaction_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::content::reaction::author::signed_reaction_fact;
     use crate::protocol::content::reaction::fact::{
         ContentReactionFact, ReactionCiphertext, REACTION_NONCE_BYTES,
     };
@@ -71,7 +88,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentReactionFact> {
-        ContentReactionAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ContentReactionAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

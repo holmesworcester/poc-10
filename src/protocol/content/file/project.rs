@@ -11,21 +11,47 @@
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
-use crate::core::intents::{RowMutation, TableDeleteWhere};
+use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{
     file_deletion, message, message_deletion, purge::project as content_purge,
 };
+use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
-use super::rows::{content_file_row, FILE_KEY_COLUMNS, FILE_ROWS};
+use super::fact::ContentFileFact;
+use super::{FILE_KEY_COLUMNS, FILE_ROWS};
+
+/// Staged read pipeline for the file fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "content::file::Codec",
+    authenticate: "content::file::authenticate::ContentFileAuthenticator",
+    adapt: "content::file::adapt::ContentFileAdapter",
+    project: "content::file::project::ContentFileProjector",
+};
+
+fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableInsert {
+    read_models::CONTENT_FILES.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(file_fact_id.to_vec()),
+        Value::Bytes(fact.message_id.to_vec()),
+        Value::Bytes(fact.file_id.to_vec()),
+        Value::Bytes(fact.author_user_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.root_hash.to_vec()),
+        Value::U64(fact.blob_bytes),
+        Value::U64(u64::from(fact.total_slices)),
+        Value::U64(u64::from(fact.slice_bytes)),
+        Value::Bytes(fact.sealed_metadata.bytes().to_vec()),
+        Value::Bool(false),
+    ])
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileProjector;
@@ -42,21 +68,22 @@ impl Projector for ContentFileProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ContentFileAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ContentFileAuthenticator,
+            super::adapt::ContentFileAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ContentFileAuthenticator>
-    for ContentFileProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::ContentFileFact> for ContentFileProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ContentFileFact>,
+        fact: &Fact,
+        file: super::fact::ContentFileFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, file) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(file.workspace_id);
         require_fact_scope(fact, &scope)?;
@@ -370,7 +397,6 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::protocol::content::file::fact::{
         ContentFileFact, SealedMetadata, FILE_ROOT_HASH_BYTES,
     };

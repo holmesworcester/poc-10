@@ -10,7 +10,7 @@ use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind,
 };
 
-use crate::protocol::auth::key_wrap::create;
+use crate::protocol::auth::key_wrap::author;
 use crate::protocol::auth::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
 
 type FactId = HandlerFactId;
@@ -181,7 +181,7 @@ impl IntentHandler for CreateKeyWrapHandler {
         let source = context.require_fact(&input.source_fact_id)?;
         let signer_secret = context.require_fact(&input.signer_secret_fact_id)?;
         let wrap =
-            create::create_validated_key_wrap_fact(&input, recipient, source, signer_secret)?;
+            author::create_validated_key_wrap_fact(&input, recipient, source, signer_secret)?;
         Ok(PipelineEffects::new().fact(wrap))
     }
 }

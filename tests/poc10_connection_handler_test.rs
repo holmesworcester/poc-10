@@ -6,21 +6,22 @@ use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
-use topo::protocol::auth::endpoint::rows as endpoint_rows;
+use topo::protocol::auth::invite::encode as invite_layout;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
-use topo::protocol::auth::invite::layout as invite_layout;
-use topo::protocol::connection::connection::layout as connection_layout;
+use topo::protocol::connection::connection::decode as connection_layout;
 use topo::protocol::connection::create_connection::{
     create_connection_intent, CreateConnection, CreateConnectionHandler,
 };
-use topo::protocol::connection::ephemeral_secret::layout as ephemeral_layout;
+use topo::protocol::connection::ephemeral_secret::decode as ephemeral_layout_decode;
+use topo::protocol::connection::ephemeral_secret::encode as ephemeral_layout_encode;
+use topo::protocol::connection::fact_receipt::encode as received_layout;
 use topo::protocol::connection::fact_receipt::fact::{
     ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST,
 };
-use topo::protocol::connection::fact_receipt::layout as received_layout;
+use topo::protocol::connection::request::encode as request_layout;
 use topo::protocol::connection::request::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP};
-use topo::protocol::connection::request::layout as request_layout;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
@@ -57,7 +58,8 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
         .facts
         .iter()
         .find(|fact| {
-            fact.body().first().copied() == Some(ephemeral_layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
+            fact.body().first().copied()
+                == Some(ephemeral_layout_encode::TYPE_CONNECTION_EPHEMERAL_SECRET)
         })
         .expect("responder ephemeral fact");
     let connection_fact = output
@@ -65,7 +67,7 @@ fn create_handler_emits_responder_secret_and_sealed_connection() {
         .iter()
         .find(|fact| connection_layout::is_sealed_fact(fact.body()))
         .expect("sealed connection fact");
-    let ephemeral = ephemeral_layout::decode_fact(ephemeral_fact.body()).expect("ephemeral");
+    let ephemeral = ephemeral_layout_decode::decode_fact(ephemeral_fact.body()).expect("ephemeral");
     let connection = connection_layout::open_fact_as_responder(connection_fact.body(), &ephemeral)
         .expect("open connection as responder");
 
@@ -177,7 +179,7 @@ fn synthesize_scenario(opts: SynthOpts) -> Scenario {
         initiator_ephemeral_secret_fact_id: [99u8; 32],
         initiator_ephemeral_public_key: initiator_ephemeral_public,
     };
-    topo::protocol::connection::request::create::sign_bootstrap_request(&mut request, &invite)
+    topo::protocol::connection::request::author::sign_bootstrap_request(&mut request, &invite)
         .expect("sign request");
     let request_fact = Fact::new(
         FactScope::Global,

@@ -11,27 +11,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::LocalSignerSecretFact;
 
 pub(crate) struct LocalSignerSecretAuthenticator;
 
-impl Authenticator for LocalSignerSecretAuthenticator {
+impl DecodedAuthenticator<super::Codec> for LocalSignerSecretAuthenticator {
     type Authenticated = LocalSignerSecretFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        secret: LocalSignerSecretFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_local_signer_secret(fact))
+        Authentication::from_result(fact, prove_decoded_local_signer_secret(fact, secret))
     }
 }
 
-fn authenticate_local_signer_secret(fact: &Fact) -> Result<LocalSignerSecretFact, String> {
-    // 1. Layout.
-    let secret = super::Codec::decode_fact(fact)?;
+fn prove_decoded_local_signer_secret(
+    fact: &Fact,
+    secret: LocalSignerSecretFact,
+) -> Result<LocalSignerSecretFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(secret)
@@ -41,9 +43,11 @@ fn authenticate_local_signer_secret(fact: &Fact) -> Result<LocalSignerSecretFact
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::local_signer_secret::encode;
     use crate::protocol::auth::local_signer_secret::fact::LocalSignerSecretFact;
-    use crate::protocol::auth::local_signer_secret::layout;
 
     use super::LocalSignerSecretAuthenticator;
 
@@ -56,12 +60,19 @@ mod tests {
             public_key,
             private_key,
         };
-        let bytes = layout::encode_fact(&secret).expect("encode local signer secret");
+        let bytes = encode::encode_fact(&secret).expect("encode local signer secret");
         Fact::new(FactScope::Local, 123, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, LocalSignerSecretFact> {
-        LocalSignerSecretAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => LocalSignerSecretAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

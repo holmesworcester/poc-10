@@ -6,27 +6,63 @@
 //! stored facts; it does not validate the advertised fact's own protocol
 //! semantics.
 
+pub mod adapt;
 pub mod authenticate;
-pub mod create;
+pub mod author;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
-pub mod rows;
+pub mod queries;
 
-pub use create::advertisement_fact;
+pub use author::advertisement_fact;
 
-pub const TYPE_SYNC_HAVE_ID: u8 = layout::TYPE_SYNC_HAVE_ID;
+use crate::core::facts::FactId;
+use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
+use crate::core::store::{TableName, TableRow};
 
-pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncHaveIdFact, String> {
-    layout::decode_fact(bytes)
+pub(crate) use decode::Codec;
+
+pub const TYPE_SYNC_HAVE_ID: u8 = encode::TYPE_SYNC_HAVE_ID;
+
+/// Sync have-id projection rows, keyed by `connection_id || fact_id` so
+/// connection::frame handlers can scan all advertisements queued for a
+/// connection. The value stores the timestamp and the advertised fact id; the
+/// fact id in the key keeps distinct advertisements distinct even when the same
+/// fact id is re-advertised from a later range compare.
+pub const SYNC_HAVE_ID_ROWS: TableName = TableName::new("sync_have_id_rows");
+
+const SYNC_HAVE_ID_ROW_KEY_FIELDS: &[RowField] = &[
+    RowField::bytes32("connection_id"),
+    RowField::bytes32("fact_id"),
+];
+const SYNC_HAVE_ID_ROW_VALUE_FIELDS: &[RowField] = &[
+    RowField::u64be("timestamp"),
+    RowField::bytes32("advertised_fact_id"),
+];
+
+pub const SYNC_HAVE_ID_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
+    SYNC_HAVE_ID_ROWS,
+    SYNC_HAVE_ID_ROW_KEY_FIELDS,
+    SYNC_HAVE_ID_ROW_VALUE_FIELDS,
+);
+
+pub fn sync_have_id_row(
+    row_fact_id: FactId,
+    fact: &fact::SyncHaveIdFact,
+) -> Result<TableRow, String> {
+    SYNC_HAVE_ID_ROW_SCHEMA.row(
+        &[
+            RowValue::Bytes(fact.connection_id.to_vec()),
+            RowValue::Bytes(row_fact_id.to_vec()),
+        ],
+        &[
+            RowValue::U64(fact.timestamp),
+            RowValue::Bytes(fact.fact_id.to_vec()),
+        ],
+    )
 }
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::SyncHaveIdFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncHaveIdFact, String> {
+    decode::decode_fact(bytes)
 }

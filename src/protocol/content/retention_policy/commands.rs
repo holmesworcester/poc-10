@@ -13,7 +13,7 @@ use crate::protocol::{auth, content};
 use std::collections::BTreeSet;
 
 use super::fact::SCOPE_KIND_WORKSPACE;
-use super::{create, queries};
+use super::{author, queries};
 
 pub const UNIX_MINUTE_MS: u64 = 60_000;
 
@@ -273,7 +273,7 @@ fn policy_fact(
 ) -> Result<Fact, String> {
     let (signer_id, _signer_public_key, signer_private_key) =
         local_signing_material(store, workspace_id)?;
-    create::signed_retention_policy_fact(
+    author::signed_retention_policy_fact(
         workspace_id,
         supersedes_policy_id,
         ttl_minutes,
@@ -295,17 +295,17 @@ fn local_signing_material(
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let endpoint_id = local_endpoint_field(
         store,
-        auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_ROWS,
         "local endpoint id",
     )?;
     let public_key = local_endpoint_field(
         store,
-        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
         "local endpoint signing public key",
     )?;
     let private_key = local_endpoint_field(
         store,
-        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
         "local endpoint signing secret",
     )?;
     if crypto::ed25519_public_key(&private_key) != public_key {
@@ -320,7 +320,7 @@ fn local_endpoint_field(
     label: &str,
 ) -> Result<[u8; 32], String> {
     let value = store
-        .table_row(table, auth::endpoint::rows::LOCAL_KEY)
+        .table_row(table, auth::endpoint::LOCAL_KEY)
         .map_err(|err| format!("load {label}: {err}"))?
         .ok_or_else(|| format!("{label} is missing"))?;
     value
@@ -333,10 +333,10 @@ fn local_admin_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, St
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let user_id = membership.user_authority_fact_id;
     let admin_rows = store
-        .table_rows_with_key_prefix(auth::admin::rows::ADMIN_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(auth::admin::ADMIN_ROWS, &workspace_id, usize::MAX)
         .map_err(|err| format!("load admin rows: {err}"))?;
     let is_admin = admin_rows.into_iter().any(|(key, value)| {
-        auth::admin::rows::decode_admin_row(&key, &value)
+        auth::admin::queries::decode_admin_row(&key, &value)
             .map(|row| row.user_fact_id == user_id)
             .unwrap_or(false)
     });

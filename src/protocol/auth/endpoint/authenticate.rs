@@ -11,27 +11,26 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::EndpointFact;
 
 pub(crate) struct EndpointAuthenticator;
 
-impl Authenticator for EndpointAuthenticator {
+impl DecodedAuthenticator<super::Codec> for EndpointAuthenticator {
     type Authenticated = EndpointFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        endpoint: EndpointFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_endpoint(fact))
+        Authentication::from_result(fact, prove_decoded_endpoint(fact, endpoint))
     }
 }
 
-fn authenticate_endpoint(fact: &Fact) -> Result<EndpointFact, String> {
-    // 1. Layout.
-    let endpoint = super::Codec::decode_fact(fact)?;
+fn prove_decoded_endpoint(fact: &Fact, endpoint: EndpointFact) -> Result<EndpointFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(endpoint)
@@ -40,8 +39,10 @@ fn authenticate_endpoint(fact: &Fact) -> Result<EndpointFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::endpoint::create::{create_local_endpoint, endpoint_fact};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::endpoint::author::{create_local_endpoint, endpoint_fact};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
 
     use super::EndpointAuthenticator;
@@ -51,7 +52,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, EndpointFact> {
-        EndpointAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => EndpointAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

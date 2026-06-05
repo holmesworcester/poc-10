@@ -15,32 +15,33 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::RetentionPolicyFact;
 
 pub(crate) struct RetentionPolicyAuthenticator;
 
-impl Authenticator for RetentionPolicyAuthenticator {
+impl DecodedAuthenticator<super::Codec> for RetentionPolicyAuthenticator {
     type Authenticated = RetentionPolicyFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        policy: RetentionPolicyFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_retention_policy(fact))
+        Authentication::from_result(fact, prove_decoded_retention_policy(fact, policy))
     }
 }
 
-/// Prove a retention-policy fact authentic over its own bytes.
-fn authenticate_retention_policy(fact: &Fact) -> Result<RetentionPolicyFact, String> {
-    // 1. Layout.
-    let policy = super::Codec::decode_fact(fact)?;
+fn prove_decoded_retention_policy(
+    fact: &Fact,
+    policy: RetentionPolicyFact,
+) -> Result<RetentionPolicyFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&policy)?;
+    verify_signature(&policy)?;
     // 4. Intrinsic fields.
     if policy.ttl_minutes == 0 {
         return Err("retention policy ttl_minutes must be non-zero".to_string());
@@ -56,11 +57,28 @@ fn authenticate_retention_policy(fact: &Fact) -> Result<RetentionPolicyFact, Str
     Ok(policy)
 }
 
+/// Verify the retention policy's natural signature over its canonical envelope.
+/// The verifier key is embedded in the fact, so this is a context-free
+/// fact-boundary proof.
+pub fn verify_signature(fact: &RetentionPolicyFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "retention policy",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::content::retention_policy::create::signed_retention_policy_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::content::retention_policy::author::signed_retention_policy_fact;
     use crate::protocol::content::retention_policy::fact::{
         RetentionPolicyFact, SCOPE_KIND_WORKSPACE,
     };
@@ -87,7 +105,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, RetentionPolicyFact> {
-        RetentionPolicyAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => RetentionPolicyAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

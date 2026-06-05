@@ -9,21 +9,39 @@
 //!      content_purged offer, and share the deletion fact.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::RowMutation;
+use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use crate::protocol::auth::user;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{file, message, purge::project as content_purge};
+use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, share_fact_with_sync,
 };
 
-use super::rows::{file_deletion_row, FileDeletionRow};
+use super::queries::FileDeletionRow;
+
+fn file_deletion_row(input: FileDeletionRow) -> TableInsert {
+    read_models::FILE_DELETIONS.insert(vec![
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.target_file_id.to_vec()),
+        Value::Bytes(input.deletion_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.author_user_id.to_vec()),
+    ])
+}
+
+/// Staged read pipeline for the file_deletion fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "content::file_deletion::Codec",
+    authenticate: "content::file_deletion::authenticate::ContentFileDeletionAuthenticator",
+    adapt: "content::file_deletion::adapt::ContentFileDeletionAdapter",
+    project: "content::file_deletion::project::ContentFileDeletionProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileDeletionProjector;
@@ -40,21 +58,22 @@ impl Projector for ContentFileDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ContentFileDeletionAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ContentFileDeletionAuthenticator,
+            super::adapt::ContentFileDeletionAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ContentFileDeletionAuthenticator>
-    for ContentFileDeletionProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDeletionProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ContentFileDeletionFact>,
+        fact: &Fact,
+        deletion: super::fact::ContentFileDeletionFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, deletion) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
@@ -257,5 +276,33 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
         Ok(())
     } else {
         Err("content file deletion fact scope does not match body workspace".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::protocol::content::file_deletion::FILE_DELETION_ROWS;
+
+    const FILE_DELETION_COLUMNS: &[&str] = read_models::FILE_DELETIONS.columns;
+
+    #[test]
+    fn file_deletion_row_round_trips() {
+        let input = FileDeletionRow {
+            workspace_id: [1; 32],
+            target_file_id: [2; 32],
+            deletion_id: [3; 32],
+            created_at_ms: 4_242,
+            author_user_id: [4; 32],
+        };
+        let row = file_deletion_row(input);
+        assert_eq!(row.table, FILE_DELETION_ROWS);
+        assert_eq!(row.columns, FILE_DELETION_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::Bytes(vec![3; 32]));
+        assert_eq!(row.values[3], Value::U64(4_242));
+        assert_eq!(row.values[4], Value::Bytes(vec![4; 32]));
     }
 }

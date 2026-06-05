@@ -1,16 +1,17 @@
 //! Unified connection-request projector.
 //!
-//! The same sealed request fact is projected on both sides. The initiator opens
-//! it with its local ephemeral secret and materializes retryable send state. The
-//! responder opens it with its local endpoint secret, records the receive
-//! receipt, and schedules `create_connection`.
+//! The same sealed request fact is projected on both sides after
+//! `authenticate.rs` has opened it with local sender/receiver context and
+//! verified the bootstrap or membership signature. The initiator branch
+//! materializes retryable send state. The responder branch records the receive
+//! receipt and schedules `create_connection`.
 //!
 //! POLICY. A connection_request is admitted iff:
-//!   1. STRUCTURAL. The global fact id matches sealed request bytes and the
-//!      opened plaintext has a valid fixed-width bootstrap or membership shape.
-//!   2. CONTEXT. The initiator branch requires the local ephemeral secret plus
-//!      invite or endpoint_shared authority; the responder branch requires the
-//!      local endpoint, receive observation, and matching authority context.
+//!   1. STRUCTURAL. The fact is global; primary byte shape, id, opening, and
+//!      request signature have already been authenticated.
+//!   2. CONTEXT. The initiator branch requires invite or endpoint_shared
+//!      authority; the responder branch requires receive observation and
+//!      matching authority context.
 //!   3. MATERIALIZE. Initiators write retryable request send state; responders
 //!      emit a receipt and the deterministic create_connection intent.
 
@@ -19,21 +20,21 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, FactCodec, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactCodec, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
+    SemanticProjector,
 };
 
-use crate::protocol::auth::{endpoint, endpoint_shared, invite, workspace};
+use crate::protocol::auth::{endpoint_shared, invite, workspace};
 use crate::protocol::connection::create_connection::{create_connection_intent, CreateConnection};
-use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::frame_observation;
 use crate::protocol::connection_frame::{
     connection_fact_receipt_for_path, ConnectionFactReceiptInput,
 };
 
+use super::authenticate;
+use super::authenticate::AuthenticatedConnectionRequest;
+use super::connection_request_row;
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
-use super::rows::connection_request_row;
-use super::{create, layout};
 
 const CONNECTION_REQUEST_ROLE: &str = "connection_request";
 const CONNECTION_FOR_REQUEST_ROLE: &str = "connection_for_request";
@@ -78,6 +79,14 @@ pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> Contex
     )
 }
 
+/// Staged read pipeline for the connection-request fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "connection::request::Codec",
+    authenticate: "connection::request::authenticate::ConnectionRequestAuthenticator",
+    adapt: "connection::request::adapt::ConnectionRequestAdapter",
+    project: "connection::request::project::ConnectionRequestProjector",
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionRequestProjector;
 
@@ -93,70 +102,35 @@ impl Projector for ConnectionRequestProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionRequestAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ConnectionRequestAuthenticator,
+            super::adapt::ConnectionRequestAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ConnectionRequestAuthenticator>
-    for ConnectionRequestProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<AuthenticatedConnectionRequest> for ConnectionRequestProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, ()>,
+        fact: &Fact,
+        semantic: AuthenticatedConnectionRequest,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, ()) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("connection request fact must be global".to_string());
         }
-
-        // 2. Context.
-        let sender_need = all_ephemeral_secret_need(fact.id);
-        let receiver_need = all_local_endpoint_need(fact.id);
-        let mut branch_needs = vec![sender_need.clone(), receiver_need.clone()];
-
-        for (_, secret_fact) in context.matched_payloads_for(&sender_need) {
-            if secret_fact.scope != FactScope::Local {
-                return Err("connection request sender secret context must be local".to_string());
+        // 2-3. Context branch + materialization.
+        match semantic {
+            AuthenticatedConnectionRequest::Sender { request, base_need } => {
+                project_sender_request(fact, &request, context, base_need)
             }
-            let secret =
-                ephemeral_secret::decode_fact_payload(secret_fact.body()).map_err(|_| {
-                    "connection request sender context is not an ephemeral secret".to_string()
-                })?;
-            let Ok(request) = layout::open_fact_as_sender(fact.body(), &secret) else {
-                continue;
-            };
-            validate_common_request(fact.id, &request)?;
-            if request.initiator_ephemeral_secret_fact_id != secret_fact.id {
-                return Err(
-                    "connection request sender secret id does not match request".to_string()
-                );
+            AuthenticatedConnectionRequest::Receiver { request, base_need } => {
+                project_receiver_request(fact, &request, context, base_need)
             }
-            return project_sender_request(fact, &request, context, sender_need.clone());
         }
-
-        for (_, endpoint_fact) in context.matched_payloads_for(&receiver_need) {
-            if endpoint_fact.scope != FactScope::Local {
-                return Err(
-                    "connection request receiver endpoint context must be local".to_string()
-                );
-            }
-            let local_endpoint =
-                endpoint::decode_fact_payload(endpoint_fact.body()).map_err(|_| {
-                    "connection request receiver context is not a local endpoint".to_string()
-                })?;
-            let Ok(request) = layout::open_fact(fact.body(), &local_endpoint) else {
-                continue;
-            };
-            validate_common_request(fact.id, &request)?;
-            return project_receiver_request(fact, &request, context, receiver_need.clone());
-        }
-
-        // 3. Materialize.
-        Ok(waiting_output(branch_needs.drain(..)))
     }
 }
 
@@ -176,9 +150,11 @@ fn project_sender_request(
             if invite_fact.scope != FactScope::Local {
                 return Err("connection request invite context must be local".to_string());
             }
-            let invite = invite::decode_fact_payload(invite_fact.body())
+            let _invite = invite::decode_fact_payload(invite_fact.body())
                 .map_err(|_| "connection request invite context is malformed".to_string())?;
-            create::validate_invite_signature(request, &invite)?;
+            if invite_fact.id != request.invite_secret_fact_id {
+                return Err("connection request invite context does not bind request".to_string());
+            }
             output = output.need(invite_need);
         }
         REQUEST_MODE_MEMBERSHIP => {
@@ -196,7 +172,6 @@ fn project_sender_request(
             if shared.endpoint_id != request.from_endpoint {
                 return Err("connection request endpoint_shared does not bind sender".to_string());
             }
-            create::validate_endpoint_signature(request, &shared.signing_public_key)?;
             output = output.need(shared_need);
         }
         _ => unreachable!("validated request mode"),
@@ -240,9 +215,11 @@ fn project_receiver_request(
             if invite_fact.scope != FactScope::Local {
                 return Err("connection request invite context must be local".to_string());
             }
-            let invite = invite::decode_fact_payload(invite_fact.body())
+            let _invite = invite::decode_fact_payload(invite_fact.body())
                 .map_err(|_| "connection request invite context is malformed".to_string())?;
-            create::validate_invite_signature(request, &invite)?;
+            if invite_fact.id != request.invite_secret_fact_id {
+                return Err("connection request invite context does not bind request".to_string());
+            }
             output = output.need(invite_need);
             request.invite_secret_fact_id
         }
@@ -261,7 +238,6 @@ fn project_receiver_request(
             if shared.endpoint_id != request.from_endpoint {
                 return Err("connection request endpoint_shared does not bind sender".to_string());
             }
-            create::validate_endpoint_signature(request, &shared.signing_public_key)?;
             let member_need =
                 content_signer_need(fact.id, shared.workspace_id, request.to_endpoint);
             let Some(member_fact) = context.payload_for(&member_need) else {
@@ -318,69 +294,22 @@ fn project_receiver_request(
         })))
 }
 
-fn validate_common_request(
-    request_id: FactId,
-    request: &ConnectionRequestFact,
-) -> Result<(), String> {
-    if request_id == [0; 32] {
-        return Err("connection request id cannot be empty".to_string());
-    }
-    if request.from_endpoint == [0; 32] {
-        return Err("connection request from_endpoint cannot be empty".to_string());
-    }
-    if request.to_endpoint == [0; 32] {
-        return Err("connection request to_endpoint cannot be empty".to_string());
-    }
-    if request.from_endpoint == request.to_endpoint {
-        return Err("connection request endpoints must differ".to_string());
-    }
-    if request.initiator_ephemeral_secret_fact_id == [0; 32] {
-        return Err("connection request initiator ephemeral id cannot be empty".to_string());
-    }
-    if request.initiator_ephemeral_public_key == [0; 32] {
-        return Err(
-            "connection request initiator ephemeral public key cannot be empty".to_string(),
-        );
-    }
-    create::validate_mode_shape(request)
-}
-
+#[cfg(test)]
 fn all_ephemeral_secret_need(owner: FactId) -> ContextNeed {
-    ContextNeed::range(
-        owner,
-        "connection_ephemeral_secret",
-        FactScope::Local,
-        [0; 32],
-        [0xff; 32],
-    )
+    authenticate::all_ephemeral_secret_need(owner)
 }
 
+#[cfg(test)]
 fn all_local_endpoint_need(owner: FactId) -> ContextNeed {
-    ContextNeed::range(
-        owner,
-        "auth_local_endpoint",
-        FactScope::Local,
-        [0; 32],
-        [0xff; 32],
-    )
+    authenticate::all_local_endpoint_need(owner)
 }
 
 fn invite_secret_need(owner: FactId, invite_secret_id: FactId) -> ContextNeed {
-    exact_need(
-        owner,
-        "connection_invite_secret",
-        FactScope::Local,
-        invite_secret_id,
-    )
+    authenticate::invite_secret_need(owner, invite_secret_id)
 }
 
 fn endpoint_shared_need(owner: FactId, endpoint_shared_id: FactId) -> ContextNeed {
-    exact_need(
-        owner,
-        "auth_endpoint_shared",
-        FactScope::Global,
-        endpoint_shared_id,
-    )
+    authenticate::endpoint_shared_need(owner, endpoint_shared_id)
 }
 
 fn content_signer_need(owner: FactId, workspace_id: FactId, endpoint_id: FactId) -> ContextNeed {
@@ -394,15 +323,7 @@ fn content_signer_need(owner: FactId, workspace_id: FactId, endpoint_id: FactId)
 }
 
 fn exact_need(owner: FactId, role: &'static str, scope: FactScope, key: FactId) -> ContextNeed {
-    ContextNeed::range(owner, role, scope, key, key)
-}
-
-fn waiting_output(needs: impl IntoIterator<Item = ContextNeed>) -> ProjectionOutput {
-    let mut output = ProjectionOutput::new();
-    for need in needs {
-        output = output.need(need);
-    }
-    output
+    authenticate::exact_need(owner, role, scope, key)
 }
 
 #[cfg(test)]
@@ -412,14 +333,16 @@ mod tests {
     use crate::core::intents::RowMutation;
     use crate::core::pipeline::{MatchedContext, ProjectionContext, Projector};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
-    use crate::protocol::auth::invite::{fact::InviteSecretFact, layout as invite_layout};
+    use crate::protocol::auth::invite::{encode as invite_encode, fact::InviteSecretFact};
     use crate::protocol::connection::ephemeral_secret::{
-        fact::ConnectionEphemeralSecretFact, layout as ephemeral_layout,
+        encode as ephemeral_encode, fact::ConnectionEphemeralSecretFact,
     };
     use crate::protocol::connection::frame_observation;
+    use crate::protocol::connection::request::author;
     use crate::protocol::connection::request::fact::REQUEST_MODE_BOOTSTRAP;
-    use crate::protocol::connection::request::rows::CONNECTION_REQUEST_ROWS;
+    use crate::protocol::connection::request::CONNECTION_REQUEST_ROWS;
 
+    use super::super::encode;
     use super::*;
 
     fn endpoint(secret: [u8; 32], signing_secret: [u8; 32]) -> EndpointFact {
@@ -436,7 +359,7 @@ mod tests {
         let invite_fact = Fact::new(
             FactScope::Local,
             10,
-            invite_layout::encode_fact(&invite_secret).expect("invite"),
+            invite_encode::encode_fact(&invite_secret).expect("invite"),
         );
         let ephemeral_private_key = [8; 32];
         let ephemeral = ConnectionEphemeralSecretFact {
@@ -448,7 +371,7 @@ mod tests {
         let ephemeral_fact = Fact::new(
             FactScope::Local,
             11,
-            ephemeral_layout::encode_fact(&ephemeral).expect("ephemeral"),
+            ephemeral_encode::encode_fact(&ephemeral).expect("ephemeral"),
         );
         let mut request = ConnectionRequestFact {
             mode: REQUEST_MODE_BOOTSTRAP,
@@ -466,11 +389,11 @@ mod tests {
             initiator_ephemeral_secret_fact_id: ephemeral_fact.id,
             initiator_ephemeral_public_key: ephemeral.ephemeral_public_key,
         };
-        create::sign_bootstrap_request(&mut request, &invite_secret).expect("sign request");
+        author::sign_bootstrap_request(&mut request, &invite_secret).expect("sign request");
         let request_fact = Fact::new(
             FactScope::Global,
             12,
-            layout::seal_fact(&request, &ephemeral_private_key).expect("seal request"),
+            encode::seal_fact(&request, &ephemeral_private_key).expect("seal request"),
         );
         (invite_fact, ephemeral_fact, request_fact)
     }
@@ -533,9 +456,9 @@ mod tests {
         let initiator = endpoint([1; 32], [2; 32]);
         let responder = endpoint([3; 32], [4; 32]);
         let (invite_fact, _, request_fact) = bootstrap_facts(initiator, responder.endpoint);
-        let endpoint_fact = crate::protocol::auth::endpoint::create::endpoint_fact(11, responder)
+        let endpoint_fact = crate::protocol::auth::endpoint::author::endpoint_fact(11, responder)
             .expect("endpoint fact");
-        let observation_fact = frame_observation::create::fact_from_observation(
+        let observation_fact = frame_observation::author::fact_from_observation(
             request_fact.id,
             b"127.0.0.1:41010",
             12,

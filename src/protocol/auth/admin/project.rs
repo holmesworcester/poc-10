@@ -13,8 +13,7 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::user;
@@ -22,7 +21,15 @@ use crate::protocol::auth::workspace;
 use crate::protocol::auth::workspace::fact::WorkspaceFact;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::rows::admin_row;
+use super::admin_row;
+
+/// Staged read pipeline for the admin-grant fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::admin::Codec",
+    authenticate: "auth::admin::authenticate::AdminAuthenticator",
+    adapt: "auth::admin::adapt::AdminAdapter",
+    project: "auth::admin::project::AdminProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct AdminProjector;
@@ -39,19 +46,24 @@ impl Projector for AdminProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::AdminAuthenticator, _>(self, fact, context)
+        project_staged::<
+            super::Codec,
+            super::authenticate::AdminAuthenticator,
+            super::adapt::AdminAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::AdminAuthenticator> for AdminProjector {
-    fn project_authenticated(
+impl SemanticProjector<AdminFact> for AdminProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, AdminFact>,
+        fact: &Fact,
+        admin: AdminFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // Authentication (see authenticate.rs) proved canonical bytes, the signer
         // signature, and non-zero selector fields. Scope is interpretation.
-        let (fact, admin) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Global {
             return Err("admin fact must have global scope".to_string());

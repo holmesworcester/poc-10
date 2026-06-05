@@ -11,8 +11,46 @@ use std::collections::BTreeSet;
 use crate::core::facts::FactId;
 use crate::core::store::Store;
 
-use super::fact::SCOPE_KIND_WORKSPACE;
-use super::rows::{self, RetentionPolicyRow};
+use super::encode::NO_PREVIOUS_POLICY_ID;
+use super::fact::{AuthorUserId, PolicyId, WorkspaceId, SCOPE_KIND_WORKSPACE};
+use super::{RETENTION_POLICY_ROWS, RETENTION_POLICY_ROW_SCHEMA};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionPolicyRow {
+    pub workspace_id: WorkspaceId,
+    pub scope_kind: u8,
+    pub scope_id: FactId,
+    pub policy_id: PolicyId,
+    pub created_at_ms: u64,
+    pub ttl_minutes: u32,
+    pub retire_minute: u64,
+    pub author_user_id: AuthorUserId,
+    pub supersedes_policy_id: Option<PolicyId>,
+}
+
+pub fn decode_policy_row(key: &[u8], value: &[u8]) -> Result<RetentionPolicyRow, String> {
+    let key_fields = RETENTION_POLICY_ROW_SCHEMA.decode_key(key)?;
+    let value_fields = RETENTION_POLICY_ROW_SCHEMA.decode_value(value)?;
+    let ttl_bytes = value_fields[1].as_bytes("ttl_minutes")?;
+    let ttl_minutes = u32::from_be_bytes(
+        ttl_bytes
+            .try_into()
+            .map_err(|_| "ttl_minutes must be 4 bytes".to_string())?,
+    );
+    let supersedes_raw = value_fields[4].as_bytes32("supersedes_policy_id")?;
+    let supersedes_policy_id = (supersedes_raw != NO_PREVIOUS_POLICY_ID).then_some(supersedes_raw);
+    Ok(RetentionPolicyRow {
+        workspace_id: key_fields[0].as_bytes32("workspace_id")?,
+        scope_kind: key_fields[1].as_u8("scope_kind")?,
+        scope_id: key_fields[2].as_bytes32("scope_id")?,
+        policy_id: key_fields[3].as_bytes32("policy_id")?,
+        created_at_ms: value_fields[0].as_u64("created_at_ms")?,
+        ttl_minutes,
+        retire_minute: value_fields[2].as_u64("retire_minute")?,
+        author_user_id: value_fields[3].as_bytes32("author_user_id")?,
+        supersedes_policy_id,
+    })
+}
 
 pub fn active_for_workspace(
     store: &Store,
@@ -52,10 +90,10 @@ pub fn policies_for_scope(
     prefix.push(scope_kind);
     prefix.extend_from_slice(&scope_id);
     store
-        .table_rows_with_key_prefix(rows::RETENTION_POLICY_ROWS, &prefix, usize::MAX)
+        .table_rows_with_key_prefix(RETENTION_POLICY_ROWS, &prefix, usize::MAX)
         .map_err(|err| format!("read retention policy rows: {err}"))?
         .into_iter()
-        .map(|(key, value)| rows::decode_policy_row(&key, &value))
+        .map(|(key, value)| decode_policy_row(&key, &value))
         .collect()
 }
 
@@ -66,7 +104,7 @@ mod tests {
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     use super::super::fact::{RetentionPolicyFact, SCOPE_KIND_WORKSPACE};
-    use super::super::rows;
+    use super::super::policy_row;
     use super::*;
 
     #[test]
@@ -80,8 +118,8 @@ mod tests {
 
         store
             .insert_table_rows(vec![
-                rows::policy_row(old_id, &old).expect("old row"),
-                rows::policy_row(new_id, &new).expect("new row"),
+                policy_row(old_id, &old).expect("old row"),
+                policy_row(new_id, &new).expect("new row"),
             ])
             .expect("insert rows");
 

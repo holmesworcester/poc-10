@@ -11,27 +11,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::CascadeTestFact;
 
 pub(crate) struct CascadeTestFactAuthenticator;
 
-impl Authenticator for CascadeTestFactAuthenticator {
+impl DecodedAuthenticator<super::Codec> for CascadeTestFactAuthenticator {
     type Authenticated = CascadeTestFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        decoded: CascadeTestFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_cascade_test_fact(fact))
+        Authentication::from_result(fact, prove_decoded_cascade_test_fact(fact, decoded))
     }
 }
 
-fn authenticate_cascade_test_fact(fact: &Fact) -> Result<CascadeTestFact, String> {
-    // 1. Layout.
-    let decoded = super::Codec::decode_fact(fact)?;
+fn prove_decoded_cascade_test_fact(
+    fact: &Fact,
+    decoded: CascadeTestFact,
+) -> Result<CascadeTestFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // FIELDS.
@@ -44,11 +46,13 @@ fn authenticate_cascade_test_fact(fact: &Fact) -> Result<CascadeTestFact, String
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::sync::cascade_test_fact::encode;
     use crate::protocol::sync::cascade_test_fact::fact::{
         CascadeDependencies, CascadeTestFact, PAYLOAD_BYTES,
     };
-    use crate::protocol::sync::cascade_test_fact::layout;
 
     use super::CascadeTestFactAuthenticator;
 
@@ -65,12 +69,19 @@ mod tests {
         Fact::new(
             FactScope::Global,
             TIMESTAMP,
-            layout::encode_fact(&payload).expect("encode cascade test fact"),
+            encode::encode_fact(&payload).expect("encode cascade test fact"),
         )
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, CascadeTestFact> {
-        CascadeTestFactAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => CascadeTestFactAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

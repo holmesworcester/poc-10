@@ -12,11 +12,11 @@ use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
-use topo::protocol::auth::endpoint::rows as endpoint_rows;
+use topo::protocol::connection::connection as connection_rows;
+use topo::protocol::connection::connection::encode as connection_layout;
 use topo::protocol::connection::connection::fact::ConnectionFact;
-use topo::protocol::connection::connection::layout as connection_layout;
-use topo::protocol::connection::connection::rows as connection_rows;
 use topo::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame, SendNetworkFrameHandler, SEND_NETWORK_FRAME,
 };

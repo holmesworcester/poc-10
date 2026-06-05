@@ -11,20 +11,38 @@
 //!      content_purged offer, and share the deletion fact.
 
 use crate::core::facts::Fact;
-use crate::core::intents::RowMutation;
+use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use crate::protocol::auth::user;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, purge::project as content_purge};
+use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, share_fact_with_sync,
 };
 
-use super::rows::{message_deletion_row, MessageDeletionRow};
+use super::queries::MessageDeletionRow;
+
+/// Staged read pipeline for the message_deletion fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "content::message_deletion::Codec",
+    authenticate: "content::message_deletion::authenticate::ContentMessageDeletionAuthenticator",
+    adapt: "content::message_deletion::adapt::ContentMessageDeletionAdapter",
+    project: "content::message_deletion::project::ContentMessageDeletionProjector",
+};
+
+fn message_deletion_row(input: MessageDeletionRow) -> TableInsert {
+    read_models::MESSAGE_DELETIONS.insert(vec![
+        Value::Bytes(input.workspace_id.to_vec()),
+        Value::Bytes(input.target_message_id.to_vec()),
+        Value::Bytes(input.deletion_id.to_vec()),
+        Value::U64(input.created_at_ms),
+        Value::Bytes(input.author_user_id.to_vec()),
+    ])
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentMessageDeletionProjector;
@@ -41,21 +59,24 @@ impl Projector for ContentMessageDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ContentMessageDeletionAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ContentMessageDeletionAuthenticator,
+            super::adapt::ContentMessageDeletionAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ContentMessageDeletionAuthenticator>
+impl SemanticProjector<super::fact::ContentMessageDeletionFact>
     for ContentMessageDeletionProjector
 {
-    fn project_authenticated(
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ContentMessageDeletionFact>,
+        fact: &Fact,
+        deletion: super::fact::ContentMessageDeletionFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, deletion) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
@@ -211,6 +232,34 @@ fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> 
 }
 
 #[cfg(test)]
+mod row_tests {
+    use super::*;
+    use crate::core::intents::Value;
+    use crate::protocol::content::message_deletion::queries::MessageDeletionRow;
+
+    const MESSAGE_DELETION_COLUMNS: &[&str] = read_models::MESSAGE_DELETIONS.columns;
+
+    #[test]
+    fn message_deletion_row_round_trips() {
+        let input = MessageDeletionRow {
+            workspace_id: [1; 32],
+            target_message_id: [2; 32],
+            deletion_id: [3; 32],
+            created_at_ms: 7_777,
+            author_user_id: [4; 32],
+        };
+        let row = message_deletion_row(input);
+        assert_eq!(row.table, super::super::MESSAGE_DELETION_ROWS);
+        assert_eq!(row.columns, MESSAGE_DELETION_COLUMNS);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::Bytes(vec![3; 32]));
+        assert_eq!(row.values[3], Value::U64(7_777));
+        assert_eq!(row.values[4], Value::Bytes(vec![4; 32]));
+    }
+}
+
+#[cfg(test)]
 mod projector_tests {
     use crate as topo;
 
@@ -220,17 +269,19 @@ mod projector_tests {
     use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth;
     use topo::protocol::auth::endpoint_shared::{
+        encode as endpoint_shared_layout,
         fact::{EndpointRole, EndpointSharedFact},
-        layout as endpoint_shared_layout,
     };
     use topo::protocol::content::message::{
         encode as message_encode,
         fact::{ContentMessageFact, MessageCiphertext},
     };
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
-    use topo::protocol::content::message_deletion::{layout, project, rows};
+    use topo::protocol::content::message_deletion::{
+        decode, encode, project, MESSAGE_DELETION_ROWS,
+    };
 
-    use topo::protocol::auth::user::{fact::UserFact, layout as user_layout};
+    use topo::protocol::auth::user::{encode as user_layout, fact::UserFact};
 
     const CONTENT_SIGNING_KEY: [u8; 32] = [7; 32];
     const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [13; 32];
@@ -263,7 +314,7 @@ mod projector_tests {
         let RowMutation::InsertValues(stored) = &output.effects.row_mutations[0] else {
             panic!("expected insert values mutation");
         };
-        assert_eq!(stored.table, rows::MESSAGE_DELETION_ROWS);
+        assert_eq!(stored.table, MESSAGE_DELETION_ROWS);
         assert_eq!(
             stored.values[0],
             topo::core::intents::Value::Bytes(deletion.workspace_id.to_vec())
@@ -430,12 +481,16 @@ mod projector_tests {
         };
         deletion.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &layout::signing_bytes(&deletion).expect("deletion signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &deletion,
+                encode::encode_fact,
+            )
+            .expect("deletion signing bytes"),
         );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
-            layout::encode_fact(&deletion).expect("encode deletion"),
+            encode::encode_fact(&deletion).expect("encode deletion"),
         );
         (deletion, fact)
     }
@@ -462,7 +517,11 @@ mod projector_tests {
         };
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &message_encode::signing_bytes(&message).expect("message signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &message,
+                message_encode::encode_fact,
+            )
+            .expect("message signing bytes"),
         );
         Fact::new(
             crate::protocol::auth::workspace::scope(workspace_id),
@@ -487,7 +546,11 @@ mod projector_tests {
         };
         signer.signature = crypto::ed25519_sign(
             &ENDPOINT_AUTHORITY_KEY,
-            &endpoint_shared_layout::signing_bytes(&signer).expect("endpoint signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &signer,
+                endpoint_shared_layout::encode_fact,
+            )
+            .expect("endpoint signing bytes"),
         );
         Fact::new(
             FactScope::Global,
@@ -509,7 +572,11 @@ mod projector_tests {
         };
         user.signature = crypto::ed25519_sign(
             &signing_key,
-            &user_layout::signing_bytes(&user).expect("user signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &user,
+                user_layout::encode_fact,
+            )
+            .expect("user signing bytes"),
         );
         Fact::new(
             FactScope::Global,
@@ -577,7 +644,7 @@ mod projector_tests {
     }
 
     fn deletion_from_fact(deletion_fact: &Fact) -> ContentMessageDeletionFact {
-        layout::decode_fact(&deletion_fact.bytes).expect("decode deletion")
+        decode::decode_fact(&deletion_fact.bytes).expect("decode deletion")
     }
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {

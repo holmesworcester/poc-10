@@ -9,10 +9,10 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::auth::local_key_secret::encode as local_key_secret_layout;
 use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::auth::removal_frontier::encode as removal_frontier_layout;
 use topo::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
-use topo::protocol::auth::removal_frontier::layout as removal_frontier_layout;
 use topo::protocol::auth::workspace::{
     commands::{create_workspace_with_identity, BootstrapIdentity},
     queries as workspace_queries,
@@ -171,7 +171,11 @@ fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) ->
     };
     body.signature = crypto::ed25519_sign(
         &signing_key,
-        &removal_frontier_layout::signing_bytes(&body).expect("frontier signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &body,
+            removal_frontier_layout::encode_removal_frontier,
+        )
+        .expect("frontier signing bytes"),
     );
     Fact::new(
         workspace_scope(workspace_id),
@@ -240,7 +244,11 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
     };
     body.signature = crypto::ed25519_sign(
         input.signer_private,
-        &content_message::encode::signing_bytes(&body).expect("message signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &body,
+            content_message::encode::encode_fact,
+        )
+        .expect("message signing bytes"),
     );
     let bytes = content_message::encode::encode_fact(&body).expect("encode content message");
     Fact::new(

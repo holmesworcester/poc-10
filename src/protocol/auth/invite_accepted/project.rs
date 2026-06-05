@@ -11,12 +11,19 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::invite;
 
-use super::rows::invite_accepted_row;
+use super::invite_accepted_row;
+
+/// Staged read pipeline for the invite_accepted fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::invite_accepted::Codec",
+    authenticate: "auth::invite_accepted::authenticate::InviteAcceptedAuthenticator",
+    adapt: "auth::invite_accepted::adapt::InviteAcceptedAdapter",
+    project: "auth::invite_accepted::project::InviteAcceptedProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct InviteAcceptedProjector;
@@ -33,21 +40,22 @@ impl Projector for InviteAcceptedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::InviteAcceptedAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::InviteAcceptedAuthenticator,
+            super::adapt::InviteAcceptedAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::InviteAcceptedAuthenticator>
-    for InviteAcceptedProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::InviteAcceptedFact> for InviteAcceptedProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::InviteAcceptedFact>,
+        fact: &Fact,
+        accepted: super::fact::InviteAcceptedFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, accepted) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("invite_accepted fact must have local scope".to_string());

@@ -12,27 +12,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::LocalRecipientKeyFact;
 
 pub(crate) struct LocalRecipientKeyAuthenticator;
 
-impl Authenticator for LocalRecipientKeyAuthenticator {
+impl DecodedAuthenticator<super::Codec> for LocalRecipientKeyAuthenticator {
     type Authenticated = LocalRecipientKeyFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        local: LocalRecipientKeyFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_local_recipient_key(fact))
+        Authentication::from_result(fact, prove_decoded_local_recipient_key(fact, local))
     }
 }
 
-fn authenticate_local_recipient_key(fact: &Fact) -> Result<LocalRecipientKeyFact, String> {
-    // 1. Layout.
-    let local = super::Codec::decode_fact(fact)?;
+fn prove_decoded_local_recipient_key(
+    fact: &Fact,
+    local: LocalRecipientKeyFact,
+) -> Result<LocalRecipientKeyFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(local)
@@ -42,9 +44,11 @@ fn authenticate_local_recipient_key(fact: &Fact) -> Result<LocalRecipientKeyFact
 mod tests {
     use crate::core::crypto::{self, X25519_PRIVATE_KEY_BYTES};
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::local_recipient_key::encode;
     use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
-    use crate::protocol::auth::local_recipient_key::layout;
 
     use super::LocalRecipientKeyAuthenticator;
 
@@ -57,12 +61,19 @@ mod tests {
             recipient_key,
             recipient_secret,
         };
-        let bytes = layout::encode_local_recipient_key(&local).expect("encode local recipient key");
+        let bytes = encode::encode_local_recipient_key(&local).expect("encode local recipient key");
         Fact::new(FactScope::Local, 123, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, LocalRecipientKeyFact> {
-        LocalRecipientKeyAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => LocalRecipientKeyAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

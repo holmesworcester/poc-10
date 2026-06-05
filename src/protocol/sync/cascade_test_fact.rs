@@ -5,26 +5,20 @@
 //! general protocol authority layer. Commands generate and replay them; rows
 //! stage dependency state; projection publishes completion context.
 
+pub mod adapt;
 pub mod authenticate;
 pub mod cli;
 pub mod commands;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
-pub mod rows;
+pub mod staging;
 
-pub const TYPE_CASCADE_TEST_FACT: u8 = layout::TYPE_CASCADE_TEST_FACT;
+pub(crate) use decode::Codec;
+
+pub const TYPE_CASCADE_TEST_FACT: u8 = encode::TYPE_CASCADE_TEST_FACT;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::CascadeTestFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::CascadeTestFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+    decode::decode_fact(bytes)
 }

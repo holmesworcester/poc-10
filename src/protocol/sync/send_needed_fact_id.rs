@@ -74,7 +74,7 @@ impl IntentHandler for SendNeededFactIdHandler {
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_needed_fact_id(raw)?;
         let have_fact = context.require_fact(&input.have_fact_id)?;
-        let have = have_id::layout::decode_fact(&have_fact.bytes)?;
+        let have = have_id::decode::decode_fact(&have_fact.bytes)?;
         if crate::core::fact_store::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
             return Ok(PipelineEffects::new());
         }
@@ -82,7 +82,7 @@ impl IntentHandler for SendNeededFactIdHandler {
             connection_id: have.connection_id,
             fact_id: have.fact_id,
         };
-        let need_fact = need_id::create::fact(need, have_fact.timestamp)?;
+        let need_fact = need_id::author::fact(need, have_fact.timestamp)?;
         Ok(PipelineEffects::new()
             .fact(need_fact.clone())
             .intent(send_facts_on_connection_intent(SendFactsOnConnection {
@@ -99,9 +99,9 @@ mod tests {
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::connection::send_facts_on_connection;
+    use crate::protocol::sync::have_id::encode as sync_have_id_layout;
     use crate::protocol::sync::have_id::fact::SyncHaveIdFact;
-    use crate::protocol::sync::have_id::layout as sync_have_id_layout;
-    use crate::protocol::sync::need_id::layout as sync_need_id_layout;
+    use crate::protocol::sync::need_id::decode as sync_need_id_layout;
 
     #[test]
     fn send_needed_fact_id_emits_need_fact_for_missing_fact() {

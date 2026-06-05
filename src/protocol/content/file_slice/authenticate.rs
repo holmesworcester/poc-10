@@ -14,40 +14,57 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ContentFileSliceFact;
 
 pub(crate) struct ContentFileSliceAuthenticator;
 
-impl Authenticator for ContentFileSliceAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ContentFileSliceAuthenticator {
     type Authenticated = ContentFileSliceFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        slice: ContentFileSliceFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_file_slice(fact))
+        Authentication::from_result(fact, prove_decoded_file_slice(fact, slice))
     }
 }
 
-/// Prove a content-file-slice fact authentic over its own bytes.
-fn authenticate_file_slice(fact: &Fact) -> Result<ContentFileSliceFact, String> {
-    // 1. Layout.
-    let slice = super::Codec::decode_fact(fact)?;
+fn prove_decoded_file_slice(
+    fact: &Fact,
+    slice: ContentFileSliceFact,
+) -> Result<ContentFileSliceFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&slice)?;
+    verify_signature(&slice)?;
     Ok(slice)
+}
+
+/// Verify the file slice's signature over its canonical envelope. The verifier
+/// key is embedded in the fact, so this is a context-free fact-boundary proof.
+pub fn verify_signature(fact: &ContentFileSliceFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "content file slice",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::content::file_slice::create::signed_file_slice_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::content::file_slice::author::signed_file_slice_fact;
     use crate::protocol::content::file_slice::fact::{ContentFileSliceFact, FileSliceProof};
 
     use super::ContentFileSliceAuthenticator;
@@ -68,7 +85,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentFileSliceFact> {
-        ContentFileSliceAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ContentFileSliceAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

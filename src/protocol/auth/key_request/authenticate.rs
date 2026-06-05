@@ -12,41 +12,59 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::KeyRequestFact;
 
 pub(crate) struct KeyRequestAuthenticator;
 
-impl Authenticator for KeyRequestAuthenticator {
+impl DecodedAuthenticator<super::Codec> for KeyRequestAuthenticator {
     type Authenticated = KeyRequestFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        request: KeyRequestFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_key_request(fact))
+        Authentication::from_result(fact, prove_decoded_key_request(fact, request))
     }
 }
 
-fn authenticate_key_request(fact: &Fact) -> Result<KeyRequestFact, String> {
-    // 1. Layout.
-    let request = super::Codec::decode_fact(fact)?;
+fn prove_decoded_key_request(
+    fact: &Fact,
+    request: KeyRequestFact,
+) -> Result<KeyRequestFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&request)?;
+    verify_signature(&request)?;
     Ok(request)
+}
+
+/// Verify the key request's signature over its canonical envelope. The verifier
+/// key is embedded in the fact, so this is a context-free fact-boundary proof.
+pub fn verify_signature(fact: &KeyRequestFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_key_request,
+        )?,
+        &fact.signature,
+        "key request",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::key_request::encode;
     use crate::protocol::auth::key_request::fact::KeyRequestFact;
-    use crate::protocol::auth::key_request::layout;
     use crate::protocol::auth::workspace;
 
     use super::KeyRequestAuthenticator;
@@ -68,15 +86,26 @@ mod tests {
         };
         let (_, signature) = crypto::ed25519_sign_canonical(
             &private_key,
-            &layout::signing_bytes(&request).expect("signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &request,
+                encode::encode_key_request,
+            )
+            .expect("signing bytes"),
         );
         request.signature = signature;
-        let bytes = layout::encode_key_request(&request).expect("encode key request");
+        let bytes = encode::encode_key_request(&request).expect("encode key request");
         Fact::new(workspace::scope(workspace_id), request.created_at_ms, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, KeyRequestFact> {
-        KeyRequestAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => KeyRequestAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

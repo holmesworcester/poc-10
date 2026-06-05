@@ -223,9 +223,8 @@ use core syntax and contracts, but core must not import their semantic rules.
 
 ### Pipeline Submodules
 
-- `pipeline/route.rs`: tag route declarations and the staged-vs-composed route
-  metadata that reviewers use to see whether a family is on the first-class
-  pipeline or the legacy composed path.
+- `pipeline/route.rs`: tag route declarations and staged route metadata that
+  reviewers use to see each family's first-class pipeline stages.
 - `pipeline/decode.rs`: decode-stage trait. Core owns when decoding happens;
   protocol families own how their bytes become typed payloads.
 - `pipeline/authenticate.rs`: authentication-stage contracts and helpers:
@@ -234,9 +233,8 @@ use core syntax and contracts, but core must not import their semantic rules.
 - `pipeline/adapt.rs`: adapter-stage trait for moving from authenticated source
   shape to the semantic value projected at the active head version.
 - `pipeline/project.rs`: project-stage contracts and staged runners. It exposes
-  `SemanticProjector` and `project_staged`; compatibility
-  `AuthenticatedProjector` / `project_authenticated` remains only for the
-  fact-by-fact cutover to staged routes.
+  `SemanticProjector` and `project_staged`, which compose
+  decode/authenticate/adapt/project for routed facts.
 - `pipeline/context.rs`: in-memory `ProjectionContext`, matched payload facts,
   due time ranges, and typed payload helpers visible while one fact is being
   processed.

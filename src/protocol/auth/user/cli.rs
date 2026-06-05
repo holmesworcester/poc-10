@@ -8,7 +8,7 @@ use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs
 use crate::core::command_context::CommandContext;
 
 use super::queries;
-use super::rows::UserRow;
+use super::queries::UserRow;
 
 pub const USERS_USAGE: &str = "users WORKSPACE_ID_HEX";
 

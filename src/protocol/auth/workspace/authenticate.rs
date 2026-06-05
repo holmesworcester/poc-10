@@ -13,24 +13,12 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, DecodedAuthenticator, FactCodec,
-    ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::WorkspaceFact;
 
 pub(crate) struct WorkspaceAuthenticator;
-
-impl Authenticator for WorkspaceAuthenticator {
-    type Authenticated = WorkspaceFact;
-
-    fn authenticate<'a>(
-        fact: &'a Fact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_workspace(fact))
-    }
-}
 
 impl DecodedAuthenticator<super::decode::Codec> for WorkspaceAuthenticator {
     type Authenticated = WorkspaceFact;
@@ -44,12 +32,6 @@ impl DecodedAuthenticator<super::decode::Codec> for WorkspaceAuthenticator {
     }
 }
 
-fn authenticate_workspace(fact: &Fact) -> Result<WorkspaceFact, String> {
-    // 1. Layout.
-    let workspace = super::decode::Codec::decode_fact(fact)?;
-    prove_decoded_workspace(fact, workspace)
-}
-
 fn prove_decoded_workspace(fact: &Fact, workspace: WorkspaceFact) -> Result<WorkspaceFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
@@ -61,7 +43,10 @@ fn prove_decoded_workspace(fact: &Fact, workspace: WorkspaceFact) -> Result<Work
 pub fn verify_signature(fact: &WorkspaceFact) -> Result<(), String> {
     crate::core::crypto::ed25519_verify_canonical(
         &fact.public_key,
-        &super::encode::signing_bytes(fact)?,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
         &fact.signature,
         "workspace",
     )
@@ -70,7 +55,9 @@ pub fn verify_signature(fact: &WorkspaceFact) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
     use crate::protocol::auth::workspace::author::create_workspace;
     use crate::protocol::auth::workspace::fact::WorkspaceFact;
 
@@ -83,7 +70,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, WorkspaceFact> {
-        WorkspaceAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => WorkspaceAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

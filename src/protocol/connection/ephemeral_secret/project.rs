@@ -22,15 +22,23 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
-use super::rows::{
+use super::{
     connection_ephemeral_secret_key, connection_ephemeral_secret_row,
     CONNECTION_EPHEMERAL_SECRET_ROWS,
 };
 use crate::protocol::connection::close;
+
+/// Staged read pipeline for the ephemeral_secret fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "connection::ephemeral_secret::Codec",
+    authenticate:
+        "connection::ephemeral_secret::authenticate::ConnectionEphemeralSecretAuthenticator",
+    adapt: "connection::ephemeral_secret::adapt::ConnectionEphemeralSecretAdapter",
+    project: "connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionEphemeralSecretProjector;
@@ -47,23 +55,26 @@ impl Projector for ConnectionEphemeralSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionEphemeralSecretAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ConnectionEphemeralSecretAuthenticator,
+            super::adapt::ConnectionEphemeralSecretAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ConnectionEphemeralSecretAuthenticator>
+impl SemanticProjector<super::fact::ConnectionEphemeralSecretFact>
     for ConnectionEphemeralSecretProjector
 {
-    fn project_authenticated(
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ConnectionEphemeralSecretFact>,
+        fact: &Fact,
+        secret: super::fact::ConnectionEphemeralSecretFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // Authentication (see authenticate.rs) proved canonical bytes and that
         // the public key re-derives from the private key. Scope is interpretation.
-        let (fact, secret) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("connection ephemeral secret fact must have local scope".to_string());

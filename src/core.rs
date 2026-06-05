@@ -33,7 +33,6 @@ pub mod intents;
 pub mod network;
 pub mod perf_profile;
 pub mod pipeline;
-pub mod projectors;
 pub mod replay;
 pub mod row_schema;
 pub mod runtime;

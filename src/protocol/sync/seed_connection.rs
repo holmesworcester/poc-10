@@ -100,7 +100,7 @@ pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId
         connection_id,
         sync::compare::fact::TimestampRange::ROOT,
     )?;
-    let compare = sync::compare::create::start_compare_fact_with_summary(connection_id, summary)?;
+    let compare = sync::compare::author::start_compare_fact_with_summary(connection_id, summary)?;
     Ok(PipelineEffects::new()
         .fact(compare.clone())
         .intent(send_facts_on_connection_intent(SendFactsOnConnection {
@@ -154,10 +154,10 @@ mod tests {
     use crate::core::facts::{FactScope, ScopeKind};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
-    use crate::protocol::auth::endpoint::{fact::EndpointFact, rows as endpoint_rows};
+    use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
     use crate::protocol::auth::endpoint_shared::{
+        self as endpoint_shared_rows,
         fact::{EndpointDeviceName, EndpointRole, EndpointSharedFact},
-        rows as endpoint_shared_rows,
     };
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
     use crate::protocol::sync::share_fact_with_sync::{ShareFactWithSync, SyncShareState};
@@ -180,8 +180,8 @@ mod tests {
                 .expect("store");
         let connection_id = [8; 32];
         store
-            .insert_table_rows(vec![connection::connection::rows::connection_row(
-                connection::connection::rows::ConnectionRowFields::without_addresses(
+            .insert_table_rows(vec![connection::connection::connection_row(
+                connection::connection::ConnectionRowFields::without_addresses(
                     connection_id,
                     [1; 32],
                     [2; 32],
@@ -239,8 +239,8 @@ mod tests {
         );
         store
             .insert_table_rows(vec![
-                connection::connection::rows::connection_row(
-                    connection::connection::rows::ConnectionRowFields::without_addresses(
+                connection::connection::connection_row(
+                    connection::connection::ConnectionRowFields::without_addresses(
                         connection_id,
                         [1; 32],
                         [2; 32],
@@ -263,7 +263,7 @@ mod tests {
 
         assert_eq!(output.facts.len(), 1);
         let compare =
-            sync::compare::layout::decode_fact(&output.facts[0].bytes).expect("compare fact");
+            sync::compare::decode::decode_fact(&output.facts[0].bytes).expect("compare fact");
         assert_eq!(compare.connection_id, connection_id);
         assert_eq!(compare.range, sync::compare::fact::TimestampRange::ROOT);
         assert!(compare.response_requested);
@@ -297,8 +297,8 @@ mod tests {
             signing_secret: [13; 32],
         });
         rows.push(
-            connection::connection::rows::connection_row(
-                connection::connection::rows::ConnectionRowFields::without_addresses(
+            connection::connection::connection_row(
+                connection::connection::ConnectionRowFields::without_addresses(
                     connection_id,
                     local_endpoint,
                     remote_endpoint,

@@ -13,14 +13,21 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::invite_server::fact::InviteServerFact;
 use crate::protocol::auth::{admin, endpoint_shared, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::rows::invite_server_row;
+use super::invite_server_row;
+
+/// Staged read pipeline for the invite_server fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::invite_server::Codec",
+    authenticate: "auth::invite_server::authenticate::InviteServerAuthenticator",
+    adapt: "auth::invite_server::adapt::InviteServerAdapter",
+    project: "auth::invite_server::project::InviteServerProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct InviteServerProjector;
@@ -37,21 +44,22 @@ impl Projector for InviteServerProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::InviteServerAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::InviteServerAuthenticator,
+            super::adapt::InviteServerAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::InviteServerAuthenticator>
-    for InviteServerProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<InviteServerFact> for InviteServerProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, InviteServerFact>,
+        fact: &Fact,
+        invite_server: InviteServerFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, invite_server) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Global {
             return Err("invite_server fact must have global scope".to_string());

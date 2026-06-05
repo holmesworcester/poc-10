@@ -12,27 +12,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ConnectionFrameObservationFact;
 
 pub(crate) struct ConnectionFrameObservationAuthenticator;
 
-impl Authenticator for ConnectionFrameObservationAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ConnectionFrameObservationAuthenticator {
     type Authenticated = ConnectionFrameObservationFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        observed: ConnectionFrameObservationFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_frame_observation(fact))
+        Authentication::from_result(fact, prove_decoded_frame_observation(fact, observed))
     }
 }
 
-fn authenticate_frame_observation(fact: &Fact) -> Result<ConnectionFrameObservationFact, String> {
-    // 1. Layout.
-    let observed = super::Codec::decode_fact(fact)?;
+fn prove_decoded_frame_observation(
+    fact: &Fact,
+    observed: ConnectionFrameObservationFact,
+) -> Result<ConnectionFrameObservationFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(observed)
@@ -41,8 +43,10 @@ fn authenticate_frame_observation(fact: &Fact) -> Result<ConnectionFrameObservat
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::connection::frame_observation::create::fact_from_observation;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::connection::frame_observation::author::fact_from_observation;
     use crate::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact;
 
     use super::ConnectionFrameObservationAuthenticator;
@@ -53,7 +57,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFrameObservationFact> {
-        ConnectionFrameObservationAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ConnectionFrameObservationAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

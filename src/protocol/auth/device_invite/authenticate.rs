@@ -13,31 +13,33 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::DeviceInviteFact;
 
 pub(crate) struct DeviceInviteAuthenticator;
 
-impl Authenticator for DeviceInviteAuthenticator {
+impl DecodedAuthenticator<super::Codec> for DeviceInviteAuthenticator {
     type Authenticated = DeviceInviteFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        device_invite: DeviceInviteFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_device_invite(fact))
+        Authentication::from_result(fact, prove_decoded_device_invite(fact, device_invite))
     }
 }
 
-fn authenticate_device_invite(fact: &Fact) -> Result<DeviceInviteFact, String> {
-    // 1. Layout.
-    let device_invite = super::Codec::decode_fact(fact)?;
+fn prove_decoded_device_invite(
+    fact: &Fact,
+    device_invite: DeviceInviteFact,
+) -> Result<DeviceInviteFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&device_invite)?;
+    verify_signature(&device_invite)?;
     // 4. Non-zero selector fields.
     if device_invite.workspace_id == [0; 32] {
         return Err("device_invite fact has empty workspace_id".to_string());
@@ -51,11 +53,25 @@ fn authenticate_device_invite(fact: &Fact) -> Result<DeviceInviteFact, String> {
     Ok(device_invite)
 }
 
+pub fn verify_signature(fact: &DeviceInviteFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "device invite",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::device_invite::create::signed_device_invite_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::device_invite::author::signed_device_invite_fact;
     use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 
     use super::DeviceInviteAuthenticator;
@@ -68,7 +84,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, DeviceInviteFact> {
-        DeviceInviteAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => DeviceInviteAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

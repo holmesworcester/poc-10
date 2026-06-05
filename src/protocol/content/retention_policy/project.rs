@@ -13,8 +13,7 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth;
 use crate::protocol::content::message;
@@ -23,7 +22,15 @@ use crate::protocol::sync::shared_fact::project::{
 };
 
 use super::fact::RetentionPolicyFact;
-use super::rows::policy_row;
+use super::policy_row;
+
+/// Staged read pipeline for the retention_policy fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "content::retention_policy::Codec",
+    authenticate: "content::retention_policy::authenticate::RetentionPolicyAuthenticator",
+    adapt: "content::retention_policy::adapt::RetentionPolicyAdapter",
+    project: "content::retention_policy::project::RetentionPolicyProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct RetentionPolicyProjector;
@@ -40,24 +47,22 @@ impl Projector for RetentionPolicyProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::RetentionPolicyAuthenticator, _>(
-            self,
-            fact,
-            projection_context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::RetentionPolicyAuthenticator,
+            super::adapt::RetentionPolicyAdapter,
+            _,
+        >(self, fact, projection_context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::RetentionPolicyAuthenticator>
-    for RetentionPolicyProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, RetentionPolicyFact>,
+        fact: &Fact,
+        policy: RetentionPolicyFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, policy) = authenticated.into_parts();
-
         // 2. Authority and predecessor context.
         let bootstrap_root =
             policy.supersedes_policy_id.is_none() && policy.author_user_id == policy.workspace_id;
@@ -254,7 +259,7 @@ mod projector_tests {
     use topo::protocol::content::retention_policy::fact::{
         RetentionPolicyFact, SCOPE_KIND_CHANNEL, SCOPE_KIND_WORKSPACE,
     };
-    use topo::protocol::content::retention_policy::{layout, project, rows};
+    use topo::protocol::content::retention_policy::{encode, project, queries};
     use topo::protocol::sync::share_fact_with_sync;
 
     fn workspace_policy() -> RetentionPolicyFact {
@@ -274,7 +279,11 @@ mod projector_tests {
         };
         policy.signature = crypto::ed25519_sign(
             &private_key,
-            &layout::signing_bytes(&policy).expect("policy signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &policy,
+                encode::encode_fact,
+            )
+            .expect("policy signing bytes"),
         );
         policy
     }
@@ -429,12 +438,16 @@ mod projector_tests {
         policy.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
         policy.signature = crypto::ed25519_sign(
             &private_key,
-            &layout::signing_bytes(&policy).expect("policy signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &policy,
+                encode::encode_fact,
+            )
+            .expect("policy signing bytes"),
         );
         Fact::new(
             FactScope::Global,
             policy.created_at_ms,
-            layout::encode_fact(&policy).expect("encode policy"),
+            encode::encode_fact(&policy).expect("encode policy"),
         )
     }
 
@@ -452,7 +465,11 @@ mod projector_tests {
         };
         admin.signature = crypto::ed25519_sign(
             &private_key,
-            &admin::layout::signing_bytes(&admin).expect("admin signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &admin,
+                admin::encode_fact_payload,
+            )
+            .expect("admin signing bytes"),
         );
         Fact::new(
             FactScope::Global,
@@ -478,12 +495,16 @@ mod projector_tests {
         };
         signer.signature = crypto::ed25519_sign(
             &[8; 32],
-            &auth::endpoint_shared::layout::signing_bytes(&signer).expect("endpoint signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &signer,
+                auth::endpoint_shared::encode::encode_fact,
+            )
+            .expect("endpoint signing bytes"),
         );
         Fact::new(
             FactScope::Global,
             signer.created_at_ms,
-            auth::endpoint_shared::layout::encode_fact(&signer).expect("encode signer"),
+            auth::endpoint_shared::encode::encode_fact(&signer).expect("encode signer"),
         )
     }
 
@@ -563,11 +584,10 @@ mod projector_tests {
         }
     }
 
-    fn decode_single_put_row(mutation: &RowMutation) -> rows::RetentionPolicyRow {
+    fn decode_single_put_row(mutation: &RowMutation) -> queries::RetentionPolicyRow {
         match mutation {
-            RowMutation::PutRow(row) => {
-                rows::decode_policy_row(&row.key, &row.value).expect("decode retention policy row")
-            }
+            RowMutation::PutRow(row) => queries::decode_policy_row(&row.key, &row.value)
+                .expect("decode retention policy row"),
             _ => panic!("expected opaque put row"),
         }
     }

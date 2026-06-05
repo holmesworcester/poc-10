@@ -86,7 +86,10 @@ pub fn generate_messages(
         let fact = crate::core::perf_profile::measure_result("message_fact_build", || {
             authoring.build_message_fact(&text, timestamp)
         })?;
-        authenticate_authored::<super::authenticate::ContentMessageAuthenticator>(&fact)?;
+        authenticate_authored::<
+            super::decode::Codec,
+            super::authenticate::ContentMessageAuthenticator,
+        >(&fact)?;
         fact_ids.push(fact.id);
         facts.push(fact);
     }
@@ -130,7 +133,9 @@ fn build_message_fact(
     author::validate_message_text(text)?;
     let fact =
         prepare_authoring_snapshot(ctx, workspace_id)?.build_message_fact(text, created_at_ms)?;
-    authenticate_authored::<super::authenticate::ContentMessageAuthenticator>(&fact)?;
+    authenticate_authored::<super::decode::Codec, super::authenticate::ContentMessageAuthenticator>(
+        &fact,
+    )?;
     Ok(fact)
 }
 
@@ -193,7 +198,7 @@ pub struct ContentMessageVault {
 
 impl ContentMessageVault {
     pub fn for_workspace(runtime: &Runtime, workspace_id: [u8; 32]) -> Result<Self, String> {
-        let endpoint = auth::endpoint::create::local_endpoint(runtime.store())?
+        let endpoint = auth::endpoint::author::local_endpoint(runtime.store())?
             .ok_or_else(|| "local endpoint is not initialized".to_string())?;
         auth::workspace::queries::local_membership(runtime.store(), workspace_id)?
             .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
@@ -247,7 +252,7 @@ fn latest_local_key_secret(
     runtime
         .facts()
         .filter_map(|fact| {
-            auth::local_key_secret::layout::decode_local_key_secret(fact.body())
+            auth::local_key_secret::decode::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == workspace_id)
         })

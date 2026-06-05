@@ -73,6 +73,7 @@ use rusqlite::{params_from_iter, OptionalExtension};
 use std::collections::BTreeMap;
 
 use super::dispatch::{record_intent_in_table_in_tx, record_intent_in_tx};
+use super::route::FactAdmissionFn;
 
 /// Which follow-up intents may be recorded by this commit path.
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +132,29 @@ pub(crate) fn validate_pipeline_effects(
     validate_intents(&effects.intents)?;
     validate_intents(&effects.local_intents)?;
     validate_row_mutations(&effects.row_mutations, allowed_tables)?;
+    Ok(())
+}
+
+pub(crate) fn validate_pipeline_effects_for_admission(
+    effects: &PipelineEffects,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<(), String> {
+    validate_pipeline_effects(effects, allowed_tables)?;
+    validate_fact_admissions(effects, fact_admission)?;
+    Ok(())
+}
+
+fn validate_fact_admissions(
+    effects: &PipelineEffects,
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<(), String> {
+    let Some(fact_admission) = fact_admission else {
+        return Ok(());
+    };
+    for fact in effects.facts.iter().chain(effects.ephemeral_facts.iter()) {
+        fact_admission(fact)?;
+    }
     Ok(())
 }
 
@@ -243,11 +267,14 @@ pub(crate) fn commit_pipeline_effects_to_store(
     store: &Store,
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
     label: &str,
 ) -> Result<PipelineEffectCounts, String> {
-    validate_pipeline_effects(effects, allowed_tables)?;
+    validate_pipeline_effects_for_admission(effects, allowed_tables, fact_admission)?;
     store
-        .write_transaction(|tx| commit_pipeline_effects_in_tx(tx, effects, allowed_tables))
+        .write_transaction(|tx| {
+            commit_pipeline_effects_in_tx(tx, effects, allowed_tables, fact_admission)
+        })
         .map_err(|err| format!("{label}: {err}"))
 }
 
@@ -265,7 +292,9 @@ pub(crate) fn commit_pipeline_effects_in_tx(
     tx: &Store,
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<PipelineEffectCounts> {
+    validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
     for purged in &effects.purged_facts {
         purge_fact_in_tx(tx, *purged)?;
     }

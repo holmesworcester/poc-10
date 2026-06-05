@@ -7,8 +7,8 @@
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::{Fact, FactId, FactScope};
 
+use super::encode;
 use super::fact::ConnectionCloseFact;
-use super::layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseConnectionReceipt {
@@ -29,7 +29,7 @@ pub fn close(
         connection_id,
         closed_at_ms,
     };
-    let fact = Fact::new(FactScope::Local, closed_at_ms, layout::encode_fact(&close)?);
+    let fact = Fact::new(FactScope::Local, closed_at_ms, encode::encode_fact(&close)?);
     Ok(CommandOutput::new(CloseConnectionReceipt {
         close_id: fact.id,
         connection_id,

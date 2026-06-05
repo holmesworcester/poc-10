@@ -12,29 +12,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::LocalHistoryNodeSecretFact;
 
 pub(crate) struct LocalHistoryNodeSecretAuthenticator;
 
-impl Authenticator for LocalHistoryNodeSecretAuthenticator {
+impl DecodedAuthenticator<super::Codec> for LocalHistoryNodeSecretAuthenticator {
     type Authenticated = LocalHistoryNodeSecretFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        node: LocalHistoryNodeSecretFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_local_history_node_secret(fact))
+        Authentication::from_result(fact, prove_decoded_local_history_node_secret(fact, node))
     }
 }
 
-fn authenticate_local_history_node_secret(
+fn prove_decoded_local_history_node_secret(
     fact: &Fact,
+    node: LocalHistoryNodeSecretFact,
 ) -> Result<LocalHistoryNodeSecretFact, String> {
-    // 1. Layout.
-    let node = super::Codec::decode_fact(fact)?;
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(node)
@@ -44,9 +44,11 @@ fn authenticate_local_history_node_secret(
 mod tests {
     use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::local_history_node_secret::encode;
     use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
-    use crate::protocol::auth::local_history_node_secret::layout;
 
     use super::LocalHistoryNodeSecretAuthenticator;
 
@@ -63,13 +65,20 @@ mod tests {
             tombstone_node_id: [6; 32],
             node_secret: [7; XCHACHA20_POLY1305_KEY_BYTES],
         };
-        let bytes = layout::encode_local_history_node_secret(&node)
+        let bytes = encode::encode_local_history_node_secret(&node)
             .expect("encode local history node secret");
         Fact::new(FactScope::Local, 123, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, LocalHistoryNodeSecretFact> {
-        LocalHistoryNodeSecretAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => LocalHistoryNodeSecretAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

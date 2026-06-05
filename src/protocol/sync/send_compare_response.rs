@@ -75,7 +75,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_sync_compare_response(raw)?;
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
-        let compare = crate::protocol::sync::compare::layout::decode_fact(&compare_fact.bytes)?;
+        let compare = crate::protocol::sync::compare::decode::decode_fact(&compare_fact.bytes)?;
         let mut output = PipelineEffects::new();
         let (plan, expanded_send_fact_ids) = if let Ok(store) = context.store() {
             let available_facts =
@@ -83,7 +83,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
                     store,
                     compare.connection_id,
                 )?;
-            let plan = crate::protocol::sync::compare::create::response_plan_with_summaries(
+            let plan = crate::protocol::sync::compare::author::response_plan_with_summaries(
                 compare_fact,
                 available_facts.iter(),
                 |range| {
@@ -103,7 +103,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
             (plan, expanded)
         } else {
             let available_facts = context.facts().cloned().collect::<Vec<_>>();
-            let plan = crate::protocol::sync::compare::create::response_plan(
+            let plan = crate::protocol::sync::compare::author::response_plan(
                 compare_fact,
                 available_facts.iter(),
             )?;

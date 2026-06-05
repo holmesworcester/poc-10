@@ -10,27 +10,26 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::SyncNeedIdFact;
 
 pub(crate) struct SyncNeedIdAuthenticator;
 
-impl Authenticator for SyncNeedIdAuthenticator {
+impl DecodedAuthenticator<super::Codec> for SyncNeedIdAuthenticator {
     type Authenticated = SyncNeedIdFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        need: SyncNeedIdFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_need_id(fact))
+        Authentication::from_result(fact, prove_decoded_need_id(fact, need))
     }
 }
 
-fn authenticate_need_id(fact: &Fact) -> Result<SyncNeedIdFact, String> {
-    // 1. Layout.
-    let need = super::Codec::decode_fact(fact)?;
+fn prove_decoded_need_id(fact: &Fact, need: SyncNeedIdFact) -> Result<SyncNeedIdFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(need)
@@ -39,8 +38,10 @@ fn authenticate_need_id(fact: &Fact) -> Result<SyncNeedIdFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::sync::need_id::create::fact as need_id_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::sync::need_id::author::fact as need_id_fact;
     use crate::protocol::sync::need_id::fact::SyncNeedIdFact;
 
     use super::SyncNeedIdAuthenticator;
@@ -57,7 +58,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, SyncNeedIdFact> {
-        SyncNeedIdAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => SyncNeedIdAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

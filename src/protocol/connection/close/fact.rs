@@ -5,7 +5,7 @@
 //! travel over connection frames and they do not contain private material.
 //!
 //! Keep this file to the typed payload shape. Byte compatibility belongs in
-//! `layout.rs`, and cleanup policy belongs in the target projectors.
+//! `encode.rs`/`decode.rs`, and cleanup policy belongs in the target projectors.
 
 use crate::core::facts::FactId;
 

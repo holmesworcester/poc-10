@@ -1,8 +1,8 @@
 //! Canonical byte encoding for content-message facts.
 //!
-//! This file owns fixed field order, field widths, the fact tag, and the pure
-//! signing transcript. It does not sign, authenticate, inspect context,
-//! encrypt, decrypt, or materialize rows.
+//! This file owns byte construction only: the fact tag, fixed field order and
+//! field widths. It does not sign, authenticate, inspect context, encrypt,
+//! decrypt, or materialize rows.
 //!
 //! Body shape:
 //!   tag (u8)
@@ -40,8 +40,6 @@ pub const CONTENT_MESSAGE_BYTES: usize = 1
     + 4
     + CIPHERTEXT_BYTES
     + ED25519_SIGNATURE_BYTES;
-const SIGNATURE_OFFSET: usize = CONTENT_MESSAGE_BYTES - ED25519_SIGNATURE_BYTES;
-
 pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_BYTES);
     out.u8(TYPE_CONTENT_MESSAGE);
@@ -59,11 +57,6 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
     out.fixed(&fact.signature);
     out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
-}
-
-pub fn signing_bytes(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
-    wire::canonical_with_zeroed_field(&encode_fact(fact)?, SIGNATURE_OFFSET..CONTENT_MESSAGE_BYTES)
-        .map_err(wire_err)
 }
 
 fn wire_err(err: wire::WireError) -> String {

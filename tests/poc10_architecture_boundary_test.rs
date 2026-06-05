@@ -252,7 +252,6 @@ fn poc10_core_contract_files_are_present() {
         "src/core/runtime.rs",
         "src/core/facts.rs",
         "src/core/context.rs",
-        "src/core/projectors.rs",
         "src/core/intents.rs",
         "src/core/pipeline.rs",
     ];

@@ -18,9 +18,10 @@ The public facade is `src/core/pipeline.rs`. Runtime code calls it to:
 - dispatch queued intents with the registered protocol handlers.
 - purge exact facts and their core-owned derived rows.
 
-Protocol code participates through `Projector`, `FactCodec`, `Authenticator`,
-`Adapter`, `SemanticProjector`, `IntentHandler`, `ProjectionOutput`, and
-`PipelineEffects`. Fact families own the concrete stage implementations.
+Protocol code participates through `Projector`, `FactCodec`,
+`DecodedAuthenticator`, `Adapter`, `SemanticProjector`, `IntentHandler`,
+`ProjectionOutput`, and `PipelineEffects`. Fact families own the concrete stage
+implementations.
 Projectors decide what facts need or offer, what rows they materialize, and what
 follow-up intents to enqueue. Handlers decide what bounded stateful work to
 perform. The pipeline decides when those effects become durable.
@@ -33,20 +34,12 @@ The direction for routed facts is a first-class staged read path:
 route -> decode -> authenticate -> adapt -> project -> effects -> commit
 ```
 
-Converted routes declare those stages in `FactRoute.pipeline` as
-`FactPipeline::Staged`. The core projection worker still stays
-protocol-neutral: it loads the fact and context, then invokes the registered
-protocol projector. The protocol router selects the tag route, core's staged
-helper runs decode/authenticate/adapt/project, and the settled
-`ProjectionOutput` hands context replacement plus `PipelineEffects` to the same
-commit boundary.
-
-The legacy path remains for fact-by-fact cutover. Routes marked
-`FactPipeline::ProjectorComposed` still call the family projector directly, and
-that projector may invoke the old composed authentication helper internally.
-That compatibility path should preserve existing fact behavior until a family is
-split into explicit `decode.rs`, `authenticate.rs`, `adapt.rs`, and `project.rs`
-roles.
+Every routed fact declares those stages in `FactRoute.pipeline` as
+`FactPipeline::Staged`. The core projection worker stays protocol-neutral: it
+loads the fact and context, then invokes the registered protocol projector. The
+protocol router selects the tag route, core's staged helper runs
+decode/authenticate/adapt/project, and the settled `ProjectionOutput` hands
+context replacement plus `PipelineEffects` to the same commit boundary.
 
 ## Write Authoring Path
 
@@ -57,11 +50,12 @@ command -> author -> encode -> authenticate self-check -> admit -> read pipeline
 ```
 
 Commands own user intent, argument parsing, local capability lookup, receipts,
-and the decision to author a fact. The family author/encode code owns canonical
-bytes, signing transcripts, AEAD associated data, deterministic nonce inputs,
-and any padding policy needed to create the fact. Before admission, authored
-facts should pass the same family authentication gate that will accept them on
-the read path. After admission they are just facts queued for projection.
+and the decision to author a fact. Family `author.rs` owns construction crypto:
+signing, encryption, and typed assembly. Family `encode.rs` owns canonical byte
+encoding only. Before storage, the runtime may call the protocol-owned
+`FactAdmissionFn`; poc-10 installs one that routes every fact tag to the same
+family `Codec` and `DecodedAuthenticator` used by the read path. After
+admission the fact is just queued for projection.
 
 ## Data Flow
 
@@ -72,7 +66,7 @@ submit_fact_to_store
 
 drain_pending_projection
   -> load fact, standing context, matched payload facts, and due time ranges
-  -> run staged route or legacy composed projector route
+  -> run staged route
   -> replace context and time wakes for that owner
   -> wake newly matched dependents
   -> commit row mutations, admitted facts, purges, and intents
@@ -111,8 +105,8 @@ that range without allowing projectors to read the clock.
 
 ## Module Responsibilities
 
-- `route.rs` owns tag route declarations and the staged-vs-composed route
-  metadata.
+- `route.rs` owns tag route declarations, staged route metadata, and the
+  optional protocol-owned fact admission hook type.
 - `decode.rs` owns the decode trait core invokes at the read-stage boundary.
 - `authenticate.rs` owns authentication result types, authentication traits,
   the authored-fact self-check helper, and the fact-id self-check helper.

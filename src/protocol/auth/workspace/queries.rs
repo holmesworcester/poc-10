@@ -15,7 +15,7 @@ use crate::protocol::connection;
 use crate::protocol::sync::shared_fact;
 
 use super::fact::{WorkspaceId, WorkspacePublicKey, WORKSPACE_NAME_BYTES};
-use endpoint_shared::rows::EndpointSharedRow;
+use endpoint_shared::queries::EndpointSharedRow;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceRow {
@@ -91,10 +91,10 @@ pub fn local_memberships(store: &Store) -> Result<Vec<LocalWorkspaceMembership>,
         return Ok(Vec::new());
     };
     let mut rows = store
-        .table_rows(endpoint_shared::rows::ENDPOINT_SHARED_ROWS)
+        .table_rows(endpoint_shared::ENDPOINT_SHARED_ROWS)
         .map_err(|err| format!("load endpoint memberships: {err}"))?
         .into_iter()
-        .map(|(key, value)| endpoint_shared::rows::decode_endpoint_shared_row(&key, &value))
+        .map(|(key, value)| endpoint_shared::queries::decode_endpoint_shared_row(&key, &value))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|row| row.endpoint_id == local_endpoint)
@@ -129,8 +129,8 @@ pub fn local_membership(
 fn local_endpoint_id(store: &Store) -> Result<Option<FactId>, String> {
     store
         .table_row(
-            auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
-            auth::endpoint::rows::LOCAL_KEY,
+            auth::endpoint::LOCAL_ENDPOINT_ROWS,
+            auth::endpoint::LOCAL_KEY,
         )
         .map_err(|err| format!("load local endpoint: {err}"))?
         .map(|value| {
@@ -178,17 +178,17 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
     let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
     let connections = runtime
         .store()
-        .table_rows(connection::connection::rows::CONNECTION_ROWS)
+        .table_rows(connection::connection::CONNECTION_ROWS)
         .map_err(|err| format!("count connections: {err}"))?
         .len();
     let connection_requests = runtime
         .store()
-        .table_rows(connection::request::rows::CONNECTION_REQUEST_ROWS)
+        .table_rows(connection::request::CONNECTION_REQUEST_ROWS)
         .map_err(|err| format!("count connection requests: {err}"))?
         .len();
     let invite_accepted = runtime
         .store()
-        .table_rows(auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS)
+        .table_rows(auth::invite_accepted::INVITE_ACCEPTED_ROWS)
         .map_err(|err| format!("count invite accepted: {err}"))?
         .len();
     Ok(RuntimeCountReport {

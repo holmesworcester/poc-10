@@ -14,31 +14,30 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::UserFact;
 
 pub(crate) struct UserAuthenticator;
 
-impl Authenticator for UserAuthenticator {
+impl DecodedAuthenticator<super::Codec> for UserAuthenticator {
     type Authenticated = UserFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        user: UserFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_user(fact))
+        Authentication::from_result(fact, prove_decoded_user(fact, user))
     }
 }
 
-fn authenticate_user(fact: &Fact) -> Result<UserFact, String> {
-    // 1. Layout.
-    let user = super::Codec::decode_fact(fact)?;
+fn prove_decoded_user(fact: &Fact, user: UserFact) -> Result<UserFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&user)?;
+    verify_signature(&user)?;
     // 4. Intrinsic fields.
     if user.workspace_id == [0; 32] {
         return Err("user workspace_id must not be empty".to_string());
@@ -52,11 +51,25 @@ fn authenticate_user(fact: &Fact) -> Result<UserFact, String> {
     Ok(user)
 }
 
+pub fn verify_signature(fact: &UserFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "user",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::user::create::signed_user_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::user::author::signed_user_fact;
     use crate::protocol::auth::user::fact::UserFact;
 
     use super::UserAuthenticator;
@@ -69,7 +82,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, UserFact> {
-        UserAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => UserAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

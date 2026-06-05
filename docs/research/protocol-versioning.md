@@ -17,19 +17,15 @@ the plan reuses:
 - Tag-routed facts: `FactRoute { tag, projector, pipeline, replayed }` and the
   `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
   `core::pipeline::RouterProjector`.
-- Per-family authenticators: each routed family has `authenticate.rs`.
-  Converted families route through a core-managed staged `FactRoute` runner;
-  unconverted families still compose authentication into projection with
-  `project_authenticated::<Authenticator, _>` only during the fact-by-fact
-  cutover. The complete conversion and old-model cleanup checklist lives in
-  `fact-validators.md`.
+- Per-family authenticators: each routed family has `authenticate.rs` and routes
+  through the core-managed staged `FactRoute` runner.
 - Replay runtime: `replay`, `state-summary`, `replay-check`,
   `intent-registry`, and `recurring-intents` are in `src`.
 - Container frame facts: `connection::{frame_small,frame_bundle,frame_file_slice}`
   (tags 168–170), produced from wire bytes by
   `connection_frame.rs::frame_fact_from_wire`.
-- The `TRNS` AEAD frame layout (`connection_frame_wire.rs`) and the sealed
-  bootstrap request (`bootstrap_request/layout.rs`, `TYPE_SEALED_CONNECTION_REQUEST`).
+- The `TRNS` AEAD frame layout (`connection_frame_wire.rs`) and sealed
+  connection request/connection carrier facts.
 - Connection close / retirement facts; purge-as-context
   (`content/purge/project.rs`); length-framed socket transport with heartbeats
   in `core/network.rs`.
@@ -38,15 +34,14 @@ What does **not** exist yet: a protocol version / ceiling, any version gating on
 routes, a release manifest, trusted time, scope-owned ceiling adapters,
 `intro_version` on routes/handlers/commands, ceiling-selected context payload
 adaptation, and the pending admission state for wire-admitted bytes that cannot
-yet become active facts. A core-managed staged `FactRoute` runner is available
-for converted facts; unconverted facts still use projector-composed routes until
-the all-family cutover in `fact-validators.md` removes that compatibility path.
+yet become active facts. The staged `FactRoute` runner is the active route model
+for all routed facts; versioning work builds on that model.
 
 Agent note: Part II contains historical/current-code inventory refs captured
 while planning. When those refs conflict with the current staged pipeline model,
 use `fact-validators.md` and `src/core/pipeline/README.md` as the source of
 truth. Do not use `core::projectors`, `project_authenticated`, `layout.rs`,
-`create.rs`, or `rows.rs` as target shapes.
+`create.rs`, or fact-family `rows.rs` as target shapes.
 
 ## 1. Summary — the model in one breath
 
@@ -291,25 +286,16 @@ trusted to the AEAD/DH primitive, not to poc-10.
 
 ### Phase 2 — Staged routes, then route gating
 
-The first implementation step in this phase was the staged `FactRoute` runner.
-It landed before real adapters, manifests, trusted time, or ceiling filtering:
-current behavior is preserved by registering identity adapt slots for converted
-families. The remaining all-family cutover is tracked in `fact-validators.md`.
-The target cutover includes an identity adapt slot for every existing family
-that does not yet need a real version adapter.
-That gives core ownership of the `decode -> authenticate -> adapt -> project`
-pipeline now, so later versioning work fills in non-identity adapt edges and
-ceiling filters instead of moving the projector boundary again.
+The staged `FactRoute` runner has landed and every routed family now carries an
+identity adapt slot. It landed before real version adapters, manifests, trusted
+time, or ceiling filtering. That gives core ownership of the
+`decode -> authenticate -> adapt -> project` pipeline now, so later versioning
+work fills in non-identity adapt edges and ceiling filters instead of moving the
+projector boundary again.
 
-Before the broad fan-out, build model family examples for the target file shape
-and review them. The examples should cover the main family styles — a
-signed/encrypted content fact, a fact with an external verifier-key
-`AuthenticationNeed`, a container frame fact, and a deterministic
-handler-authored sync/auth fact. Each model should include the target files
-(`encode.rs`, `decode.rs`, `author.rs` when the family locally authors facts,
-`authenticate.rs`, identity `adapt.rs`, and `project.rs`), top-of-file policies,
-route declarations, and focused tests. Once those examples settle, migrate the
-remaining families mechanically.
+The model family lessons are in `fact-validators.md`: signed/encrypted content,
+deterministic root auth, sealed request/connection opener authentication, and
+runtime write admission through the same staged authenticators.
 
 - `FactRoute` becomes the core-owned staged pipeline for one tag: `tag`,
   `intro_version: u32`, `replayed`, decoder, authenticator, adapt path, author
@@ -319,8 +305,9 @@ remaining families mechanically.
   context/time needs park/wake the projection stage for an already authenticated
   and adapted fact. A future adapt need would park/wake the adapt stage, but the
   identity adapt stub has no needs.
-- Core also grows the write-side twin for commands: `cli -> command -> author ->
-  encode -> authenticate self-check -> admit`. This is where blocked-mode,
+- Core has the write-side admission hook for commands and emitted facts:
+  `cli -> command -> author -> encode -> authenticate self-check -> admit`.
+  This is where blocked-mode,
   ceiling-selected author dispatch, local above-ceiling refusal, returned fact
   ids, and the handoff into the read pipeline belong.
 - `registry::protocol_projector()` builds a **ceiling-filtered** route runner
@@ -376,17 +363,15 @@ remaining families mechanically.
   authenticated fact; projector-pending is an active fact waiting on ordinary
   context needs.
 - **Known-route authentication.** The staged runner exists in `core::pipeline`
-  and converted families already route through it; remaining families still use
-  `project_authenticated` only as a cutover bridge. Once a tag is registered and
-  converted, core routes raw bytes through that tag's decode, authentication,
-  adapt, and project stages. Ceiling filtering later decides which registered
-  tags can become active. The authenticator returns
-  `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or
-  `NeedsAuthentication(AuthenticationNeed)` for verifier/opening context.
-  In the final fact-family cutover, projectors stop invoking
-  `project_authenticated` themselves; that composition is route-runner logic
-  around decode, typed authentication, adapt, and projection. Projectors, not
-  authenticators, express semantic context, authority
+  and all routed families route through it. Once a tag is registered, core
+  routes raw bytes through that tag's decode, authentication, adapt, and project
+  stages. Ceiling filtering later decides which registered tags can become
+  active. The authenticator returns
+  `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or one or more
+  `NeedsAuthentication` context needs for verifier/opening context. Projectors
+  do not invoke authentication helpers themselves; that composition is
+  route-runner logic around decode, typed authentication, adapt, and projection.
+  Projectors, not authenticators, express semantic context, authority
   requirements, parking, purge rules, and reproject needs. A fact version
   chooses whether verifier key material is embedded or referenced; the runtime
   contract must support `NeedsAuthentication` either way so future versions can
@@ -438,11 +423,11 @@ closed:
   - `decode.rs`: canonical wire bytes or `Fact` to typed source value. It checks
     tag, length, padding, enum values, and canonical field shapes, but it does
     not check fact id or signatures. This replaces the decoding half of today's
-    `layout.rs`.
+    `encode.rs`.
   - `author.rs`: local semantic construction: command/context/keys to an
     authored typed value, including encryption, signing, assembly,
-    deterministic nonce use, and policy checks. This replaces fact-family
-    `create.rs`; names of non-family intents/handlers may remain `create_*`.
+    deterministic nonce use, and policy checks. Names of non-family
+    intents/handlers may remain `create_*`.
   - `authenticate.rs`: always present per version, kept forever, and routed by
     tag. It calls `decode`, computes/checks the fact id, verifies the
     fact-boundary cryptographic proof (usually signature/domain, sometimes a
@@ -466,8 +451,8 @@ closed:
     inputs.
   - row schemas / `queries.rs`: shared at head; a v2 fact projects into the
     current row shape (ceiling-era rows). A genuinely new table is the rare
-    exception. Handwritten fact-family `rows.rs` files are a migration bridge,
-    not the target version-bucket shape.
+    exception. Fact-family `rows.rs` files are not the target version-bucket
+    shape.
 - Lineage lives in data and the registry, not the tree: a `supersedes_*` field /
   context offer plus the `intro_version` index. Shared field codecs are reached
   through a module-owned typed helper, never another module's raw layout codec.

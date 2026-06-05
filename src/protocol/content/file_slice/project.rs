@@ -14,11 +14,11 @@
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
+use crate::core::intents::TableInsert;
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use crate::protocol::content::file;
@@ -28,11 +28,38 @@ use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project as message_project;
 use crate::protocol::content::message_deletion;
 use crate::protocol::content::purge::project as content_purge;
+use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
 
-use super::rows::{content_file_slice_row, FILE_SLICE_KEY_COLUMNS, FILE_SLICE_ROWS};
+use super::fact::ContentFileSliceFact;
+use super::FILE_SLICE_ROWS;
+
+pub(crate) const FILE_SLICE_KEY_COLUMNS: &[&str] = read_models::FILE_SLICES.key_columns;
+
+pub fn content_file_slice_row(
+    slice_fact_id: FactId,
+    fact: &ContentFileSliceFact,
+    ciphertext: Vec<u8>,
+) -> TableInsert {
+    read_models::FILE_SLICES.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(fact.file_id.to_vec()),
+        Value::U64(u64::from(fact.slice_index)),
+        Value::Bytes(slice_fact_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(ciphertext),
+    ])
+}
+
+/// Staged read pipeline for the file_slice fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "content::file_slice::Codec",
+    authenticate: "content::file_slice::authenticate::ContentFileSliceAuthenticator",
+    adapt: "content::file_slice::adapt::ContentFileSliceAdapter",
+    project: "content::file_slice::project::ContentFileSliceProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileSliceProjector;
@@ -49,21 +76,22 @@ impl Projector for ContentFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ContentFileSliceAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ContentFileSliceAuthenticator,
+            super::adapt::ContentFileSliceAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ContentFileSliceAuthenticator>
-    for ContentFileSliceProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSliceProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ContentFileSliceFact>,
+        fact: &Fact,
+        slice: super::fact::ContentFileSliceFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, slice) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
@@ -434,5 +462,28 @@ mod tests {
             proof.len(),
             FILE_SLICE_BAO_PROOF_BYTES
         );
+    }
+
+    #[test]
+    fn slice_row_round_trips_ordered_key() {
+        let fact = ContentFileSliceFact {
+            workspace_id: [1; 32],
+            created_at_ms: 77,
+            file_id: [2; 32],
+            slice_index: 5,
+            signer_id: [6; 32],
+            signer_public_key: [7; 32],
+            proof: crate::protocol::content::file_slice::fact::FileSliceProof::new(&[0xdd; 16])
+                .expect("proof"),
+            signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
+        };
+        let row = content_file_slice_row([9; 32], &fact, vec![0xcc; 16]);
+        assert_eq!(row.table, FILE_SLICE_ROWS);
+        assert_eq!(row.columns, read_models::FILE_SLICES.columns);
+        assert_eq!(row.values[0], Value::Bytes(vec![1; 32]));
+        assert_eq!(row.values[1], Value::Bytes(vec![2; 32]));
+        assert_eq!(row.values[2], Value::U64(5));
+        assert_eq!(row.values[3], Value::Bytes(vec![9; 32]));
+        assert_eq!(row.values[5], Value::Bytes(vec![0xcc; 16]));
     }
 }

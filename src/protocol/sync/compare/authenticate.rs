@@ -10,27 +10,26 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::SyncCompareFact;
 
 pub(crate) struct SyncCompareAuthenticator;
 
-impl Authenticator for SyncCompareAuthenticator {
+impl DecodedAuthenticator<super::Codec> for SyncCompareAuthenticator {
     type Authenticated = SyncCompareFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        compare: SyncCompareFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_compare(fact))
+        Authentication::from_result(fact, prove_decoded_compare(fact, compare))
     }
 }
 
-fn authenticate_compare(fact: &Fact) -> Result<SyncCompareFact, String> {
-    // 1. Layout.
-    let compare = super::Codec::decode_fact(fact)?;
+fn prove_decoded_compare(fact: &Fact, compare: SyncCompareFact) -> Result<SyncCompareFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(compare)
@@ -39,8 +38,10 @@ fn authenticate_compare(fact: &Fact) -> Result<SyncCompareFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::sync::compare::create::start_compare_fact_with_summary;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::sync::compare::author::start_compare_fact_with_summary;
     use crate::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact};
 
     use super::SyncCompareAuthenticator;
@@ -57,7 +58,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, SyncCompareFact> {
-        SyncCompareAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => SyncCompareAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

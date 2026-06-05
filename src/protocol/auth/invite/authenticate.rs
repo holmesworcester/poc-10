@@ -11,27 +11,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::InviteSecretFact;
 
 pub(crate) struct InviteSecretAuthenticator;
 
-impl Authenticator for InviteSecretAuthenticator {
+impl DecodedAuthenticator<super::Codec> for InviteSecretAuthenticator {
     type Authenticated = InviteSecretFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        invite_secret: InviteSecretFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_invite_secret(fact))
+        Authentication::from_result(fact, prove_decoded_invite_secret(fact, invite_secret))
     }
 }
 
-fn authenticate_invite_secret(fact: &Fact) -> Result<InviteSecretFact, String> {
-    // 1. Layout.
-    let invite_secret = super::Codec::decode_fact(fact)?;
+fn prove_decoded_invite_secret(
+    fact: &Fact,
+    invite_secret: InviteSecretFact,
+) -> Result<InviteSecretFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(invite_secret)
@@ -40,20 +42,29 @@ fn authenticate_invite_secret(fact: &Fact) -> Result<InviteSecretFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::invite::encode;
     use crate::protocol::auth::invite::fact::InviteSecretFact;
-    use crate::protocol::auth::invite::layout;
 
     use super::InviteSecretAuthenticator;
 
     fn canonical_fact() -> Fact {
         let invite_secret = InviteSecretFact::new([7; 32]);
-        let bytes = layout::encode_fact(&invite_secret).expect("encode invite_secret");
+        let bytes = encode::encode_fact(&invite_secret).expect("encode invite_secret");
         Fact::new(FactScope::Local, 100, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, InviteSecretFact> {
-        InviteSecretAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => InviteSecretAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

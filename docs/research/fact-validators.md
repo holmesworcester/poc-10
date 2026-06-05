@@ -10,18 +10,16 @@ builds on this layer (its `decode → authenticate → adapt → project` pipeli
 reuses these authenticators unchanged), but the split is useful on its own
 today.
 
-**Status: core staged runner and model routes landed; full family conversion
-remains.** Change 1: every routed fact family has an `authenticate.rs`;
-projectors consume an `AuthenticatedFact` and verify no signatures; the old
-`project_typed` / `TypedProjector` path is removed; the full suite is green and
-behaviour is unchanged. Change 2 (the behaviour-changing follow-on — per-fact
-projection isolation + purge/keep classification) is described under *Error
-isolation and purge* below and also landed. Change 3: `core::pipeline` now
-exposes first-class route, decode, authenticate, adapt, project, effects, and
-commit contracts. `content/message` and `auth/workspace` are staged model
-routes. The remaining work is to convert every routed fact family to
-`FactPipeline::Staged`, remove the projector-composed compatibility model, and
-keep the complete check suite green.
+**Status: staged family conversion landed on main.** Every routed fact family is
+registered as `FactPipeline::Staged`; each route declares `decode`,
+`authenticate`, `adapt`, and `project` labels; `src/core/projectors.rs` and
+`FactPipeline::ProjectorComposed` are gone. Core now exposes first-class route,
+decode, authenticate, adapt, project, effects, commit, and optional fact
+admission contracts. The remaining work is cleanup and hardening: keep the
+guardrails green, ensure sealed/container families prove their boundary in
+`authenticate.rs`, keep authored/emitted facts flowing through the runtime
+admission self-check, and do not reintroduce `layout.rs`, `create.rs`, or
+fact-family `rows.rs` as target shapes.
 
 This note was originally named "fact validators." The design insight is that the
 pre-projector layer should not claim full protocol validity. It proves that a
@@ -187,12 +185,11 @@ were signed by this key"; the projector still proves "this `endpoint_shared`
 binds the sender and sits in a shared workspace."
 
 As built, an authentication need is carried on the *same* standing-need channel
-as a projection need. In converted routes, core's staged helper runs
-authentication before adaptation and projection; `NeedsAuthentication` becomes a
-standing need that re-wakes the same route. In legacy composed routes, the
-family projector still invokes the compatibility authentication helper until
-that family is cut over. The two surfaces are distinct in ownership and meaning
-even though core schedules both through standing context.
+as a projection need. Core's staged helper runs authentication before adaptation
+and projection; `NeedsAuthentication` becomes one or more standing needs that
+re-wake the same route. The authentication and projection surfaces are distinct
+in ownership and meaning even though core schedules both through standing
+context.
 
 Purge, deletion, retention, and all materialization effects stay projector-owned.
 A purge fact may be authentic forever, but whether a target observes it, removes
@@ -221,7 +218,7 @@ have a reviewable conversion point.
 
 ### Staged core pipeline
 
-The staged helper is the first cutover shape. A converted per-tag `FactRoute`
+The staged helper is the current routed shape. A per-tag `FactRoute`
 runner is:
 
 ```text
@@ -241,31 +238,28 @@ the protocol: the protocol route owns the concrete `T`, its `decode`,
 `authenticate`, `adapt`, and `project` functions, while core sees only "tag 50
 has this decoder, this authenticator, this adapt slot, and this projector."
 
-Converted projectors call `project_staged::<Codec, Authenticator, Adapter, _>()`
-for direct tests, and their registered route function also calls the same core
-runner. Transitional families keep `project_authenticated`, which preserves the
-existing behavior while the cutover proceeds fact by fact. Context payload facts
-are loaded by core through matched needs/offers, but the consuming projector
-decodes them through the owning typed helper when it needs fields. They are not
-re-authenticated by the consumer path: their offer exists only because the owner
-already passed its own route. Needs/offers keep matching on stable
-role/scope/range coordinates while future typed helpers can adapt payload shape
-to the active ceiling.
+Projectors call `project_staged::<Codec, Authenticator, Adapter, _>()` for
+direct tests, and their registered route function also calls the same core
+runner. Context payload facts are loaded by core through matched needs/offers,
+but the consuming projector decodes them through the owning typed helper when it
+needs fields. They are not re-authenticated by the consumer path: their offer
+exists only because the owner already passed its own route. Needs/offers keep
+matching on stable role/scope/range coordinates while future typed helpers can
+adapt payload shape to the active ceiling.
 
-The first implementation substep built two model family shapes before the
-fan-out: a signed/encrypted content family (`content/message`) and a
-deterministic root auth family (`auth/workspace`). Future model candidates are
-an external-verifier authentication-need family, a container frame family, and a
-deterministic handler-authored sync/auth family.
+The initial model families were `content/message` and `auth/workspace`. The
+follow-on model lessons now include the sealed connection families:
+`connection/request` and `connection/connection` authenticate by opening their
+sealed bodies with narrow context needs before projection materializes rows or
+intents.
 
 ### Model fact lessons
 
-- `content/message` and `auth/workspace` are the first production staged
-  routes. Each route declares `decode`, `authenticate`, `adapt`, and `project`
-  labels in `FactRoute.pipeline`, and the route function calls
+- Every production route now declares `decode`, `authenticate`, `adapt`, and
+  `project` labels in `FactRoute.pipeline`, and each route function calls
   `project_staged`.
-- `encode.rs` owns canonical bytes and pure transcript helpers. It does not
-  sign, encrypt, read context, authenticate, adapt, project, or admit.
+- `encode.rs` owns canonical bytes. It does not sign, encrypt, read context,
+  authenticate, adapt, project, or admit.
 - `decode.rs` owns byte parsing and `FactCodec`. It checks tags, lengths,
   canonical padding, and fixed slots; it does not check ids, signatures,
   verifier context, or semantic relationships.
@@ -282,8 +276,9 @@ deterministic handler-authored sync/auth family.
   encryption, and calls to `encode.rs`. It must not reference `CommandContext`,
   `Store`, or `Runtime`.
 - `commands.rs` owns runtime gathering and command receipts. It gathers the
-  authoring snapshot, calls `author.rs`, runs the authenticate self-check before
-  returning facts, and does not own projection rows or fact byte layout.
+  authoring snapshot, calls `author.rs`, and does not own projection rows or
+  fact byte layout. The runtime admission hook can route emitted facts through
+  the same staged authenticator before storage.
 - Row shape is separate from fact shape. Core can learn row fields from
   protocol-owned `SchemaSource.row_schemas` declarations without hard-coding
   protocol semantics; projectors still decide when to emit rows.
@@ -295,16 +290,19 @@ deterministic handler-authored sync/auth family.
   typed SQL tables declared in registry `read_models`; `project.rs` owns the
   private row-mutation builders, while `queries.rs` owns result structs and read
   SQL. Typed-table rows should not detour through a per-family row file.
+- The remaining sync support files are intentionally named for their role:
+  `sync/cascade_test_fact/staging.rs` for staged replay-test facts and
+  `sync/shared_fact/index.rs` for the sync contribution/negentropy index.
 - Documentation should be readable by following the pipeline. Each converted
   family needs top-of-file docs saying what that role owns, and reviewers should
   be able to line up the route declaration with the role files.
 
 ### Write-side twin: command authoring pipeline
 
-Creation is the messiest current boundary: CLI/command code, `create.rs`,
-`layout.rs`, crypto transcript helpers, final byte encoding, submission, and
-projection are often interleaved. The target write pipeline mirrors the read
-pipeline:
+Creation is the write-side twin of the read pipeline. CLI/command code gathers
+inputs, `author.rs` constructs signed/encrypted typed facts, `encode.rs`
+serializes canonical bytes, runtime admission checks those bytes, and projection
+interprets the admitted fact. The write pipeline mirrors the read pipeline:
 
 ```text
 cli args
@@ -322,12 +320,9 @@ and call the ceiling-selected author. It should not handcraft wire bytes.
 
 `author.rs` performs local semantic construction: it signs, encrypts, assembles
 the typed fact, and returns the authored value plus scope/timestamp/admission
-metadata. `encode.rs` owns canonical bytes. Its "transcripts" are the
-domain-separated byte strings that cryptography consumes — deterministic nonce
-seeds, AEAD associated data, signing bytes, and final serialization. They are
-not secret material and not semantic construction. An author may call
-`encode.rs` transcript helpers during construction, then the final encode stage
-serializes the assembled typed fact.
+metadata. `encode.rs` owns canonical bytes. Do not invent a separate signing
+input abstraction: signatures and encryption consume canonical bytes produced by
+the encoder, while the actual signing/encryption operation stays in `author.rs`.
 
 Before a command reports success or returns a fact id, the write pipeline runs
 the real family authenticator over the authored bytes. `Authenticated` admits the
@@ -341,34 +336,27 @@ the canonical form.
 ## Directory and registry
 
 - The target fact-family role files are:
-  - `encode.rs` — typed fact to canonical wire bytes, plus transcript byte
-    helpers for nonce seeds, AEAD associated data, signing bytes, and final
-    serialization. This is byte definition, not semantic construction.
+  - `encode.rs` — typed fact to canonical wire bytes. This is byte definition,
+    not semantic construction.
   - `decode.rs` — canonical bytes or `Fact` to typed source value, with tag,
     length, padding, and enum checks, but no id or signature proof.
   - `author.rs` — command/context/keys to an authored typed value; encryption,
     signing, assembly, deterministic nonce use, retention checks, and
-    ceiling-selected local construction live here. This replaces fact-family
-    `create.rs` in the target shape; non-family intent names such as
-    `create_key_wrap` may keep their established command names.
+    ceiling-selected local construction live here. Non-family intent names such
+    as `create_key_wrap` may keep their established command names.
   - `authenticate.rs` — id check + fact-boundary cryptographic proof +
     intrinsic field rules, returning `Authenticated`, `NeedsAuthentication`, or
-    `Invalid`. Staged authenticators receive the decoded source value; legacy
-    composed authenticators may still decode internally until their route is
-    cut over.
+    `Invalid`. Staged authenticators receive the decoded source value.
   - `adapt.rs` — typed source value to the active semantic value; identity for
     current families, non-identity for version splits.
   - `project.rs` — active semantic value plus context to rows, needs, offers,
     time wakes, intents, emitted facts, and purge.
-- `project.rs` drops primary decode + signature; the projector implements
-  `AuthenticatedProjector` (binds `let (fact, payload) = authenticated.into_parts()`)
-  and begins at scope + context. Scope stays in the projector (interpretation).
-- **Routing, as built.** `FactRoute.pipeline` records whether a route is still
-  `ProjectorComposed` or has first-class `decode -> authenticate -> adapt ->
-  project` stages. `content/message` and `auth/workspace` are staged model
-  routes; their route functions call core `project_staged`. Existing
-  unconverted families keep the old composed path so the cutover can proceed
-  fact by fact without changing their behavior.
+- `project.rs` drops primary decode + signature and implements
+  `SemanticProjector<Semantic>`. It begins at scope + context. Scope stays in
+  the projector because it is interpretation.
+- **Routing, as built.** Every `FactRoute.pipeline` records first-class
+  `decode -> authenticate -> adapt -> project` stages, and every route function
+  calls core `project_staged`.
 - Foreign context is still read through module-owned typed helpers, never another
   module's raw layout codec — and a projector **never re-verifies a context
   fact's signature**: that fact was authenticated before it could offer the
@@ -400,105 +388,53 @@ a split whose structure a reviewer cannot follow is not done.
   projectors interpret and validate context; inline comments attach to
   invariants, ownership, and security conditions, and never narrate obvious code.
 
-## Execution plan for the remaining cutover
+## Post-conversion hardening plan
 
-This plan is an instruction-quality checklist for completing the staged model.
-It is not complete when only a subset of facts has moved. It is complete only
-when **all routed fact families are staged, the old composed model is removed,
+This checklist keeps the staged model review-ready. It is not complete unless
+**all routed fact families stay staged, the old composed model stays removed,
 and every check below passes**.
 
-The compatibility rule while working is narrow: during the conversion,
-unconverted families may continue using the existing composed projector path so
-the tree compiles after each family. Do not create a third pattern. The final
-state has no `FactPipeline::ProjectorComposed`, no `project_authenticated`
-family delegation, and no `core::projectors` re-export facade.
+### 1. Guard the route and file shape
 
-### 1. Inventory every remaining legacy family
+- Every route in `FACT_ROUTES` must remain `FactPipeline::Staged`.
+- Every route function must call
+  `core::pipeline::project_staged::<Codec, Authenticator, Adapter, _>()`.
+- No live code may import `core::projectors`, call `project_authenticated`, or
+  implement compatibility-only `Authenticator` / `AuthenticatedProjector`.
+- Routed fact families must keep role files named for the pipeline:
+  `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, `project.rs`, and
+  `author.rs` when locally authored.
+- Do not reintroduce fact-family `layout.rs`, `create.rs`, or `rows.rs`.
+  Non-family support files must be named for their role, such as sync
+  `index.rs` or `staging.rs`.
 
-Start by enumerating the protocol routes and legacy call sites:
+### 2. Keep boundaries readable
 
-- routes whose `FactRoute.pipeline` is still `ProjectorComposed`;
-- route macro arms or route constructors that default to `ProjectorComposed`;
-- `project.rs` files importing or calling `project_authenticated`;
-- implementations of compatibility-only `Authenticator` or
-  `AuthenticatedProjector`;
-- family code still importing pipeline contracts through `core::projectors`;
-- fact-family `layout.rs`, `create.rs`, or handwritten `rows.rs` files that are
-  still transitional.
+For each non-trivial family, reviewers should be able to answer this by opening
+one file per role:
 
-This inventory is the worklist. Do not hand off while any routed family remains
-on it.
+1. `encode.rs`: What are the canonical bytes?
+2. `decode.rs`: How are bytes parsed and canonical layout rejected?
+3. `authenticate.rs`: What proves id, signature/container boundary, intrinsic
+   field rules, and narrow authentication needs?
+4. `adapt.rs`: What source value becomes the active semantic value?
+5. `project.rs`: What scope, context, authority, rows, offers, needs, time
+   wakes, emitted facts, intents, deletion, retention, and purge result?
+6. `author.rs` / `commands.rs`: What inputs construct facts, where do signing
+   and encryption happen, and how do emitted facts reach runtime admission?
 
-### 2. Convert each family to staged route files
+Sealed/container families must not decrypt or validate primary fact-boundary
+crypto in `project.rs`. If opening is required to know what the fact is,
+`authenticate.rs` parks on the needed opener context and returns the opened
+authenticated semantic value.
 
-Per family, in route order under `auth`, `connection`, `content`, then `sync`:
+### 3. Keep write admission centralized
 
-1. Ensure the target role files exist and are named for the pipeline:
-   `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, `author.rs` when the
-   family authors facts, `project.rs`, `queries.rs` when it reads rows, and
-   module-owned context helpers where needed.
-2. Move canonical byte parsing into `decode.rs`. The staged `Codec` implements
-   `FactCodec` and checks tag, exact length, padding, enum discriminants, and
-   other canonical layout facts. It does not check id, signatures, verifier
-   context, semantic authority, rows, or context relationships.
-3. Move fact-boundary proof into `authenticate.rs`. The staged authenticator
-   implements `DecodedAuthenticator<Codec>`, receives the decoded source value,
-   checks `verify_fact_id`, proves signatures or boundary crypto, enforces
-   intrinsic single-fact rules, and returns `Authentication::{Authenticated,
-   NeedsAuthentication, Invalid}`. It does not re-decode, materialize rows,
-   prove authority, inspect semantic context except a narrow authentication
-   need, emit projector needs/offers, purge, read clocks, or perform IO.
-4. Add `adapt.rs` even when the adapter is identity. It maps the authenticated
-   source value to the semantic value projected at the active head version and
-   gives future version splits a visible conversion point.
-5. Re-type `project.rs` to implement `SemanticProjector<Semantic>`. The
-   projector begins at scope/context/authority/materialization. It receives the
-   semantic value, never parses primary bytes, never checks the fact id, never
-   verifies primary or context signatures, and owns rows, needs, offers, time
-   wakes, emitted facts, intents, deletion, retention, and purge.
-6. Change the family `Projector::project` implementation and registry route to
-   call `core::pipeline::project_staged::<Codec, Authenticator, Adapter, _>()`.
-   Set `FactRoute.pipeline = FactPipeline::Staged { decode, authenticate,
-   adapt, project }` with labels that match the role files reviewers can open.
-7. Move command-side construction to the write-side twin. `commands.rs` gathers
-   runtime inputs and receipts; `author.rs` signs/encrypts/assembles typed
-   values from explicit inputs; `encode.rs` owns canonical bytes and transcript
-   helpers; authored facts run the staged authentication self-check before
-   admission.
-8. Remove transitional row files as part of the family conversion. Row fields
-   belong in protocol-owned schema metadata (`SchemaSource.row_schemas` or
-   registry typed tables); `project.rs` owns when to emit row mutations, and
-   `queries.rs` owns read semantics. Do not leave a converted family with a
-   handwritten `rows.rs` detour.
-9. Update family docs and top-of-file policy comments so a reviewer can follow
-   the route declaration through `decode`, `authenticate`, `adapt`, `project`,
-   `effects`, and command authoring without guessing what each role owns.
-
-After each family, run focused tests for that family plus the registry and
-guardrail tests. The final handoff still requires the complete check suite.
-
-### 3. Remove the old composed model
-
-After every routed family is staged:
-
-1. Delete all `project_authenticated` call sites from fact families.
-2. Delete compatibility-only `Authenticator` and `AuthenticatedProjector`
-   implementations from protocol code.
-3. Replace authored-fact self-checks that still use the legacy `Authenticator`
-   trait with a staged self-check based on `FactCodec + DecodedAuthenticator`.
-4. Remove `FactPipeline::ProjectorComposed` and any registry macro arms or tests
-   that permit it.
-5. Remove `core::pipeline::project_authenticated`,
-   `core::pipeline::Authenticator`, and `core::pipeline::AuthenticatedProjector`
-   if no non-legacy use remains.
-6. Delete `src/core/projectors.rs`; all imports must use `core::pipeline`.
-7. Tighten guardrails so they fail on reintroduction of `ProjectorComposed`,
-   `project_authenticated`, `AuthenticatedProjector`, `core::projectors`,
-   transitional routed-family `layout.rs` / `create.rs`, or converted-family
-   handwritten `rows.rs`.
-8. Update `RULES.md`, `src/core/README.md`, `src/core/pipeline/README.md`, scope
-   READMEs, and this plan so no live doc describes the composed model as an
-   allowed target.
+The main runtime installs a protocol-owned fact admission hook. That hook routes
+stored facts by tag to the same family `Codec` and `DecodedAuthenticator` used
+on the read path. It must run for command output, handler output, projection
+child facts, emitted ephemeral facts, replay-allowed handler output, and direct
+runtime fact submission.
 
 ### 4. Required tests and checks
 
@@ -543,8 +479,10 @@ Success means all of the following are true:
 - no live code imports `core::projectors`;
 - `src/core/projectors.rs` is deleted;
 - `FactPipeline::ProjectorComposed` is deleted;
-- converted families have no transitional `layout.rs`, `create.rs`, or
-  handwritten `rows.rs`;
+- routed families have no transitional `layout.rs`, `create.rs`, or
+  handwritten fact-family `rows.rs`;
+- sync support files that are not fact-family role files are named for their
+  role, currently `shared_fact/index.rs` and `cascade_test_fact/staging.rs`;
 - every authenticator has credible malformed-input tests, and any
   context-waiting authenticator has parking/authentication tests;
 - projector tests exercise the staged path through real bytes;

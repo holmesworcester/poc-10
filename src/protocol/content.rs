@@ -13,8 +13,8 @@
 //! modules; they should not update content read models directly.
 //!
 //! To change how content is encoded or admitted, start in the leaf module's
-//! `layout.rs` and `project.rs`. To change what the CLI shows, start in
-//! `queries.rs` and the leaf `cli.rs`.
+//! `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, and `project.rs`.
+//! To change what the CLI shows, start in `queries.rs` and the leaf `cli.rs`.
 
 pub mod file;
 pub mod file_deletion;

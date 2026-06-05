@@ -137,6 +137,7 @@ const RUNTIME: RuntimeDescription = RuntimeDescription {
     // No not-replayed types: every fact replays, preserving the suppression
     // tests' behavior.
     fact_routes: &[],
+    fact_admission: None,
     handlers: HANDLERS,
     command_excluded_handlers: &[],
 };
@@ -149,9 +150,15 @@ const RUNTIME_NOT_REPLAYED: RuntimeDescription = RuntimeDescription {
     fact_routes: &[FactRoute {
         tag: FACT_TAG,
         projector: route_projector,
-        pipeline: FactPipeline::ProjectorComposed,
+        pipeline: FactPipeline::Staged {
+            decode: "test::Codec",
+            authenticate: "test::Authenticator",
+            adapt: "test::Adapter",
+            project: "test::Projector",
+        },
         replayed: false,
     }],
+    fact_admission: None,
     handlers: HANDLERS,
     command_excluded_handlers: &[],
 };

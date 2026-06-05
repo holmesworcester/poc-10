@@ -10,12 +10,19 @@
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::sync::send_requested_fact::{send_requested_fact_intent, SendRequestedFact};
 
-use super::rows::sync_need_id_row;
+use super::sync_need_id_row;
+
+/// Staged read pipeline for the need_id fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "sync::need_id::Codec",
+    authenticate: "sync::need_id::authenticate::SyncNeedIdAuthenticator",
+    adapt: "sync::need_id::adapt::SyncNeedIdAdapter",
+    project: "sync::need_id::project::SyncNeedIdProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncNeedIdProjector;
@@ -32,19 +39,22 @@ impl Projector for SyncNeedIdProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::SyncNeedIdAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::SyncNeedIdAuthenticator,
+            super::adapt::SyncNeedIdAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::SyncNeedIdAuthenticator> for SyncNeedIdProjector {
-    fn project_authenticated(
+impl SemanticProjector<super::fact::SyncNeedIdFact> for SyncNeedIdProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::SyncNeedIdFact>,
+        fact: &Fact,
+        need: super::fact::SyncNeedIdFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, need) = authenticated.into_parts();
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .row_mutation(RowMutation::PutRow(sync_need_id_row(fact.id, &need)?))

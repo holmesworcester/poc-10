@@ -4,24 +4,18 @@
 //! auth key material. Projection validates supersession and emits proactive
 //! key-wrap work.
 
+pub mod adapt;
 pub mod authenticate;
-pub mod create;
+pub mod author;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
 
-pub const TYPE_RECIPIENT_KEY: u8 = layout::TYPE_RECIPIENT_KEY;
+pub(crate) use decode::Codec;
+
+pub const TYPE_RECIPIENT_KEY: u8 = encode::TYPE_RECIPIENT_KEY;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::RecipientKeyFact, String> {
-    layout::decode_recipient_key(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::RecipientKeyFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+    decode::decode_recipient_key(bytes)
 }

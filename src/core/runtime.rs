@@ -27,7 +27,7 @@ use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::pipeline;
-use crate::core::pipeline::{FactRoute, Projector, Timeline};
+use crate::core::pipeline::{FactAdmissionFn, FactRoute, Projector, Timeline};
 use crate::core::schema::{
     CORE_SCHEMA_SOURCE, EPHEMERAL_PROJECTION_INPUTS, INTENTS, LOCAL_INTENTS, PENDING_PROJECTION,
 };
@@ -57,6 +57,8 @@ pub struct RuntimeDescription {
     /// Replay reads `replayed` to skip facts whose projection is live session
     /// state (connection requests and connections) rather than durable truth.
     pub fact_routes: &'static [FactRoute],
+    /// Optional protocol-owned fact admission check run before core stores facts.
+    pub fact_admission: Option<FactAdmissionFn>,
     /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
     /// Handler route names a synchronous command should not run.
@@ -180,6 +182,7 @@ impl HandlerSet {
         &self,
         store: &Store,
         allowed_tables: &[TableName],
+        fact_admission: Option<FactAdmissionFn>,
         limit: usize,
     ) -> Result<WorkStatus, String> {
         let mut total = WorkStatus::idle();
@@ -204,7 +207,13 @@ impl HandlerSet {
             let handler = self
                 .handler_for_kind(kind)
                 .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
-            let status = pipeline::dispatch_queued_intent(handler, store, allowed_tables, queued)?;
+            let status = pipeline::dispatch_queued_intent(
+                handler,
+                store,
+                allowed_tables,
+                fact_admission,
+                queued,
+            )?;
             total.merge(status);
             if status.retried {
                 if let Some(key) = local_retry_key {
@@ -326,12 +335,21 @@ impl Runtime {
 
     /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
+        if let Some(admit) = self.description.fact_admission {
+            admit(&fact).expect("runtime fact submission should pass admission");
+        }
         pipeline::submit_fact_to_store(&self.store, fact)
             .expect("runtime fact submission should persist")
     }
 
     /// Admit many facts in one transaction.
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
+        let facts = facts.into_iter().collect::<Vec<_>>();
+        if let Some(admit) = self.description.fact_admission {
+            for fact in &facts {
+                admit(fact)?;
+            }
+        }
         pipeline::submit_facts_to_store(&self.store, facts)
     }
 
@@ -373,6 +391,7 @@ impl Runtime {
             &self.store,
             &effects,
             self.description.row_mutation_tables,
+            self.description.fact_admission,
             "submit command output",
         )?;
         Ok(receipt)
@@ -386,6 +405,7 @@ impl Runtime {
             self.projector.as_ref(),
             &self.store,
             self.description.row_mutation_tables,
+            self.description.fact_admission,
             limit,
         )
     }
@@ -445,7 +465,12 @@ impl Runtime {
         handlers: &HandlerSet,
         limit: usize,
     ) -> Result<WorkStatus, String> {
-        handlers.dispatch(&self.store, self.description.row_mutation_tables, limit)
+        handlers.dispatch(
+            &self.store,
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            limit,
+        )
     }
 
     fn process_work_until_idle(
@@ -526,6 +551,7 @@ impl Runtime {
             self.description.handlers,
             self.description.fact_routes,
             self.description.row_mutation_tables,
+            self.description.fact_admission,
             replay_time_wakes,
             order,
         )
@@ -667,6 +693,25 @@ mod tests {
         row_mutation_tables: &[],
         projector: noop_projector,
         fact_routes: &[],
+        fact_admission: None,
+        handlers: &[],
+        command_excluded_handlers: &[],
+    };
+
+    fn reject_bad_fact(fact: &Fact) -> Result<(), String> {
+        if fact.bytes.first().copied() == Some(b'!') {
+            Err("bad test fact rejected by admission".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    const ADMISSION_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[],
+        row_mutation_tables: &[],
+        projector: noop_projector,
+        fact_routes: &[],
+        fact_admission: Some(reject_bad_fact),
         handlers: &[],
         command_excluded_handlers: &[],
     };
@@ -684,6 +729,22 @@ mod tests {
         assert!(
             runtime.facts().any(|fact| fact.id == external_fact.id),
             "fact iteration should read externally committed facts from SQLite"
+        );
+    }
+
+    #[test]
+    fn command_output_rejects_facts_that_fail_runtime_admission() {
+        let mut runtime = Runtime::open_memory(&ADMISSION_RUNTIME).expect("runtime");
+        let rejected = Fact::new(FactScope::Global, 7, b"!bad".to_vec());
+
+        let err = runtime
+            .submit_command_output(CommandOutput::new(()).with_facts(vec![rejected.clone()]))
+            .expect_err("admission should reject command fact");
+
+        assert!(err.contains("bad test fact rejected by admission"), "{err}");
+        assert!(
+            !runtime.facts().any(|fact| fact.id == rejected.id),
+            "rejected fact must not be persisted"
         );
     }
 

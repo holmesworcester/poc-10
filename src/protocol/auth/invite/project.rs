@@ -11,11 +11,18 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
-use super::rows::invite_secret_row;
+use super::invite_secret_row;
+
+/// Staged read pipeline for the invite fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::invite::Codec",
+    authenticate: "auth::invite::authenticate::InviteSecretAuthenticator",
+    adapt: "auth::invite::adapt::InviteSecretAdapter",
+    project: "auth::invite::project::InviteSecretProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct InviteSecretProjector;
@@ -32,21 +39,22 @@ impl Projector for InviteSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::InviteSecretAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::InviteSecretAuthenticator,
+            super::adapt::InviteSecretAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::InviteSecretAuthenticator>
-    for InviteSecretProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::InviteSecretFact> for InviteSecretProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::InviteSecretFact>,
+        fact: &Fact,
+        invite_secret: super::fact::InviteSecretFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, invite_secret) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("invite_secret fact must have local scope".to_string());

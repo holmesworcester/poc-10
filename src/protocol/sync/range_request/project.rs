@@ -8,8 +8,15 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
+};
+
+/// Staged read pipeline for the range_request fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "sync::range_request::Codec",
+    authenticate: "sync::range_request::authenticate::SyncRangeRequestAuthenticator",
+    adapt: "sync::range_request::adapt::SyncRangeRequestAdapter",
+    project: "sync::range_request::project::SyncRangeRequestProjector",
 };
 
 #[derive(Debug, Clone, Default)]
@@ -27,23 +34,22 @@ impl Projector for SyncRangeRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::SyncRangeRequestAuthenticator, _>(
-            self,
-            fact,
-            projection_context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::SyncRangeRequestAuthenticator,
+            super::adapt::SyncRangeRequestAdapter,
+            _,
+        >(self, fact, projection_context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::SyncRangeRequestAuthenticator>
-    for SyncRangeRequestProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::SyncRangeRequestFact> for SyncRangeRequestProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::SyncRangeRequestFact>,
+        fact: &Fact,
+        request: super::fact::SyncRangeRequestFact,
         _projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, request) = authenticated.into_parts();
         // 1. Structural.
         let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
         require_fact_scope(fact, &scope)?;

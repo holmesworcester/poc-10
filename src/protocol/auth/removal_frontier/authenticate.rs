@@ -12,39 +12,58 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::RemovalFrontierFact;
 
 pub(crate) struct RemovalFrontierAuthenticator;
 
-impl Authenticator for RemovalFrontierAuthenticator {
+impl DecodedAuthenticator<super::Codec> for RemovalFrontierAuthenticator {
     type Authenticated = RemovalFrontierFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        frontier: RemovalFrontierFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_removal_frontier(fact))
+        Authentication::from_result(fact, prove_decoded_removal_frontier(fact, frontier))
     }
 }
 
-fn authenticate_removal_frontier(fact: &Fact) -> Result<RemovalFrontierFact, String> {
-    // 1. Layout.
-    let frontier = super::Codec::decode_fact(fact)?;
+fn prove_decoded_removal_frontier(
+    fact: &Fact,
+    frontier: RemovalFrontierFact,
+) -> Result<RemovalFrontierFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&frontier)?;
+    verify_signature(&frontier)?;
     Ok(frontier)
+}
+
+/// Verify the removal frontier's signature over its canonical envelope. The
+/// verifier key is embedded in the fact, so this is a context-free fact-boundary
+/// proof.
+pub fn verify_signature(fact: &RemovalFrontierFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_removal_frontier,
+        )?,
+        &fact.signature,
+        "removal frontier",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::removal_frontier::create::signed_removal_frontier_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::removal_frontier::author::signed_removal_frontier_fact;
     use crate::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
 
     use super::RemovalFrontierAuthenticator;
@@ -57,7 +76,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, RemovalFrontierFact> {
-        RemovalFrontierAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => RemovalFrontierAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

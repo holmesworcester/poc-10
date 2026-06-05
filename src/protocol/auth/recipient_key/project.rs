@@ -8,8 +8,7 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
@@ -20,6 +19,14 @@ use crate::protocol::auth::key_wrap::project::{
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
+
+/// Staged read pipeline for the recipient_key fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::recipient_key::Codec",
+    authenticate: "auth::recipient_key::authenticate::RecipientKeyAuthenticator",
+    adapt: "auth::recipient_key::adapt::RecipientKeyAdapter",
+    project: "auth::recipient_key::project::RecipientKeyProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct RecipientKeyProjector;
@@ -36,21 +43,22 @@ impl Projector for RecipientKeyProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::RecipientKeyAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::RecipientKeyAuthenticator,
+            super::adapt::RecipientKeyAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::RecipientKeyAuthenticator>
-    for RecipientKeyProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<RecipientKeyFact> for RecipientKeyProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, RecipientKeyFact>,
+        fact: &Fact,
+        recipient: RecipientKeyFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, recipient) = authenticated.into_parts();
         recipient_key(fact, context, recipient)
     }
 }

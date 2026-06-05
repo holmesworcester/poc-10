@@ -11,10 +11,12 @@
 //! close-context coordinates; change the target projectors for target-specific
 //! cleanup.
 
+pub mod adapt;
 pub mod authenticate;
 pub mod commands;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
 
 pub use project::{
@@ -22,16 +24,8 @@ pub use project::{
     ephemeral_secret_closed_offer,
 };
 
+pub(crate) use decode::Codec;
+
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionCloseFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::ConnectionCloseFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+    decode::decode_fact(bytes)
 }

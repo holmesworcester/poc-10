@@ -16,7 +16,7 @@ use crate::core::store::Store;
 use std::collections::BTreeSet;
 
 use super::fact::{CascadeDependencies, CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
-use super::{layout, rows};
+use super::{decode, encode, staging};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerateDepsReceipt {
@@ -55,21 +55,21 @@ pub fn generate_deps(
             dependencies,
             payload: [(index % 251) as u8; PAYLOAD_BYTES],
         };
-        let bytes = layout::encode_fact(&fact)?;
+        let bytes = encode::encode_fact(&fact)?;
         let fact = Fact::new(FactScope::Global, timestamp, bytes.clone());
         ids.push(fact.id);
-        staged_rows.push(rows::staged_fact_row(index as u64, bytes));
+        staged_rows.push(staging::staged_fact_row(index as u64, bytes));
     }
 
     let existing_keys = store
-        .table_rows(rows::CASCADE_STAGED_FACT_ROWS)
+        .table_rows(staging::CASCADE_STAGED_FACT_ROWS)
         .map_err(|err| format!("load existing cascade staged rows: {err}"))?
         .into_iter()
         .map(|(key, _)| key)
         .collect::<Vec<_>>();
     store
         .write_transaction(|tx| {
-            tx.delete_table_rows_in_tx(rows::CASCADE_STAGED_FACT_ROWS, existing_keys)?;
+            tx.delete_table_rows_in_tx(staging::CASCADE_STAGED_FACT_ROWS, existing_keys)?;
             tx.insert_table_rows_in_tx(staged_rows)
         })
         .map_err(|err| format!("write cascade staged rows: {err}"))?;
@@ -84,12 +84,12 @@ pub fn generate_deps(
 pub fn replay_deps_reverse(runtime: &mut Runtime) -> Result<ReplayDepsReceipt, String> {
     let mut rows = runtime
         .store()
-        .table_rows(rows::CASCADE_STAGED_FACT_ROWS)
+        .table_rows(staging::CASCADE_STAGED_FACT_ROWS)
         .map_err(|err| format!("load cascade staged rows: {err}"))?
         .into_iter()
         .map(|(key, value)| {
-            let index = rows::decode_staged_fact_key(&key)?;
-            let fact = layout::decode_fact(&value)?;
+            let index = staging::decode_staged_fact_key(&key)?;
+            let fact = decode::decode_fact(&value)?;
             Ok((index, fact.timestamp, value))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -120,7 +120,7 @@ fn materialize_replayed_cascade_offers(
     let mut completed_fact_ids = Vec::new();
 
     for (_, timestamp, bytes) in ordered {
-        let decoded = layout::decode_fact(bytes)?;
+        let decoded = decode::decode_fact(bytes)?;
         if decoded.timestamp != *timestamp {
             return Err("cascade staged timestamp mismatch".to_string());
         }
@@ -154,7 +154,7 @@ fn applied_cascade_test_fact_count(runtime: &Runtime) -> usize {
     let role = "sync_exact_fact";
     runtime
         .facts()
-        .filter(|fact| layout::decode_fact(fact.body()).is_ok())
+        .filter(|fact| decode::decode_fact(fact.body()).is_ok())
         .filter(|fact| {
             crate::core::pipeline::context_store::persisted_context(runtime.store(), &fact.id)
                 .ok()
@@ -199,8 +199,8 @@ mod tests {
         runtime
             .store()
             .delete_table_rows(
-                rows::CASCADE_STAGED_FACT_ROWS,
-                vec![rows::staged_fact_key(0)],
+                staging::CASCADE_STAGED_FACT_ROWS,
+                vec![staging::staged_fact_key(0)],
             )
             .expect("delete dependency row");
 

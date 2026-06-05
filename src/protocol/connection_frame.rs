@@ -59,21 +59,21 @@ pub fn require_sendable_fact(fact: &Fact) -> Result<&[u8], String> {
 pub fn is_private_local_fact_tag(tag: u8) -> bool {
     matches!(
         tag,
-        connection::close::layout::TYPE_CONNECTION_CLOSE
-            | connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET
-            | connection::request::layout::TYPE_CONNECTION_REQUEST
-            | connection::connection::layout::TYPE_CONNECTION
-            | auth::endpoint::layout::TYPE_LOCAL_ENDPOINT
-            | auth::invite::layout::TYPE_INVITE_SECRET
-            | auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET
-            | auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET
-            | auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET
-            | auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY
-            | connection::frame_small::layout::TYPE_CONNECTION_FRAME_SMALL
-            | connection::frame_file_slice::layout::TYPE_CONNECTION_FRAME_FILE_SLICE
-            | connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE
-            | connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION
-            | connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT
+        connection::close::encode::TYPE_CONNECTION_CLOSE
+            | connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET
+            | connection::request::encode::TYPE_CONNECTION_REQUEST
+            | connection::connection::encode::TYPE_CONNECTION
+            | auth::endpoint::encode::TYPE_LOCAL_ENDPOINT
+            | auth::invite::encode::TYPE_INVITE_SECRET
+            | auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET
+            | auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET
+            | auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET
+            | auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY
+            | connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL
+            | connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE
+            | connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE
+            | connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION
+            | connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT
     )
 }
 
@@ -108,13 +108,13 @@ pub(crate) fn exact_frame_slot<const N: usize>(frame: &[u8]) -> Result<FixedSlot
 pub fn frame_fact_from_wire(frame: &[u8], local_timestamp_ms: u64) -> Result<Fact, String> {
     match classify_frame(frame) {
         Some(ConnectionFrameKind::Small) => {
-            connection::frame_small::create::fact_from_wire(frame, local_timestamp_ms)
+            connection::frame_small::author::fact_from_wire(frame, local_timestamp_ms)
         }
         Some(ConnectionFrameKind::FileSlice) => {
-            connection::frame_file_slice::create::fact_from_wire(frame, local_timestamp_ms)
+            connection::frame_file_slice::author::fact_from_wire(frame, local_timestamp_ms)
         }
         Some(ConnectionFrameKind::Bundle) => {
-            connection::frame_bundle::create::fact_from_wire(frame, local_timestamp_ms)
+            connection::frame_bundle::author::fact_from_wire(frame, local_timestamp_ms)
         }
         None => Err("connection frame has unknown size class".to_string()),
     }
@@ -125,7 +125,7 @@ pub fn observed_frame_effect(
     origin_addr: &[u8],
     received_at_local_ms: u64,
 ) -> Result<PipelineEffects, String> {
-    let observation = connection::frame_observation::create::fact_from_observation(
+    let observation = connection::frame_observation::author::fact_from_observation(
         frame_fact.id,
         origin_addr,
         received_at_local_ms,
@@ -140,7 +140,7 @@ pub fn observed_handshake_fact_effect(
     origin_addr: &[u8],
     received_at_local_ms: u64,
 ) -> Result<PipelineEffects, String> {
-    let observation = connection::frame_observation::create::fact_from_observation(
+    let observation = connection::frame_observation::author::fact_from_observation(
         frame_fact.id,
         origin_addr,
         received_at_local_ms,
@@ -153,7 +153,7 @@ pub fn observed_request_fact_effect(
     origin_addr: &[u8],
     received_at_local_ms: u64,
 ) -> Result<PipelineEffects, String> {
-    if !connection::request::layout::is_sealed_fact(&frame_bytes) {
+    if !connection::request::decode::is_sealed_fact(&frame_bytes) {
         return Ok(PipelineEffects::new());
     }
     observed_handshake_fact_effect(
@@ -168,7 +168,7 @@ pub fn observed_connection_fact_effect(
     origin_addr: &[u8],
     received_at_local_ms: u64,
 ) -> Result<PipelineEffects, String> {
-    if !connection::connection::layout::is_sealed_fact(&frame_bytes) {
+    if !connection::connection::decode::is_sealed_fact(&frame_bytes) {
         return Ok(PipelineEffects::new());
     }
     observed_handshake_fact_effect(
@@ -183,15 +183,15 @@ pub fn wire_from_frame_fact(fact: &Fact) -> Result<Vec<u8>, String> {
         return Err("connection frame fact must have local scope".to_string());
     }
     match fact.body().first().copied() {
-        Some(connection::frame_small::layout::TYPE_CONNECTION_FRAME_SMALL) => {
+        Some(connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL) => {
             connection::frame_small::Codec::decode_fact(fact)
                 .map(|input| input.frame.bytes().to_vec())
         }
-        Some(connection::frame_file_slice::layout::TYPE_CONNECTION_FRAME_FILE_SLICE) => {
+        Some(connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE) => {
             connection::frame_file_slice::Codec::decode_fact(fact)
                 .map(|input| input.frame.bytes().to_vec())
         }
-        Some(connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE) => {
+        Some(connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE) => {
             connection::frame_bundle::Codec::decode_fact(fact)
                 .map(|input| input.frame.bytes().to_vec())
         }
@@ -331,7 +331,7 @@ fn connection_material_from_context(
     context: &ProjectionContext,
     owner: FactId,
 ) -> ConnectionMaterialContext {
-    if connection::connection::layout::validate_sealed_fact(fact.body()).is_err() {
+    if connection::connection::decode::validate_sealed_fact(fact.body()).is_err() {
         return ConnectionMaterialContext::Invalid;
     }
     let endpoint_need = ContextNeed::range(
@@ -344,7 +344,7 @@ fn connection_material_from_context(
     for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
         if let Ok(endpoint) = auth::endpoint::decode_fact_payload(endpoint_fact.body()) {
             if let Ok(connection) =
-                connection::connection::layout::open_fact(fact.body(), &endpoint)
+                connection::connection::decode::open_fact(fact.body(), &endpoint)
             {
                 return ConnectionMaterialContext::Open(material_from_connection_fact(
                     fact.id, connection,
@@ -362,7 +362,7 @@ fn connection_material_from_context(
     for (_, secret_fact) in context.matched_payloads_for(&ephemeral_need) {
         if let Ok(secret) = connection::ephemeral_secret::decode_fact_payload(secret_fact.body()) {
             if let Ok(connection) =
-                connection::connection::layout::open_fact_as_responder(fact.body(), &secret)
+                connection::connection::decode::open_fact_as_responder(fact.body(), &secret)
             {
                 return ConnectionMaterialContext::Open(material_from_connection_fact(
                     fact.id, connection,
@@ -482,7 +482,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
-        auth::recipient_key::layout::TYPE_RECIPIENT_KEY => {
+        auth::recipient_key::encode::TYPE_RECIPIENT_KEY => {
             return admit_with_codec::<auth::recipient_key::Codec>(bytes, |recipient| {
                 Ok(Admission::workspace(
                     recipient.workspace_id,
@@ -490,7 +490,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
-        auth::removal_frontier::layout::TYPE_REMOVAL_FRONTIER => {
+        auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER => {
             return admit_with_codec::<auth::removal_frontier::Codec>(bytes, |frontier| {
                 Ok(Admission::workspace(
                     frontier.workspace_id,
@@ -498,7 +498,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
-        auth::key_request::layout::TYPE_KEY_REQUEST => {
+        auth::key_request::encode::TYPE_KEY_REQUEST => {
             return admit_with_codec::<auth::key_request::Codec>(bytes, |request| {
                 Ok(Admission::workspace(
                     request.workspace_id,
@@ -520,7 +520,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         sync::need_id::TYPE_SYNC_NEED_ID => {
             return admit_with_codec::<sync::need_id::Codec>(bytes, |_| Ok(Admission::global(0)));
         }
-        auth::key_wrap::layout::TYPE_KEY_WRAP => {
+        auth::key_wrap::encode::TYPE_KEY_WRAP => {
             return admit_with_codec::<auth::key_wrap::Codec>(bytes, |wrap| {
                 Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms))
             });
@@ -613,7 +613,7 @@ pub fn connection_fact_receipt_for_path(
     Ok(Fact::new(
         FactScope::Local,
         input.received_at_local_ms,
-        connection::fact_receipt::layout::encode_fact(&fact)?,
+        connection::fact_receipt::encode::encode_fact(&fact)?,
     ))
 }
 
@@ -657,10 +657,14 @@ mod tests {
         };
         deletion.signature = ed25519_sign(
             &signing_secret,
-            &content::message_deletion::layout::signing_bytes(&deletion).expect("signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &deletion,
+                content::message_deletion::encode::encode_fact,
+            )
+            .expect("signing bytes"),
         );
         let bytes =
-            content::message_deletion::layout::encode_fact(&deletion).expect("encode deletion");
+            content::message_deletion::encode::encode_fact(&deletion).expect("encode deletion");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit deletion");
 
@@ -680,7 +684,11 @@ mod tests {
         };
         workspace.signature = ed25519_sign(
             &signing_secret,
-            &auth::workspace::encode::signing_bytes(&workspace).expect("signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &workspace,
+                auth::workspace::encode::encode_fact,
+            )
+            .expect("signing bytes"),
         );
         let bytes = auth::workspace::encode::encode_fact(&workspace).expect("workspace");
 
@@ -705,9 +713,13 @@ mod tests {
         };
         user.signature = ed25519_sign(
             &signing_secret,
-            &auth::user::layout::signing_bytes(&user).expect("signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &user,
+                auth::user::encode::encode_fact,
+            )
+            .expect("signing bytes"),
         );
-        let bytes = auth::user::layout::encode_fact(&user).expect("user payload");
+        let bytes = auth::user::encode::encode_fact(&user).expect("user payload");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");
 
@@ -738,10 +750,10 @@ mod tests {
                 &initiator_ephemeral_private_key,
             ),
         };
-        connection::request::create::sign_bootstrap_request(&mut request, &invite)
+        connection::request::author::sign_bootstrap_request(&mut request, &invite)
             .expect("sign request");
         let frame =
-            connection::request::layout::seal_fact(&request, &initiator_ephemeral_private_key)
+            connection::request::encode::seal_fact(&request, &initiator_ephemeral_private_key)
                 .expect("request");
 
         let first = observed_request_fact_effect(frame.clone(), b"127.0.0.1:41002", 100)
@@ -758,8 +770,8 @@ mod tests {
         assert!(first.facts.iter().all(|fact| {
             !matches!(
                 fact.body().first().copied(),
-                Some(connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET)
-                    | Some(connection::connection::layout::TYPE_CONNECTION)
+                Some(connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET)
+                    | Some(connection::connection::encode::TYPE_CONNECTION)
             )
         }));
     }
@@ -770,7 +782,7 @@ mod tests {
             .filter(|fact| {
                 fact.body().first().copied()
                     != Some(
-                        connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION,
+                        connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION,
                     )
             })
             .map(|fact| fact.id)

@@ -20,24 +20,12 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, DecodedAuthenticator, FactCodec,
-    ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ContentMessageFact;
 
 pub(crate) struct ContentMessageAuthenticator;
-
-impl Authenticator for ContentMessageAuthenticator {
-    type Authenticated = ContentMessageFact;
-
-    fn authenticate<'a>(
-        fact: &'a Fact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_message(fact))
-    }
-}
 
 impl DecodedAuthenticator<super::decode::Codec> for ContentMessageAuthenticator {
     type Authenticated = ContentMessageFact;
@@ -49,16 +37,6 @@ impl DecodedAuthenticator<super::decode::Codec> for ContentMessageAuthenticator 
     ) -> Authentication<'a, Self::Authenticated> {
         Authentication::from_result(fact, prove_decoded_message(fact, message))
     }
-}
-
-/// Prove a content-message fact authentic over its own bytes.
-///
-/// Context-free, so the steps chain with `?`; `authenticate` maps the result to
-/// an `Authentication` outcome.
-fn authenticate_message(fact: &Fact) -> Result<ContentMessageFact, String> {
-    // 1. Layout.
-    let message = super::decode::Codec::decode_fact(fact)?;
-    prove_decoded_message(fact, message)
 }
 
 fn prove_decoded_message(
@@ -75,7 +53,10 @@ fn prove_decoded_message(
 pub fn verify_signature(fact: &ContentMessageFact) -> Result<(), String> {
     crate::core::crypto::ed25519_verify_canonical(
         &fact.signer_public_key,
-        &super::encode::signing_bytes(fact)?,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
         &fact.signature,
         "content message",
     )
@@ -85,7 +66,9 @@ pub fn verify_signature(fact: &ContentMessageFact) -> Result<(), String> {
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
     use crate::protocol::content::message::encode;
     use crate::protocol::content::message::fact::{
         ContentMessageFact, MessageCiphertext, NONCE_BYTES,
@@ -114,7 +97,11 @@ mod tests {
         };
         let (_, signature) = crypto::ed25519_sign_canonical(
             &PRIVATE_KEY,
-            &encode::signing_bytes(&message).expect("signing bytes"),
+            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &message,
+                encode::encode_fact,
+            )
+            .expect("signing bytes"),
         );
         message.signature = signature;
         Fact::new(
@@ -125,7 +112,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentMessageFact> {
-        ContentMessageAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::decode::Codec::decode_fact(fact) {
+            Ok(decoded) => ContentMessageAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

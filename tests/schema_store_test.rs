@@ -203,7 +203,7 @@ fn content_read_model_rows_materialize_into_typed_tables() {
     )
     .expect("insert content message row");
 
-    let reaction_row = reaction::rows::ReactionRow {
+    let reaction_row = reaction::queries::ReactionRow {
         workspace_id: [1; 32],
         reaction_id: [10; 32],
         created_at_ms: 60_001,

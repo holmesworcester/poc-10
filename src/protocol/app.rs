@@ -22,8 +22,8 @@ use crate::core::intents::Intent;
 use crate::core::runtime::RuntimeDescription;
 use crate::core::store::Store;
 use crate::protocol::registry::{
-    protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES, FACT_ROUTES, HANDLER_ROUTES,
-    ROW_MUTATION_TABLES, SCHEMA_SOURCES,
+    authenticate_fact_for_admission, protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES,
+    FACT_ROUTES, HANDLER_ROUTES, ROW_MUTATION_TABLES, SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
 use crate::protocol::{connection, content};
@@ -33,6 +33,7 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     row_mutation_tables: ROW_MUTATION_TABLES,
     projector: protocol_projector,
     fact_routes: FACT_ROUTES,
+    fact_admission: Some(authenticate_fact_for_admission),
     handlers: HANDLER_ROUTES,
     command_excluded_handlers: COMMAND_EXCLUDED_HANDLER_ROUTES,
 };
@@ -74,7 +75,7 @@ fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, St
     connection::receive_network_frame::receive_network_frame_intent(
         connection::receive_network_frame::ReceiveNetworkFrame {
             frame: input.frame,
-            origin_addr: connection::fact_receipt::create::canonical_origin_addr_bytes(
+            origin_addr: connection::fact_receipt::author::canonical_origin_addr_bytes(
                 input.origin_addr,
             ),
             received_at_local_ms: input.received_at_local_ms,

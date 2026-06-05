@@ -12,11 +12,18 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
-use super::rows::endpoint_rows;
+use super::endpoint_rows;
+
+/// Staged read pipeline for the endpoint fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::endpoint::Codec",
+    authenticate: "auth::endpoint::authenticate::EndpointAuthenticator",
+    adapt: "auth::endpoint::adapt::EndpointAdapter",
+    project: "auth::endpoint::project::EndpointProjector",
+};
 
 const DAEMON_ENDPOINT_ROLE: &str = "auth_daemon_endpoint";
 const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
@@ -60,17 +67,22 @@ impl Projector for EndpointProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::EndpointAuthenticator, _>(self, fact, context)
+        project_staged::<
+            super::Codec,
+            super::authenticate::EndpointAuthenticator,
+            super::adapt::EndpointAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::EndpointAuthenticator> for EndpointProjector {
-    fn project_authenticated(
+impl SemanticProjector<super::fact::EndpointFact> for EndpointProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::EndpointFact>,
+        fact: &Fact,
+        endpoint: super::fact::EndpointFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, endpoint) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("local endpoint fact must have local scope".to_string());

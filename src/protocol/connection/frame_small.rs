@@ -5,18 +5,12 @@
 //! `connection_frame_observation` context before opening the frame and emitting
 //! durable child facts plus receipts.
 
+pub mod adapt;
 pub mod authenticate;
-pub mod create;
+pub mod author;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::ConnectionFrameSmallFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        layout::decode_fact(fact.body())
-    }
-}
+pub(crate) use decode::Codec;

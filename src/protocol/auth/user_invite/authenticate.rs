@@ -14,31 +14,33 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::UserInviteFact;
 
 pub(crate) struct UserInviteAuthenticator;
 
-impl Authenticator for UserInviteAuthenticator {
+impl DecodedAuthenticator<super::Codec> for UserInviteAuthenticator {
     type Authenticated = UserInviteFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        user_invite: UserInviteFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_user_invite(fact))
+        Authentication::from_result(fact, prove_decoded_user_invite(fact, user_invite))
     }
 }
 
-fn authenticate_user_invite(fact: &Fact) -> Result<UserInviteFact, String> {
-    // 1. Layout.
-    let user_invite = super::Codec::decode_fact(fact)?;
+fn prove_decoded_user_invite(
+    fact: &Fact,
+    user_invite: UserInviteFact,
+) -> Result<UserInviteFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&user_invite)?;
+    verify_signature(&user_invite)?;
     // 4. Non-zero selector fields.
     if user_invite.workspace_id == [0; 32] {
         return Err("user_invite fact has empty workspace_id".to_string());
@@ -52,11 +54,25 @@ fn authenticate_user_invite(fact: &Fact) -> Result<UserInviteFact, String> {
     Ok(user_invite)
 }
 
+pub fn verify_signature(fact: &UserInviteFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "user invite",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::user_invite::create::signed_user_invite_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::user_invite::author::signed_user_invite_fact;
     use crate::protocol::auth::user_invite::fact::UserInviteFact;
 
     use super::UserInviteAuthenticator;
@@ -69,7 +85,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, UserInviteFact> {
-        UserInviteAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => UserInviteAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

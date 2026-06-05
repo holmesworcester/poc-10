@@ -16,8 +16,8 @@ use crate::core::facts::{Fact, FactId, FactScope};
 
 /// A decoded fact whose primary bytes are proven canonical and authentic.
 ///
-/// Only a family `Authenticator` constructs this value, so holding one is the
-/// proof: the content id matches `hash(bytes)`, and any fact-boundary signature
+/// Only a family `DecodedAuthenticator` constructs this value, so holding one is
+/// the proof: the content id matches `hash(bytes)`, and any fact-boundary signature
 /// or container envelope verified. It is an in-memory view — not a new signed
 /// fact — that borrows the source fact and owns its decoded payload. A projector
 /// reads the payload and the source fact through it and never touches raw bytes.
@@ -73,7 +73,7 @@ impl<'a, T> AuthenticatedFact<'a, T> {
 /// even though core schedules both through the same standing-need machinery.
 pub enum Authentication<'a, T> {
     Authenticated(AuthenticatedFact<'a, T>),
-    NeedsAuthentication(ContextNeed),
+    NeedsAuthentication(Vec<ContextNeed>),
     Invalid(String),
 }
 
@@ -90,25 +90,19 @@ impl<'a, T> Authentication<'a, T> {
             Err(error) => Authentication::Invalid(error),
         }
     }
+
+    /// Park authentication on one context need.
+    pub fn need(need: ContextNeed) -> Self {
+        Authentication::NeedsAuthentication(vec![need])
+    }
+
+    /// Park authentication on several alternate or cumulative context needs.
+    pub fn needs(needs: impl IntoIterator<Item = ContextNeed>) -> Self {
+        Authentication::NeedsAuthentication(needs.into_iter().collect())
+    }
 }
 
-/// Family authenticator: primary bytes to an authenticated typed fact.
-///
-/// Implementations live in each family's `authenticate.rs` and reuse the family
-/// `FactCodec` decoder plus the family fact-boundary cryptographic proof. They
-/// do decode + id-check + intrinsic field rules + proof, and nothing
-/// context-semantic. A context-free authenticator ignores `context`; a carrier
-/// authenticator reads only the narrow crypto context it parks on.
-pub trait Authenticator {
-    type Authenticated;
-
-    fn authenticate<'a>(
-        fact: &'a Fact,
-        context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated>;
-}
-
-/// Authenticator for the first-class staged read pipeline.
+/// Family authenticator for the first-class staged read pipeline.
 ///
 /// The fact's owning codec decodes raw bytes first. The authenticator receives
 /// that decoded source value and owns id checks, fact-boundary cryptographic
@@ -123,18 +117,21 @@ pub trait DecodedAuthenticator<C: FactCodec> {
         context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated>;
 }
-/// Self-check a freshly authored fact against its own authenticator.
+/// Self-check a freshly authored fact against its own staged authenticator.
 ///
 /// The write pipeline's exit gate mirrors the read pipeline's entry gate:
-/// authored bytes must be acceptable to the family authenticator before they
-/// are admitted. `NeedsAuthentication` is accepted because some valid facts
-/// require verifier context that is not available at authoring time; `Invalid`
-/// means the author/encode/sign transcript drifted and must not be submitted.
-pub fn authenticate_authored<A>(fact: &Fact) -> Result<(), String>
+/// authored bytes must decode through the family `Codec` and be acceptable to
+/// the family `DecodedAuthenticator` before they are admitted.
+/// `NeedsAuthentication` is accepted because some valid facts require verifier
+/// context that is not available at authoring time; `Invalid` means the
+/// author/encode/signing drifted and must not be submitted.
+pub fn authenticate_authored<C, A>(fact: &Fact) -> Result<(), String>
 where
-    A: Authenticator,
+    C: FactCodec,
+    A: DecodedAuthenticator<C>,
 {
-    match A::authenticate(fact, &ProjectionContext::default()) {
+    let decoded = C::decode_fact(fact)?;
+    match A::authenticate_decoded(fact, decoded, &ProjectionContext::default()) {
         Authentication::Authenticated(_) | Authentication::NeedsAuthentication(_) => Ok(()),
         Authentication::Invalid(error) => Err(error),
     }

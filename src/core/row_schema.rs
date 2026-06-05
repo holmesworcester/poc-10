@@ -67,6 +67,39 @@ pub enum RowValue {
     U64(u64),
 }
 
+impl RowValue {
+    /// Borrow a `Bytes` field, naming it for error messages.
+    pub fn as_bytes(&self, name: &str) -> Result<&[u8], String> {
+        match self {
+            RowValue::Bytes(bytes) => Ok(bytes),
+            _ => Err(format!("{name} must be bytes")),
+        }
+    }
+
+    /// Read a fixed 32-byte `Bytes` field.
+    pub fn as_bytes32(&self, name: &str) -> Result<[u8; 32], String> {
+        self.as_bytes(name)?
+            .try_into()
+            .map_err(|_| format!("{name} must be 32 bytes"))
+    }
+
+    /// Read a `U64` field.
+    pub fn as_u64(&self, name: &str) -> Result<u64, String> {
+        match self {
+            RowValue::U64(value) => Ok(*value),
+            _ => Err(format!("{name} must be u64")),
+        }
+    }
+
+    /// Read a `U8` field.
+    pub fn as_u8(&self, name: &str) -> Result<u8, String> {
+        match self {
+            RowValue::U8(value) => Ok(*value),
+            _ => Err(format!("{name} must be u8")),
+        }
+    }
+}
+
 /// Schema for one opaque row table's key/value bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowTableSchema {

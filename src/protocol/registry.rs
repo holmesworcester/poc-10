@@ -24,7 +24,8 @@ use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
 use crate::core::pipeline::{
-    FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
+    authenticate_authored, FactRoute, ProjectionContext, ProjectionOutput, Projector,
+    RouterProjector,
 };
 use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{SchemaSource, TableName};
@@ -181,6 +182,253 @@ pub(crate) mod read_models {
     );
 }
 
+macro_rules! authenticate_admission_arm {
+    ($fact:expr, $codec:path, $authenticator:path) => {
+        authenticate_authored::<$codec, $authenticator>($fact)
+    };
+}
+
+/// Protocol-owned write admission gate for facts core is about to store.
+///
+/// Core calls this optionally from the runtime commit boundary. The registry
+/// keeps the tag-to-family map here, but each family still owns the concrete
+/// decode and authenticate implementation.
+pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String> {
+    let tag = fact
+        .bytes
+        .first()
+        .copied()
+        .ok_or_else(|| "cannot admit empty fact bytes".to_string())?;
+    match tag {
+        sync::cascade_test_fact::encode::TYPE_CASCADE_TEST_FACT => authenticate_admission_arm!(
+            fact,
+            sync::cascade_test_fact::Codec,
+            sync::cascade_test_fact::authenticate::CascadeTestFactAuthenticator
+        ),
+        connection::close::encode::TYPE_CONNECTION_CLOSE => authenticate_admission_arm!(
+            fact,
+            connection::close::Codec,
+            connection::close::authenticate::ConnectionCloseAuthenticator
+        ),
+        connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET => {
+            authenticate_admission_arm!(
+                fact,
+                connection::ephemeral_secret::Codec,
+                connection::ephemeral_secret::authenticate::ConnectionEphemeralSecretAuthenticator
+            )
+        }
+        connection::request::encode::TYPE_CONNECTION_REQUEST => authenticate_admission_arm!(
+            fact,
+            connection::request::Codec,
+            connection::request::authenticate::ConnectionRequestAuthenticator
+        ),
+        connection::connection::encode::TYPE_CONNECTION => authenticate_admission_arm!(
+            fact,
+            connection::connection::Codec,
+            connection::connection::authenticate::ConnectionAuthenticator
+        ),
+        content::file::encode::TYPE_CONTENT_FILE => authenticate_admission_arm!(
+            fact,
+            content::file::Codec,
+            content::file::authenticate::ContentFileAuthenticator
+        ),
+        content::file_deletion::encode::TYPE_CONTENT_FILE_DELETION => authenticate_admission_arm!(
+            fact,
+            content::file_deletion::Codec,
+            content::file_deletion::authenticate::ContentFileDeletionAuthenticator
+        ),
+        content::file_slice::encode::TYPE_CONTENT_FILE_SLICE => authenticate_admission_arm!(
+            fact,
+            content::file_slice::Codec,
+            content::file_slice::authenticate::ContentFileSliceAuthenticator
+        ),
+        content::message::encode::TYPE_CONTENT_MESSAGE => authenticate_admission_arm!(
+            fact,
+            content::message::Codec,
+            content::message::authenticate::ContentMessageAuthenticator
+        ),
+        content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION => {
+            authenticate_admission_arm!(
+                fact,
+                content::message_deletion::Codec,
+                content::message_deletion::authenticate::ContentMessageDeletionAuthenticator
+            )
+        }
+        content::reaction::encode::TYPE_CONTENT_REACTION => authenticate_admission_arm!(
+            fact,
+            content::reaction::Codec,
+            content::reaction::authenticate::ContentReactionAuthenticator
+        ),
+        auth::recipient_key::encode::TYPE_RECIPIENT_KEY => authenticate_admission_arm!(
+            fact,
+            auth::recipient_key::Codec,
+            auth::recipient_key::authenticate::RecipientKeyAuthenticator
+        ),
+        auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER => authenticate_admission_arm!(
+            fact,
+            auth::removal_frontier::Codec,
+            auth::removal_frontier::authenticate::RemovalFrontierAuthenticator
+        ),
+        auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET => authenticate_admission_arm!(
+            fact,
+            auth::local_key_secret::Codec,
+            auth::local_key_secret::authenticate::LocalKeySecretAuthenticator
+        ),
+        auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET => {
+            authenticate_admission_arm!(
+                fact,
+                auth::local_history_node_secret::Codec,
+                auth::local_history_node_secret::authenticate::LocalHistoryNodeSecretAuthenticator
+            )
+        }
+        auth::local_secret_retirement::encode::TYPE_LOCAL_SECRET_RETIREMENT => {
+            authenticate_admission_arm!(
+                fact,
+                auth::local_secret_retirement::Codec,
+                auth::local_secret_retirement::authenticate::LocalSecretRetirementAuthenticator
+            )
+        }
+        auth::key_request::encode::TYPE_KEY_REQUEST => authenticate_admission_arm!(
+            fact,
+            auth::key_request::Codec,
+            auth::key_request::authenticate::KeyRequestAuthenticator
+        ),
+        auth::key_wrap::encode::TYPE_KEY_WRAP => authenticate_admission_arm!(
+            fact,
+            auth::key_wrap::Codec,
+            auth::key_wrap::authenticate::KeyWrapAuthenticator
+        ),
+        auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY => {
+            authenticate_admission_arm!(
+                fact,
+                auth::local_recipient_key::Codec,
+                auth::local_recipient_key::authenticate::LocalRecipientKeyAuthenticator
+            )
+        }
+        auth::endpoint::encode::TYPE_LOCAL_ENDPOINT => authenticate_admission_arm!(
+            fact,
+            auth::endpoint::Codec,
+            auth::endpoint::authenticate::EndpointAuthenticator
+        ),
+        auth::invite::encode::TYPE_INVITE_SECRET => authenticate_admission_arm!(
+            fact,
+            auth::invite::Codec,
+            auth::invite::authenticate::InviteSecretAuthenticator
+        ),
+        auth::workspace::encode::TYPE_WORKSPACE => authenticate_admission_arm!(
+            fact,
+            auth::workspace::Codec,
+            auth::workspace::authenticate::WorkspaceAuthenticator
+        ),
+        auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET => authenticate_admission_arm!(
+            fact,
+            auth::local_signer_secret::Codec,
+            auth::local_signer_secret::authenticate::LocalSignerSecretAuthenticator
+        ),
+        auth::device_invite::encode::TYPE_DEVICE_INVITE => authenticate_admission_arm!(
+            fact,
+            auth::device_invite::Codec,
+            auth::device_invite::authenticate::DeviceInviteAuthenticator
+        ),
+        auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED => authenticate_admission_arm!(
+            fact,
+            auth::endpoint_shared::Codec,
+            auth::endpoint_shared::authenticate::EndpointSharedAuthenticator
+        ),
+        auth::invite_server::encode::TYPE_INVITE_SERVER => authenticate_admission_arm!(
+            fact,
+            auth::invite_server::Codec,
+            auth::invite_server::authenticate::InviteServerAuthenticator
+        ),
+        auth::admin::encode::TYPE_ADMIN => authenticate_admission_arm!(
+            fact,
+            auth::admin::Codec,
+            auth::admin::authenticate::AdminAuthenticator
+        ),
+        auth::invite_accepted::encode::TYPE_INVITE_ACCEPTED => authenticate_admission_arm!(
+            fact,
+            auth::invite_accepted::Codec,
+            auth::invite_accepted::authenticate::InviteAcceptedAuthenticator
+        ),
+        content::retention_policy::encode::TYPE_RETENTION_POLICY => authenticate_admission_arm!(
+            fact,
+            content::retention_policy::Codec,
+            content::retention_policy::authenticate::RetentionPolicyAuthenticator
+        ),
+        sync::range_request::encode::TYPE_SYNC_RANGE_REQUEST => authenticate_admission_arm!(
+            fact,
+            sync::range_request::Codec,
+            sync::range_request::authenticate::SyncRangeRequestAuthenticator
+        ),
+        sync::shared_fact::encode::TYPE_SHARED_FACT => authenticate_admission_arm!(
+            fact,
+            sync::shared_fact::Codec,
+            sync::shared_fact::authenticate::SyncSharedFactAuthenticator
+        ),
+        sync::compare::encode::TYPE_SYNC_COMPARE => authenticate_admission_arm!(
+            fact,
+            sync::compare::Codec,
+            sync::compare::authenticate::SyncCompareAuthenticator
+        ),
+        sync::have_id::encode::TYPE_SYNC_HAVE_ID => authenticate_admission_arm!(
+            fact,
+            sync::have_id::Codec,
+            sync::have_id::authenticate::SyncHaveIdAuthenticator
+        ),
+        sync::need_id::encode::TYPE_SYNC_NEED_ID => authenticate_admission_arm!(
+            fact,
+            sync::need_id::Codec,
+            sync::need_id::authenticate::SyncNeedIdAuthenticator
+        ),
+        connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL => {
+            authenticate_admission_arm!(
+                fact,
+                connection::frame_small::Codec,
+                connection::frame_small::authenticate::ConnectionFrameSmallAuthenticator
+            )
+        }
+        connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE => {
+            authenticate_admission_arm!(
+                fact,
+                connection::frame_file_slice::Codec,
+                connection::frame_file_slice::authenticate::ConnectionFrameFileSliceAuthenticator
+            )
+        }
+        connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE => {
+            authenticate_admission_arm!(
+                fact,
+                connection::frame_bundle::Codec,
+                connection::frame_bundle::authenticate::ConnectionFrameBundleAuthenticator
+            )
+        }
+        connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION => {
+            authenticate_admission_arm!(
+                fact,
+                connection::frame_observation::Codec,
+                connection::frame_observation::authenticate::ConnectionFrameObservationAuthenticator
+            )
+        }
+        connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT => {
+            authenticate_admission_arm!(
+                fact,
+                connection::fact_receipt::Codec,
+                connection::fact_receipt::authenticate::ConnectionFactReceiptAuthenticator
+            )
+        }
+        auth::user_invite::encode::TYPE_USER_INVITE => authenticate_admission_arm!(
+            fact,
+            auth::user_invite::Codec,
+            auth::user_invite::authenticate::UserInviteAuthenticator
+        ),
+        auth::user::encode::TYPE_USER => authenticate_admission_arm!(
+            fact,
+            auth::user::Codec,
+            auth::user::authenticate::UserAuthenticator
+        ),
+        _ => Err(format!("no admission route registered for fact tag {tag}")),
+    }
+}
+
 pub const FACTS_SCHEMA_SOURCE: SchemaSource = SchemaSource {
     ddl: r#"
 CREATE TABLE IF NOT EXISTS opened_message_rows (
@@ -319,34 +567,53 @@ CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
 CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 "#,
     row_tables: &[
-        auth::key_wrap::rows::KEY_WRAP_ROWS,
-        auth::user::rows::USER_ROWS,
-        auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
-        auth::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
-        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-        auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-        auth::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
-        sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
-        auth::admin::rows::ADMIN_ROWS,
-        connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
-        connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
-        connection::request::rows::CONNECTION_REQUEST_ROWS,
-        connection::connection::rows::CONNECTION_ROWS,
-        auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
-        auth::invite_server::rows::INVITE_SERVER_ROWS,
-        auth::user_invite::rows::USER_INVITE_ROWS,
-        auth::device_invite::rows::DEVICE_INVITE_ROWS,
-        auth::invite::rows::INVITE_SECRET_ROWS,
-        sync::compare::rows::SYNC_COMPARE_ROWS,
-        sync::have_id::rows::SYNC_HAVE_ID_ROWS,
-        sync::need_id::rows::SYNC_NEED_ID_ROWS,
-        sync::shared_fact::rows::SHAREABLE_FACT_ROWS,
-        sync::shared_fact::rows::NEGENTROPY_LEAF_ROWS,
-        sync::shared_fact::rows::NEGENTROPY_CONTEXT_HAVE_ROWS,
-        sync::shared_fact::rows::NEGENTROPY_NODE_ROWS,
-        content::retention_policy::rows::RETENTION_POLICY_ROWS,
+        auth::key_wrap::KEY_WRAP_ROWS,
+        auth::user::USER_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+        auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+        auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
+        sync::cascade_test_fact::staging::CASCADE_STAGED_FACT_ROWS,
+        auth::admin::ADMIN_ROWS,
+        connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
+        connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
+        connection::request::CONNECTION_REQUEST_ROWS,
+        connection::connection::CONNECTION_ROWS,
+        auth::invite_accepted::INVITE_ACCEPTED_ROWS,
+        auth::invite_server::INVITE_SERVER_ROWS,
+        auth::user_invite::USER_INVITE_ROWS,
+        auth::device_invite::DEVICE_INVITE_ROWS,
+        auth::invite::INVITE_SECRET_ROWS,
+        sync::compare::SYNC_COMPARE_ROWS,
+        sync::have_id::SYNC_HAVE_ID_ROWS,
+        sync::need_id::SYNC_NEED_ID_ROWS,
+        sync::shared_fact::index::SHAREABLE_FACT_ROWS,
+        sync::shared_fact::index::NEGENTROPY_LEAF_ROWS,
+        sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
+        sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
+        content::retention_policy::RETENTION_POLICY_ROWS,
     ],
-    row_schemas: &[auth::workspace::WORKSPACE_ROW_SCHEMA],
+    row_schemas: &[
+        auth::workspace::WORKSPACE_ROW_SCHEMA,
+        auth::admin::ADMIN_ROW_SCHEMA,
+        auth::device_invite::DEVICE_INVITE_ROW_SCHEMA,
+        auth::user::USER_ROW_SCHEMA,
+        auth::user_invite::USER_INVITE_ROW_SCHEMA,
+        auth::invite::INVITE_SECRET_ROW_SCHEMA,
+        auth::invite_server::INVITE_SERVER_ROW_SCHEMA,
+        auth::invite_accepted::INVITE_ACCEPTED_ROW_SCHEMA,
+        auth::endpoint_shared::ENDPOINT_SHARED_ROW_SCHEMA,
+        auth::key_wrap::KEY_WRAP_ROW_SCHEMA,
+        connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA,
+        connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROW_SCHEMA,
+        connection::request::CONNECTION_REQUEST_ROW_SCHEMA,
+        connection::connection::CONNECTION_ROW_SCHEMA,
+        sync::compare::SYNC_COMPARE_ROW_SCHEMA,
+        sync::have_id::SYNC_HAVE_ID_ROW_SCHEMA,
+        sync::need_id::SYNC_NEED_ID_ROW_SCHEMA,
+        content::retention_policy::RETENTION_POLICY_ROW_SCHEMA,
+    ],
 };
 
 // Every CLI command's host function must live in `protocol::cli`. This macro
@@ -533,37 +800,37 @@ pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
-    sync::cascade_test_fact::rows::CASCADE_STAGED_FACT_ROWS,
-    connection::ephemeral_secret::rows::CONNECTION_EPHEMERAL_SECRET_ROWS,
-    connection::fact_receipt::rows::CONNECTION_FACT_RECEIPT_ROWS,
-    connection::request::rows::CONNECTION_REQUEST_ROWS,
-    connection::connection::rows::CONNECTION_ROWS,
+    sync::cascade_test_fact::staging::CASCADE_STAGED_FACT_ROWS,
+    connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
+    connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
+    connection::request::CONNECTION_REQUEST_ROWS,
+    connection::connection::CONNECTION_ROWS,
     read_models::FILE_ROWS,
     read_models::FILE_DELETION_ROWS,
     read_models::FILE_SLICE_ROWS,
     read_models::CONTENT_MESSAGE_ROWS,
     read_models::MESSAGE_DELETION_ROWS,
     read_models::REACTION_ROWS,
-    content::retention_policy::rows::RETENTION_POLICY_ROWS,
-    auth::key_wrap::rows::KEY_WRAP_ROWS,
-    auth::admin::rows::ADMIN_ROWS,
-    auth::device_invite::rows::DEVICE_INVITE_ROWS,
-    auth::endpoint::rows::LOCAL_ENDPOINT_ROWS,
-    auth::endpoint::rows::LOCAL_ENDPOINT_SECRET_ROWS,
-    auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-    auth::endpoint::rows::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-    auth::endpoint_shared::rows::ENDPOINT_SHARED_ROWS,
-    auth::invite::rows::INVITE_SECRET_ROWS,
-    auth::invite_accepted::rows::INVITE_ACCEPTED_ROWS,
-    auth::invite_server::rows::INVITE_SERVER_ROWS,
-    auth::user::rows::USER_ROWS,
-    auth::user_invite::rows::USER_INVITE_ROWS,
+    content::retention_policy::RETENTION_POLICY_ROWS,
+    auth::key_wrap::KEY_WRAP_ROWS,
+    auth::admin::ADMIN_ROWS,
+    auth::device_invite::DEVICE_INVITE_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+    auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
+    auth::invite::INVITE_SECRET_ROWS,
+    auth::invite_accepted::INVITE_ACCEPTED_ROWS,
+    auth::invite_server::INVITE_SERVER_ROWS,
+    auth::user::USER_ROWS,
+    auth::user_invite::USER_INVITE_ROWS,
     auth::workspace::WORKSPACE_ROWS,
     read_models::OPENED_MESSAGE_ROWS,
     read_models::MESSAGE_TOMBSTONE_ROWS,
-    sync::compare::rows::SYNC_COMPARE_ROWS,
-    sync::have_id::rows::SYNC_HAVE_ID_ROWS,
-    sync::need_id::rows::SYNC_NEED_ID_ROWS,
+    sync::compare::SYNC_COMPARE_ROWS,
+    sync::have_id::SYNC_HAVE_ID_ROWS,
+    sync::need_id::SYNC_NEED_ID_ROWS,
 ];
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {
@@ -583,42 +850,16 @@ impl Projector for ProtocolProjector {
     }
 }
 
+// Every fact route is staged: the generated route fn calls the family projector,
+// whose `project` routes through core `project_staged`
+// (decode -> authenticate -> adapt -> project). The route's staged pipeline
+// labels come from the family's `project::PIPELINE` const so a reviewer can line
+// up the route declaration with the role files.
 macro_rules! projector_route {
-    ($name:ident, content::message::project::ContentMessageProjector, staged_content_message) => {
-        fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
-            crate::core::pipeline::project_staged::<
-                content::message::decode::Codec,
-                content::message::authenticate::ContentMessageAuthenticator,
-                content::message::adapt::ContentMessageAdapter,
-                content::message::project::ContentMessageProjector,
-            >(
-                &content::message::project::ContentMessageProjector::new(),
-                fact,
-                context,
-            )
-        }
-    };
-    ($name:ident, auth::workspace::project::WorkspaceProjector, staged_workspace) => {
-        fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
-            crate::core::pipeline::project_staged::<
-                auth::workspace::decode::Codec,
-                auth::workspace::authenticate::WorkspaceAuthenticator,
-                auth::workspace::adapt::WorkspaceAdapter,
-                auth::workspace::project::WorkspaceProjector,
-            >(
-                &auth::workspace::project::WorkspaceProjector::new(),
-                fact,
-                context,
-            )
-        }
-    };
     ($name:ident, $projector:path) => {
         fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
             <$projector>::new().project(fact, context)
         }
-    };
-    ($name:ident, $projector:path, $replay:ident) => {
-        projector_route!($name, $projector);
     };
 }
 
@@ -629,84 +870,64 @@ macro_rules! projector_route {
 // dead connection. Omitting the marker means the fact is durable protocol truth
 // that replay rebuilds deterministically.
 macro_rules! projector_routes {
-    ($($name:ident => $tag:path, $projector:path $(, $replay:ident)? ;)+) => {
-        $(projector_route!($name, $projector $(, $replay)?);)+
+    ($($name:ident => $tag:path, $projector:path, $pipeline:path $(, $replay:ident)? ;)+) => {
+        $(projector_route!($name, $projector);)+
 
         pub(crate) const FACT_ROUTES: &[FactRoute] = &[
             $(FactRoute {
                 tag: $tag,
                 projector: $name,
-                pipeline: projector_routes!(@pipeline $($replay)?),
+                pipeline: $pipeline,
                 replayed: projector_routes!(@replayed $($replay)?),
             },)+
         ];
     };
-    (@pipeline) => { FactPipeline::ProjectorComposed };
-    (@pipeline not_replayed) => { FactPipeline::ProjectorComposed };
-    (@pipeline staged_content_message) => {
-        FactPipeline::Staged {
-            decode: "content::message::decode::Codec",
-            authenticate: "content::message::authenticate::ContentMessageAuthenticator",
-            adapt: "content::message::adapt::ContentMessageAdapter",
-            project: "content::message::project::ContentMessageProjector",
-        }
-    };
-    (@pipeline staged_workspace) => {
-        FactPipeline::Staged {
-            decode: "auth::workspace::decode::Codec",
-            authenticate: "auth::workspace::authenticate::WorkspaceAuthenticator",
-            adapt: "auth::workspace::adapt::WorkspaceAdapter",
-            project: "auth::workspace::project::WorkspaceProjector",
-        }
-    };
     (@replayed) => { true };
     (@replayed not_replayed) => { false };
-    (@replayed staged_content_message) => { true };
-    (@replayed staged_workspace) => { true };
 }
 
 projector_routes! {
-    project_cascade_test_fact => sync::cascade_test_fact::layout::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector;
-    project_connection_close => connection::close::layout::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector;
-    project_connection_ephemeral_secret => connection::ephemeral_secret::layout::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector;
-    project_connection_request => connection::request::layout::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, not_replayed;
-    project_connection => connection::connection::layout::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, not_replayed;
-    project_content_file => content::file::layout::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector;
-    project_content_file_deletion => content::file_deletion::layout::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector;
-    project_content_file_slice => content::file_slice::layout::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector;
-    project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, staged_content_message;
-    project_content_message_deletion => content::message_deletion::layout::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector;
-    project_content_reaction => content::reaction::layout::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector;
-    project_auth_recipient_key => auth::recipient_key::layout::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector;
-    project_auth_removal_frontier => auth::removal_frontier::layout::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector;
-    project_auth_local_key_secret => auth::local_key_secret::layout::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector;
-    project_auth_local_history_node_secret => auth::local_history_node_secret::layout::TYPE_LOCAL_HISTORY_NODE_SECRET, auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
-    project_auth_local_secret_retirement => auth::local_secret_retirement::layout::TYPE_LOCAL_SECRET_RETIREMENT, auth::local_secret_retirement::project::LocalSecretRetirementProjector;
-    project_auth_key_request => auth::key_request::layout::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector;
-    project_auth_key_wrap => auth::key_wrap::layout::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector;
-    project_auth_local_recipient_key => auth::local_recipient_key::layout::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector;
-    project_endpoint => auth::endpoint::layout::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector;
-    project_invite => auth::invite::layout::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector;
-    project_workspace => auth::workspace::encode::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector, staged_workspace;
-    project_auth_local_signer_secret => auth::local_signer_secret::layout::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector;
-    project_device_invite => auth::device_invite::layout::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector;
-    project_endpoint_shared => auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector;
-    project_invite_server => auth::invite_server::layout::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector;
-    project_admin => auth::admin::layout::TYPE_ADMIN, auth::admin::project::AdminProjector;
-    project_invite_accepted => auth::invite_accepted::layout::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector;
-    project_retention_policy => content::retention_policy::layout::TYPE_RETENTION_POLICY, content::retention_policy::project::RetentionPolicyProjector;
-    project_sync_range_request => sync::range_request::layout::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector;
-    project_sync_shared_fact => sync::shared_fact::layout::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector;
-    project_sync_compare => sync::compare::layout::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector;
-    project_sync_have_id => sync::have_id::layout::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, not_replayed;
-    project_sync_need_id => sync::need_id::layout::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, not_replayed;
-    project_connection_frame_small => connection::frame_small::layout::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector;
-    project_connection_frame_file_slice => connection::frame_file_slice::layout::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector;
-    project_connection_frame_bundle => connection::frame_bundle::layout::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector;
-    project_connection_frame_observation => connection::frame_observation::layout::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector;
-    project_connection_fact_receipt => connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector;
-    project_user_invite => auth::user_invite::layout::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector;
-    project_user => auth::user::layout::TYPE_USER, auth::user::project::UserProjector;
+    project_cascade_test_fact => sync::cascade_test_fact::encode::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector, sync::cascade_test_fact::project::PIPELINE;
+    project_connection_close => connection::close::encode::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector, connection::close::project::PIPELINE;
+    project_connection_ephemeral_secret => connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector, connection::ephemeral_secret::project::PIPELINE;
+    project_connection_request => connection::request::encode::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, connection::request::project::PIPELINE, not_replayed;
+    project_connection => connection::connection::encode::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, connection::connection::project::PIPELINE, not_replayed;
+    project_content_file => content::file::encode::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector, content::file::project::PIPELINE;
+    project_content_file_deletion => content::file_deletion::encode::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector, content::file_deletion::project::PIPELINE;
+    project_content_file_slice => content::file_slice::encode::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector, content::file_slice::project::PIPELINE;
+    project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, content::message::project::PIPELINE;
+    project_content_message_deletion => content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector, content::message_deletion::project::PIPELINE;
+    project_content_reaction => content::reaction::encode::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector, content::reaction::project::PIPELINE;
+    project_auth_recipient_key => auth::recipient_key::encode::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector, auth::recipient_key::project::PIPELINE;
+    project_auth_removal_frontier => auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector, auth::removal_frontier::project::PIPELINE;
+    project_auth_local_key_secret => auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector, auth::local_key_secret::project::PIPELINE;
+    project_auth_local_history_node_secret => auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET, auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector, auth::local_history_node_secret::project::PIPELINE;
+    project_auth_local_secret_retirement => auth::local_secret_retirement::encode::TYPE_LOCAL_SECRET_RETIREMENT, auth::local_secret_retirement::project::LocalSecretRetirementProjector, auth::local_secret_retirement::project::PIPELINE;
+    project_auth_key_request => auth::key_request::encode::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector, auth::key_request::project::PIPELINE;
+    project_auth_key_wrap => auth::key_wrap::encode::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector, auth::key_wrap::project::PIPELINE;
+    project_auth_local_recipient_key => auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector, auth::local_recipient_key::project::PIPELINE;
+    project_endpoint => auth::endpoint::encode::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector, auth::endpoint::project::PIPELINE;
+    project_invite => auth::invite::encode::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector, auth::invite::project::PIPELINE;
+    project_workspace => auth::workspace::encode::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector, auth::workspace::project::PIPELINE;
+    project_auth_local_signer_secret => auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector, auth::local_signer_secret::project::PIPELINE;
+    project_device_invite => auth::device_invite::encode::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector, auth::device_invite::project::PIPELINE;
+    project_endpoint_shared => auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector, auth::endpoint_shared::project::PIPELINE;
+    project_invite_server => auth::invite_server::encode::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector, auth::invite_server::project::PIPELINE;
+    project_admin => auth::admin::encode::TYPE_ADMIN, auth::admin::project::AdminProjector, auth::admin::project::PIPELINE;
+    project_invite_accepted => auth::invite_accepted::encode::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector, auth::invite_accepted::project::PIPELINE;
+    project_retention_policy => content::retention_policy::encode::TYPE_RETENTION_POLICY, content::retention_policy::project::RetentionPolicyProjector, content::retention_policy::project::PIPELINE;
+    project_sync_range_request => sync::range_request::encode::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector, sync::range_request::project::PIPELINE;
+    project_sync_shared_fact => sync::shared_fact::encode::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector, sync::shared_fact::project::PIPELINE;
+    project_sync_compare => sync::compare::encode::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector, sync::compare::project::PIPELINE;
+    project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PIPELINE, not_replayed;
+    project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PIPELINE, not_replayed;
+    project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PIPELINE;
+    project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PIPELINE;
+    project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PIPELINE;
+    project_connection_frame_observation => connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector, connection::frame_observation::project::PIPELINE;
+    project_connection_fact_receipt => connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector, connection::fact_receipt::project::PIPELINE;
+    project_user_invite => auth::user_invite::encode::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector, auth::user_invite::project::PIPELINE;
+    project_user => auth::user::encode::TYPE_USER, auth::user::project::UserProjector, auth::user::project::PIPELINE;
 }
 
 // Every route must declare `replay = <bool>`: whether core may dispatch this

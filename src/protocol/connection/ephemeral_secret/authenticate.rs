@@ -12,27 +12,29 @@
 use crate::core::crypto;
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ConnectionEphemeralSecretFact;
 
 pub(crate) struct ConnectionEphemeralSecretAuthenticator;
 
-impl Authenticator for ConnectionEphemeralSecretAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ConnectionEphemeralSecretAuthenticator {
     type Authenticated = ConnectionEphemeralSecretFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        secret: ConnectionEphemeralSecretFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_ephemeral_secret(fact))
+        Authentication::from_result(fact, prove_decoded_ephemeral_secret(fact, secret))
     }
 }
 
-fn authenticate_ephemeral_secret(fact: &Fact) -> Result<ConnectionEphemeralSecretFact, String> {
-    // 1. Layout.
-    let secret = super::Codec::decode_fact(fact)?;
+fn prove_decoded_ephemeral_secret(
+    fact: &Fact,
+    secret: ConnectionEphemeralSecretFact,
+) -> Result<ConnectionEphemeralSecretFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // Intrinsic fields.
@@ -46,9 +48,11 @@ fn authenticate_ephemeral_secret(fact: &Fact) -> Result<ConnectionEphemeralSecre
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::connection::ephemeral_secret::encode;
     use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
-    use crate::protocol::connection::ephemeral_secret::layout;
 
     use super::ConnectionEphemeralSecretAuthenticator;
 
@@ -64,12 +68,19 @@ mod tests {
         Fact::new(
             FactScope::Local,
             100,
-            layout::encode_fact(&secret).expect("encode ephemeral secret"),
+            encode::encode_fact(&secret).expect("encode ephemeral secret"),
         )
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionEphemeralSecretFact> {
-        ConnectionEphemeralSecretAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ConnectionEphemeralSecretAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

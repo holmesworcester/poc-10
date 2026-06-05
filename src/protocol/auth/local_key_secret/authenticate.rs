@@ -12,27 +12,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::LocalKeySecretFact;
 
 pub(crate) struct LocalKeySecretAuthenticator;
 
-impl Authenticator for LocalKeySecretAuthenticator {
+impl DecodedAuthenticator<super::Codec> for LocalKeySecretAuthenticator {
     type Authenticated = LocalKeySecretFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        secret: LocalKeySecretFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_local_key_secret(fact))
+        Authentication::from_result(fact, prove_decoded_local_key_secret(fact, secret))
     }
 }
 
-fn authenticate_local_key_secret(fact: &Fact) -> Result<LocalKeySecretFact, String> {
-    // 1. Layout.
-    let secret = super::Codec::decode_fact(fact)?;
+fn prove_decoded_local_key_secret(
+    fact: &Fact,
+    secret: LocalKeySecretFact,
+) -> Result<LocalKeySecretFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(secret)
@@ -41,9 +43,11 @@ fn authenticate_local_key_secret(fact: &Fact) -> Result<LocalKeySecretFact, Stri
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::local_key_secret::encode;
     use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-    use crate::protocol::auth::local_key_secret::layout;
 
     use super::LocalKeySecretAuthenticator;
 
@@ -55,12 +59,19 @@ mod tests {
             created_at_ms: 123,
             key_secret: [4; 32],
         };
-        let bytes = layout::encode_local_key_secret(&secret).expect("encode local key secret");
+        let bytes = encode::encode_local_key_secret(&secret).expect("encode local key secret");
         Fact::new(FactScope::Local, 123, bytes)
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, LocalKeySecretFact> {
-        LocalKeySecretAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => LocalKeySecretAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

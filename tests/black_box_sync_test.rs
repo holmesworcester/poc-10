@@ -974,10 +974,10 @@ fn local_admin_visible(db: &str, workspace_id: [u8; 32]) -> Result<bool, String>
     let membership = auth_workspace::queries::local_membership(&store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined workspace".to_string())?;
     let rows = store
-        .table_rows_with_key_prefix(admin::rows::ADMIN_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(admin::ADMIN_ROWS, &workspace_id, usize::MAX)
         .map_err(|err| format!("load admin rows: {err}"))?;
     for (key, value) in rows {
-        let row = admin::rows::decode_admin_row(&key, &value)?;
+        let row = admin::queries::decode_admin_row(&key, &value)?;
         if row.user_fact_id == membership.user_authority_fact_id {
             return Ok(true);
         }

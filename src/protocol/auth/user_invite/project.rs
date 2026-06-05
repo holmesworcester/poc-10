@@ -13,14 +13,21 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::user_invite::fact::UserInviteFact;
 use crate::protocol::auth::{admin, endpoint_shared, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::rows::user_invite_row;
+use super::user_invite_row;
+
+/// Staged read pipeline for the user_invite fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::user_invite::Codec",
+    authenticate: "auth::user_invite::authenticate::UserInviteAuthenticator",
+    adapt: "auth::user_invite::adapt::UserInviteAdapter",
+    project: "auth::user_invite::project::UserInviteProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct UserInviteProjector;
@@ -37,19 +44,22 @@ impl Projector for UserInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::UserInviteAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::UserInviteAuthenticator,
+            super::adapt::UserInviteAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::UserInviteAuthenticator> for UserInviteProjector {
-    fn project_authenticated(
+impl SemanticProjector<UserInviteFact> for UserInviteProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, UserInviteFact>,
+        fact: &Fact,
+        user_invite: UserInviteFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, user_invite) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("user_invite fact must have global scope".to_string());

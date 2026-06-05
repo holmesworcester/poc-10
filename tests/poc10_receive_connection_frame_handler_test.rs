@@ -6,32 +6,37 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::{FixedBytes, FixedSlot};
+use topo::protocol::auth::endpoint::encode as endpoint_layout;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
-use topo::protocol::auth::endpoint::layout as endpoint_layout;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
-use topo::protocol::auth::key_wrap::create as auth_create;
+use topo::protocol::auth::key_wrap::author as auth_create;
+use topo::protocol::auth::key_wrap::encode as auth_layout;
 use topo::protocol::auth::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::protocol::auth::key_wrap::layout as auth_layout;
 use topo::protocol::connection;
+use topo::protocol::connection::connection::decode as connection_layout_decode;
+use topo::protocol::connection::connection::encode as connection_layout_encode;
 use topo::protocol::connection::connection::fact::ConnectionFact;
-use topo::protocol::connection::connection::layout as connection_layout;
+use topo::protocol::connection::frame_bundle::decode as frame_bundle_layout_decode;
+use topo::protocol::connection::frame_bundle::encode as frame_bundle_layout_encode;
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
-use topo::protocol::connection::frame_bundle::layout as frame_bundle_layout;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
-use topo::protocol::connection::frame_file_slice::layout as frame_file_slice_layout;
-use topo::protocol::connection::frame_observation::create as frame_observation_create;
-use topo::protocol::connection::frame_observation::layout as frame_observation_layout;
+use topo::protocol::connection::frame_file_slice::decode as frame_file_slice_layout;
+use topo::protocol::connection::frame_observation::author as frame_observation_create;
+use topo::protocol::connection::frame_observation::decode as frame_observation_layout_decode;
+use topo::protocol::connection::frame_observation::encode as frame_observation_layout_encode;
+use topo::protocol::connection::frame_small::decode as frame_small_layout_decode;
+use topo::protocol::connection::frame_small::encode as frame_small_layout_encode;
 use topo::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
-use topo::protocol::connection::frame_small::layout as frame_small_layout;
 use topo::protocol::connection::frame_small::project::ConnectionFrameSmallProjector;
 use topo::protocol::connection::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
 };
+use topo::protocol::connection::request::decode as connection_request_layout_decode;
+use topo::protocol::connection::request::encode as connection_request_layout_encode;
 use topo::protocol::connection::request::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP};
-use topo::protocol::connection::request::layout as connection_request_layout;
 use topo::protocol::connection_frame_wire::{
     self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
 };
@@ -40,8 +45,8 @@ use topo::protocol::connection_frame_wire::{
     CONNECTION_FRAME_SIZE_CLASS_BUNDLE, CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
     CONNECTION_FRAME_SMALL_WIRE_BYTES,
 };
+use topo::protocol::sync::compare::encode as sync_compare_layout;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
-use topo::protocol::sync::compare::layout as sync_compare_layout;
 
 const ORIGIN: &[u8] = b"127.0.0.1:41001";
 const RECEIVED_AT: u64 = 1_700_000_222;
@@ -78,7 +83,7 @@ fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
     Fact::new(
         FactScope::Local,
         RECEIVED_AT,
-        frame_small_layout::encode_fact(&input).expect("small connection frame"),
+        frame_small_layout_encode::encode_fact(&input).expect("small connection frame"),
     )
 }
 
@@ -89,7 +94,7 @@ fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
     Fact::new(
         FactScope::Local,
         RECEIVED_AT,
-        frame_bundle_layout::encode_fact(&input).expect("bundle connection frame"),
+        frame_bundle_layout_encode::encode_fact(&input).expect("bundle connection frame"),
     )
 }
 
@@ -98,12 +103,12 @@ fn project_connection_frame_fact(
     context: ProjectionContext,
 ) -> topo::core::pipeline::ProjectionOutput {
     match fact.body().first().copied() {
-        Some(frame_small_layout::TYPE_CONNECTION_FRAME_SMALL) => {
+        Some(frame_small_layout_encode::TYPE_CONNECTION_FRAME_SMALL) => {
             ConnectionFrameSmallProjector::new()
                 .project(fact, &context)
                 .expect("project small connection frame")
         }
-        Some(frame_bundle_layout::TYPE_CONNECTION_FRAME_BUNDLE) => {
+        Some(frame_bundle_layout_encode::TYPE_CONNECTION_FRAME_BUNDLE) => {
             ConnectionFrameBundleProjector::new()
                 .project(fact, &context)
                 .expect("project bundle connection frame")
@@ -214,7 +219,7 @@ fn connection_fact() -> (Fact, ConnectionFact, EndpointFact) {
     let fact = Fact::new(
         FactScope::Local,
         1,
-        connection_layout::seal_fact(&connection, &responder_ephemeral_private)
+        connection_layout_encode::seal_fact(&connection, &responder_ephemeral_private)
             .expect("connection"),
     );
     (fact, connection, local_endpoint)
@@ -276,10 +281,10 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = frame_small_layout::decode_fact(output.ephemeral_facts[0].body())
+    let input = frame_small_layout_decode::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode small connection frame");
     assert_eq!(input.frame, frame);
-    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
+    let observation = frame_observation_layout_decode::decode_fact(output.facts[0].body())
         .expect("decode frame observation");
     assert_eq!(observation.frame_fact_id, output.ephemeral_facts[0].id);
     assert_eq!(observation.origin_addr, ORIGIN);
@@ -325,7 +330,7 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = frame_bundle_layout::decode_fact(output.ephemeral_facts[0].body())
+    let input = frame_bundle_layout_decode::decode_fact(output.ephemeral_facts[0].body())
         .expect("decode bundle connection frame");
     assert_eq!(input.frame, frame);
 }
@@ -343,19 +348,19 @@ fn sealed_request_frame_is_admitted_as_durable_request_plus_observation() {
     assert!(output.facts.iter().any(|fact| {
         fact.scope == FactScope::Global
             && fact.bytes == frame
-            && connection_request_layout::is_sealed_fact(fact.body())
+            && connection_request_layout_decode::is_sealed_fact(fact.body())
     }));
     assert!(output.facts.iter().any(|fact| {
         fact.scope == FactScope::Local
             && fact.body().first().copied()
-                == Some(frame_observation_layout::TYPE_CONNECTION_FRAME_OBSERVATION)
+                == Some(frame_observation_layout_encode::TYPE_CONNECTION_FRAME_OBSERVATION)
     }));
 }
 
 #[test]
 fn raw_connection_request_bytes_are_discarded_at_the_network_boundary() {
     let request = plaintext_request();
-    let frame = connection_request_layout::encode_fact(&request).expect("request");
+    let frame = connection_request_layout_encode::encode_fact(&request).expect("request");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame), &HandlerContext::new())
@@ -368,7 +373,7 @@ fn raw_connection_request_bytes_are_discarded_at_the_network_boundary() {
 #[test]
 fn raw_connection_bytes_are_discarded_at_the_network_boundary() {
     let connection = plaintext_connection();
-    let frame = connection_layout::encode_fact(&connection).expect("response");
+    let frame = connection_layout_encode::encode_fact(&connection).expect("response");
 
     let output = ReceiveNetworkFrameHandler::new()
         .handle(&receive_intent(frame), &HandlerContext::new())
@@ -393,7 +398,7 @@ fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() 
         handshake_hash: [77; 32],
         connection_secret: [78; 32],
     };
-    let frame = connection_layout::seal_fact(&connection, &responder_ephemeral_private)
+    let frame = connection_layout_encode::seal_fact(&connection, &responder_ephemeral_private)
         .expect("seal connection");
 
     let output = ReceiveNetworkFrameHandler::new()
@@ -405,7 +410,7 @@ fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() 
     assert!(output.facts.iter().any(|fact| {
         fact.scope == FactScope::Local
             && fact.bytes == frame
-            && connection_layout::is_sealed_fact(fact.body())
+            && connection_layout_decode::is_sealed_fact(fact.body())
     }));
 }
 
@@ -431,7 +436,7 @@ fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
         .find(|fact| fact.scope == FactScope::Local && fact.id != admitted_wrap.id)
         .expect("local receipt fact");
     let receipt =
-        connection::fact_receipt::layout::decode_fact(&receipt_fact.bytes).expect("decode receipt");
+        connection::fact_receipt::decode::decode_fact(&receipt_fact.bytes).expect("decode receipt");
     assert_eq!(receipt.received_fact_id, admitted_wrap.id);
     assert_eq!(receipt.origin_addr, ORIGIN);
     assert_eq!(receipt.local_endpoint_id, connection.to_endpoint);
@@ -451,7 +456,7 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
         .handle(&intent, &HandlerContext::new())
         .expect("receive connection::frame stages input");
 
-    let observation = frame_observation_layout::decode_fact(output.facts[0].body())
+    let observation = frame_observation_layout_decode::decode_fact(output.facts[0].body())
         .expect("decode frame observation");
     assert_eq!(observation.origin_addr, ORIGIN);
 }
@@ -493,7 +498,7 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
         .find(|fact| fact.scope == FactScope::Local)
         .expect("local receipt fact");
     let receipt =
-        connection::fact_receipt::layout::decode_fact(&receipt_fact.bytes).expect("decode receipt");
+        connection::fact_receipt::decode::decode_fact(&receipt_fact.bytes).expect("decode receipt");
     assert_eq!(receipt.received_fact_id, admitted.id);
 }
 
@@ -574,9 +579,9 @@ fn sealed_request_frame() -> Vec<u8> {
     request.invite_signature = [0; crypto::ED25519_SIGNATURE_BYTES];
     request.initiator_ephemeral_public_key =
         crypto::x25519_public_key(&initiator_ephemeral_private);
-    connection::request::create::sign_bootstrap_request(&mut request, &invite)
+    connection::request::author::sign_bootstrap_request(&mut request, &invite)
         .expect("sign request");
-    connection_request_layout::seal_fact(&request, &initiator_ephemeral_private)
+    connection_request_layout_encode::seal_fact(&request, &initiator_ephemeral_private)
         .expect("seal request")
 }
 

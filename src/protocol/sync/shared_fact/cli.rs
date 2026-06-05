@@ -9,7 +9,7 @@
 use crate::core::cli::{decode_hex_32_named, encode_hex, CliArgs, CliOutput};
 use crate::core::facts::FactId;
 
-use super::rows::SyncStatus;
+use super::index::SyncStatus;
 
 pub const SYNC_STATUS_USAGE: &str = "sync-status";
 pub const SYNC_RANGE_USAGE: &str = "sync-range PEER_OR_CONNECTION_ID_HEX --workspace WORKSPACE_ID_HEX --start-ms START --end-ms END (--with-deps|--without-deps)";

@@ -1,7 +1,7 @@
 //! Pure content-message fact authoring.
 //!
 //! This layer takes an explicit authoring snapshot plus message text, derives
-//! crypto material from canonical transcripts, signs/encrypts, encodes bytes,
+//! crypto material from canonical bytes, signs/encrypts, encodes bytes,
 //! and returns a fact. Runtime gathering belongs in `commands.rs`.
 
 use crate::core::command_context::{
@@ -23,7 +23,7 @@ pub struct MessageAuthoringSnapshot {
     encryption: LocalEncryptionCapability,
     signer_public_key: crypto::Ed25519PublicKey,
     author_user_id: FactId,
-    active_policy: Option<retention_policy::rows::RetentionPolicyRow>,
+    active_policy: Option<retention_policy::queries::RetentionPolicyRow>,
     retained_floor_minute: u64,
 }
 
@@ -33,7 +33,7 @@ impl MessageAuthoringSnapshot {
         signing: LocalSigningCapability,
         encryption: LocalEncryptionCapability,
         author_user_id: FactId,
-        active_policy: Option<retention_policy::rows::RetentionPolicyRow>,
+        active_policy: Option<retention_policy::queries::RetentionPolicyRow>,
         retained_floor_minute: u64,
     ) -> Result<Self, String> {
         if signing.workspace_id != workspace_id {
@@ -115,7 +115,10 @@ impl MessageAuthoringSnapshot {
         let (_, signature) = crate::core::perf_profile::measure_result("message_sign", || {
             Ok::<_, String>(crypto::ed25519_sign_canonical(
                 &self.signing.private_key,
-                &super::encode::signing_bytes(&message)?,
+                &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                    &message,
+                    super::encode::encode_fact,
+                )?,
             ))
         })?;
         message.signature = signature;

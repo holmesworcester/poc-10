@@ -11,27 +11,29 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::SyncRangeRequestFact;
 
 pub(crate) struct SyncRangeRequestAuthenticator;
 
-impl Authenticator for SyncRangeRequestAuthenticator {
+impl DecodedAuthenticator<super::Codec> for SyncRangeRequestAuthenticator {
     type Authenticated = SyncRangeRequestFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        request: SyncRangeRequestFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_range_request(fact))
+        Authentication::from_result(fact, prove_decoded_range_request(fact, request))
     }
 }
 
-fn authenticate_range_request(fact: &Fact) -> Result<SyncRangeRequestFact, String> {
-    // 1. Layout.
-    let request = super::Codec::decode_fact(fact)?;
+fn prove_decoded_range_request(
+    fact: &Fact,
+    request: SyncRangeRequestFact,
+) -> Result<SyncRangeRequestFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(request)
@@ -40,9 +42,11 @@ fn authenticate_range_request(fact: &Fact) -> Result<SyncRangeRequestFact, Strin
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::sync::range_request::encode;
     use crate::protocol::sync::range_request::fact::SyncRangeRequestFact;
-    use crate::protocol::sync::range_request::layout;
 
     use super::SyncRangeRequestAuthenticator;
 
@@ -56,12 +60,19 @@ mod tests {
         Fact::new(
             FactScope::Global,
             10,
-            layout::encode_fact(&request).expect("encode sync range request"),
+            encode::encode_fact(&request).expect("encode sync range request"),
         )
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, SyncRangeRequestFact> {
-        SyncRangeRequestAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => SyncRangeRequestAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

@@ -9,7 +9,7 @@ use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
 
-use super::create;
+use super::author;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateUser {
@@ -65,7 +65,7 @@ pub fn signed_user_fact(
     input: &CreateSignedUser,
     public_key: Ed25519PublicKey,
 ) -> Result<Fact, String> {
-    create::signed_user_fact(
+    author::signed_user_fact(
         input.created_at_ms,
         input.workspace_id,
         public_key,

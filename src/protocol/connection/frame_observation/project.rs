@@ -11,11 +11,19 @@
 use crate::core::context::ContextOffer;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use super::fact::ConnectionFrameObservationFact;
+
+/// Staged read pipeline for the frame_observation fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "connection::frame_observation::Codec",
+    authenticate:
+        "connection::frame_observation::authenticate::ConnectionFrameObservationAuthenticator",
+    adapt: "connection::frame_observation::adapt::ConnectionFrameObservationAdapter",
+    project: "connection::frame_observation::project::ConnectionFrameObservationProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFrameObservationProjector;
@@ -32,21 +40,22 @@ impl Projector for ConnectionFrameObservationProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionFrameObservationAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ConnectionFrameObservationAuthenticator,
+            super::adapt::ConnectionFrameObservationAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ConnectionFrameObservationAuthenticator>
-    for ConnectionFrameObservationProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<ConnectionFrameObservationFact> for ConnectionFrameObservationProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, ConnectionFrameObservationFact>,
+        fact: &Fact,
+        observed: ConnectionFrameObservationFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, observed) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("connection frame observation must have local scope".to_string());

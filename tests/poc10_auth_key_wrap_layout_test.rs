@@ -1,16 +1,15 @@
 use topo::core::crypto::{self, XCHACHA20_POLY1305_NONCE_BYTES};
+use topo::protocol::auth::key_wrap::decode::decode_key_wrap;
+use topo::protocol::auth::key_wrap::encode::{
+    encode_key_wrap, frontier_root_key_wrap_coordinate_key, history_node_key_wrap_coordinate_key,
+    key_wrap_coordinate_key, KEY_WRAP_BYTES, KEY_WRAP_COORDINATE_KEY_BYTES,
+};
 use topo::protocol::auth::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
-use topo::protocol::auth::key_wrap::layout::{
-    decode_key_wrap, encode_key_wrap, frontier_root_key_wrap_coordinate_key,
-    history_node_key_wrap_coordinate_key, key_wrap_coordinate_key, KEY_WRAP_BYTES,
-    KEY_WRAP_COORDINATE_KEY_BYTES,
-};
+use topo::protocol::auth::local_recipient_key::decode::decode_local_recipient_key;
+use topo::protocol::auth::local_recipient_key::encode::encode_local_recipient_key;
 use topo::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
-use topo::protocol::auth::local_recipient_key::layout::{
-    decode_local_recipient_key, encode_local_recipient_key,
-};
 
 fn id(byte: u8) -> [u8; 32] {
     [byte; 32]

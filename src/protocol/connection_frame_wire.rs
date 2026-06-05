@@ -50,14 +50,14 @@ pub const CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES: usize = 4 * 1024;
 /// content file-slice fact. It avoids the old 1 MiB catch-all frame while still
 /// carrying a full `content::file_slice`.
 pub const CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES: usize =
-    INNER_BUNDLE_HEADER_BYTES + INNER_FACT_LEN_BYTES + file_slice::layout::CONTENT_FILE_SLICE_BYTES;
+    INNER_BUNDLE_HEADER_BYTES + INNER_FACT_LEN_BYTES + file_slice::encode::CONTENT_FILE_SLICE_BYTES;
 
 /// Maximum fact bytes carried in one padded bundle slot.
 ///
 /// The current maximum non-file-slice carrier is a content-file payload. If a
 /// future non-slice fact grows, the guardrail test should force this constant
 /// to move with it.
-pub const CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES: usize = file::layout::CONTENT_FILE_BYTES;
+pub const CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES: usize = file::encode::CONTENT_FILE_BYTES;
 
 /// Number of padded fact slots in one bundle frame.
 ///
@@ -664,7 +664,7 @@ fn frame_size_class_for_facts(facts: &ConnectionFrameFactBundle) -> Result<u8, S
         && facts
             .iter()
             .next()
-            .is_some_and(|fact| fact.len() == file_slice::layout::CONTENT_FILE_SLICE_BYTES)
+            .is_some_and(|fact| fact.len() == file_slice::encode::CONTENT_FILE_SLICE_BYTES)
     {
         Ok(CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE)
     } else if facts.len() <= CONNECTION_FRAME_BUNDLE_FACT_SLOTS

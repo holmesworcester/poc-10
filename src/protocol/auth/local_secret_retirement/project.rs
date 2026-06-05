@@ -11,8 +11,7 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::{local_history_node_secret, local_key_secret};
 
@@ -50,6 +49,14 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
     }
 }
 
+/// Staged read pipeline for the local_secret_retirement fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::local_secret_retirement::Codec",
+    authenticate: "auth::local_secret_retirement::authenticate::LocalSecretRetirementAuthenticator",
+    adapt: "auth::local_secret_retirement::adapt::LocalSecretRetirementAdapter",
+    project: "auth::local_secret_retirement::project::LocalSecretRetirementProjector",
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct LocalSecretRetirementProjector;
 
@@ -65,21 +72,22 @@ impl Projector for LocalSecretRetirementProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::LocalSecretRetirementAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::LocalSecretRetirementAuthenticator,
+            super::adapt::LocalSecretRetirementAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::LocalSecretRetirementAuthenticator>
-    for LocalSecretRetirementProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<LocalSecretRetirementFact> for LocalSecretRetirementProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, LocalSecretRetirementFact>,
+        fact: &Fact,
+        retirement: LocalSecretRetirementFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, retirement) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("local secret retirement fact must have local scope".to_string());

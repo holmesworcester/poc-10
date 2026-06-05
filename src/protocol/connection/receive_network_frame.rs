@@ -14,7 +14,7 @@
 //! stage an established connection frame.
 
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::connection::fact_receipt::create::normalize_origin_addr_bytes;
+use crate::protocol::connection::fact_receipt::author::normalize_origin_addr_bytes;
 use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 
 pub const RECEIVE_NETWORK_FRAME: &str = "receive_network_frame";
@@ -132,14 +132,14 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         // type tag is the sealed type) plus a frame observation. Its projector
         // unseals it with the local endpoint secret from `auth_local_endpoint`
         // context — the boundary does no unsealing itself.
-        if request::layout::is_sealed_fact(&input.frame) {
+        if request::decode::is_sealed_fact(&input.frame) {
             return Ok(connection_frame::observed_request_fact_effect(
                 input.frame.clone(),
                 &input.origin_addr,
                 input.received_at_local_ms,
             )?);
         }
-        if connection::layout::is_sealed_fact(&input.frame) {
+        if connection::decode::is_sealed_fact(&input.frame) {
             return Ok(connection_frame::observed_connection_fact_effect(
                 input.frame.clone(),
                 &input.origin_addr,
@@ -149,17 +149,17 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
 
         Ok(match connection_frame::classify_frame(&input.frame) {
             Some(ConnectionFrameKind::Small) => connection_frame::observed_frame_effect(
-                frame_small::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
+                frame_small::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
             )?,
             Some(ConnectionFrameKind::FileSlice) => connection_frame::observed_frame_effect(
-                frame_file_slice::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
+                frame_file_slice::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
             )?,
             Some(ConnectionFrameKind::Bundle) => connection_frame::observed_frame_effect(
-                frame_bundle::create::fact_from_wire(&input.frame, input.received_at_local_ms)?,
+                frame_bundle::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
             )?,

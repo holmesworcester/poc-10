@@ -13,8 +13,7 @@
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use crate::protocol::connection::connection;
@@ -60,6 +59,14 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
     }
 }
 
+/// Staged read pipeline for the close fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "connection::close::Codec",
+    authenticate: "connection::close::authenticate::ConnectionCloseAuthenticator",
+    adapt: "connection::close::adapt::ConnectionCloseAdapter",
+    project: "connection::close::project::ConnectionCloseProjector",
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionCloseProjector;
 
@@ -75,23 +82,24 @@ impl Projector for ConnectionCloseProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionCloseAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ConnectionCloseAuthenticator,
+            super::adapt::ConnectionCloseAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ConnectionCloseAuthenticator>
-    for ConnectionCloseProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::ConnectionCloseFact> for ConnectionCloseProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::ConnectionCloseFact>,
+        fact: &Fact,
+        close: super::fact::ConnectionCloseFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // Authentication (see authenticate.rs) proved canonical bytes and the
         // non-empty connection id. Scope is interpretation.
-        let (fact, close) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("connection close fact must have local scope".to_string());

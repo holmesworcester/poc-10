@@ -5,18 +5,12 @@
 //! Frame facts contain only wire bytes; this family supplies the receive
 //! context needed before those bytes may be opened.
 
+pub mod adapt;
 pub mod authenticate;
-pub mod create;
+pub mod author;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::ConnectionFrameObservationFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        layout::decode_fact(fact.body())
-    }
-}
+pub(crate) use decode::Codec;

@@ -8,8 +8,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
@@ -22,6 +21,14 @@ use crate::protocol::auth::removal_frontier;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyRequestFact;
+
+/// Staged read pipeline for the key_request fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::key_request::Codec",
+    authenticate: "auth::key_request::authenticate::KeyRequestAuthenticator",
+    adapt: "auth::key_request::adapt::KeyRequestAdapter",
+    project: "auth::key_request::project::KeyRequestProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyRequestProjector;
@@ -38,19 +45,22 @@ impl Projector for KeyRequestProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::KeyRequestAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::KeyRequestAuthenticator,
+            super::adapt::KeyRequestAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::KeyRequestAuthenticator> for KeyRequestProjector {
-    fn project_authenticated(
+impl SemanticProjector<KeyRequestFact> for KeyRequestProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, KeyRequestFact>,
+        fact: &Fact,
+        request: KeyRequestFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, request) = authenticated.into_parts();
         key_request(fact, context, request)
     }
 }

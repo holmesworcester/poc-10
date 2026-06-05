@@ -8,31 +8,33 @@
 //! Frame facts carry only wire bytes; there is no fact-boundary signature and no
 //! intrinsic field rule. Admission scope, the observation and connection context,
 //! decryption, and child materialization are all interpretation the projector
-//! owns through `create::project_observed_frame`.
+//! owns through `author::project_observed_frame`.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ConnectionFrameSmallFact;
 
 pub(crate) struct ConnectionFrameSmallAuthenticator;
 
-impl Authenticator for ConnectionFrameSmallAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ConnectionFrameSmallAuthenticator {
     type Authenticated = ConnectionFrameSmallFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        input: ConnectionFrameSmallFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_frame_small(fact))
+        Authentication::from_result(fact, prove_decoded_frame_small(fact, input))
     }
 }
 
-fn authenticate_frame_small(fact: &Fact) -> Result<ConnectionFrameSmallFact, String> {
-    // 1. Layout.
-    let input = super::Codec::decode_fact(fact)?;
+fn prove_decoded_frame_small(
+    fact: &Fact,
+    input: ConnectionFrameSmallFact,
+) -> Result<ConnectionFrameSmallFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(input)
@@ -41,9 +43,11 @@ fn authenticate_frame_small(fact: &Fact) -> Result<ConnectionFrameSmallFact, Str
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
     use crate::core::wire::FixedBytes;
-    use crate::protocol::connection::frame_small::create::fact_from_wire;
+    use crate::protocol::connection::frame_small::author::fact_from_wire;
     use crate::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
     use crate::protocol::connection_frame_wire as wire;
 
@@ -61,7 +65,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFrameSmallFact> {
-        ConnectionFrameSmallAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ConnectionFrameSmallAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

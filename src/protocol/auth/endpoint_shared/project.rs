@@ -13,15 +13,22 @@ use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
+use super::endpoint_shared_row;
 use super::fact::EndpointRole;
-use super::rows::endpoint_shared_row;
+
+/// Staged read pipeline for the endpoint_shared fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::endpoint_shared::Codec",
+    authenticate: "auth::endpoint_shared::authenticate::EndpointSharedAuthenticator",
+    adapt: "auth::endpoint_shared::adapt::EndpointSharedAdapter",
+    project: "auth::endpoint_shared::project::EndpointSharedProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct EndpointSharedProjector;
@@ -38,25 +45,26 @@ impl Projector for EndpointSharedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::EndpointSharedAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::EndpointSharedAuthenticator,
+            super::adapt::EndpointSharedAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::EndpointSharedAuthenticator>
-    for EndpointSharedProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<super::fact::EndpointSharedFact> for EndpointSharedProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, super::fact::EndpointSharedFact>,
+        fact: &Fact,
+        shared: super::fact::EndpointSharedFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // Authentication (see authenticate.rs) proved canonical bytes, the
         // signer signature, and intrinsic fields. Scope is interpretation, not
         // authentication, so it is checked here, behind the lens and ceiling
         // projector.
-        let (fact, shared) = authenticated.into_parts();
         if fact.scope != FactScope::Global {
             return Err("endpoint shared fact must have global scope".to_string());
         }

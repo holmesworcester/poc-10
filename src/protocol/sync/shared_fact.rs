@@ -6,30 +6,24 @@
 //! The index is connection-scoped sharing policy; it does not change the
 //! validity of the underlying facts.
 
+pub mod adapt;
 pub mod authenticate;
 pub mod cli;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
+pub mod index;
 pub mod project;
-pub mod rows;
 
-pub const TYPE_SHARED_FACT: u8 = layout::TYPE_SHARED_FACT;
+pub(crate) use decode::Codec;
+
+pub const TYPE_SHARED_FACT: u8 = encode::TYPE_SHARED_FACT;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SharedFact, String> {
-    layout::decode_fact(bytes)
+    decode::decode_fact(bytes)
 }
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::SharedFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
-}
-
-pub use rows::{
+pub use index::{
     connection_id_for_peer_or_connection, connection_ids_for_shareable_fact,
     expand_fact_ids_with_context_for_connection, negentropy_context_have_for_leaf,
     range_summary_for_connection, record_sync_contribution, shareable_fact_for_connection,

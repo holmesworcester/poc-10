@@ -12,12 +12,20 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
-use super::create;
+use super::author;
 use super::fact::ConnectionFrameFileSliceFact;
+
+/// Staged read pipeline for the frame_file_slice fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "connection::frame_file_slice::Codec",
+    authenticate:
+        "connection::frame_file_slice::authenticate::ConnectionFrameFileSliceAuthenticator",
+    adapt: "connection::frame_file_slice::adapt::ConnectionFrameFileSliceAdapter",
+    project: "connection::frame_file_slice::project::ConnectionFrameFileSliceProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFrameFileSliceProjector;
@@ -34,24 +42,25 @@ impl Projector for ConnectionFrameFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::ConnectionFrameFileSliceAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::ConnectionFrameFileSliceAuthenticator,
+            super::adapt::ConnectionFrameFileSliceAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::ConnectionFrameFileSliceAuthenticator>
-    for ConnectionFrameFileSliceProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<ConnectionFrameFileSliceFact> for ConnectionFrameFileSliceProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, ConnectionFrameFileSliceFact>,
+        fact: &Fact,
+        input: ConnectionFrameFileSliceFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, input) = authenticated.into_parts();
         // 1. Structural.
         // 2. Context.
         // 3. Materialize.
-        create::project_observed_frame(fact, input, context)
+        author::project_observed_frame(fact, input, context)
     }
 }

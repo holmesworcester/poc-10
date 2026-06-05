@@ -2,15 +2,15 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::protocol::auth::create_key_wrap as intent;
 use topo::protocol::auth::create_key_wrap::CreateKeyWrapHandler;
+use topo::protocol::auth::key_wrap::decode as key_wrap_layout;
 use topo::protocol::auth::key_wrap::fact::WrappedSecretKind;
-use topo::protocol::auth::key_wrap::layout as key_wrap_layout;
 use topo::protocol::auth::key_wrap::project::{WrapSourceDescriptor, WrapSourceKind};
+use topo::protocol::auth::local_key_secret::encode as local_key_secret_layout;
 use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
+use topo::protocol::auth::local_signer_secret::encode as local_signer_layout;
 use topo::protocol::auth::local_signer_secret::fact::LocalSignerSecretFact;
-use topo::protocol::auth::local_signer_secret::layout as local_signer_layout;
+use topo::protocol::auth::recipient_key::encode as recipient_key_layout;
 use topo::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
-use topo::protocol::auth::recipient_key::layout as recipient_key_layout;
 use topo::protocol::auth::workspace::scope as workspace_scope;
 
 #[test]
@@ -70,7 +70,11 @@ fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key:
     };
     recipient.signature = topo::core::crypto::ed25519_sign(
         &private_key,
-        &recipient_key_layout::signing_bytes(&recipient).expect("recipient signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &recipient,
+            recipient_key_layout::encode_recipient_key,
+        )
+        .expect("recipient signing bytes"),
     );
     Fact::new(
         workspace_scope(workspace_id),

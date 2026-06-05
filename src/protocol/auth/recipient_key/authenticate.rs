@@ -15,31 +15,33 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::RecipientKeyFact;
 
 pub(crate) struct RecipientKeyAuthenticator;
 
-impl Authenticator for RecipientKeyAuthenticator {
+impl DecodedAuthenticator<super::Codec> for RecipientKeyAuthenticator {
     type Authenticated = RecipientKeyFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        recipient: RecipientKeyFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_recipient_key(fact))
+        Authentication::from_result(fact, prove_decoded_recipient_key(fact, recipient))
     }
 }
 
-fn authenticate_recipient_key(fact: &Fact) -> Result<RecipientKeyFact, String> {
-    // 1. Layout.
-    let recipient = super::Codec::decode_fact(fact)?;
+fn prove_decoded_recipient_key(
+    fact: &Fact,
+    recipient: RecipientKeyFact,
+) -> Result<RecipientKeyFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&recipient)?;
+    verify_signature(&recipient)?;
     // 4. A recipient key cannot supersede itself.
     if recipient.previous_recipient_key_id == fact.id {
         return Err(
@@ -50,12 +52,29 @@ fn authenticate_recipient_key(fact: &Fact) -> Result<RecipientKeyFact, String> {
     Ok(recipient)
 }
 
+/// Verify the recipient key's signature over its canonical envelope. The
+/// verifier key is embedded in the fact, so this is a context-free fact-boundary
+/// proof.
+pub fn verify_signature(fact: &RecipientKeyFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_recipient_key,
+        )?,
+        &fact.signature,
+        "recipient key",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::recipient_key::create::signed_recipient_key_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::recipient_key::author::signed_recipient_key_fact;
     use crate::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 
     use super::RecipientKeyAuthenticator;
@@ -78,7 +97,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, RecipientKeyFact> {
-        RecipientKeyAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => RecipientKeyAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

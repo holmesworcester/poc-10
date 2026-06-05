@@ -9,31 +9,33 @@
 //! Frame facts carry only wire bytes; there is no fact-boundary signature and no
 //! intrinsic field rule. Admission scope, the observation and connection context,
 //! decryption, and child materialization are all interpretation the projector
-//! owns through `create::project_observed_frame`.
+//! owns through `author::project_observed_frame`.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::ConnectionFrameFileSliceFact;
 
 pub(crate) struct ConnectionFrameFileSliceAuthenticator;
 
-impl Authenticator for ConnectionFrameFileSliceAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ConnectionFrameFileSliceAuthenticator {
     type Authenticated = ConnectionFrameFileSliceFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        input: ConnectionFrameFileSliceFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_frame_file_slice(fact))
+        Authentication::from_result(fact, prove_decoded_frame_file_slice(fact, input))
     }
 }
 
-fn authenticate_frame_file_slice(fact: &Fact) -> Result<ConnectionFrameFileSliceFact, String> {
-    // 1. Layout.
-    let input = super::Codec::decode_fact(fact)?;
+fn prove_decoded_frame_file_slice(
+    fact: &Fact,
+    input: ConnectionFrameFileSliceFact,
+) -> Result<ConnectionFrameFileSliceFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(input)
@@ -42,9 +44,11 @@ fn authenticate_frame_file_slice(fact: &Fact) -> Result<ConnectionFrameFileSlice
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
     use crate::core::wire::FixedBytes;
-    use crate::protocol::connection::frame_file_slice::create::fact_from_wire;
+    use crate::protocol::connection::frame_file_slice::author::fact_from_wire;
     use crate::protocol::connection::frame_file_slice::fact::ConnectionFrameFileSliceFact;
     use crate::protocol::connection_frame_wire as wire;
 
@@ -62,7 +66,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFrameFileSliceFact> {
-        ConnectionFrameFileSliceAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ConnectionFrameFileSliceAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

@@ -277,7 +277,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         let batches = fact_batches(facts_for_work(work, context)?)?;
 
         let local_endpoint =
-            endpoint::create::local_endpoint(context.store()?)?.ok_or_else(|| {
+            endpoint::author::local_endpoint(context.store()?)?.ok_or_else(|| {
                 HandlerError::fatal("send_facts_on_connection requires local endpoint state")
             })?;
         let (sender_endpoint, receiver_endpoint) = if local_endpoint.endpoint
@@ -355,7 +355,7 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
     let mut packed_len = INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
         let fact_len = frame_policy::require_sendable_fact(&fact)?.len();
-        if fact_len == crate::protocol::content::file_slice::layout::CONTENT_FILE_SLICE_BYTES {
+        if fact_len == crate::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES {
             if !batch.is_empty() {
                 batches.push(std::mem::take(&mut batch));
                 packed_len = INNER_BUNDLE_HEADER_BYTES;

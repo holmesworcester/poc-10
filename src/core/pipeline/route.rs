@@ -6,16 +6,18 @@ use crate::core::facts::Fact;
 
 /// Function pointer used by static projector route tables.
 pub type ProjectorFn = fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>;
+/// Optional protocol-owned admission check for facts core is about to store.
+pub type FactAdmissionFn = fn(&Fact) -> Result<(), String>;
 /// Function that maps an envelope fact to its semantic fact tag.
 pub type EffectiveTagFn = fn(&Fact) -> Result<u8, String>;
 
 /// Human-readable stage declaration for a fact route.
+///
+/// Every route is staged: the registered route function calls core's first-class
+/// decode, authenticate, adapt, and project runner, and records the role-file
+/// labels a reviewer can open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactPipeline {
-    /// Legacy route: the projector function composes authentication/adaptation
-    /// internally. This keeps unconverted facts running during fact-by-fact
-    /// cutover.
-    ProjectorComposed,
     /// Staged route: the registered route function calls core's first-class
     /// decode, authenticate, adapt, and project runner.
     Staged {
@@ -38,8 +40,7 @@ pub struct FactRoute {
     /// Effective fact tag routed to this projector function.
     pub tag: u8,
     pub projector: ProjectorFn,
-    /// Whether this route is still projector-composed or uses core's
-    /// first-class staged read pipeline.
+    /// First-class stage labels for this route's read pipeline.
     pub pipeline: FactPipeline,
     /// Whether a from-scratch replay re-projects this fact type. `true` for
     /// durable protocol truth (membership, content, keys, learned addresses)
@@ -54,11 +55,9 @@ pub struct FactRoute {
 
 /// The protocol-facing projection entry point.
 ///
-/// Legacy families implement `project` as a small call through
-/// `project_authenticated`. Converted families declare `FactPipeline::Staged`
-/// in their route and implement `project` through `project_staged`, so route
-/// metadata and direct projector calls expose the same
-/// decode/authenticate/adapt/project stages.
+/// Every family declares `FactPipeline::Staged` in its route and implements
+/// `project` through `project_staged`, so route metadata and direct projector
+/// calls expose the same decode/authenticate/adapt/project stages.
 pub trait Projector {
     fn project(&self, fact: &Fact, context: &ProjectionContext)
         -> Result<ProjectionOutput, String>;

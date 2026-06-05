@@ -9,25 +9,19 @@
 //! coordinates. Change the target secret projectors for target-specific cleanup
 //! and validation.
 
+pub mod adapt;
 pub mod authenticate;
+pub mod decode;
+pub mod encode;
 pub mod fact;
-pub mod layout;
 pub mod project;
 
 pub use project::{secret_retired_need, secret_retired_offer};
 
-pub const TYPE_LOCAL_SECRET_RETIREMENT: u8 = layout::TYPE_LOCAL_SECRET_RETIREMENT;
+pub(crate) use decode::Codec;
+
+pub const TYPE_LOCAL_SECRET_RETIREMENT: u8 = encode::TYPE_LOCAL_SECRET_RETIREMENT;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalSecretRetirementFact, String> {
-    layout::decode_fact(bytes)
-}
-
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = fact::LocalSecretRetirementFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact_payload(fact.body())
-    }
+    decode::decode_fact(bytes)
 }

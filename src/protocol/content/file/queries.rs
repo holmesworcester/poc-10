@@ -10,7 +10,22 @@ use crate::core::facts::FactId;
 use crate::core::store::Store;
 use rusqlite::params;
 
-use super::rows::ContentFileRow;
+use super::fact::{AuthorId, RootHash, WorkspaceId};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentFileRow {
+    pub workspace_id: WorkspaceId,
+    pub file_fact_id: FactId,
+    pub created_at_ms: u64,
+    pub message_id: FactId,
+    pub author_user_id: AuthorId,
+    pub file_id: FactId,
+    pub blob_bytes: u64,
+    pub total_slices: u32,
+    pub slice_bytes: u32,
+    pub root_hash: RootHash,
+    pub sealed_metadata: Vec<u8>,
+}
 
 pub fn content_file_rows(
     store: &Store,

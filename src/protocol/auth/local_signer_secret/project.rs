@@ -9,11 +9,18 @@
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
 use super::fact::LocalSignerSecretFact;
+
+/// Staged read pipeline for the local_signer_secret fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::local_signer_secret::Codec",
+    authenticate: "auth::local_signer_secret::authenticate::LocalSignerSecretAuthenticator",
+    adapt: "auth::local_signer_secret::adapt::LocalSignerSecretAdapter",
+    project: "auth::local_signer_secret::project::LocalSignerSecretProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalSignerSecretProjector;
@@ -30,21 +37,22 @@ impl Projector for LocalSignerSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::LocalSignerSecretAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::LocalSignerSecretAuthenticator,
+            super::adapt::LocalSignerSecretAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::LocalSignerSecretAuthenticator>
-    for LocalSignerSecretProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<LocalSignerSecretFact> for LocalSignerSecretProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, LocalSignerSecretFact>,
+        fact: &Fact,
+        secret: LocalSignerSecretFact,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, secret) = authenticated.into_parts();
         // 1. Scope.
         if fact.scope != FactScope::Local {
             return Err("local signer secret fact must have local scope".to_string());

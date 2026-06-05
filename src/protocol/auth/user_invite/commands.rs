@@ -6,7 +6,7 @@
 //! authority boundary: it decides whether the stated authority fact can invite
 //! a user into the workspace.
 
-use super::create;
+use super::author;
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
@@ -71,7 +71,7 @@ pub fn signed_user_invite_fact(
     signer_id: FactId,
     signer_private_key: Ed25519PrivateKey,
 ) -> Result<Fact, String> {
-    create::signed_user_invite_fact(
+    author::signed_user_invite_fact(
         input.created_at_ms,
         input.public_key,
         input.workspace_id,

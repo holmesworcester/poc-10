@@ -13,9 +13,46 @@ use std::net::SocketAddr;
 use crate::core::facts::FactId;
 use crate::core::store::Store;
 
-use crate::protocol::auth::endpoint::create::local_endpoint;
+use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint_shared::queries::all_memberships;
-use crate::protocol::connection::connection::rows::answered_request_ids;
+use crate::protocol::connection::connection::queries::answered_request_ids;
+use crate::protocol::connection::request::{
+    decode::decode_optional_addr, encode::ADDR_BLOCK_BYTES,
+};
+
+use super::{CONNECTION_REQUEST_ROWS, CONNECTION_REQUEST_ROW_SCHEMA};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionRequestRow {
+    pub request_id: FactId,
+    pub request_sent_id: FactId,
+    pub initiator_ephemeral_secret_fact_id: FactId,
+    /// Reachable address to (re)send this request to. `None` marks a row that
+    /// must not be re-sent.
+    pub peer_addr: Option<SocketAddr>,
+    pub sealed_request_bytes: Vec<u8>,
+}
+
+pub fn decode_connection_request_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<ConnectionRequestRow, String> {
+    let key_fields = CONNECTION_REQUEST_ROW_SCHEMA.decode_key(key)?;
+    let value_fields = CONNECTION_REQUEST_ROW_SCHEMA.decode_value(value)?;
+    let peer_addr_block: [u8; ADDR_BLOCK_BYTES] = value_fields[2]
+        .as_bytes("peer_addr")?
+        .try_into()
+        .map_err(|_| "connection request row peer_addr block is malformed".to_string())?;
+    let peer_addr = decode_optional_addr(&peer_addr_block)?;
+    Ok(ConnectionRequestRow {
+        request_id: key_fields[0].as_bytes32("request_id")?,
+        request_sent_id: value_fields[0].as_bytes32("request_sent_id")?,
+        initiator_ephemeral_secret_fact_id: value_fields[1]
+            .as_bytes32("initiator_ephemeral_secret_fact_id")?,
+        peer_addr,
+        sealed_request_bytes: value_fields[3].as_bytes("sealed_request_bytes")?.to_vec(),
+    })
+}
 
 /// A membership connection we can open to a known endpoint without an invite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,10 +117,10 @@ pub fn pending_connection_requests(store: &Store) -> Result<Vec<PendingConnectio
     let answered = answered_request_ids(store)?;
     let mut pending = Vec::new();
     for (key, value) in store
-        .table_rows(super::rows::CONNECTION_REQUEST_ROWS)
+        .table_rows(CONNECTION_REQUEST_ROWS)
         .map_err(|err| format!("read membership connection request rows: {err}"))?
     {
-        let row = super::rows::decode_connection_request_row(&key, &value)?;
+        let row = decode_connection_request_row(&key, &value)?;
         let Some(addr) = row.peer_addr else {
             continue;
         };
@@ -107,14 +144,14 @@ pub fn pending_membership_requests(store: &Store) -> Result<Vec<PendingConnectio
 pub fn request_by_id(
     store: &Store,
     request_id: &FactId,
-) -> Result<Option<super::rows::ConnectionRequestRow>, String> {
+) -> Result<Option<ConnectionRequestRow>, String> {
     let row = store
         .table_row(
-            super::rows::CONNECTION_REQUEST_ROWS,
-            &super::rows::connection_request_key(request_id),
+            CONNECTION_REQUEST_ROWS,
+            &super::connection_request_key(request_id),
         )
         .map_err(|err| format!("read connection request row: {err}"))?;
-    row.map(|value| super::rows::decode_connection_request_row(request_id, &value))
+    row.map(|value| decode_connection_request_row(request_id, &value))
         .transpose()
 }
 
@@ -146,5 +183,27 @@ mod tests {
             choose_connection_mode(&store, [9; 32]).expect("query"),
             None
         );
+    }
+
+    #[test]
+    fn connection_request_row_roundtrips_through_schema() {
+        use crate::protocol::connection::request::encode::SEALED_FACT_BYTES;
+
+        let sealed = vec![7u8; SEALED_FACT_BYTES];
+        let row = super::super::connection_request_row(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            Some("127.0.0.1:41000".parse().unwrap()),
+            &sealed,
+        )
+        .expect("connection request row");
+        let decoded =
+            decode_connection_request_row(&row.key, &row.value).expect("decode request row");
+        assert_eq!(decoded.request_id, [1; 32]);
+        assert_eq!(decoded.request_sent_id, [2; 32]);
+        assert_eq!(decoded.initiator_ephemeral_secret_fact_id, [3; 32]);
+        assert_eq!(decoded.peer_addr, Some("127.0.0.1:41000".parse().unwrap()));
+        assert_eq!(decoded.sealed_request_bytes, sealed);
     }
 }

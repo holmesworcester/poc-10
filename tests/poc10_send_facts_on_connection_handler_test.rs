@@ -5,11 +5,11 @@ use topo::core::facts::Fact;
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
+use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
-use topo::protocol::auth::endpoint::rows as endpoint_rows;
+use topo::protocol::connection::connection as connection_rows;
+use topo::protocol::connection::connection::encode as connection_layout;
 use topo::protocol::connection::connection::fact::ConnectionFact;
-use topo::protocol::connection::connection::layout as connection_layout;
-use topo::protocol::connection::connection::rows as connection_rows;
 use topo::protocol::connection::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
@@ -17,7 +17,7 @@ use topo::protocol::connection::send_facts_on_connection::{
 use topo::protocol::connection::send_network_frame;
 use topo::protocol::connection_frame_wire as connection_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
-use topo::protocol::sync::shared_fact::{fact::SharedFact, layout as shared_fact_layout};
+use topo::protocol::sync::shared_fact::{encode as shared_fact_layout, fact::SharedFact};
 
 fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionFact) {
     let connection = ConnectionFact {

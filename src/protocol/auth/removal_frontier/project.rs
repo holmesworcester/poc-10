@@ -8,14 +8,21 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    project_authenticated, AuthenticatedFact, AuthenticatedProjector, ProjectionContext,
-    ProjectionOutput, Projector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::RemovalFrontierFact;
+
+/// Staged read pipeline for the removal_frontier fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::removal_frontier::Codec",
+    authenticate: "auth::removal_frontier::authenticate::RemovalFrontierAuthenticator",
+    adapt: "auth::removal_frontier::adapt::RemovalFrontierAdapter",
+    project: "auth::removal_frontier::project::RemovalFrontierProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct RemovalFrontierProjector;
@@ -32,23 +39,24 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_authenticated::<super::authenticate::RemovalFrontierAuthenticator, _>(
-            self, fact, context,
-        )
+        project_staged::<
+            super::Codec,
+            super::authenticate::RemovalFrontierAuthenticator,
+            super::adapt::RemovalFrontierAdapter,
+            _,
+        >(self, fact, context)
     }
 }
 
-impl AuthenticatedProjector<super::authenticate::RemovalFrontierAuthenticator>
-    for RemovalFrontierProjector
-{
-    fn project_authenticated(
+impl SemanticProjector<RemovalFrontierFact> for RemovalFrontierProjector {
+    fn project_semantic(
         &self,
-        authenticated: AuthenticatedFact<'_, RemovalFrontierFact>,
+        fact: &Fact,
+        frontier: RemovalFrontierFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // Authentication (see authenticate.rs) proved canonical bytes and the
         // signer signature. Scope is interpretation.
-        let (fact, frontier) = authenticated.into_parts();
         // 1. Scope.
         let scope = crate::protocol::auth::workspace::scope(frontier.workspace_id);
         require_fact_scope(fact, &scope)?;

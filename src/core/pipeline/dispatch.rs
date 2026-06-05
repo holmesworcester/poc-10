@@ -34,9 +34,10 @@ use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use super::commit_effects::{
-    commit_pipeline_effects_in_tx, suppress_disallowed_intents, validate_pipeline_effects,
-    IntentAdmissionPolicy,
+    commit_pipeline_effects_in_tx, suppress_disallowed_intents,
+    validate_pipeline_effects_for_admission, IntentAdmissionPolicy,
 };
+use super::route::FactAdmissionFn;
 use super::WorkStatus;
 
 /// Queue durable idempotent handler work.
@@ -88,12 +89,14 @@ pub(crate) fn dispatch_queued_intent(
     handler: &(impl IntentHandler + ?Sized),
     store: &Store,
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
     queued: QueuedIntent,
 ) -> Result<WorkStatus, String> {
     Ok(dispatch_queued_intent_with_policy(
         handler,
         store,
         allowed_tables,
+        fact_admission,
         queued,
         IntentAdmissionPolicy::All,
     )?
@@ -105,6 +108,7 @@ pub(crate) fn dispatch_queued_intent_filtering_intents(
     handler: &(impl IntentHandler + ?Sized),
     store: &Store,
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
     queued: QueuedIntent,
     allowed_followup_kinds: &[&'static str],
 ) -> Result<IntentDispatchReport, String> {
@@ -112,6 +116,7 @@ pub(crate) fn dispatch_queued_intent_filtering_intents(
         handler,
         store,
         allowed_tables,
+        fact_admission,
         queued,
         IntentAdmissionPolicy::AllowKinds(allowed_followup_kinds),
     )
@@ -121,6 +126,7 @@ fn dispatch_queued_intent_with_policy(
     handler: &(impl IntentHandler + ?Sized),
     store: &Store,
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
     queued: QueuedIntent,
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<IntentDispatchReport, String> {
@@ -136,13 +142,14 @@ fn dispatch_queued_intent_with_policy(
         });
     };
     let mut suppressed_intents = suppress_disallowed_intents(&mut output, intent_policy);
-    validate_pipeline_effects(&output, allowed_tables)?;
+    validate_pipeline_effects_for_admission(&output, allowed_tables, fact_admission)?;
     let handled = HandledIntent {
         table: queued.table,
         kind: queued.intent.kind.as_str(),
         idempotence_key: &queued.intent.key,
     };
-    status.progressed = commit_handler_output(store, handled, &output, allowed_tables)?;
+    status.progressed =
+        commit_handler_output(store, handled, &output, allowed_tables, fact_admission)?;
     if !status.progressed {
         suppressed_intents = 0;
     }
@@ -248,6 +255,7 @@ fn commit_handler_output(
     handled: HandledIntent<'_>,
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
@@ -258,7 +266,7 @@ fn commit_handler_output(
                 delete_intent_in_tx(tx, LOCAL_INTENTS, handled.kind, handled.idempotence_key)?;
             }
 
-            commit_pipeline_effects_in_tx(tx, effects, allowed_tables)?;
+            commit_pipeline_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
             Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))

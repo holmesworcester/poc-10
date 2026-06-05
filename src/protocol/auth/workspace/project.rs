@@ -10,10 +10,17 @@
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
-    project_staged, AuthenticatedFact, AuthenticatedProjector, ProjectionContext, ProjectionOutput,
-    Projector, SemanticProjector,
+    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
+
+/// Staged read pipeline for the workspace fact.
+pub const PIPELINE: FactPipeline = FactPipeline::Staged {
+    decode: "auth::workspace::decode::Codec",
+    authenticate: "auth::workspace::authenticate::WorkspaceAuthenticator",
+    adapt: "auth::workspace::adapt::WorkspaceAdapter",
+    project: "auth::workspace::project::WorkspaceProjector",
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceProjector;
@@ -44,19 +51,8 @@ impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
         &self,
         fact: &Fact,
         workspace: super::fact::WorkspaceFact,
-        context: &ProjectionContext,
-    ) -> Result<ProjectionOutput, String> {
-        self.project_authenticated(AuthenticatedFact::new(fact, workspace), context)
-    }
-}
-
-impl AuthenticatedProjector<super::authenticate::WorkspaceAuthenticator> for WorkspaceProjector {
-    fn project_authenticated(
-        &self,
-        authenticated: AuthenticatedFact<'_, super::fact::WorkspaceFact>,
         _context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let (fact, workspace) = authenticated.into_parts();
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());

@@ -611,14 +611,14 @@ fn user_name(
     workspace_id: FactId,
     user_id: FactId,
 ) -> Result<Option<String>, String> {
-    let user_key = auth::user::rows::user_key(&workspace_id, &user_id);
+    let user_key = auth::user::user_key(&workspace_id, &user_id);
     let Some(value) = store
-        .table_row(auth::user::rows::USER_ROWS, &user_key)
+        .table_row(auth::user::USER_ROWS, &user_key)
         .map_err(|err| format!("read user row: {err}"))?
     else {
         return Ok(None);
     };
-    let row = auth::user::rows::decode_user_row(&user_key, &value)?;
+    let row = auth::user::queries::decode_user_row(&user_key, &value)?;
     Ok(Some(row.username))
 }
 
@@ -745,7 +745,7 @@ fn reactions_by_message(
     workspace_id: FactId,
 ) -> Result<BTreeMap<FactId, Vec<ReactionDisplayRow>>, String> {
     let mut grouped: BTreeMap<FactId, Vec<ReactionDisplayRow>> = BTreeMap::new();
-    for row in reaction::rows::reaction_rows_for_workspace(store, workspace_id)? {
+    for row in reaction::queries::reaction_rows_for_workspace(store, workspace_id)? {
         let Some(message) =
             queries::content_message_row(store, workspace_id, row.target_message_id)?
         else {
@@ -843,8 +843,8 @@ fn file_slices(
     store: &Store,
     workspace_id: FactId,
     file_id: FactId,
-) -> Result<Vec<file_slice::rows::ContentFileSliceRow>, String> {
-    file_slice::rows::file_slice_rows_for_file(store, workspace_id, file_id)
+) -> Result<Vec<file_slice::queries::ContentFileSliceRow>, String> {
+    file_slice::queries::file_slice_rows_for_file(store, workspace_id, file_id)
 }
 
 fn resolve_file_selector(
@@ -941,7 +941,7 @@ fn signed_reaction_fact(
     reaction: reaction::fact::ContentReactionFact,
 ) -> Result<Fact, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    reaction::create::signed_reaction_fact(
+    reaction::author::signed_reaction_fact(
         created_at_ms,
         workspace_id,
         reaction.target_message_id,
@@ -960,7 +960,7 @@ fn signed_file_fact(
     file: file::fact::ContentFileFact,
 ) -> Result<Fact, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    file::create::signed_file_fact(
+    file::author::signed_file_fact(
         workspace_id,
         created_at_ms,
         file.message_id,
@@ -983,7 +983,7 @@ fn signed_file_slice_fact(
     slice: file_slice::fact::ContentFileSliceFact,
 ) -> Result<Fact, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    file_slice::create::signed_file_slice_fact(
+    file_slice::author::signed_file_slice_fact(
         workspace_id,
         created_at_ms,
         slice.file_id,
@@ -1066,7 +1066,7 @@ fn local_content_key(
 ) -> Result<XChaCha20Poly1305Key, String> {
     let facts = persisted_facts(store)?;
     for fact in &facts {
-        if let Ok(secret) = auth::local_key_secret::layout::decode_local_key_secret(fact.body()) {
+        if let Ok(secret) = auth::local_key_secret::decode::decode_local_key_secret(fact.body()) {
             if secret.workspace_id == workspace_id && secret.frontier_id == frontier_id {
                 return Ok(secret.key_secret);
             }
@@ -1074,7 +1074,7 @@ fn local_content_key(
     }
     for fact in facts {
         if let Ok(secret) =
-            auth::local_history_node_secret::layout::decode_local_history_node_secret(fact.body())
+            auth::local_history_node_secret::decode::decode_local_history_node_secret(fact.body())
         {
             let end_minute = secret
                 .range_start

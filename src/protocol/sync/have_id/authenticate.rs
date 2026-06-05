@@ -10,27 +10,26 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::SyncHaveIdFact;
 
 pub(crate) struct SyncHaveIdAuthenticator;
 
-impl Authenticator for SyncHaveIdAuthenticator {
+impl DecodedAuthenticator<super::Codec> for SyncHaveIdAuthenticator {
     type Authenticated = SyncHaveIdFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        have: SyncHaveIdFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_have_id(fact))
+        Authentication::from_result(fact, prove_decoded_have_id(fact, have))
     }
 }
 
-fn authenticate_have_id(fact: &Fact) -> Result<SyncHaveIdFact, String> {
-    // 1. Layout.
-    let have = super::Codec::decode_fact(fact)?;
+fn prove_decoded_have_id(fact: &Fact, have: SyncHaveIdFact) -> Result<SyncHaveIdFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     Ok(have)
@@ -39,8 +38,10 @@ fn authenticate_have_id(fact: &Fact) -> Result<SyncHaveIdFact, String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::sync::have_id::create::advertisement_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::sync::have_id::author::advertisement_fact;
     use crate::protocol::sync::have_id::fact::SyncHaveIdFact;
 
     use super::SyncHaveIdAuthenticator;
@@ -51,7 +52,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, SyncHaveIdFact> {
-        SyncHaveIdAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => SyncHaveIdAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

@@ -75,15 +75,14 @@ fn assert_staged_route(
         .find(|route| route.tag == tag)
         .expect("model route");
 
+    // Every route is staged now that the composed model is removed, so this
+    // destructure is irrefutable; it still pins the role-file labels.
     let FactPipeline::Staged {
         decode,
         authenticate,
         adapt,
         project,
-    } = route.pipeline
-    else {
-        panic!("model route {tag} should use the staged pipeline");
-    };
+    } = route.pipeline;
 
     assert_eq!(decode, expected_decode);
     assert_eq!(authenticate, expected_authenticate);
@@ -278,10 +277,10 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
         .map(|route| route.tag)
         .collect();
     let expected: BTreeSet<u8> = [
-        connection::request::layout::TYPE_CONNECTION_REQUEST,
-        connection::connection::layout::TYPE_CONNECTION,
-        sync::have_id::layout::TYPE_SYNC_HAVE_ID,
-        sync::need_id::layout::TYPE_SYNC_NEED_ID,
+        connection::request::encode::TYPE_CONNECTION_REQUEST,
+        connection::connection::encode::TYPE_CONNECTION,
+        sync::have_id::encode::TYPE_SYNC_HAVE_ID,
+        sync::need_id::encode::TYPE_SYNC_NEED_ID,
     ]
     .into_iter()
     .collect();
@@ -299,10 +298,10 @@ fn only_transport_and_negotiation_facts_are_not_replayed() {
         .map(|route| route.tag)
         .collect();
     for truth_tag in [
-        connection::fact_receipt::layout::TYPE_CONNECTION_FACT_RECEIPT,
-        topo::protocol::auth::endpoint_shared::layout::TYPE_ENDPOINT_SHARED,
+        connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT,
+        topo::protocol::auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED,
         topo::protocol::content::message::TYPE_CONTENT_MESSAGE,
-        topo::protocol::auth::key_wrap::layout::TYPE_KEY_WRAP,
+        topo::protocol::auth::key_wrap::encode::TYPE_KEY_WRAP,
     ] {
         assert!(
             replayed.contains(&truth_tag),

@@ -16,32 +16,33 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::EndpointSharedFact;
 
 pub(crate) struct EndpointSharedAuthenticator;
 
-impl Authenticator for EndpointSharedAuthenticator {
+impl DecodedAuthenticator<super::Codec> for EndpointSharedAuthenticator {
     type Authenticated = EndpointSharedFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        shared: EndpointSharedFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_endpoint_shared(fact))
+        Authentication::from_result(fact, prove_decoded_endpoint_shared(fact, shared))
     }
 }
 
-/// Prove an endpoint-shared fact authentic over its own bytes.
-fn authenticate_endpoint_shared(fact: &Fact) -> Result<EndpointSharedFact, String> {
-    // 1. Layout.
-    let shared = super::Codec::decode_fact(fact)?;
+fn prove_decoded_endpoint_shared(
+    fact: &Fact,
+    shared: EndpointSharedFact,
+) -> Result<EndpointSharedFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&shared)?;
+    verify_signature(&shared)?;
     // 4. Intrinsic fields.
     if shared.endpoint_id.iter().all(|byte| *byte == 0) {
         return Err("endpoint_shared endpoint_id cannot be empty".to_string());
@@ -58,11 +59,28 @@ fn authenticate_endpoint_shared(fact: &Fact) -> Result<EndpointSharedFact, Strin
     Ok(shared)
 }
 
+/// Verify the endpoint-shared fact's signature over its canonical envelope. The
+/// verifier key is embedded in the fact, so this is a context-free fact-boundary
+/// proof.
+pub fn verify_signature(fact: &EndpointSharedFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "endpoint shared",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::auth::endpoint_shared::create::signed_endpoint_shared_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::auth::endpoint_shared::author::signed_endpoint_shared_fact;
     use crate::protocol::auth::endpoint_shared::fact::{EndpointRole, EndpointSharedFact};
 
     use super::EndpointSharedAuthenticator;
@@ -85,7 +103,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, EndpointSharedFact> {
-        EndpointSharedAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => EndpointSharedAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {

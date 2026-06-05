@@ -1,14 +1,14 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+use topo::protocol::auth::local_history_node_secret::encode as local_history_layout;
 use topo::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
-use topo::protocol::auth::local_history_node_secret::layout as local_history_layout;
 use topo::protocol::auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector;
+use topo::protocol::auth::local_key_secret::encode as local_key_secret_layout;
 use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-use topo::protocol::auth::local_key_secret::layout as local_key_secret_layout;
 use topo::protocol::auth::local_key_secret::project::LocalKeySecretProjector;
+use topo::protocol::auth::removal_frontier::encode as removal_frontier_layout;
 use topo::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
-use topo::protocol::auth::removal_frontier::layout as removal_frontier_layout;
 
 #[test]
 fn local_key_secret_waits_for_frontier_then_offers_root_material() {
@@ -120,7 +120,11 @@ fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at
     };
     frontier.signature = crypto::ed25519_sign(
         &private_key,
-        &removal_frontier_layout::signing_bytes(&frontier).expect("frontier signing bytes"),
+        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &frontier,
+            removal_frontier_layout::encode_removal_frontier,
+        )
+        .expect("frontier signing bytes"),
     );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),

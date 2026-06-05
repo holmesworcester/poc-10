@@ -17,7 +17,7 @@
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
-    verify_fact_id, Authentication, Authenticator, FactCodec, ProjectionContext,
+    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
 
 use super::fact::MAX_FILE_BYTES;
@@ -25,25 +25,26 @@ use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
 
 pub(crate) struct ContentFileAuthenticator;
 
-impl Authenticator for ContentFileAuthenticator {
+impl DecodedAuthenticator<super::Codec> for ContentFileAuthenticator {
     type Authenticated = super::fact::ContentFileFact;
 
-    fn authenticate<'a>(
+    fn authenticate_decoded<'a>(
         fact: &'a Fact,
+        file: super::fact::ContentFileFact,
         _context: &ProjectionContext,
     ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, authenticate_file(fact))
+        Authentication::from_result(fact, prove_decoded_file(fact, file))
     }
 }
 
-/// Prove a content-file fact authentic over its own bytes.
-fn authenticate_file(fact: &Fact) -> Result<super::fact::ContentFileFact, String> {
-    // 1. Layout.
-    let file = super::Codec::decode_fact(fact)?;
+fn prove_decoded_file(
+    fact: &Fact,
+    file: super::fact::ContentFileFact,
+) -> Result<super::fact::ContentFileFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
     // 3. Signature over the canonical envelope (verifier key is embedded).
-    super::layout::verify_signature(&file)?;
+    verify_signature(&file)?;
     // 4. Intrinsic descriptor fields.
     validate_file_fields(&file)?;
     Ok(file)
@@ -93,11 +94,28 @@ fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify the content file's signature over its canonical envelope. The
+/// verifier key is embedded in the fact, so this is a context-free fact-boundary
+/// proof.
+pub fn verify_signature(fact: &super::fact::ContentFileFact) -> Result<(), String> {
+    crate::core::crypto::ed25519_verify_canonical(
+        &fact.signer_public_key,
+        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            fact,
+            super::encode::encode_fact,
+        )?,
+        &fact.signature,
+        "content file",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{Authentication, Authenticator, ProjectionContext};
-    use crate::protocol::content::file::create::signed_file_fact;
+    use crate::core::pipeline::{
+        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
+    };
+    use crate::protocol::content::file::author::signed_file_fact;
     use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
 
     use super::ContentFileAuthenticator;
@@ -123,7 +141,14 @@ mod tests {
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentFileFact> {
-        ContentFileAuthenticator::authenticate(fact, &ProjectionContext::default())
+        match super::super::Codec::decode_fact(fact) {
+            Ok(decoded) => ContentFileAuthenticator::authenticate_decoded(
+                fact,
+                decoded,
+                &ProjectionContext::default(),
+            ),
+            Err(error) => Authentication::Invalid(error),
+        }
     }
 
     fn is_invalid(fact: &Fact) -> bool {
