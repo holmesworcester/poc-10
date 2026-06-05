@@ -25,9 +25,10 @@ pub fn signed_removal_frontier_fact(
     };
     let (_, signature) = crypto::ed25519_sign_canonical(
         &private_key,
-        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &crate::core::wire::encode_with_zeroed_trailing_field(
             &frontier,
             encode::encode_removal_frontier,
+            crate::core::crypto::ED25519_SIGNATURE_BYTES,
         )?,
     );
     frontier.signature = signature;

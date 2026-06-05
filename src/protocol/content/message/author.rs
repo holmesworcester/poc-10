@@ -115,9 +115,10 @@ impl MessageAuthoringSnapshot {
         let (_, signature) = crate::core::perf_profile::measure_result("message_sign", || {
             Ok::<_, String>(crypto::ed25519_sign_canonical(
                 &self.signing.private_key,
-                &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &crate::core::wire::encode_with_zeroed_trailing_field(
                     &message,
                     super::encode::encode_fact,
+                    crate::core::crypto::ED25519_SIGNATURE_BYTES,
                 )?,
             ))
         })?;

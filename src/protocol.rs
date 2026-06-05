@@ -28,7 +28,6 @@
 //! fact families and send/receive intents; it is not itself a fact family.
 
 pub mod app;
-pub mod canonical;
 pub(crate) mod cli;
 pub mod connection_frame;
 pub mod connection_frame_wire;

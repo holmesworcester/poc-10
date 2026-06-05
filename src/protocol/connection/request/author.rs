@@ -6,9 +6,9 @@
 //! bytes with the endpoint signature slot zeroed.
 
 use crate::core::crypto::{self, Ed25519PublicKey};
+use crate::core::wire;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
-use crate::protocol::canonical;
 
 use super::encode;
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
@@ -17,7 +17,7 @@ pub fn bootstrap_signature_bytes(request: &ConnectionRequestFact) -> Result<Vec<
     if request.mode != REQUEST_MODE_BOOTSTRAP {
         return Err("bootstrap request signature requires bootstrap mode".to_string());
     }
-    canonical::encode_with_zeroed_fields(
+    wire::encode_with_zeroed_fields(
         request,
         encode::encode_fact,
         [encode::INVITE_SIGNATURE_OFFSET..encode::INVITE_SIGNATURE_END],
@@ -28,7 +28,7 @@ pub fn endpoint_signature_bytes(request: &ConnectionRequestFact) -> Result<Vec<u
     if request.mode != REQUEST_MODE_MEMBERSHIP {
         return Err("membership request signature requires membership mode".to_string());
     }
-    canonical::encode_with_zeroed_fields(
+    wire::encode_with_zeroed_fields(
         request,
         encode::encode_fact,
         [encode::ENDPOINT_SIGNATURE_OFFSET..encode::ENDPOINT_SIGNATURE_END],

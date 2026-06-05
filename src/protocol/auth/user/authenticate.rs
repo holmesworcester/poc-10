@@ -54,9 +54,10 @@ fn prove_decoded_user(fact: &Fact, user: UserFact) -> Result<UserFact, String> {
 pub fn verify_signature(fact: &UserFact) -> Result<(), String> {
     crate::core::crypto::ed25519_verify_canonical(
         &fact.signer_public_key,
-        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &crate::core::wire::encode_with_zeroed_trailing_field(
             fact,
             super::encode::encode_fact,
+            crate::core::crypto::ED25519_SIGNATURE_BYTES,
         )?,
         &fact.signature,
         "user",

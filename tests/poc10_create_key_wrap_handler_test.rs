@@ -70,9 +70,10 @@ fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key:
     };
     recipient.signature = topo::core::crypto::ed25519_sign(
         &private_key,
-        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &topo::core::wire::encode_with_zeroed_trailing_field(
             &recipient,
             recipient_key_layout::encode_recipient_key,
+            topo::core::crypto::ED25519_SIGNATURE_BYTES,
         )
         .expect("recipient signing bytes"),
     );

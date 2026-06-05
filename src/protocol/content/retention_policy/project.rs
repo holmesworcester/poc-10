@@ -279,9 +279,10 @@ mod projector_tests {
         };
         policy.signature = crypto::ed25519_sign(
             &private_key,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &policy,
                 encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("policy signing bytes"),
         );
@@ -438,9 +439,10 @@ mod projector_tests {
         policy.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
         policy.signature = crypto::ed25519_sign(
             &private_key,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &policy,
                 encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("policy signing bytes"),
         );
@@ -465,9 +467,10 @@ mod projector_tests {
         };
         admin.signature = crypto::ed25519_sign(
             &private_key,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &admin,
                 admin::encode_fact_payload,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("admin signing bytes"),
         );
@@ -495,9 +498,10 @@ mod projector_tests {
         };
         signer.signature = crypto::ed25519_sign(
             &[8; 32],
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &signer,
                 auth::endpoint_shared::encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("endpoint signing bytes"),
         );

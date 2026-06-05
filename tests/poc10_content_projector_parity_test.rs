@@ -346,9 +346,10 @@ fn endpoint_shared_fact(
     };
     endpoint.signature = crypto::ed25519_sign(
         &ENDPOINT_AUTHORITY_KEY,
-        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &topo::core::wire::encode_with_zeroed_trailing_field(
             &endpoint,
             auth::endpoint_shared::encode::encode_fact,
+            topo::core::crypto::ED25519_SIGNATURE_BYTES,
         )
         .expect("endpoint signing bytes"),
     );
@@ -369,9 +370,10 @@ fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact
     };
     user.signature = crypto::ed25519_sign(
         &user_private,
-        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &topo::core::wire::encode_with_zeroed_trailing_field(
             &user,
             auth::user::encode::encode_fact,
+            topo::core::crypto::ED25519_SIGNATURE_BYTES,
         )
         .expect("user signing bytes"),
     );
@@ -404,9 +406,10 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     };
     message.signature = crypto::ed25519_sign(
         &CONTENT_SIGNING_KEY,
-        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &topo::core::wire::encode_with_zeroed_trailing_field(
             &message,
             content::message::encode::encode_fact,
+            topo::core::crypto::ED25519_SIGNATURE_BYTES,
         )
         .expect("message signing bytes"),
     );
@@ -463,9 +466,10 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     };
     file.signature = crypto::ed25519_sign(
         &CONTENT_SIGNING_KEY,
-        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &topo::core::wire::encode_with_zeroed_trailing_field(
             &file,
             content::file::encode::encode_fact,
+            topo::core::crypto::ED25519_SIGNATURE_BYTES,
         )
         .expect("file signing bytes"),
     );
@@ -522,9 +526,10 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &topo::core::wire::encode_with_zeroed_trailing_field(
                     &fact,
                     content::message::encode::encode_fact,
+                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
                 )?,
             );
             content::message::encode::encode_fact(&fact)
@@ -535,9 +540,10 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &topo::core::wire::encode_with_zeroed_trailing_field(
                     &fact,
                     content::file::encode::encode_fact,
+                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
                 )?,
             );
             content::file::encode::encode_fact(&fact)
@@ -548,9 +554,10 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &topo::core::wire::encode_with_zeroed_trailing_field(
                     &fact,
                     content::reaction::encode::encode_fact,
+                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
                 )?,
             );
             content::reaction::encode::encode_fact(&fact)
@@ -561,9 +568,10 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &topo::core::wire::encode_with_zeroed_trailing_field(
                     &fact,
                     content::message_deletion::encode::encode_fact,
+                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
                 )?,
             );
             content::message_deletion::encode::encode_fact(&fact)
@@ -574,9 +582,10 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
             fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
             fact.signature = crypto::ed25519_sign(
                 &private_key,
-                &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+                &topo::core::wire::encode_with_zeroed_trailing_field(
                     &fact,
                     content::file_deletion::encode::encode_fact,
+                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
                 )?,
             );
             content::file_deletion::encode::encode_fact(&fact)

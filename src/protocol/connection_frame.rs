@@ -657,9 +657,10 @@ mod tests {
         };
         deletion.signature = ed25519_sign(
             &signing_secret,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &deletion,
                 content::message_deletion::encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("signing bytes"),
         );
@@ -684,9 +685,10 @@ mod tests {
         };
         workspace.signature = ed25519_sign(
             &signing_secret,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &workspace,
                 auth::workspace::encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("signing bytes"),
         );
@@ -713,9 +715,10 @@ mod tests {
         };
         user.signature = ed25519_sign(
             &signing_secret,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &user,
                 auth::user::encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("signing bytes"),
         );

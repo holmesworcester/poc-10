@@ -952,9 +952,10 @@ mod projector_tests {
         message.expires_at_minute = message.minute + 1;
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &message,
                 encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("message signing bytes"),
         );
@@ -1042,9 +1043,10 @@ mod projector_tests {
         };
         deletion.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &deletion,
                 deletion_layout::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("deletion signing bytes"),
         );
@@ -1095,9 +1097,10 @@ mod projector_tests {
         };
         user.signature = crypto::ed25519_sign(
             &signing_key,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &user,
                 user_layout::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("user signing bytes"),
         );
@@ -1139,9 +1142,10 @@ mod projector_tests {
         };
         message.signature = crypto::ed25519_sign(
             &CONTENT_SIGNING_KEY,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &message,
                 encode::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("message signing bytes"),
         );
@@ -1171,9 +1175,10 @@ mod projector_tests {
         };
         signer.signature = crypto::ed25519_sign(
             &ENDPOINT_AUTHORITY_KEY,
-            &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+            &crate::core::wire::encode_with_zeroed_trailing_field(
                 &signer,
                 endpoint_shared_layout::encode_fact,
+                crate::core::crypto::ED25519_SIGNATURE_BYTES,
             )
             .expect("endpoint signing bytes"),
         );

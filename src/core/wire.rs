@@ -375,6 +375,43 @@ pub fn canonical_with_zeroed_field(
     Ok(canonical)
 }
 
+/// Encode a value and zero selected byte ranges in the encoded output.
+///
+/// Core does not know what the ranges mean. The caller owns the layout and
+/// chooses the exact fields that must be zeroed before hashing, signing, or
+/// comparing canonical bytes.
+pub fn encode_with_zeroed_fields<T>(
+    value: &T,
+    encode: fn(&T) -> Result<Vec<u8>, String>,
+    ranges: impl IntoIterator<Item = Range<usize>>,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = encode(value)?;
+    for range in ranges {
+        if range.start > range.end || range.end > bytes.len() {
+            return Err("canonical zeroed field range is outside encoded bytes".to_string());
+        }
+        bytes[range].fill(0);
+    }
+    Ok(bytes)
+}
+
+/// Encode a value and zero a fixed-width trailing field.
+///
+/// This is a generic byte utility. Protocol code supplies the trailing length,
+/// such as a signature width, at the call site.
+pub fn encode_with_zeroed_trailing_field<T>(
+    value: &T,
+    encode: fn(&T) -> Result<Vec<u8>, String>,
+    trailing_len: usize,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = encode(value)?;
+    let Some(start) = bytes.len().checked_sub(trailing_len) else {
+        return Err("canonical bytes are shorter than trailing zeroed field".to_string());
+    };
+    bytes[start..].fill(0);
+    Ok(bytes)
+}
+
 /// Require an exact byte length.
 pub fn expect_len(bytes: &[u8], expected: usize) -> Result<(), WireError> {
     if bytes.len() == expected {
@@ -810,6 +847,38 @@ mod tests {
         assert_eq!(
             take_bool8(&[2]).unwrap_err(),
             WireError::InvalidBool { actual: 2 }
+        );
+    }
+
+    fn encode_test_bytes(value: &[u8; 5]) -> Result<Vec<u8>, String> {
+        Ok(value.to_vec())
+    }
+
+    #[test]
+    fn encoded_zeroing_helpers_zero_caller_selected_fields() {
+        let value = [1, 2, 3, 4, 5];
+
+        assert_eq!(
+            encode_with_zeroed_fields(&value, encode_test_bytes, [1..3, 4..5]).unwrap(),
+            vec![1, 0, 0, 4, 0]
+        );
+        assert_eq!(
+            encode_with_zeroed_trailing_field(&value, encode_test_bytes, 2).unwrap(),
+            vec![1, 2, 3, 0, 0]
+        );
+    }
+
+    #[test]
+    fn encoded_zeroing_helpers_reject_impossible_ranges() {
+        let value = [1, 2, 3, 4, 5];
+
+        assert_eq!(
+            encode_with_zeroed_fields(&value, encode_test_bytes, [4..6]).unwrap_err(),
+            "canonical zeroed field range is outside encoded bytes"
+        );
+        assert_eq!(
+            encode_with_zeroed_trailing_field(&value, encode_test_bytes, 6).unwrap_err(),
+            "canonical bytes are shorter than trailing zeroed field"
         );
     }
 

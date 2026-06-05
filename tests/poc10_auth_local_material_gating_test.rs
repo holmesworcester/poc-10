@@ -120,9 +120,10 @@ fn frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32], created_at
     };
     frontier.signature = crypto::ed25519_sign(
         &private_key,
-        &topo::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &topo::core::wire::encode_with_zeroed_trailing_field(
             &frontier,
             removal_frontier_layout::encode_removal_frontier,
+            topo::core::crypto::ED25519_SIGNATURE_BYTES,
         )
         .expect("frontier signing bytes"),
     );

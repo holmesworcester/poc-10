@@ -602,9 +602,10 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
     let mut endpoint = endpoint;
     let (_, signature) = crypto::ed25519_sign_canonical(
         &input.signer_private_key,
-        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &crate::core::wire::encode_with_zeroed_trailing_field(
             &endpoint,
             auth::endpoint_shared::encode::encode_fact,
+            crate::core::crypto::ED25519_SIGNATURE_BYTES,
         )?,
     );
     endpoint.signature = signature;

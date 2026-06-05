@@ -32,9 +32,10 @@ pub fn signed_invite_server_fact(
     let mut invite_server = invite_server;
     let (_, signature) = crypto::ed25519_sign_canonical(
         signer_private_key,
-        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &crate::core::wire::encode_with_zeroed_trailing_field(
             &invite_server,
             encode::encode_fact,
+            crate::core::crypto::ED25519_SIGNATURE_BYTES,
         )?,
     );
     invite_server.signature = signature;

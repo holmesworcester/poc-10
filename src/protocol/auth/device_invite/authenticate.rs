@@ -56,9 +56,10 @@ fn prove_decoded_device_invite(
 pub fn verify_signature(fact: &DeviceInviteFact) -> Result<(), String> {
     crate::core::crypto::ed25519_verify_canonical(
         &fact.signer_public_key,
-        &crate::protocol::canonical::encode_with_zeroed_trailing_signature(
+        &crate::core::wire::encode_with_zeroed_trailing_field(
             fact,
             super::encode::encode_fact,
+            crate::core::crypto::ED25519_SIGNATURE_BYTES,
         )?,
         &fact.signature,
         "device invite",
