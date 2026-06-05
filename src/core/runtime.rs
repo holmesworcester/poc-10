@@ -25,7 +25,7 @@ use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, 
 use crate::core::context::ContextOffer;
 use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactId};
-use crate::core::intents::{Intent, IntentHandler};
+use crate::core::intents::{Intent, IntentHandler, NetworkAccessPolicy};
 use crate::core::pipeline;
 use crate::core::pipeline::{FactRoute, Projector, Timeline};
 use crate::core::schema::{
@@ -119,6 +119,8 @@ pub struct HandlerRoute {
     pub factory: HandlerFactory,
     /// Whether core may dispatch this intent before the replay barrier finishes.
     pub runs_during_replay: bool,
+    /// Whether this route may call core outbound network IO.
+    pub network_access: NetworkAccessPolicy,
     /// Live-only recurring schedule installed by the daemon, if any.
     pub recurrence: Option<RecurringIntentSpec>,
 }
@@ -134,6 +136,7 @@ struct HandlerSet {
 
 struct HandlerEntry {
     intent_kind: &'static str,
+    network_access: NetworkAccessPolicy,
     handler: Box<dyn IntentHandler>,
 }
 
@@ -145,6 +148,7 @@ impl HandlerSet {
                 .iter()
                 .map(|route| HandlerEntry {
                     intent_kind: route.intent_kind,
+                    network_access: route.network_access,
                     handler: (route.factory)(),
                 })
                 .collect(),
@@ -159,6 +163,7 @@ impl HandlerSet {
                 .filter(|route| !excluded_names.contains(&route.name))
                 .map(|route| HandlerEntry {
                     intent_kind: route.intent_kind,
+                    network_access: route.network_access,
                     handler: (route.factory)(),
                 })
                 .collect(),
@@ -169,11 +174,8 @@ impl HandlerSet {
         self.entries.iter().map(|entry| entry.intent_kind).collect()
     }
 
-    fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
-        self.entries
-            .iter()
-            .find(|entry| entry.intent_kind == kind)
-            .map(|entry| entry.handler.as_ref())
+    fn entry_for_kind(&self, kind: &str) -> Option<&HandlerEntry> {
+        self.entries.iter().find(|entry| entry.intent_kind == kind)
     }
 
     pub(crate) fn dispatch(
@@ -201,10 +203,16 @@ impl HandlerSet {
             {
                 break;
             }
-            let handler = self
-                .handler_for_kind(kind)
+            let entry = self
+                .entry_for_kind(kind)
                 .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
-            let status = pipeline::dispatch_queued_intent(handler, store, allowed_tables, queued)?;
+            let status = pipeline::dispatch_queued_intent(
+                entry.handler.as_ref(),
+                entry.network_access,
+                store,
+                allowed_tables,
+                queued,
+            )?;
             total.merge(status);
             if status.retried {
                 if let Some(key) = local_retry_key {

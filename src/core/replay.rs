@@ -34,7 +34,7 @@
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
-use crate::core::intents::IntentHandler;
+use crate::core::intents::{IntentHandler, NetworkAccessPolicy};
 use crate::core::pipeline;
 use crate::core::pipeline::{FactRoute, Projector};
 use crate::core::runtime::HandlerRoute;
@@ -350,7 +350,7 @@ struct ReplayDrive<'a> {
     projector: &'a dyn Projector,
     allowed_tables: &'a [TableName],
     replay_time_wakes: &'a [DaemonTimeWake],
-    handlers: Vec<(&'static str, Box<dyn IntentHandler>)>,
+    handlers: Vec<ReplayHandlerEntry>,
     kinds: Vec<&'static str>,
 }
 
@@ -362,12 +362,18 @@ impl<'a> ReplayDrive<'a> {
         replay_time_wakes: &'a [DaemonTimeWake],
         routes: &'static [HandlerRoute],
     ) -> Self {
-        let handlers: Vec<(&'static str, Box<dyn IntentHandler>)> = routes
+        let handlers: Vec<ReplayHandlerEntry> = routes
             .iter()
             .filter(|route| route.runs_during_replay)
-            .map(|route| (route.intent_kind, (route.factory)()))
+            .map(|route| ReplayHandlerEntry {
+                intent_kind: route.intent_kind,
+                // Replay is before the live network barrier. Even if a protocol
+                // registry is malformed, replay dispatch never grants network IO.
+                network_access: NetworkAccessPolicy::Denied,
+                handler: (route.factory)(),
+            })
             .collect();
-        let kinds = handlers.iter().map(|(kind, _)| *kind).collect();
+        let kinds = handlers.iter().map(|entry| entry.intent_kind).collect();
         Self {
             store,
             projector,
@@ -378,11 +384,8 @@ impl<'a> ReplayDrive<'a> {
         }
     }
 
-    fn handler_for(&self, kind: &str) -> Option<&dyn IntentHandler> {
-        self.handlers
-            .iter()
-            .find(|(route_kind, _)| *route_kind == kind)
-            .map(|(_, handler)| handler.as_ref())
+    fn handler_for(&self, kind: &str) -> Option<&ReplayHandlerEntry> {
+        self.handlers.iter().find(|entry| entry.intent_kind == kind)
     }
 
     fn fixpoint(&self, counters: &mut ReplayCounters) -> Result<(), String> {
@@ -447,11 +450,12 @@ impl<'a> ReplayDrive<'a> {
                 break;
             };
             let kind = queued.intent.kind.as_str().to_owned();
-            let handler = self
+            let entry = self
                 .handler_for(&kind)
                 .ok_or_else(|| format!("no replay handler registered for intent kind {kind}"))?;
             let report = pipeline::dispatch_queued_intent_filtering_intents(
-                handler,
+                entry.handler.as_ref(),
+                entry.network_access,
                 self.store,
                 self.allowed_tables,
                 queued,
@@ -473,6 +477,12 @@ impl<'a> ReplayDrive<'a> {
         }
         Ok(progressed)
     }
+}
+
+struct ReplayHandlerEntry {
+    intent_kind: &'static str,
+    network_access: NetworkAccessPolicy,
+    handler: Box<dyn IntentHandler>,
 }
 
 /// Wipe every derived table, keeping only the durable input tables.

@@ -8,10 +8,10 @@ use std::thread;
 
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intents::{retry_intent_reason, HandlerContext, IntentHandler};
-use topo::core::network;
-use topo::core::schema::CORE_SCHEMA_SOURCE;
+use topo::core::intents::{HandlerContext, IntentHandler};
+use topo::core::runtime::Runtime;
 use topo::core::store::Store;
+use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::endpoint::rows as endpoint_rows;
 use topo::protocol::connection::connection::fact::ConnectionFact;
@@ -20,7 +20,6 @@ use topo::protocol::connection::connection::rows as connection_rows;
 use topo::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame, SendNetworkFrameHandler, SEND_NETWORK_FRAME,
 };
-use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
 fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
@@ -34,13 +33,14 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
         stream.read_exact(&mut body).expect("read body");
         body
     });
-    let store = test_store();
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let local_endpoint = local_endpoint();
-    store
+    runtime
+        .store()
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
         .expect("seed local endpoint");
     let (connection_fact, connection) = routed_connection(addr, local_endpoint.endpoint);
-    seed_connection_route(&store, connection_fact.id, &connection);
+    seed_connection_route(runtime.store(), connection_fact.id, &connection);
     let input = SendNetworkFrame {
         routing_key: connection_fact.id,
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
@@ -48,16 +48,14 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
     let intent = send_network_frame_intent(input);
     assert_eq!(intent.kind.as_str(), SEND_NETWORK_FRAME);
 
-    let handler = SendNetworkFrameHandler::new();
-    let output = handler
-        .handle(
-            &intent,
-            &HandlerContext::with_facts([connection_fact]).with_store(&store),
-        )
-        .expect("network send should write frame");
+    runtime
+        .submit_local_intent(intent)
+        .expect("queue network send");
+    let status = runtime.dispatch_intents(1).expect("network dispatch");
 
-    assert!(output.facts.is_empty());
-    assert!(output.intents.is_empty());
+    assert!(status.progressed);
+    assert!(!status.retried);
+    assert_eq!(runtime.pending_intent_count(), 0);
     assert_eq!(
         reader.join().expect("reader"),
         b"opaque-connection::frame-frame-bytes"
@@ -78,57 +76,77 @@ fn empty_frame_is_rejected_before_route_lookup() {
 }
 
 #[test]
+fn nonempty_frame_without_registry_network_access_is_rejected() {
+    let intent = send_network_frame_intent(SendNetworkFrame {
+        routing_key: [1u8; 32],
+        frame: b"opaque".to_vec(),
+    });
+
+    let err = SendNetworkFrameHandler::new()
+        .handle(&intent, &HandlerContext::new())
+        .expect_err("direct handler contexts should not grant network");
+
+    assert!(err.contains("registry-granted network access"), "{err}");
+}
+
+#[test]
 fn unreachable_peer_requests_retry_without_consuming_intent() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
     let addr = listener.local_addr().expect("listener addr");
     drop(listener);
 
-    let store = test_store();
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let local_endpoint = local_endpoint();
-    store
+    runtime
+        .store()
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
         .expect("seed local endpoint");
     let (connection_fact, connection) = routed_connection(addr, local_endpoint.endpoint);
-    seed_connection_route(&store, connection_fact.id, &connection);
+    seed_connection_route(runtime.store(), connection_fact.id, &connection);
     let intent = send_network_frame_intent(SendNetworkFrame {
         routing_key: connection_fact.id,
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
     });
 
-    let err = SendNetworkFrameHandler::new()
-        .handle(
-            &intent,
-            &HandlerContext::with_facts([connection_fact]).with_store(&store),
-        )
-        .expect_err("unreachable peer should request retry");
+    runtime
+        .submit_local_intent(intent)
+        .expect("queue network send");
+    let status = runtime.dispatch_intents(1).expect("network dispatch");
 
-    assert!(retry_intent_reason(&err).is_some(), "{err}");
-    assert!(err.contains("open tcp stream"), "{err}");
+    assert!(status.retried);
+    assert_eq!(
+        runtime.pending_intent_count(),
+        1,
+        "retrying network send should leave the intent queued"
+    );
 }
 
 #[test]
 fn missing_route_requests_retry_without_consuming_intent() {
-    let store = test_store();
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let local_endpoint = local_endpoint();
-    store
+    runtime
+        .store()
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
         .expect("seed local endpoint");
     let (connection_fact, connection) = connection_without_return_route(local_endpoint.endpoint);
-    seed_connection_route(&store, connection_fact.id, &connection);
+    seed_connection_route(runtime.store(), connection_fact.id, &connection);
     let intent = send_network_frame_intent(SendNetworkFrame {
         routing_key: connection_fact.id,
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
     });
 
-    let err = SendNetworkFrameHandler::new()
-        .handle(
-            &intent,
-            &HandlerContext::with_facts([connection_fact]).with_store(&store),
-        )
-        .expect_err("missing route should request retry");
+    runtime
+        .submit_local_intent(intent)
+        .expect("queue network send");
+    let status = runtime.dispatch_intents(1).expect("network dispatch");
 
-    assert!(retry_intent_reason(&err).is_some(), "{err}");
-    assert!(err.contains("send_network_frame route"), "{err}");
+    assert!(status.retried);
+    assert_eq!(
+        runtime.pending_intent_count(),
+        1,
+        "retrying network send should leave the intent queued"
+    );
 }
 
 fn local_endpoint() -> EndpointFact {
@@ -140,15 +158,6 @@ fn local_endpoint() -> EndpointFact {
         signing_public_key: crypto::ed25519_public_key(&signing_secret),
         signing_secret,
     }
-}
-
-fn test_store() -> Store {
-    Store::open_memory_with_schema_sources(&[
-        CORE_SCHEMA_SOURCE,
-        network::SCHEMA_SOURCE,
-        FACTS_SCHEMA_SOURCE,
-    ])
-    .expect("store")
 }
 
 fn routed_connection(

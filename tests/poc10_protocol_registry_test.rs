@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use topo::core::intents::NetworkAccessPolicy;
 use topo::core::pipeline::FactPipeline;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 
@@ -207,6 +208,33 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
             MATCH_RUNTIME.command_excluded_handlers.contains(&excluded),
             "command runtime should exclude network handler {excluded}"
         );
+    }
+}
+
+#[test]
+fn runtime_network_access_is_declared_only_for_the_network_send_route() {
+    let network_enabled = MATCH_RUNTIME
+        .handlers
+        .iter()
+        .filter(|route| route.network_access.allows_network())
+        .map(|route| route.name)
+        .collect::<BTreeSet<_>>();
+    let expected: BTreeSet<&str> = ["send_network_frame"].into_iter().collect();
+
+    assert_eq!(
+        network_enabled, expected,
+        "only the route that lowers connection frames to core network IO may receive network access"
+    );
+
+    for route in MATCH_RUNTIME.handlers {
+        if route.runs_during_replay {
+            assert_eq!(
+                route.network_access,
+                NetworkAccessPolicy::Denied,
+                "replay route {} must never have network access",
+                route.name
+            );
+        }
     }
 }
 

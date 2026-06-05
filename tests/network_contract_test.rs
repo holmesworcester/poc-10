@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
+use topo::core::intents::HandlerContext;
 use topo::core::network::{
-    self, InboundNetworkRow, NetworkSource, NetworkTarget, OutboundNetworkRow,
+    self, InboundNetworkRow, NetworkSource, NetworkTarget, OutboundFrame, OutboundNetworkRow,
 };
 use topo::core::store::Store;
 
@@ -77,4 +78,22 @@ fn network_rows_are_opaque_and_idempotent() {
             .is_empty(),
         "network rows are process-local IO staging, not restart-durable protocol truth"
     );
+}
+
+#[test]
+fn outbound_tcp_send_requires_registry_network_access() {
+    let store = Store::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
+    let target = NetworkTarget::new("127.0.0.1:9".parse().unwrap());
+
+    let err = network::send(
+        HandlerContext::new().network_access(),
+        &store,
+        target,
+        OutboundFrame {
+            bytes: b"blocked before connect".to_vec(),
+        },
+    )
+    .expect_err("denied network access should stop before tcp connect");
+
+    assert!(err.contains("registry-granted network access"), "{err}");
 }

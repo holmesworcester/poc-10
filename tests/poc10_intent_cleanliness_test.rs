@@ -45,6 +45,10 @@ fn immediate_rust_children(root: &Path) -> Vec<PathBuf> {
 fn immediate_rust_module_names(root: &Path) -> BTreeSet<String> {
     immediate_rust_children(root)
         .into_iter()
+        // Verus proof files are source siblings of the Rust fact family, but
+        // they are included from src/protocol/proof.rs rather than declared as
+        // ordinary Rust modules in the family manifest.
+        .filter(|path| path.file_name().map_or(true, |name| name != "proof.rs"))
         .filter_map(|path| {
             path.file_stem()
                 .and_then(|stem| stem.to_str())
@@ -1160,7 +1164,7 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 14] = [
+const STANDARD_FAMILY_FILES: [&str; 15] = [
     "fact.rs",
     "encode.rs",
     "decode.rs",
@@ -1176,6 +1180,9 @@ const STANDARD_FAMILY_FILES: [&str; 14] = [
     "create.rs",
     "commands.rs",
     "cli.rs",
+    // Verus-only local proof obligations for this fact family. These are not
+    // ordinary Rust modules; src/protocol/proof.rs composes them for verification.
+    "proof.rs",
     // Wire-transport encoding for a fact family whose canonical bytes are sent
     // sealed on the wire (request/connection), kept separate from the
     // durable `layout.rs`.

@@ -108,8 +108,10 @@ impl IntentHandler for SendNetworkFrameHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_network_frame(intent)?;
         validate_frame(&input)?;
+        let network_access = context.require_network_access(SEND_NETWORK_FRAME)?;
         let target = resolve_target(&input.routing_key, context)?;
         network::send(
+            network_access,
             context.store()?,
             target,
             OutboundFrame { bytes: input.frame },

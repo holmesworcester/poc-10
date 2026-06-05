@@ -21,7 +21,7 @@
 
 use crate::core::cli::CliCommand;
 use crate::core::facts::Fact;
-use crate::core::intents::TypedTableSchema;
+use crate::core::intents::{NetworkAccessPolicy, TypedTableSchema};
 use crate::core::network;
 use crate::core::pipeline::{
     FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
@@ -715,23 +715,31 @@ projector_routes! {
 // classification. `recurring = <RecurringIntentSpec>` marks a live-only
 // operational loop the daemon installs as an in-memory schedule after replay.
 macro_rules! handler_route {
-    ($name:literal, $intent_kind:path, $handler:path, replay = $replay:expr) => {
+    ($name:literal, $intent_kind:path, $handler:path, replay = $replay:expr, network = $network:tt) => {
         HandlerRoute {
             name: $name,
             intent_kind: $intent_kind,
             factory: || Box::new(<$handler>::new()),
             runs_during_replay: $replay,
+            network_access: handler_route!(@network $network),
             recurrence: None,
         }
     };
-    ($name:literal, $intent_kind:path, $handler:path, replay = $replay:expr, recurring = $spec:expr) => {
+    ($name:literal, $intent_kind:path, $handler:path, replay = $replay:expr, network = $network:tt, recurring = $spec:expr) => {
         HandlerRoute {
             name: $name,
             intent_kind: $intent_kind,
             factory: || Box::new(<$handler>::new()),
             runs_during_replay: $replay,
+            network_access: handler_route!(@network $network),
             recurrence: Some($spec),
         }
+    };
+    (@network true) => {
+        NetworkAccessPolicy::Allowed
+    };
+    (@network false) => {
+        NetworkAccessPolicy::Denied
     };
 }
 
@@ -748,25 +756,29 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "create_connection",
         connection::create_connection::CREATE_CONNECTION,
         connection::create_connection::CreateConnectionHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_sync_compare_response",
         sync::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
         sync::send_compare_response::SendSyncCompareResponseHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_needed_fact_id",
         sync::send_needed_fact_id::SEND_NEEDED_FACT_ID,
         sync::send_needed_fact_id::SendNeededFactIdHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_requested_fact",
         sync::send_requested_fact::SEND_REQUESTED_FACT,
         sync::send_requested_fact::SendRequestedFactHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
     // share_fact_with_sync rebuilds sync-derived shareable/negentropy state from
     // retained facts: deterministic replay rebuild work.
@@ -774,14 +786,16 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "share_fact_with_sync",
         sync::share_fact_with_sync::SHARE_FACT_WITH_SYNC,
         sync::share_fact_with_sync::ShareFactWithSyncHandler,
-        replay = true
+        replay = true,
+        network = false
     ),
     // Seeding sync runs only for connections explicitly recreated after replay.
     handler_route!(
         "seed_connection_sync",
         sync::seed_connection::SEED_CONNECTION_SYNC,
         sync::seed_connection::SeedConnectionSyncHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
     // Connection maintenance is a live-only recurring operational loop. The
     // daemon installs it as an in-memory schedule and fires it on a fixed
@@ -792,6 +806,7 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         connection::maintain_connections::MAINTAIN_CONNECTIONS,
         connection::maintain_connections::MaintainConnectionsHandler,
         replay = false,
+        network = false,
         recurring = RecurringIntentSpec {
             interval_ms: 250,
             initial_delay_ms: 0,
@@ -804,7 +819,8 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "create_key_wrap",
         auth::create_key_wrap::CREATE_KEY_WRAP,
         auth::create_key_wrap::CreateKeyWrapHandler,
-        replay = true
+        replay = true,
+        network = false
     ),
     // Unwrap deterministically creates local secret facts (ids, not plaintext)
     // from retained wrap/recipient/frontier/local recipient-key facts.
@@ -812,7 +828,8 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "unwrap_key_wrap",
         auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
         auth::unwrap_key_wrap::UnwrapKeyWrapHandler,
-        replay = true
+        replay = true,
+        network = false
     ),
     // Sending facts over a connection, frame send, and frame receive are
     // operational IO over a live session.
@@ -820,19 +837,22 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "send_facts_on_connection",
         connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
         connection::send_facts_on_connection::SendFactsOnConnectionHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
     handler_route!(
         "send_network_frame",
         connection::send_network_frame::SEND_NETWORK_FRAME,
         connection::send_network_frame::SendNetworkFrameHandler,
-        replay = false
+        replay = false,
+        network = true
     ),
     handler_route!(
         "receive_network_frame",
         connection::receive_network_frame::RECEIVE_NETWORK_FRAME,
         connection::receive_network_frame::ReceiveNetworkFrameHandler,
-        replay = false
+        replay = false,
+        network = false
     ),
 ];
 

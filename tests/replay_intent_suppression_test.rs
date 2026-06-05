@@ -7,7 +7,9 @@
 
 use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
+use topo::core::intents::{
+    HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind, NetworkAccessPolicy,
+};
 use topo::core::pipeline::{
     FactPipeline, FactRoute, ProjectionContext, ProjectionOutput, Projector,
 };
@@ -95,6 +97,7 @@ const HANDLERS: &[HandlerRoute] = &[
         intent_kind: REPLAY_OK,
         factory: replay_handler,
         runs_during_replay: true,
+        network_access: NetworkAccessPolicy::Denied,
         recurrence: None,
     },
     HandlerRoute {
@@ -102,6 +105,7 @@ const HANDLERS: &[HandlerRoute] = &[
         intent_kind: LIVE_ONLY,
         factory: live_handler,
         runs_during_replay: false,
+        network_access: NetworkAccessPolicy::Denied,
         recurrence: None,
     },
     HandlerRoute {
@@ -109,6 +113,7 @@ const HANDLERS: &[HandlerRoute] = &[
         intent_kind: LIVE_LOCAL,
         factory: live_handler,
         runs_during_replay: false,
+        network_access: NetworkAccessPolicy::Denied,
         recurrence: None,
     },
     HandlerRoute {
@@ -116,6 +121,7 @@ const HANDLERS: &[HandlerRoute] = &[
         intent_kind: LIVE_FROM_HANDLER,
         factory: live_handler,
         runs_during_replay: false,
+        network_access: NetworkAccessPolicy::Denied,
         recurrence: None,
     },
 ];

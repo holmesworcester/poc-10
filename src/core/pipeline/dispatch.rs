@@ -28,7 +28,10 @@
 
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::persisted_fact;
-use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler, IntentKind};
+use crate::core::intents::{
+    HandlerContext, HandlerError, Intent, IntentHandler, IntentKind, NetworkAccess,
+    NetworkAccessPolicy,
+};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
@@ -86,12 +89,14 @@ pub(crate) fn next_queued_intent(
 /// should stop this bounded pass.
 pub(crate) fn dispatch_queued_intent(
     handler: &(impl IntentHandler + ?Sized),
+    network_access: NetworkAccessPolicy,
     store: &Store,
     allowed_tables: &[TableName],
     queued: QueuedIntent,
 ) -> Result<WorkStatus, String> {
     Ok(dispatch_queued_intent_with_policy(
         handler,
+        network_access,
         store,
         allowed_tables,
         queued,
@@ -103,6 +108,7 @@ pub(crate) fn dispatch_queued_intent(
 /// Run one claimed intent while suppressing inadmissible follow-up intents.
 pub(crate) fn dispatch_queued_intent_filtering_intents(
     handler: &(impl IntentHandler + ?Sized),
+    network_access: NetworkAccessPolicy,
     store: &Store,
     allowed_tables: &[TableName],
     queued: QueuedIntent,
@@ -110,6 +116,7 @@ pub(crate) fn dispatch_queued_intent_filtering_intents(
 ) -> Result<IntentDispatchReport, String> {
     dispatch_queued_intent_with_policy(
         handler,
+        network_access,
         store,
         allowed_tables,
         queued,
@@ -119,13 +126,14 @@ pub(crate) fn dispatch_queued_intent_filtering_intents(
 
 fn dispatch_queued_intent_with_policy(
     handler: &(impl IntentHandler + ?Sized),
+    network_access: NetworkAccessPolicy,
     store: &Store,
     allowed_tables: &[TableName],
     queued: QueuedIntent,
     intent_policy: IntentAdmissionPolicy<'_>,
 ) -> Result<IntentDispatchReport, String> {
     let mut status = WorkStatus::idle();
-    let context = load_handler_context(store, handler, &queued.intent)?;
+    let context = load_handler_context(store, handler, network_access, &queued.intent)?;
     let Some(mut output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
         if status.retried && queued.table == LOCAL_INTENTS {
             rotate_local_retry_to_tail(store, &queued.intent)?;
@@ -200,6 +208,7 @@ fn next_queued_intent_in_table(
 fn load_handler_context<'a>(
     store: &'a Store,
     handler: &(impl IntentHandler + ?Sized),
+    network_access: NetworkAccessPolicy,
     intent: &Intent,
 ) -> Result<HandlerContext<'a>, String> {
     let mut facts = Vec::new();
@@ -209,7 +218,9 @@ fn load_handler_context<'a>(
         }
     }
     let context = HandlerContext::with_facts(facts);
-    Ok(context.with_store(store))
+    Ok(context
+        .with_store(store)
+        .with_network_access(NetworkAccess::from_policy(network_access)))
 }
 
 /// Run a handler and convert retry markers into report state.

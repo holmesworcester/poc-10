@@ -31,6 +31,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use crate::core::intents::NetworkAccess;
 use crate::core::store::{SchemaSource, Store, TableName, TableRow};
 
 /// Ephemeral outbound network queue table.
@@ -145,10 +146,16 @@ impl InboundNetworkRow {
 }
 
 /// Send one outbound frame through TCP after staging it in the core outbound queue.
-pub fn send(store: &Store, target: NetworkTarget, frame: OutboundFrame) -> Result<(), String> {
+pub fn send(
+    access: NetworkAccess,
+    store: &Store,
+    target: NetworkTarget,
+    frame: OutboundFrame,
+) -> Result<(), String> {
+    access.require_allowed("network::send")?;
     let OutboundFrame { bytes } = frame;
     let row = OutboundNetworkRow::new(target, bytes);
-    send_once(store, target, vec![row], (), |_, _| Ok(())).map(|_| ())
+    send_once(access, store, target, vec![row], (), |_, _| Ok(())).map(|_| ())
 }
 
 /// Insert outbound rows idempotently.
@@ -422,12 +429,14 @@ pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
 /// queue deletion complete. If the remote side stops draining its socket, the
 /// write times out and the protocol send rows remain queued for a later pass.
 pub fn send_once<T>(
+    access: NetworkAccess,
     store: &Store,
     target: NetworkTarget,
     rows: Vec<OutboundNetworkRow>,
     mut value: T,
     mut on_sent: impl FnMut(&[OutboundNetworkRow], &mut T) -> Result<(), String>,
 ) -> Result<T, String> {
+    access.require_allowed("network::send_once")?;
     let mut stream = connect(target.addr()).map_err(|err| format!("open tcp stream: {err}"))?;
     let mut report = StreamReport::default();
     write_outbound(

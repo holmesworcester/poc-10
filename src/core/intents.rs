@@ -120,6 +120,62 @@ impl Intent {
     }
 }
 
+/// Registry-declared network authority for an intent handler route.
+///
+/// Protocol registries choose this value for each handler route; core turns it
+/// into a [`NetworkAccess`] token only while dispatching that registered handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkAccessPolicy {
+    Denied,
+    Allowed,
+}
+
+impl NetworkAccessPolicy {
+    pub fn allows_network(self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+}
+
+/// Runtime-granted token for outbound network IO.
+///
+/// Protocol code can carry this token from its [`HandlerContext`], but only core
+/// can mint an allowed value from the registry policy.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetworkAccess {
+    allowed: bool,
+}
+
+impl NetworkAccess {
+    pub(crate) fn from_policy(policy: NetworkAccessPolicy) -> Self {
+        Self {
+            allowed: policy.allows_network(),
+        }
+    }
+
+    pub fn is_allowed(self) -> bool {
+        self.allowed
+    }
+
+    pub(crate) fn require_allowed(self, operation: &str) -> Result<(), String> {
+        if self.allowed {
+            Ok(())
+        } else {
+            Err(format!(
+                "{operation} requires registry-granted network access"
+            ))
+        }
+    }
+}
+
+impl fmt::Debug for NetworkAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkAccess")
+            .field("allowed", &self.allowed)
+            .finish()
+    }
+}
+
 /// Delete one opaque row by key from a row table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDelete {
@@ -301,6 +357,7 @@ pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
     store: Option<&'a Store>,
+    network_access: NetworkAccess,
 }
 
 impl fmt::Debug for HandlerContext<'_> {
@@ -309,6 +366,7 @@ impl fmt::Debug for HandlerContext<'_> {
             .debug_struct("HandlerContext")
             .field("facts", &self.facts)
             .field("has_store", &self.store.is_some())
+            .field("network_access", &self.network_access)
             .finish()
     }
 }
@@ -324,6 +382,7 @@ impl<'a> HandlerContext<'a> {
         Self {
             facts: facts.into_iter().map(|fact| (fact.id, fact)).collect(),
             store: None,
+            network_access: NetworkAccess::default(),
         }
     }
 
@@ -333,10 +392,26 @@ impl<'a> HandlerContext<'a> {
         self
     }
 
+    pub(crate) fn with_network_access(mut self, access: NetworkAccess) -> Self {
+        self.network_access = access;
+        self
+    }
+
     /// Borrow the store or return a fatal handler error if none was attached.
     pub fn store(&self) -> Result<&Store, HandlerError> {
         self.store
             .ok_or_else(|| HandlerError::fatal("handler context missing store"))
+    }
+
+    pub fn network_access(&self) -> NetworkAccess {
+        self.network_access
+    }
+
+    pub fn require_network_access(&self, operation: &str) -> Result<NetworkAccess, HandlerError> {
+        self.network_access
+            .require_allowed(operation)
+            .map_err(HandlerError::fatal)?;
+        Ok(self.network_access)
     }
 
     /// Return a preloaded fact by id.
@@ -471,5 +546,16 @@ mod tests {
                 .contains("SQL value exceeds SQLite integer range"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn handler_context_defaults_to_no_network_access() {
+        let context = HandlerContext::new();
+
+        assert!(!context.network_access().is_allowed());
+        assert!(context
+            .require_network_access("test network")
+            .expect_err("default context should deny network")
+            .contains("registry-granted network access"));
     }
 }
