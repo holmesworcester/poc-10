@@ -8,6 +8,7 @@
 
 pub mod adapt;
 pub mod authenticate;
+pub mod author;
 pub mod commands;
 pub mod decode;
 pub mod encode;

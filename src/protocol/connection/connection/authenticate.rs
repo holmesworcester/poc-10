@@ -19,7 +19,7 @@ use crate::protocol::connection::request;
 use crate::protocol::connection::request::fact::{REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 
 use super::fact::ConnectionFact;
-use super::{author, decode};
+use super::{decode, encode};
 
 pub(crate) struct ConnectionAuthenticator;
 
@@ -269,7 +269,7 @@ fn validate_material(
         other => return Err(format!("unknown connection request mode {other}")),
     };
     if let Some(initiator_secret) = initiator_secret {
-        let material = author::initiator_material(
+        let material = encode::initiator_material(
             connection.request_id,
             request,
             invite.as_ref(),
@@ -283,7 +283,7 @@ fn validate_material(
         {
             return Err("connection material does not match initiator handshake".to_string());
         }
-    } else if author::public_handshake_hash(
+    } else if encode::public_handshake_hash(
         connection.request_id,
         request,
         &connection.responder_ephemeral_public_key,

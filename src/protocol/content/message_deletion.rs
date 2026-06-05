@@ -2,7 +2,7 @@
 //!
 //! Message deletions are signed tombstones for message ids. Projection waits
 //! for target-message and author context, records a tombstone row, and
-//! publishes `content_purged` context for the target message coordinate.
+//! publishes generic `fact_purged` context for the target message coordinate.
 //! Message, reaction, file, and slice projectors keep matching needs and delete
 //! their own rows plus their own fact bytes when this context arrives.
 

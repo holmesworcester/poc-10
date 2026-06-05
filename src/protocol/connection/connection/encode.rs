@@ -1,20 +1,29 @@
 //! Canonical byte encoding for unified connection facts.
 //!
-//! This file owns byte construction only: the fact tag, fixed plaintext field
-//! order and widths, and the sealing transcript that turns a connection plaintext
-//! into its sealed network envelope. It does not open, authenticate, or inspect
-//! context.
+//! This file owns deterministic connection bytes: the fact tag, fixed plaintext
+//! field order and widths, the sealing transcript that turns a connection
+//! plaintext into its sealed network envelope, and the public handshake transcript
+//! used by both authoring and authentication. It does not open, authenticate, or
+//! inspect context.
 //!
 //! The sealed bytes are the connection fact bytes and therefore the connection
 //! id. The encrypted plaintext contains the connection secret and route
 //! addresses; the header contains only metadata needed to open and match
 //! context.
 
+use std::net::SocketAddr;
+
 use crate::core::crypto::{
-    self, X25519PrivateKey, XChaCha20Poly1305Nonce, XCHACHA20_POLY1305_NONCE_BYTES,
-    XCHACHA20_POLY1305_TAG_BYTES,
+    self, x25519_diffie_hellman, X25519PrivateKey, XChaCha20Poly1305Nonce,
+    XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,
 };
+use crate::protocol::auth::endpoint::fact::EndpointFact;
+use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
+use crate::protocol::connection::request::fact::{
+    ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP,
+};
 
 use super::fact::ConnectionFact;
 
@@ -22,6 +31,10 @@ pub const TYPE_CONNECTION: u8 = 49;
 pub(crate) const SEAL_VERSION: u8 = 1;
 pub(crate) const CONNECTION_PURPOSE: &[u8] = b"topo-sealed-connection-v2";
 pub(crate) const SEALED_HEADER_BYTES: usize = 1 + 1 + 32 + 32 + 32 + XCHACHA20_POLY1305_NONCE_BYTES;
+const BOOTSTRAP_HANDSHAKE_PURPOSE: &[u8] = b"topo-connection-bootstrap-handshake-v2";
+const MEMBERSHIP_HANDSHAKE_PURPOSE: &[u8] = b"topo-connection-membership-handshake-v2";
+const CONNECTION_SECRET_PURPOSE: &[u8] = b"topo-connection-secret-v2";
+const TRANSCRIPT_LABEL: &[u8] = b"topo-connection-handshake-transcript-v2";
 
 pub const PLAINTEXT_FACT_BYTES: usize = 1 // tag
     + 32 // from_endpoint
@@ -37,6 +50,12 @@ pub const PLAINTEXT_FACT_BYTES: usize = 1 // tag
 pub const FACT_BYTES: usize = PLAINTEXT_FACT_BYTES;
 pub const SEALED_FACT_BYTES: usize =
     SEALED_HEADER_BYTES + PLAINTEXT_FACT_BYTES + XCHACHA20_POLY1305_TAG_BYTES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeMaterial {
+    pub handshake_hash: [u8; 32],
+    pub connection_secret: [u8; 32],
+}
 
 pub fn encode_fact(fact: &ConnectionFact) -> Result<Vec<u8>, String> {
     encode_plaintext(fact)
@@ -98,6 +117,157 @@ pub fn seal_fact(
     let mut out = Vec::with_capacity(SEALED_FACT_BYTES);
     out.extend_from_slice(&header);
     out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+pub fn initiator_material(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    invite: Option<&InviteSecretFact>,
+    initiator_ephemeral: &ConnectionEphemeralSecretFact,
+    responder_ephemeral_public_key: &[u8; 32],
+    responder_addr: Option<SocketAddr>,
+    initiator_addr: Option<SocketAddr>,
+) -> Result<HandshakeMaterial, String> {
+    if initiator_ephemeral.owner_endpoint != request.from_endpoint {
+        return Err("connection initiator ephemeral owner does not match request".to_string());
+    }
+    if initiator_ephemeral.ephemeral_public_key != request.initiator_ephemeral_public_key {
+        return Err("connection initiator ephemeral public key does not match request".to_string());
+    }
+    let ee = x25519_diffie_hellman(
+        &initiator_ephemeral.ephemeral_private_key,
+        responder_ephemeral_public_key,
+    );
+    let es = x25519_diffie_hellman(
+        &initiator_ephemeral.ephemeral_private_key,
+        &request.to_endpoint,
+    );
+    material(
+        request_id,
+        request,
+        invite,
+        responder_ephemeral_public_key,
+        responder_addr,
+        initiator_addr,
+        ee,
+        es,
+    )
+}
+
+pub fn responder_material(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    invite: Option<&InviteSecretFact>,
+    endpoint: &EndpointFact,
+    responder_ephemeral_private_key: &X25519PrivateKey,
+    responder_ephemeral_public_key: &[u8; 32],
+    responder_addr: Option<SocketAddr>,
+    initiator_addr: Option<SocketAddr>,
+) -> Result<HandshakeMaterial, String> {
+    let ee = x25519_diffie_hellman(
+        responder_ephemeral_private_key,
+        &request.initiator_ephemeral_public_key,
+    );
+    let es = x25519_diffie_hellman(&endpoint.secret, &request.initiator_ephemeral_public_key);
+    material(
+        request_id,
+        request,
+        invite,
+        responder_ephemeral_public_key,
+        responder_addr,
+        initiator_addr,
+        ee,
+        es,
+    )
+}
+
+pub fn public_handshake_hash(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    responder_ephemeral_public_key: &[u8; 32],
+    responder_addr: Option<SocketAddr>,
+    initiator_addr: Option<SocketAddr>,
+) -> Result<[u8; 32], String> {
+    Ok(crypto::hash(&public_transcript(
+        request_id,
+        request,
+        responder_ephemeral_public_key,
+        responder_addr,
+        initiator_addr,
+    )?))
+}
+
+fn material(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    invite: Option<&InviteSecretFact>,
+    responder_ephemeral_public_key: &[u8; 32],
+    responder_addr: Option<SocketAddr>,
+    initiator_addr: Option<SocketAddr>,
+    ee: [u8; 32],
+    es: [u8; 32],
+) -> Result<HandshakeMaterial, String> {
+    let transcript = public_transcript(
+        request_id,
+        request,
+        responder_ephemeral_public_key,
+        responder_addr,
+        initiator_addr,
+    )?;
+    let mut ikm = Vec::new();
+    let purpose = match request.mode {
+        REQUEST_MODE_BOOTSTRAP => {
+            let invite =
+                invite.ok_or_else(|| "bootstrap connection requires invite secret".to_string())?;
+            if invite.bootstrap_hash != request.bootstrap_hash {
+                return Err("connection invite secret does not match request".to_string());
+            }
+            ikm.extend_from_slice(&invite.bootstrap_secret);
+            ikm.extend_from_slice(&request.bootstrap_hash);
+            BOOTSTRAP_HANDSHAKE_PURPOSE
+        }
+        REQUEST_MODE_MEMBERSHIP => MEMBERSHIP_HANDSHAKE_PURPOSE,
+        other => return Err(format!("unknown connection request mode {other}")),
+    };
+    ikm.extend_from_slice(&ee);
+    ikm.extend_from_slice(&es);
+    let response_key = crypto::hkdf_sha256_key(&ikm, purpose, &transcript)?;
+    let handshake_hash = crypto::hash(&transcript);
+    let connection_secret =
+        crypto::hkdf_sha256_key(&response_key, CONNECTION_SECRET_PURPOSE, &handshake_hash)?;
+    Ok(HandshakeMaterial {
+        handshake_hash,
+        connection_secret,
+    })
+}
+
+fn public_transcript(
+    request_id: [u8; 32],
+    request: &ConnectionRequestFact,
+    responder_ephemeral_public_key: &[u8; 32],
+    responder_addr: Option<SocketAddr>,
+    initiator_addr: Option<SocketAddr>,
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    out.extend_from_slice(TRANSCRIPT_LABEL);
+    out.extend_from_slice(&request_id);
+    out.push(request.mode);
+    out.extend_from_slice(&request.from_endpoint);
+    out.extend_from_slice(&request.to_endpoint);
+    out.extend_from_slice(&request.nonce);
+    out.extend_from_slice(&encode_optional_addr(request.dialed_addr)?);
+    out.extend_from_slice(&request.invite_fact_id);
+    out.extend_from_slice(&request.bootstrap_hash);
+    out.extend_from_slice(&request.invite_secret_fact_id);
+    out.extend_from_slice(&request.invite_signature);
+    out.extend_from_slice(&request.initiator_endpoint_shared_id);
+    out.extend_from_slice(&request.endpoint_signature);
+    out.extend_from_slice(&request.initiator_ephemeral_secret_fact_id);
+    out.extend_from_slice(&request.initiator_ephemeral_public_key);
+    out.extend_from_slice(responder_ephemeral_public_key);
+    out.extend_from_slice(&encode_optional_addr(responder_addr)?);
+    out.extend_from_slice(&encode_optional_addr(initiator_addr)?);
     Ok(out)
 }
 

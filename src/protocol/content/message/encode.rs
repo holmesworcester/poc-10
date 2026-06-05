@@ -21,6 +21,8 @@
 use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
+use crate::core::facts::FactId;
+
 use super::fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES};
 
 pub const TYPE_CONTENT_MESSAGE: u8 = 50;
@@ -57,6 +59,22 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
     out.fixed(&fact.signature);
     out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
+}
+
+/// AEAD associated-data layout for content-message ciphertext.
+///
+/// The bytes are derived, not stored as a standalone field. Authoring and
+/// projection both use this deterministic layout so encrypt/decrypt stay bound
+/// to the same public message context without making read-side code import
+/// `author.rs`.
+pub fn associated_data(workspace_id: FactId, frontier_id: FactId, minute: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(32 + 32 + 8);
+    bytes.extend_from_slice(&workspace_id);
+    bytes.extend_from_slice(&frontier_id);
+    let mut minute_bytes = [0u8; 8];
+    wire::put_u64be(minute, &mut minute_bytes).expect("eight-byte minute slot");
+    bytes.extend_from_slice(&minute_bytes);
+    bytes
 }
 
 fn wire_err(err: wire::WireError) -> String {

@@ -8,11 +8,10 @@
 
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::Ed25519PrivateKey;
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::FactId;
 use crate::protocol::auth;
 
-use super::encode;
-use super::fact::InviteAcceptedFact;
+use super::author;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptInvite {
@@ -35,29 +34,20 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>,
     validate_id("workspace_id", &input.workspace_id)?;
     validate_id("invite_fact_id", &input.invite_fact_id)?;
 
-    let secret = auth::invite::fact::InviteSecretFact::scoped(
+    let (secret, secret_fact) = auth::invite::author::scoped_secret_fact(
         input.bootstrap_secret,
         input.workspace_id,
         input.invite_fact_id,
-    );
-    let secret_fact = Fact::new(
-        FactScope::Local,
         input.created_at_ms,
-        auth::invite::encode::encode_fact(&secret)?,
-    );
-
-    let accepted = InviteAcceptedFact {
-        workspace_id: input.workspace_id,
-        invite_fact_id: input.invite_fact_id,
-        invite_secret_fact_id: secret_fact.id,
-        bootstrap_hash: secret.bootstrap_hash,
-        accepted_endpoint_id: input.accepted_endpoint_id,
-    };
-    let accepted_fact = Fact::new(
-        FactScope::Local,
+    )?;
+    let (_accepted, accepted_fact) = author::accepted_fact(
+        input.workspace_id,
+        input.invite_fact_id,
+        secret_fact.id,
+        secret.bootstrap_hash,
+        input.accepted_endpoint_id,
         input.created_at_ms.saturating_add(1),
-        encode::encode_fact(&accepted)?,
-    );
+    )?;
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
         invite_secret_fact_id: secret_fact.id,

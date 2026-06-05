@@ -223,7 +223,7 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
         content_message::author::pad_plaintext(input.text.as_bytes()).expect("pad text");
     let ciphertext = crypto::xchacha20poly1305_encrypt(
         &input.key_secret,
-        &content_message::author::associated_data(input.workspace_id, input.frontier_id, minute),
+        &content_message::encode::associated_data(input.workspace_id, input.frontier_id, minute),
         &nonce,
         &plaintext,
     )

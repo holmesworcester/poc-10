@@ -8,7 +8,7 @@
 //!      This uses authenticated message metadata, so deletes do not wait for
 //!      encrypted message text to open.
 //!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
-//!      content_purged offer, and share the deletion fact.
+//!      fact_purged offer, and share the deletion fact.
 
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
@@ -17,8 +17,8 @@ use crate::core::pipeline::{
 };
 
 use crate::protocol::auth::user;
+use crate::protocol::content::message;
 use crate::protocol::content::message::project::{self, FactSigner};
-use crate::protocol::content::{message, purge::project as content_purge};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, share_fact_with_sync,
@@ -147,12 +147,14 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
         });
         Ok(share_fact_with_sync(
             output_with_needs([Some(signer_need), Some(target_need), Some(author_need)])
-                .offer(content_purge::target_purged_offer(
+                .offer(crate::core::pipeline::fact_purged_offer(
                     fact.id,
                     scope,
-                    deletion.target_frontier_id,
-                    deletion.target_minute,
-                    deletion.target_message_id,
+                    project::fact_purged_key(
+                        deletion.target_frontier_id,
+                        deletion.target_minute,
+                        deletion.target_message_id,
+                    ),
                 ))
                 .row_mutation(RowMutation::InsertValues(row)),
             deletion.workspace_id,
@@ -304,7 +306,7 @@ mod projector_tests {
 
         assert_eq!(output.needs.len(), 3);
         assert_eq!(output.offers.len(), 1);
-        assert_eq!(output.offers[0].role, "content_purged");
+        assert_eq!(output.offers[0].role, "fact_purged");
         assert_eq!(output.effects.intents.len(), 1);
         assert_eq!(
             output.effects.intents[0].kind.as_str(),

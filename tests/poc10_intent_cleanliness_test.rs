@@ -450,8 +450,10 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
         if !production.contains("impl Projector for") {
-            // A project.rs that owns no projector (shared coordinate helpers,
-            // e.g. content/purge) is not a routed fact family.
+            // A project.rs that owns no projector (shared coordinate helpers) is
+            // not a routed fact family. Helper directories under protocol scopes
+            // are rejected elsewhere; this branch only keeps utility project
+            // modules outside fact-family directories from being routed.
             continue;
         }
 
@@ -525,6 +527,68 @@ fn target_projectors_do_not_verify_signatures() {
          before it could offer that context — so its authenticity is guaranteed. A projector \
          decodes context facts for their fields and proves relationships, but never re-verifies \
          a signature:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_read_stages_do_not_import_author_role_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for name in ["authenticate.rs", "project.rs"] {
+        for path in fact_family_files_named(root, name) {
+            let relative = path.strip_prefix(root).unwrap().display().to_string();
+            let text = source_text(&path);
+            let production = strip_line_comments(production_text_before_unit_tests(&text));
+            for marker in [
+                "use super::author",
+                "super::{author",
+                "::author::",
+                "author::",
+            ] {
+                if production.contains(marker) {
+                    offenders.push(format!("{relative} contains {marker:?}"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "authenticate.rs and project.rs are read-side stages and must not import \
+         author.rs. Move shared deterministic bytes to encode.rs, and read-side \
+         proof helpers to authenticate.rs or a neutral standard role:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn target_authors_do_not_own_projection_stage_output() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for path in fact_family_files_named(root, "author.rs") {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let text = source_text(&path);
+        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        for marker in [
+            "ProjectionContext",
+            "ProjectionOutput",
+            "impl Projector",
+            "impl SemanticProjector",
+            "project_observed_frame",
+        ] {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "author.rs constructs facts; it must not own projection context, projection \
+         output, or projector helpers:\n{}",
         offenders.join("\n")
     );
 }
@@ -1198,7 +1262,7 @@ const STANDARD_FAMILY_FILES: [&str; 13] = [
 const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local directories that are deliberately not fact families.
-const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 1] = ["content/purge"];
+const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 0] = [];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {

@@ -27,7 +27,6 @@ use crate::protocol::content::message;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project as message_project;
 use crate::protocol::content::message_deletion;
-use crate::protocol::content::purge::project as content_purge;
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
@@ -151,19 +150,23 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
         if parent_message.workspace_id != slice.workspace_id {
             return Err("file slice message parent workspace does not match slice".to_string());
         }
-        let file_deletion_need = content_purge::target_purged_need(
+        let file_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            parent_message.frontier_id,
-            unix_minute_for(file.created_at_ms),
-            parent.id,
+            message_project::fact_purged_key(
+                parent_message.frontier_id,
+                unix_minute_for(file.created_at_ms),
+                parent.id,
+            ),
         );
-        let parent_deletion_need = content_purge::target_purged_need(
+        let parent_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope,
-            parent_message.frontier_id,
-            parent_message.minute,
-            file.message_id,
+            message_project::fact_purged_key(
+                parent_message.frontier_id,
+                parent_message.minute,
+                file.message_id,
+            ),
         );
         if let Some(deletion) = context_payload(
             context,

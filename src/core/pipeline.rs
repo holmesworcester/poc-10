@@ -46,7 +46,10 @@ pub use authenticate::{
 };
 pub use context::{MatchedContext, ProjectionContext};
 pub use decode::FactCodec;
-pub use effects::{ProjectionOutput, TimeRange, TimeWake, Timeline};
+pub use effects::{
+    fact_purged_need, fact_purged_offer, fact_purged_range_need, fact_purged_role,
+    ProjectionOutput, TimeRange, TimeWake, Timeline,
+};
 pub use project::{project_staged, SemanticProjector};
 pub use route::{
     EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactPipeline, FactRoute, Projector,

@@ -9,7 +9,7 @@
 //! Frame facts carry only wire bytes; there is no fact-boundary signature and no
 //! intrinsic field rule. Admission scope, the observation and connection context,
 //! decryption, and child materialization are all interpretation the projector
-//! owns through `author::project_observed_frame`.
+//! owns through `connection_frame::project_observed_frame`.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{

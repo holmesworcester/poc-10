@@ -16,7 +16,7 @@ use crate::core::pipeline::{
 };
 
 use crate::protocol::content::message::project::{self, FactSigner};
-use crate::protocol::content::{message, message_deletion, purge::project as content_purge};
+use crate::protocol::content::{message, message_deletion};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
@@ -136,12 +136,14 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
             reaction.target_message_id,
             "reaction target",
         )?;
-        let target_deletion_need = content_purge::target_purged_need(
+        let target_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            target_context.message.frontier_id,
-            target_context.message.minute,
-            reaction.target_message_id,
+            project::fact_purged_key(
+                target_context.message.frontier_id,
+                target_context.message.minute,
+                reaction.target_message_id,
+            ),
         );
         if let Some(deletion) =
             context_payload(context, &target_deletion_need, "reaction target deletion")?

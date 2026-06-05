@@ -13,13 +13,12 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
-use crate::protocol::auth::invite::fact::InviteSecretFact;
-use crate::protocol::connection::ephemeral_secret::encode as ephemeral_encode;
+use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 use super::queries::choose_connection_mode;
-use super::{author as request_create, encode};
+use super::{authenticate as request_auth, author as request_create, encode};
 
 pub const CONNECT_USAGE: &str = "connect ENDPOINT_ID_HEX ADDR";
 
@@ -61,18 +60,20 @@ pub fn create_bootstrap(
         return Err("bootstrap_secret cannot be empty".to_string());
     }
 
-    let invite_secret = match input.workspace_id {
+    let (invite_secret, invite_secret_fact) = match input.workspace_id {
         Some(workspace_id) => {
             validate_id("workspace_id", &workspace_id)?;
-            InviteSecretFact::scoped(input.bootstrap_secret, workspace_id, input.invite_fact_id)
+            auth::invite::author::scoped_secret_fact(
+                input.bootstrap_secret,
+                workspace_id,
+                input.invite_fact_id,
+                input.created_at_ms,
+            )?
         }
-        None => InviteSecretFact::new(input.bootstrap_secret),
+        None => {
+            auth::invite::author::unscoped_secret_fact(input.bootstrap_secret, input.created_at_ms)?
+        }
     };
-    let invite_secret_fact = Fact::new(
-        FactScope::Local,
-        input.created_at_ms,
-        auth::invite::encode::encode_fact(&invite_secret)?,
-    );
     let (ephemeral, ephemeral_fact) = ephemeral_fact(
         input.local_endpoint.endpoint,
         input.created_at_ms.saturating_add(1),
@@ -191,19 +192,7 @@ fn ephemeral_fact(
     owner_endpoint: FactId,
     created_at_ms: u64,
 ) -> Result<(ConnectionEphemeralSecretFact, Fact), String> {
-    let ephemeral_private_key = crypto::random_x25519_private_key();
-    let ephemeral = ConnectionEphemeralSecretFact {
-        owner_endpoint,
-        ephemeral_private_key,
-        ephemeral_public_key: crypto::x25519_public_key(&ephemeral_private_key),
-        created_at_ms,
-    };
-    let fact = Fact::new(
-        FactScope::Local,
-        created_at_ms,
-        ephemeral_encode::encode_fact(&ephemeral)?,
-    );
-    Ok((ephemeral, fact))
+    ephemeral_author::random_secret_fact(owner_endpoint, created_at_ms)
 }
 
 fn sealed_request_fact(
@@ -211,7 +200,7 @@ fn sealed_request_fact(
     ephemeral_private_key: &[u8; 32],
     created_at_ms: u64,
 ) -> Result<Fact, String> {
-    request_create::validate_mode_shape(request)?;
+    request_auth::validate_mode_shape(request)?;
     let sealed = encode::seal_fact(request, ephemeral_private_key)?;
     Ok(Fact::new(FactScope::Global, created_at_ms, sealed))
 }

@@ -15,7 +15,6 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
-use super::author;
 use super::fact::ConnectionFrameSmallFact;
 
 /// Staged read pipeline for the frame_small fact.
@@ -60,6 +59,10 @@ impl SemanticProjector<ConnectionFrameSmallFact> for ConnectionFrameSmallProject
         // 1. Structural.
         // 2. Context.
         // 3. Materialize.
-        author::project_observed_frame(fact, input, context)
+        crate::protocol::connection_frame::project_observed_frame(
+            fact,
+            input.frame.bytes(),
+            context,
+        )
     }
 }

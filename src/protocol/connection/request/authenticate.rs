@@ -11,6 +11,7 @@
 //!      against the local invite secret or global endpoint_shared verifier.
 
 use crate::core::context::ContextNeed;
+use crate::core::crypto::{self, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
     verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
@@ -19,7 +20,7 @@ use crate::protocol::auth::{endpoint, endpoint_shared, invite};
 use crate::protocol::connection::ephemeral_secret;
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
-use super::{author, decode};
+use super::{decode, encode};
 
 pub(crate) struct ConnectionRequestAuthenticator;
 
@@ -150,7 +151,7 @@ fn authenticate_request_signature(
             }
             let invite = invite::decode_fact_payload(invite_fact.body())
                 .map_err(|_| "connection request invite context is malformed".to_string())?;
-            author::validate_invite_signature(request, &invite)?;
+            validate_invite_signature(request, &invite)?;
             Ok(None)
         }
         REQUEST_MODE_MEMBERSHIP => {
@@ -168,11 +169,54 @@ fn authenticate_request_signature(
             if shared.endpoint_id != request.from_endpoint {
                 return Err("connection request endpoint_shared does not bind sender".to_string());
             }
-            author::validate_endpoint_signature(request, &shared.signing_public_key)?;
+            validate_endpoint_signature(request, &shared.signing_public_key)?;
             Ok(None)
         }
         _ => unreachable!("validated request mode"),
     }
+}
+
+pub(crate) fn validate_invite_signature(
+    request: &ConnectionRequestFact,
+    invite_secret: &invite::fact::InviteSecretFact,
+) -> Result<(), String> {
+    if request.mode != REQUEST_MODE_BOOTSTRAP {
+        return Err("connection request invite validation requires bootstrap mode".to_string());
+    }
+    if invite_secret.bootstrap_hash != request.bootstrap_hash {
+        return Err("connection request bootstrap hash is not authorized".to_string());
+    }
+    if let Some(invite_fact_id) = invite_secret.invite_fact_id {
+        if invite_fact_id != request.invite_fact_id {
+            return Err("connection request invite id is not authorized".to_string());
+        }
+    }
+    let public_key = crypto::ed25519_public_key(&invite_secret.bootstrap_secret);
+    if !crypto::ed25519_verify(
+        &public_key,
+        &encode::bootstrap_signature_bytes(request)?,
+        &request.invite_signature,
+    ) {
+        return Err("connection request invite signature is not authorized".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_endpoint_signature(
+    request: &ConnectionRequestFact,
+    signing_public_key: &Ed25519PublicKey,
+) -> Result<(), String> {
+    if request.mode != REQUEST_MODE_MEMBERSHIP {
+        return Err("connection request endpoint validation requires membership mode".to_string());
+    }
+    if !crypto::ed25519_verify(
+        signing_public_key,
+        &encode::endpoint_signature_bytes(request)?,
+        &request.endpoint_signature,
+    ) {
+        return Err("connection request endpoint signature is not authorized".to_string());
+    }
+    Ok(())
 }
 
 pub(super) fn validate_common_request(
@@ -199,7 +243,60 @@ pub(super) fn validate_common_request(
             "connection request initiator ephemeral public key cannot be empty".to_string(),
         );
     }
-    author::validate_mode_shape(request)
+    validate_mode_shape(request)
+}
+
+pub(crate) fn validate_mode_shape(request: &ConnectionRequestFact) -> Result<(), String> {
+    match request.mode {
+        REQUEST_MODE_BOOTSTRAP => {
+            require_nonzero("invite_fact_id", &request.invite_fact_id)?;
+            require_nonzero("bootstrap_hash", &request.bootstrap_hash)?;
+            require_nonzero("invite_secret_fact_id", &request.invite_secret_fact_id)?;
+            if request.invite_signature == [0; crypto::ED25519_SIGNATURE_BYTES] {
+                return Err("bootstrap request invite_signature cannot be empty".to_string());
+            }
+            require_zero(
+                "initiator_endpoint_shared_id",
+                &request.initiator_endpoint_shared_id,
+            )?;
+            if request.endpoint_signature != [0; crypto::ED25519_SIGNATURE_BYTES] {
+                return Err("bootstrap request endpoint_signature must be zero".to_string());
+            }
+        }
+        REQUEST_MODE_MEMBERSHIP => {
+            require_zero("invite_fact_id", &request.invite_fact_id)?;
+            require_zero("bootstrap_hash", &request.bootstrap_hash)?;
+            require_zero("invite_secret_fact_id", &request.invite_secret_fact_id)?;
+            if request.invite_signature != [0; crypto::ED25519_SIGNATURE_BYTES] {
+                return Err("membership request invite_signature must be zero".to_string());
+            }
+            require_nonzero(
+                "initiator_endpoint_shared_id",
+                &request.initiator_endpoint_shared_id,
+            )?;
+            if request.endpoint_signature == [0; crypto::ED25519_SIGNATURE_BYTES] {
+                return Err("membership request endpoint_signature cannot be empty".to_string());
+            }
+        }
+        other => return Err(format!("unknown connection request mode {other}")),
+    }
+    Ok(())
+}
+
+fn require_nonzero(name: &str, value: &[u8; 32]) -> Result<(), String> {
+    if value == &[0; 32] {
+        Err(format!("connection request {name} cannot be empty"))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_zero(name: &str, value: &[u8; 32]) -> Result<(), String> {
+    if value != &[0; 32] {
+        Err(format!("connection request inactive {name} must be zero"))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn all_ephemeral_secret_need(owner: FactId) -> ContextNeed {

@@ -16,8 +16,8 @@ fact bytes and invokes the registered projector for each type tag.
 Data leaves content projection as:
 
 - context offers such as `content_message_meta`, `content_message`,
-  `content_file`, `content_purged`, `content_retention_floor`, and
-  `sync_exact_fact`;
+  `content_file`, generic core `fact_purged`, `content_retention_floor`,
+  and `sync_exact_fact`;
 - context needs for auth signer/user/admin proof, key-material coverage,
   parent content facts, deletion facts, retention floors, and time wakes;
 - durable intent effects for follow-up work owned by registered protocol
@@ -49,10 +49,10 @@ below names the read.
 Auth provides `content_signer`, `auth_user`, `auth_admin`, and
 `secret_coverage` context. Content never opens encrypted text or admits signed
 content until those witnesses match the payload. Content publishes
-`content_message`, `content_message_meta`, `content_file`, `content_purged`,
-and `content_retention_floor` context so child content, deletion, retention,
-and key-material projectors can make bounded progress without scanning content
-rows.
+`content_message`, `content_message_meta`, `content_file`, generic core
+`fact_purged`, and `content_retention_floor` context so child content,
+deletion, retention, and key-material projectors can make bounded progress
+without scanning content rows.
 
 ### Other Interfaces
 
@@ -77,8 +77,9 @@ Message, reaction, file, file-slice, and deletion facts are scoped to their
 workspace. Retention policy facts are global facts whose payload names the
 workspace/scope and whose projector validates admin or bootstrap authority.
 
-Deletion is target-owned. A deletion projector publishes `content_purged` only
-after it validates author and target. The target message/file/reaction/slice
+Deletion is target-owned. A deletion projector publishes generic core
+`fact_purged` context only after it validates author and target. The target
+message/file/reaction/slice
 projector consumes that context, deletes its own rows, and purges its own fact
 bytes. Projectors do not purge someone else's fact.
 
@@ -132,7 +133,7 @@ message {
 
 Authorizes removal of one message. Projection requires signer, target
 `content_message_meta`, and author user context, validates the target frontier,
-minute, and author, writes `message_deletion_rows`, offers `content_purged`,
+minute, and author, writes `message_deletion_rows`, offers `fact_purged`,
 and shares the deletion fact.
 
 ```text
@@ -175,7 +176,7 @@ reaction {
 Authorizes removal of one file descriptor. Projection requires signer, exact
 target file, parent message, and author user context. It validates the target
 file author and parent message, writes `file_deletion_rows`, offers
-`content_purged`, and shares the deletion fact.
+`fact_purged`, and shares the deletion fact.
 
 ```text
 file_deletion {
@@ -272,7 +273,7 @@ auth workspace/user/endpoint/key context
             -> file_slice_budget_1
 
 message_deletion_hello
-  -> content_purged(frontier_alice, minute_hello, message_hello)
+  -> fact_purged(frontier_alice, minute_hello, message_hello)
   -> message_hello self-purges
   -> reaction_bob self-purges
   -> file_descriptor_budget self-purges

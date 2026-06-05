@@ -11,18 +11,11 @@ use crate::core::command_context::{
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::crypto;
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::{Fact, FactId};
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::auth;
-use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
-use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
-use crate::protocol::auth::local_secret_retirement::{
-    encode as local_secret_retirement_layout,
-    fact::{LocalSecretRetirementFact, RETIRE_REASON_CHOP},
-};
 use crate::protocol::auth::recipient_key::decode as recipient_key_layout;
 use crate::protocol::auth::removal_frontier::decode as removal_frontier_decode;
 use crate::protocol::content;
@@ -31,11 +24,8 @@ use std::collections::BTreeSet;
 
 use super::encode;
 use crate::protocol::auth::local_history_node_secret::decode as local_history_layout_decode;
-use crate::protocol::auth::local_history_node_secret::encode as local_history_layout_encode;
 use crate::protocol::auth::local_key_secret::decode as local_key_secret_layout_decode;
-use crate::protocol::auth::local_key_secret::encode as local_key_secret_layout_encode;
 use crate::protocol::auth::local_recipient_key::decode as local_recipient_layout_decode;
-use crate::protocol::auth::local_recipient_key::encode as local_recipient_layout_encode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateRecipientKey {
@@ -190,17 +180,13 @@ pub fn create_recipient_key(
         signing.public_key,
         signing.private_key,
     )?;
-    let local = LocalRecipientKeyFact {
-        workspace_id: input.workspace_id,
-        recipient_key_id: recipient_fact.id,
+    let (_local, local_fact) = auth::local_recipient_key::author::recipient_key_fact(
+        input.workspace_id,
+        recipient_fact.id,
         recipient_key,
         recipient_secret,
-    };
-    let local_fact = Fact::new(
-        FactScope::Local,
         input.created_at_ms,
-        local_recipient_layout_encode::encode_local_recipient_key(&local)?,
-    );
+    )?;
     Ok(CommandOutput::new(CreateRecipientKeyReceipt {
         local_recipient_key_id: local_fact.id,
         recipient_key_id: recipient_fact.id,
@@ -226,29 +212,19 @@ pub fn create_key_frontier(
         input.created_at_ms,
         endpoint.signing_secret,
     )?;
-    let local_secret = LocalKeySecretFact {
-        workspace_id: input.workspace_id,
-        frontier_id: frontier_fact.id,
-        owner_endpoint_id: endpoint.endpoint,
-        created_at_ms: input.created_at_ms,
-        key_secret: crypto::random_xchacha20poly1305_key(),
-    };
-    let local_secret_fact = Fact::new(
-        FactScope::Local,
+    let (_local_secret, local_secret_fact) = auth::local_key_secret::author::random_secret_fact(
+        input.workspace_id,
+        frontier_fact.id,
+        endpoint.endpoint,
         input.created_at_ms,
-        local_key_secret_layout_encode::encode_local_key_secret(&local_secret)?,
-    );
-    let signer = auth::local_signer_secret::fact::LocalSignerSecretFact {
-        workspace_id: input.workspace_id,
-        signer_id: endpoint.endpoint,
-        public_key: endpoint.signing_public_key,
-        private_key: endpoint.signing_secret,
-    };
-    let signer_fact = Fact::new(
-        FactScope::Local,
+    )?;
+    let (_signer, signer_fact) = auth::local_signer_secret::author::signer_secret_fact(
+        input.workspace_id,
+        endpoint.endpoint,
+        endpoint.signing_public_key,
+        endpoint.signing_secret,
         input.created_at_ms,
-        auth::local_signer_secret::encode::encode_fact(&signer)?,
-    );
+    )?;
     Ok(CommandOutput::new(CreateKeyFrontierReceipt {
         workspace_id: input.workspace_id,
         removal_frontier_id: frontier_fact.id,
@@ -519,23 +495,19 @@ pub fn create_history_node(
     info.extend_from_slice(&input.tombstone_node_id);
     let node_secret =
         crate::core::crypto::blake3_keyed_hash(&source_secret, b"topo:key-node:v1", &info);
-    let node = LocalHistoryNodeSecretFact {
-        workspace_id: input.workspace_id,
-        frontier_id: input.removal_frontier_id,
+    let (_node, fact) = auth::local_history_node_secret::author::history_node_secret_fact(
+        input.workspace_id,
+        input.removal_frontier_id,
         owner_endpoint_id,
-        source_secret_id: input.source_secret_id,
-        range_start: input.range_start,
-        range_width: input.range_width,
-        bit_depth: TIME_TREE_BIT_DEPTH,
-        fact_id_prefix: [0; 32],
-        tombstone_node_id: input.tombstone_node_id,
+        input.source_secret_id,
+        input.range_start,
+        input.range_width,
+        TIME_TREE_BIT_DEPTH,
+        [0; 32],
+        input.tombstone_node_id,
         node_secret,
-    };
-    let fact = Fact::new(
-        FactScope::Local,
         input.created_at_ms,
-        local_history_layout_encode::encode_local_history_node_secret(&node)?,
-    );
+    )?;
     Ok(CommandOutput::new(CreateHistoryNodeReceipt {
         workspace_id: input.workspace_id,
         removal_frontier_id: input.removal_frontier_id,
@@ -566,15 +538,13 @@ pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt,
     let retirement_facts = local_key_secret_ids
         .iter()
         .map(|fact_id| {
-            let retirement = LocalSecretRetirementFact {
-                workspace_id: input.workspace_id,
-                target_secret_id: *fact_id,
-                reason_kind: RETIRE_REASON_CHOP,
-                floor_minute: input.floor_minute,
-                created_at_ms: input.created_at_ms,
-            };
-            local_secret_retirement_layout::encode_fact(&retirement)
-                .map(|bytes| Fact::new(FactScope::Local, input.created_at_ms, bytes))
+            auth::local_secret_retirement::author::chop_retirement_fact(
+                input.workspace_id,
+                *fact_id,
+                input.floor_minute,
+                input.created_at_ms,
+            )
+            .map(|(_retirement, fact)| fact)
         })
         .collect::<Result<Vec<_>, _>>()?;
     runtime.submit_facts(retirement_facts)?;

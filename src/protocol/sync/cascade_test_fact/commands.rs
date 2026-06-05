@@ -10,13 +10,13 @@
 //! These commands deliberately model one narrow behavior: facts do not count as
 //! applied until every declared dependency has already offered completion.
 
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::collections::BTreeSet;
 
-use super::fact::{CascadeDependencies, CascadeTestFact, MAX_DEPS, PAYLOAD_BYTES};
-use super::{decode, encode, staging};
+use super::fact::{CascadeDependencies, MAX_DEPS, PAYLOAD_BYTES};
+use super::{author, decode, staging};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerateDepsReceipt {
@@ -50,13 +50,12 @@ pub fn generate_deps(
         dep_edges += dependencies.len();
         let timestamp = u64::try_from(index + 1)
             .map_err(|_| "cascade fact index exceeds timestamp range".to_string())?;
-        let fact = CascadeTestFact {
+        let fact = author::fact_from_payload(
             timestamp,
             dependencies,
-            payload: [(index % 251) as u8; PAYLOAD_BYTES],
-        };
-        let bytes = encode::encode_fact(&fact)?;
-        let fact = Fact::new(FactScope::Global, timestamp, bytes.clone());
+            [(index % 251) as u8; PAYLOAD_BYTES],
+        )?;
+        let bytes = fact.bytes.clone();
         ids.push(fact.id);
         staged_rows.push(staging::staged_fact_row(index as u64, bytes));
     }
@@ -98,7 +97,7 @@ pub fn replay_deps_reverse(runtime: &mut Runtime) -> Result<ReplayDepsReceipt, S
 
     runtime
         .submit_facts(rows.iter().map(|(_, timestamp, bytes)| {
-            Fact::new(FactScope::Global, *timestamp, bytes.clone())
+            author::fact_from_staged_bytes(*timestamp, bytes.clone())
         }))?;
     materialize_replayed_cascade_offers(runtime, &rows)?;
 
@@ -124,7 +123,7 @@ fn materialize_replayed_cascade_offers(
         if decoded.timestamp != *timestamp {
             return Err("cascade staged timestamp mismatch".to_string());
         }
-        let fact = Fact::new(FactScope::Global, *timestamp, bytes.clone());
+        let fact = author::fact_from_staged_bytes(*timestamp, bytes.clone());
         if !decoded
             .dependencies
             .iter()
@@ -133,14 +132,7 @@ fn materialize_replayed_cascade_offers(
             continue;
         }
 
-        let offer = crate::core::context::ContextOffer::range(
-            fact.id,
-            "sync_exact_fact",
-            fact.scope.clone(),
-            fact.id,
-            fact.id,
-        );
-        offers.push(offer);
+        offers.push(author::completion_offer(fact.id, fact.scope.clone()));
         completed_fact_ids.push(fact.id);
         applied.insert(fact.id);
     }

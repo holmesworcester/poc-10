@@ -2,7 +2,7 @@
 //!
 //! File deletions are author-signed tombstones for file ids. Commands construct
 //! the deletion fact from user selection, projection verifies target and author
-//! context, and projection publishes `content_purged` context for the target
+//! context, and projection publishes generic `fact_purged` context for the target
 //! file coordinate. Keep deletion authorization here; file metadata and slice
 //! projection only consume the resulting context and remove their own state.
 

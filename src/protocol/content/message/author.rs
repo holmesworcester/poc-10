@@ -84,7 +84,11 @@ impl MessageAuthoringSnapshot {
         let ciphertext = crate::core::perf_profile::measure_result("message_encrypt", || {
             crypto::xchacha20poly1305_encrypt(
                 &self.encryption.key_secret,
-                &associated_data(self.workspace_id, self.encryption.frontier_id, minute),
+                &super::encode::associated_data(
+                    self.workspace_id,
+                    self.encryption.frontier_id,
+                    minute,
+                ),
                 &nonce,
                 &plaintext,
             )
@@ -159,16 +163,6 @@ pub fn pad_plaintext(text: &[u8]) -> Result<Vec<u8>, String> {
     wire::put_u32be(len, &mut buf[..TEXT_LENGTH_PREFIX_BYTES]).map_err(|err| format!("{err:?}"))?;
     buf[TEXT_LENGTH_PREFIX_BYTES..TEXT_LENGTH_PREFIX_BYTES + text.len()].copy_from_slice(text);
     Ok(buf)
-}
-
-pub fn associated_data(workspace_id: WorkspaceId, frontier_id: FactId, minute: u64) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(32 + 32 + 8);
-    bytes.extend_from_slice(&workspace_id);
-    bytes.extend_from_slice(&frontier_id);
-    let mut minute_bytes = [0u8; 8];
-    wire::put_u64be(minute, &mut minute_bytes).expect("eight-byte minute slot");
-    bytes.extend_from_slice(&minute_bytes);
-    bytes
 }
 
 pub fn deterministic_nonce(

@@ -17,9 +17,7 @@ use crate::core::pipeline::{
 };
 
 use crate::protocol::content::message::project::{self, FactSigner};
-use crate::protocol::content::{
-    file_deletion, message, message_deletion, purge::project as content_purge,
-};
+use crate::protocol::content::{file_deletion, message, message_deletion};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
@@ -136,19 +134,23 @@ impl SemanticProjector<super::fact::ContentFileFact> for ContentFileProjector {
             file.message_id,
             "file parent",
         )?;
-        let file_deletion_need = content_purge::target_purged_need(
+        let file_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            parent.message.frontier_id,
-            message::fact::unix_minute_for(file.created_at_ms),
-            fact.id,
+            project::fact_purged_key(
+                parent.message.frontier_id,
+                message::fact::unix_minute_for(file.created_at_ms),
+                fact.id,
+            ),
         );
-        let parent_deletion_need = content_purge::target_purged_need(
+        let parent_deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            parent.message.frontier_id,
-            parent.message.minute,
-            file.message_id,
+            project::fact_purged_key(
+                parent.message.frontier_id,
+                parent.message.minute,
+                file.message_id,
+            ),
         );
         if let Some(deletion) = context_payload(context, &file_deletion_need, "file deletion")? {
             validate_file_deletion(deletion, file.workspace_id, fact.id, file.author_user_id)?;

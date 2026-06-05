@@ -10,13 +10,13 @@
 //! ciphertext`. The sealed bytes are the fact bytes and therefore the request id.
 
 use crate::core::crypto::{
-    self, Ed25519Signature, X25519PrivateKey, XChaCha20Poly1305Nonce, ED25519_SIGNATURE_BYTES,
+    self, X25519PrivateKey, XChaCha20Poly1305Nonce, ED25519_SIGNATURE_BYTES,
     XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,
 };
 use crate::core::wire;
 use std::net::{IpAddr, SocketAddr};
 
-use super::fact::ConnectionRequestFact;
+use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 
 pub const TYPE_CONNECTION_REQUEST: u8 = 48;
 pub(crate) const SEAL_VERSION: u8 = 1;
@@ -143,6 +143,30 @@ pub fn seal_fact(
     Ok(out)
 }
 
+/// Canonical request bytes used by bootstrap invite signatures.
+pub fn bootstrap_signature_bytes(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
+    if request.mode != REQUEST_MODE_BOOTSTRAP {
+        return Err("bootstrap request signature requires bootstrap mode".to_string());
+    }
+    wire::encode_with_zeroed_fields(
+        request,
+        encode_fact,
+        [INVITE_SIGNATURE_OFFSET..INVITE_SIGNATURE_END],
+    )
+}
+
+/// Canonical request bytes used by membership endpoint signatures.
+pub fn endpoint_signature_bytes(request: &ConnectionRequestFact) -> Result<Vec<u8>, String> {
+    if request.mode != REQUEST_MODE_MEMBERSHIP {
+        return Err("membership request signature requires membership mode".to_string());
+    }
+    wire::encode_with_zeroed_fields(
+        request,
+        encode_fact,
+        [ENDPOINT_SIGNATURE_OFFSET..ENDPOINT_SIGNATURE_END],
+    )
+}
+
 fn sealed_header(
     initiator_ephemeral_public_key: [u8; 32],
     to_endpoint: [u8; 32],
@@ -155,10 +179,6 @@ fn sealed_header(
     out.extend_from_slice(&to_endpoint);
     out.extend_from_slice(&nonce);
     out
-}
-
-pub fn endpoint_signature_bytes(signature: &Ed25519Signature) -> &[u8] {
-    signature
 }
 
 fn addr_wire_err(err: wire::WireError) -> String {

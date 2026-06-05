@@ -6,6 +6,7 @@
 
 pub mod adapt;
 pub mod authenticate;
+pub mod author;
 pub mod decode;
 pub mod encode;
 pub mod fact;

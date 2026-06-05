@@ -5,10 +5,7 @@
 //! and purge scheduling when close context arrives.
 
 use crate::core::command_context::{CommandContext, CommandOutput};
-use crate::core::facts::{Fact, FactId, FactScope};
-
-use super::encode;
-use super::fact::ConnectionCloseFact;
+use crate::core::facts::FactId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseConnectionReceipt {
@@ -21,15 +18,8 @@ pub fn close(
     ctx: &CommandContext<'_>,
     connection_id: FactId,
 ) -> Result<CommandOutput<CloseConnectionReceipt>, String> {
-    if connection_id == [0; 32] {
-        return Err("connection_id cannot be empty".to_string());
-    }
     let closed_at_ms = ctx.next_timestamp();
-    let close = ConnectionCloseFact {
-        connection_id,
-        closed_at_ms,
-    };
-    let fact = Fact::new(FactScope::Local, closed_at_ms, encode::encode_fact(&close)?);
+    let fact = super::author::close_fact(connection_id, closed_at_ms)?;
     Ok(CommandOutput::new(CloseConnectionReceipt {
         close_id: fact.id,
         connection_id,

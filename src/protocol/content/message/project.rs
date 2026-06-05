@@ -12,7 +12,7 @@
 //!   3. MATERIALIZE. Once opened, the projector writes read-model rows and
 //!      offers semantic message context.
 
-use crate::core::context::ContextNeed;
+use crate::core::context::{ContextKey, ContextKeyPart, ContextNeed};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
@@ -22,9 +22,7 @@ use crate::core::pipeline::{
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
-use crate::protocol::content::{
-    message_deletion, purge::project as content_purge, retention_policy,
-};
+use crate::protocol::content::{message_deletion, retention_policy};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
@@ -39,6 +37,20 @@ pub const PIPELINE: FactPipeline = FactPipeline::Staged {
     adapt: "content::message::adapt::ContentMessageAdapter",
     project: "content::message::project::ContentMessageProjector",
 };
+
+/// Content's key shape for the generic core `fact_purged` context role.
+///
+/// This is not a protocol fact family. It is the content projection coordinate
+/// used by deletion facts to wake exactly the target content projector that
+/// owns row cleanup and `purge_self`.
+pub fn fact_purged_key(frontier_id: FactId, minute: u64, target_fact_id: FactId) -> ContextKey {
+    ContextKey::from_parts([
+        ContextKeyPart::bytes(&frontier_id),
+        ContextKeyPart::u64(minute),
+        ContextKeyPart::bytes(&target_fact_id),
+    ])
+    .expect("content purge context key uses bounded fixed-width parts")
+}
 
 pub const COVER_HORIZON_MINUTES: u64 = 30 * 24 * 60;
 
@@ -199,12 +211,10 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
             message.signer_id,
             message.signer_id,
         );
-        let deletion_need = content_purge::target_purged_need(
+        let deletion_need = crate::core::pipeline::fact_purged_need(
             fact.id,
             scope.clone(),
-            message.frontier_id,
-            message.minute,
-            fact.id,
+            fact_purged_key(message.frontier_id, message.minute, fact.id),
         );
         let retention_floor_need = retention_floor_need(fact.id, message.workspace_id);
         let author_need = crate::core::context::ContextNeed::range(
@@ -478,7 +488,7 @@ fn decrypt_text(
     };
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &key,
-        &crate::protocol::content::message::author::associated_data(
+        &crate::protocol::content::message::encode::associated_data(
             message.workspace_id,
             message.frontier_id,
             message.minute,
@@ -737,7 +747,6 @@ mod projector_tests {
     use topo::protocol::content::message::{author, encode, project};
     use topo::protocol::content::message_deletion::encode as deletion_layout;
     use topo::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
-    use topo::protocol::content::purge::project as content_purge;
     use topo::protocol::registry::read_models;
 
     use topo::protocol::auth::user::{encode as user_layout, fact::UserFact};
@@ -931,10 +940,7 @@ mod projector_tests {
             .needs
             .iter()
             .any(|need| need.role == "content_signer"));
-        assert!(output
-            .needs
-            .iter()
-            .any(|need| need.role == "content_purged"));
+        assert!(output.needs.iter().any(|need| need.role == "fact_purged"));
         assert!(output
             .needs
             .iter()
@@ -1070,6 +1076,7 @@ mod projector_tests {
         assert!(put_delete!(output, read_models::CONTENT_MESSAGE_ROWS).is_some());
         assert!(put_delete!(output, read_models::OPENED_MESSAGE_ROWS).is_some());
         assert!(put_row!(output, read_models::MESSAGE_TOMBSTONE_ROWS).is_some());
+        assert_eq!(output.effects.purged_facts, vec![fact.id]);
     }
 
     #[test]
@@ -1120,7 +1127,7 @@ mod projector_tests {
         let plaintext = author::pad_plaintext(text.as_bytes()).expect("pad plaintext");
         let ciphertext = crypto::xchacha20poly1305_encrypt(
             &key,
-            &author::associated_data(workspace_id, frontier_id, minute),
+            &encode::associated_data(workspace_id, frontier_id, minute),
             &nonce,
             &plaintext,
         )
@@ -1289,19 +1296,15 @@ mod projector_tests {
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
-            need: content_purge::target_purged_need(
+            need: crate::core::pipeline::fact_purged_need(
                 message_fact.id,
                 scope.clone(),
-                message.frontier_id,
-                message.minute,
-                message_fact.id,
+                project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
             ),
-            offer: content_purge::target_purged_offer(
+            offer: crate::core::pipeline::fact_purged_offer(
                 deletion_fact.id,
                 scope,
-                message.frontier_id,
-                message.minute,
-                message_fact.id,
+                project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
             ),
             payload: deletion_fact.clone(),
         }

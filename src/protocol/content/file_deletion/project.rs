@@ -6,7 +6,7 @@
 //!   2. AUTHORITY. The signer, target file, and author user contexts must all
 //!      validate against the same workspace and target.
 //!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
-//!      content_purged offer, and share the deletion fact.
+//!      fact_purged offer, and share the deletion fact.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableInsert, Value};
@@ -17,7 +17,7 @@ use crate::core::pipeline::{
 use crate::protocol::auth::user;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, FactSigner};
-use crate::protocol::content::{file, message, purge::project as content_purge};
+use crate::protocol::content::{file, message};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, share_fact_with_sync,
@@ -173,12 +173,14 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
                 Some(parent_need),
                 Some(author_need),
             ])
-            .offer(content_purge::target_purged_offer(
+            .offer(crate::core::pipeline::fact_purged_offer(
                 fact.id,
                 scope,
-                parent.frontier_id,
-                unix_minute_for(target.created_at_ms),
-                deletion.target_file_id,
+                project::fact_purged_key(
+                    parent.frontier_id,
+                    unix_minute_for(target.created_at_ms),
+                    deletion.target_file_id,
+                ),
             ))
             .row_mutation(RowMutation::InsertValues(row)),
             deletion.workspace_id,

@@ -21,8 +21,6 @@ use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::connection;
 
-use super::fact::InviteSecretFact;
-
 const INVITE_PREFIX: &str = "topo://invite/";
 const INVITE_VERSION: &str = "v6";
 const INVITE_KIND: &str = "user";
@@ -127,17 +125,18 @@ pub fn create(
         ),
     };
 
-    let invite_secret = match input.workspace_id {
-        Some(workspace_id) => {
-            InviteSecretFact::scoped(invite_private_key, workspace_id, invite_fact_id)
-        }
-        None => InviteSecretFact::new(invite_private_key),
+    let (_invite_secret, invite_secret_fact) = match input.workspace_id {
+        Some(workspace_id) => super::author::scoped_secret_fact(
+            invite_private_key,
+            workspace_id,
+            invite_fact_id,
+            input.created_at_ms.saturating_add(2),
+        )?,
+        None => super::author::unscoped_secret_fact(
+            invite_private_key,
+            input.created_at_ms.saturating_add(2),
+        )?,
     };
-    let invite_secret_fact = Fact::new(
-        FactScope::Local,
-        input.created_at_ms.saturating_add(2),
-        super::encode::encode_fact(&invite_secret)?,
-    );
     facts.push(invite_secret_fact.clone());
     facts.splice(0..0, endpoint_output.effects.facts);
 
@@ -191,16 +190,12 @@ pub fn create_device_link(
         membership.endpoint_shared_id,
         local.signing_secret,
     )?;
-    let invite_secret = InviteSecretFact::scoped(
+    let (_invite_secret, invite_secret_fact) = super::author::scoped_secret_fact(
         invite_private_key,
         input.workspace_id,
         device_invite_fact.id,
-    );
-    let invite_secret_fact = Fact::new(
-        FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        super::encode::encode_fact(&invite_secret)?,
-    );
+    )?;
     let mut facts = endpoint_output.effects.facts;
     facts.push(device_invite_fact.clone());
     facts.push(invite_secret_fact.clone());
@@ -243,16 +238,12 @@ pub fn create_invite_server(
         local.signing_public_key,
         &local.signing_secret,
     )?;
-    let invite_secret = InviteSecretFact::scoped(
+    let (_invite_secret, invite_secret_fact) = super::author::scoped_secret_fact(
         invite_private_key,
         input.workspace_id,
         invite_server_fact.id,
-    );
-    let invite_secret_fact = Fact::new(
-        FactScope::Local,
         input.created_at_ms.saturating_add(2),
-        super::encode::encode_fact(&invite_secret)?,
-    );
+    )?;
     let mut facts = endpoint_output.effects.facts;
     facts.push(invite_server_fact.clone());
     facts.push(invite_secret_fact.clone());

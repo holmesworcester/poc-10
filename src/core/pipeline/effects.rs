@@ -1,9 +1,65 @@
 //! Projection effects and time-wake output for fact pipeline stages.
 
-use crate::core::context::{ContextNeed, ContextOffer, ContextSet};
+use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSet, Role};
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
+
+const FACT_PURGED_ROLE: &str = "fact_purged";
+
+/// Context role used by deletion/retention projectors to wake a target fact.
+///
+/// Core treats purge keys opaquely. Protocol families choose their own stable
+/// key shape and validate matched payloads before treating this context as
+/// authority. This context is proof and routing only. The target projector must
+/// still emit `ProjectionOutput::purge_self` after deleting its own rows so
+/// core removes the target fact bytes.
+pub fn fact_purged_role() -> Role {
+    Role::expect(FACT_PURGED_ROLE)
+}
+
+pub fn fact_purged_need(
+    owner: FactId,
+    scope: crate::core::facts::FactScope,
+    key: ContextKey,
+) -> ContextNeed {
+    ContextNeed {
+        owner,
+        role: fact_purged_role(),
+        scope,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
+
+pub fn fact_purged_offer(
+    owner: FactId,
+    scope: crate::core::facts::FactScope,
+    key: ContextKey,
+) -> ContextOffer {
+    ContextOffer {
+        owner,
+        role: fact_purged_role(),
+        scope,
+        start_key: key.clone(),
+        end_key: key,
+    }
+}
+
+pub fn fact_purged_range_need(
+    owner: FactId,
+    scope: crate::core::facts::FactScope,
+    start_key: ContextKey,
+    end_key: ContextKey,
+) -> ContextNeed {
+    ContextNeed {
+        owner,
+        role: fact_purged_role(),
+        scope,
+        start_key,
+        end_key,
+    }
+}
 
 /// Protocol-defined time-wake namespace.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -135,5 +191,42 @@ impl ProjectionOutput {
             offers: self.offers.clone(),
         }
         .normalized()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::facts::FactScope;
+
+    use super::*;
+
+    #[test]
+    fn purge_need_and_offer_match_same_opaque_key() {
+        let scope = FactScope::Local;
+        let key = ContextKey::from_bytes(vec![4, 2, 9]);
+        let need = fact_purged_need([1; 32], scope.clone(), key.clone());
+        let offer = fact_purged_offer([3; 32], scope.clone(), key);
+
+        assert_eq!(need.role, offer.role);
+        assert_eq!(need.scope, scope);
+        assert_eq!(need.start_key, offer.start_key);
+        assert_eq!(need.end_key, offer.end_key);
+    }
+
+    #[test]
+    fn purge_range_need_spans_matching_offer_key() {
+        let scope = FactScope::Local;
+        let need = fact_purged_range_need(
+            [1; 32],
+            scope.clone(),
+            ContextKey::from_bytes(vec![2, 0]),
+            ContextKey::from_bytes(vec![2, 255]),
+        );
+        let offer = fact_purged_offer([3; 32], scope.clone(), ContextKey::from_bytes(vec![2, 9]));
+
+        assert_eq!(need.role, offer.role);
+        assert_eq!(need.scope, scope);
+        assert!(need.start_key <= offer.start_key);
+        assert!(need.end_key >= offer.end_key);
     }
 }

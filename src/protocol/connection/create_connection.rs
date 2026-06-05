@@ -121,8 +121,7 @@ mod tests {
 // The handler proves the queued dependency ids still name the expected facts,
 // then delegates DH handshake construction to `connection::create`.
 
-use crate::core::crypto;
-use crate::core::facts::{Fact, FactScope};
+use crate::core::facts::FactScope;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
@@ -132,11 +131,9 @@ use crate::protocol::auth::invite;
 use crate::protocol::connection::connection::author::{
     build_responder_connection, BuildResponderConnection,
 };
-use crate::protocol::connection::ephemeral_secret::{
-    encode as ephemeral_layout, fact::ConnectionEphemeralSecretFact,
-};
+use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::request::author as request_create;
+use crate::protocol::connection::request::authenticate as request_auth;
 use crate::protocol::connection::request::decode as request_layout;
 use crate::protocol::connection::request::fact::{REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 use std::net::SocketAddr;
@@ -194,7 +191,7 @@ impl IntentHandler for CreateConnectionHandler {
                 let invite = invite::decode_fact_payload(authority_fact.body()).map_err(|_| {
                     HandlerError::fatal("create_connection context is not invite secret")
                 })?;
-                request_create::validate_invite_signature(&request, &invite)?;
+                request_auth::validate_invite_signature(&request, &invite)?;
                 Some(invite)
             }
             REQUEST_MODE_MEMBERSHIP => {
@@ -213,7 +210,7 @@ impl IntentHandler for CreateConnectionHandler {
                 if initiator_shared.endpoint_id != request.from_endpoint {
                     return Err("create_connection endpoint_shared does not bind the sender".into());
                 }
-                request_create::validate_endpoint_signature(
+                request_auth::validate_endpoint_signature(
                     &request,
                     &initiator_shared.signing_public_key,
                 )?;
@@ -226,18 +223,9 @@ impl IntentHandler for CreateConnectionHandler {
             .initiator_addr
             .or(Some(parse_origin_addr(&received)?));
 
-        let responder_ephemeral_private_key = crypto::random_x25519_private_key();
-        let responder_ephemeral = ConnectionEphemeralSecretFact {
-            owner_endpoint: endpoint.endpoint,
-            ephemeral_private_key: responder_ephemeral_private_key,
-            ephemeral_public_key: crypto::x25519_public_key(&responder_ephemeral_private_key),
-            created_at_ms: received.received_at_local_ms,
-        };
-        let responder_ephemeral_fact = Fact::new(
-            FactScope::Local,
-            received.received_at_local_ms,
-            ephemeral_layout::encode_fact(&responder_ephemeral)?,
-        );
+        let (responder_ephemeral, responder_ephemeral_fact) =
+            ephemeral_author::random_secret_fact(endpoint.endpoint, received.received_at_local_ms)?;
+        let responder_ephemeral_private_key = responder_ephemeral.ephemeral_private_key;
 
         let built = build_responder_connection(BuildResponderConnection {
             request_id: input.request_id,
