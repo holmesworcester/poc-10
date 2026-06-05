@@ -18,6 +18,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::core::pipeline::{FactPipeline, FactRoute};
+
 /// Fleet-wide protocol version.
 pub type ProtocolVersion = u32;
 
@@ -105,6 +107,115 @@ impl ProtocolBundle {
     }
 }
 
+/// Staged route labels for one fact-family version.
+///
+/// These labels are reviewer-facing coordinates into the kept-forever
+/// decode/authenticate path, the adapter edge toward the ceiling semantic type,
+/// and the projector that materializes the read model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactVersionStages {
+    pub decode: &'static str,
+    pub authenticate: &'static str,
+    pub adapt: &'static str,
+    pub project: &'static str,
+}
+
+impl FactVersionStages {
+    pub const fn new(
+        decode: &'static str,
+        authenticate: &'static str,
+        adapt: &'static str,
+        project: &'static str,
+    ) -> Self {
+        Self {
+            decode,
+            authenticate,
+            adapt,
+            project,
+        }
+    }
+
+    pub const fn from_pipeline(pipeline: FactPipeline) -> Self {
+        match pipeline {
+            FactPipeline::Staged {
+                decode,
+                authenticate,
+                adapt,
+                project,
+            } => Self {
+                decode,
+                authenticate,
+                adapt,
+                project,
+            },
+        }
+    }
+
+    pub const fn pipeline(self) -> FactPipeline {
+        FactPipeline::Staged {
+            decode: self.decode,
+            authenticate: self.authenticate,
+            adapt: self.adapt,
+            project: self.project,
+        }
+    }
+}
+
+/// Route metadata needed to check a fact-version manifest.
+///
+/// Core routes also carry a projector function pointer. Versioning validation
+/// deliberately ignores that executable pointer and checks only the durable
+/// manifest coordinates that release reviewers need: tag, stage labels, and
+/// replay policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactVersionRoute {
+    pub tag: u8,
+    pub stages: FactVersionStages,
+    pub replayed: bool,
+}
+
+impl FactVersionRoute {
+    pub const fn new(tag: u8, stages: FactVersionStages, replayed: bool) -> Self {
+        Self {
+            tag,
+            stages,
+            replayed,
+        }
+    }
+
+    pub const fn from_fact_route(route: FactRoute) -> Self {
+        Self {
+            tag: route.tag,
+            stages: FactVersionStages::from_pipeline(route.pipeline),
+            replayed: route.replayed,
+        }
+    }
+}
+
+/// Manifest entry for one durable fact-family version.
+///
+/// The protocol bundle table says when a family version is active. This entry
+/// ties that family version to the one durable fact tag and the route stages
+/// that know how to decode, authenticate, adapt, and project it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactVersionManifestEntry {
+    pub tag: u8,
+    pub family: &'static str,
+    pub version: FactFamilyVersion,
+    pub active_from_protocol: ProtocolVersion,
+    pub stages: FactVersionStages,
+    pub replayed: bool,
+}
+
+impl FactVersionManifestEntry {
+    pub const fn family_version(self) -> FamilyVersion {
+        FamilyVersion {
+            family: self.family,
+            version: self.version,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolBundleError {
     Empty,
@@ -141,7 +252,7 @@ pub enum ProtocolBundleError {
 /// Validate the static protocol bundle table.
 ///
 /// Protocol versions must be strictly increasing. Family versions may stay the
-/// same or increase, but never regress or disappear after introduction.
+/// same or increase, but never regress or disappear after they appear.
 pub fn validate_protocol_bundles(bundles: &[ProtocolBundle]) -> Result<(), ProtocolBundleError> {
     if bundles.is_empty() {
         return Err(ProtocolBundleError::Empty);
@@ -227,6 +338,170 @@ pub fn family_version_for_protocol(
     bundle
         .family_version(family)
         .ok_or(ProtocolBundleError::MissingFamily { protocol, family })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactVersionManifestError {
+    EmptyManifest,
+    InvalidBundleTable {
+        error: ProtocolBundleError,
+    },
+    DuplicateTag {
+        tag: u8,
+    },
+    DuplicateFamilyVersion {
+        family: &'static str,
+        version: FactFamilyVersion,
+        first_tag: u8,
+        duplicate_tag: u8,
+    },
+    MissingBundleForFamilyVersion {
+        tag: u8,
+        family: &'static str,
+        version: FactFamilyVersion,
+    },
+    ActiveFromProtocolMismatch {
+        tag: u8,
+        family: &'static str,
+        version: FactFamilyVersion,
+        declared: ProtocolVersion,
+        actual: ProtocolVersion,
+    },
+    DuplicateRouteTag {
+        tag: u8,
+    },
+    MissingRoute {
+        tag: u8,
+    },
+    UnmanifestedRoute {
+        tag: u8,
+    },
+    RouteStagesMismatch {
+        tag: u8,
+        expected: FactVersionStages,
+        actual: FactVersionStages,
+    },
+    RouteReplayMismatch {
+        tag: u8,
+        expected: bool,
+        actual: bool,
+    },
+}
+
+/// Look up the manifest entry for one routed fact tag.
+pub fn fact_version_for_tag(
+    manifest: &[FactVersionManifestEntry],
+    tag: u8,
+) -> Option<FactVersionManifestEntry> {
+    manifest.iter().copied().find(|entry| entry.tag == tag)
+}
+
+/// Look up the protocol version that first admits one routed fact tag.
+pub fn active_from_protocol_for_tag(
+    manifest: &[FactVersionManifestEntry],
+    tag: u8,
+) -> Option<ProtocolVersion> {
+    fact_version_for_tag(manifest, tag).map(|entry| entry.active_from_protocol)
+}
+
+/// Validate that fact-version metadata, bundle membership, and routes agree.
+///
+/// This is the static guardrail behind the release manifest plan. A tag must
+/// name exactly one family version, that family version's declared
+/// `active_from_protocol` must match the first protocol bundle that contains it, and
+/// the route table must expose the same decode/authenticate/adapt/project labels
+/// and replay policy.
+pub fn validate_fact_version_manifest(
+    manifest: &[FactVersionManifestEntry],
+    bundles: &[ProtocolBundle],
+    routes: &[FactVersionRoute],
+) -> Result<(), FactVersionManifestError> {
+    if manifest.is_empty() {
+        return Err(FactVersionManifestError::EmptyManifest);
+    }
+    validate_protocol_bundles(bundles)
+        .map_err(|error| FactVersionManifestError::InvalidBundleTable { error })?;
+
+    let mut entries_by_tag = BTreeMap::<u8, FactVersionManifestEntry>::new();
+    let mut tags_by_family_version = BTreeMap::<(&'static str, FactFamilyVersion), u8>::new();
+    for entry in manifest {
+        if entries_by_tag.insert(entry.tag, *entry).is_some() {
+            return Err(FactVersionManifestError::DuplicateTag { tag: entry.tag });
+        }
+
+        let key = (entry.family, entry.version);
+        if let Some(first_tag) = tags_by_family_version.insert(key, entry.tag) {
+            return Err(FactVersionManifestError::DuplicateFamilyVersion {
+                family: entry.family,
+                version: entry.version,
+                first_tag,
+                duplicate_tag: entry.tag,
+            });
+        }
+
+        let Some(actual_active_from) = first_protocol_containing(bundles, entry.family_version())
+        else {
+            return Err(FactVersionManifestError::MissingBundleForFamilyVersion {
+                tag: entry.tag,
+                family: entry.family,
+                version: entry.version,
+            });
+        };
+        if entry.active_from_protocol != actual_active_from {
+            return Err(FactVersionManifestError::ActiveFromProtocolMismatch {
+                tag: entry.tag,
+                family: entry.family,
+                version: entry.version,
+                declared: entry.active_from_protocol,
+                actual: actual_active_from,
+            });
+        }
+    }
+
+    let mut routes_by_tag = BTreeMap::<u8, FactVersionRoute>::new();
+    for route in routes {
+        if routes_by_tag.insert(route.tag, *route).is_some() {
+            return Err(FactVersionManifestError::DuplicateRouteTag { tag: route.tag });
+        }
+    }
+
+    for entry in manifest {
+        let Some(route) = routes_by_tag.get(&entry.tag).copied() else {
+            return Err(FactVersionManifestError::MissingRoute { tag: entry.tag });
+        };
+        if entry.stages != route.stages {
+            return Err(FactVersionManifestError::RouteStagesMismatch {
+                tag: entry.tag,
+                expected: entry.stages,
+                actual: route.stages,
+            });
+        }
+        if entry.replayed != route.replayed {
+            return Err(FactVersionManifestError::RouteReplayMismatch {
+                tag: entry.tag,
+                expected: entry.replayed,
+                actual: route.replayed,
+            });
+        }
+    }
+
+    for route in routes {
+        if !entries_by_tag.contains_key(&route.tag) {
+            return Err(FactVersionManifestError::UnmanifestedRoute { tag: route.tag });
+        }
+    }
+
+    Ok(())
+}
+
+fn first_protocol_containing(
+    bundles: &[ProtocolBundle],
+    member: FamilyVersion,
+) -> Option<ProtocolVersion> {
+    bundles
+        .iter()
+        .find(|bundle| bundle.contains(member))
+        .map(|bundle| bundle.protocol)
 }
 
 /// Signed release metadata after signature verification by the caller.
@@ -407,7 +682,7 @@ pub enum IngressClassification {
 pub enum PendingReason {
     UnknownTag,
     AboveCeiling {
-        intro_version: ProtocolVersion,
+        active_from_protocol: ProtocolVersion,
         ceiling: ProtocolVersion,
     },
 }
@@ -423,19 +698,19 @@ pub enum DropReason {
 /// established the sync/transport source is authenticated. Unauthenticated
 /// bytes do not get retained as pending evidence.
 pub fn classify_received_fact(
-    route_intro_version: Option<ProtocolVersion>,
+    route_active_from_protocol: Option<ProtocolVersion>,
     ceiling: ProtocolVersion,
     authenticated_source: bool,
 ) -> IngressClassification {
     if !authenticated_source {
         return IngressClassification::Dropped(DropReason::UnauthenticatedSource);
     }
-    let Some(intro_version) = route_intro_version else {
+    let Some(active_from_protocol) = route_active_from_protocol else {
         return IngressClassification::Pending(PendingReason::UnknownTag);
     };
-    if intro_version > ceiling {
+    if active_from_protocol > ceiling {
         IngressClassification::Pending(PendingReason::AboveCeiling {
-            intro_version,
+            active_from_protocol,
             ceiling,
         })
     } else {
@@ -514,6 +789,85 @@ mod tests {
             protocol: 3,
             families: PROTOCOL_3_FAMILIES,
         },
+    ];
+    const MESSAGE_V1_STAGES: FactVersionStages = FactVersionStages::new(
+        "content::message_v1::decode::Codec",
+        "content::message_v1::authenticate::Authenticator",
+        "content::message::adapt::FromV1",
+        "content::message::project::Projector",
+    );
+    const MESSAGE_V2_STAGES: FactVersionStages = FactVersionStages::new(
+        "content::message_v2::decode::Codec",
+        "content::message_v2::authenticate::Authenticator",
+        "content::message::adapt::Identity",
+        "content::message::project::Projector",
+    );
+    const FILE_V1_STAGES: FactVersionStages = FactVersionStages::new(
+        "content::file_v1::decode::Codec",
+        "content::file_v1::authenticate::Authenticator",
+        "content::file::adapt::FromV1",
+        "content::file::project::Projector",
+    );
+    const FILE_V2_STAGES: FactVersionStages = FactVersionStages::new(
+        "content::file_v2::decode::Codec",
+        "content::file_v2::authenticate::Authenticator",
+        "content::file::adapt::Identity",
+        "content::file::project::Projector",
+    );
+    const ADMIN_V1_STAGES: FactVersionStages = FactVersionStages::new(
+        "auth::admin_v1::decode::Codec",
+        "auth::admin_v1::authenticate::Authenticator",
+        "auth::admin::adapt::FromV1",
+        "auth::admin::project::Projector",
+    );
+    const FACT_VERSION_MANIFEST: &[FactVersionManifestEntry] = &[
+        FactVersionManifestEntry {
+            tag: 50,
+            family: MESSAGE,
+            version: 1,
+            active_from_protocol: 1,
+            stages: MESSAGE_V1_STAGES,
+            replayed: true,
+        },
+        FactVersionManifestEntry {
+            tag: 51,
+            family: MESSAGE,
+            version: 2,
+            active_from_protocol: 2,
+            stages: MESSAGE_V2_STAGES,
+            replayed: true,
+        },
+        FactVersionManifestEntry {
+            tag: 52,
+            family: FILE,
+            version: 1,
+            active_from_protocol: 1,
+            stages: FILE_V1_STAGES,
+            replayed: true,
+        },
+        FactVersionManifestEntry {
+            tag: 53,
+            family: FILE,
+            version: 2,
+            active_from_protocol: 3,
+            stages: FILE_V2_STAGES,
+            replayed: true,
+        },
+        FactVersionManifestEntry {
+            tag: 54,
+            family: ADMIN,
+            version: 1,
+            active_from_protocol: 1,
+            stages: ADMIN_V1_STAGES,
+            replayed: true,
+        },
+    ];
+    const FACT_VERSION_ROUTES: &[FactVersionRoute] = &[
+        FactVersionRoute::new(50, MESSAGE_V1_STAGES, true),
+        FactVersionRoute::new(51, MESSAGE_V2_STAGES, true),
+        FactVersionRoute::new(52, FILE_V1_STAGES, true),
+        FactVersionRoute::new(53, FILE_V2_STAGES, true),
+        FactVersionRoute::new(54, ADMIN_V1_STAGES, true),
     ];
 
     #[test]
@@ -686,11 +1040,143 @@ mod tests {
     }
 
     #[test]
+    fn fact_version_manifest_ties_tags_to_bundle_membership_and_routes() {
+        validate_fact_version_manifest(
+            FACT_VERSION_MANIFEST,
+            PROTOCOL_BUNDLES,
+            FACT_VERSION_ROUTES,
+        )
+        .expect("manifest, bundles, and routes agree");
+
+        assert_eq!(
+            active_from_protocol_for_tag(FACT_VERSION_MANIFEST, 51),
+            Some(2)
+        );
+        assert_eq!(
+            fact_version_for_tag(FACT_VERSION_MANIFEST, 53).map(|entry| entry.family_version()),
+            Some(FamilyVersion {
+                family: FILE,
+                version: 2,
+            })
+        );
+        assert_eq!(
+            active_from_protocol_for_tag(FACT_VERSION_MANIFEST, 200),
+            None
+        );
+    }
+
+    #[test]
+    fn fact_version_manifest_validation_rejects_unsafe_edges() {
+        let mut duplicate_tag = FACT_VERSION_MANIFEST.to_vec();
+        duplicate_tag[1].tag = duplicate_tag[0].tag;
+        assert_eq!(
+            validate_fact_version_manifest(&duplicate_tag, PROTOCOL_BUNDLES, FACT_VERSION_ROUTES),
+            Err(FactVersionManifestError::DuplicateTag { tag: 50 })
+        );
+
+        let mut duplicate_family_version = FACT_VERSION_MANIFEST.to_vec();
+        duplicate_family_version[1].family = duplicate_family_version[0].family;
+        duplicate_family_version[1].version = duplicate_family_version[0].version;
+        assert_eq!(
+            validate_fact_version_manifest(
+                &duplicate_family_version,
+                PROTOCOL_BUNDLES,
+                FACT_VERSION_ROUTES,
+            ),
+            Err(FactVersionManifestError::DuplicateFamilyVersion {
+                family: MESSAGE,
+                version: 1,
+                first_tag: 50,
+                duplicate_tag: 51,
+            })
+        );
+
+        let mut wrong_active_from = FACT_VERSION_MANIFEST.to_vec();
+        wrong_active_from[1].active_from_protocol = 1;
+        assert_eq!(
+            validate_fact_version_manifest(
+                &wrong_active_from,
+                PROTOCOL_BUNDLES,
+                FACT_VERSION_ROUTES
+            ),
+            Err(FactVersionManifestError::ActiveFromProtocolMismatch {
+                tag: 51,
+                family: MESSAGE,
+                version: 2,
+                declared: 1,
+                actual: 2,
+            })
+        );
+
+        let mut missing_bundle_member = FACT_VERSION_MANIFEST.to_vec();
+        missing_bundle_member[1].version = 3;
+        assert_eq!(
+            validate_fact_version_manifest(
+                &missing_bundle_member,
+                PROTOCOL_BUNDLES,
+                FACT_VERSION_ROUTES,
+            ),
+            Err(FactVersionManifestError::MissingBundleForFamilyVersion {
+                tag: 51,
+                family: MESSAGE,
+                version: 3,
+            })
+        );
+
+        let mut route_stage_mismatch = FACT_VERSION_ROUTES.to_vec();
+        route_stage_mismatch[0].stages = MESSAGE_V2_STAGES;
+        assert_eq!(
+            validate_fact_version_manifest(
+                FACT_VERSION_MANIFEST,
+                PROTOCOL_BUNDLES,
+                &route_stage_mismatch,
+            ),
+            Err(FactVersionManifestError::RouteStagesMismatch {
+                tag: 50,
+                expected: MESSAGE_V1_STAGES,
+                actual: MESSAGE_V2_STAGES,
+            })
+        );
+
+        let mut route_replay_mismatch = FACT_VERSION_ROUTES.to_vec();
+        route_replay_mismatch[0].replayed = false;
+        assert_eq!(
+            validate_fact_version_manifest(
+                FACT_VERSION_MANIFEST,
+                PROTOCOL_BUNDLES,
+                &route_replay_mismatch,
+            ),
+            Err(FactVersionManifestError::RouteReplayMismatch {
+                tag: 50,
+                expected: true,
+                actual: false,
+            })
+        );
+
+        let missing_route = &FACT_VERSION_ROUTES[1..];
+        assert_eq!(
+            validate_fact_version_manifest(FACT_VERSION_MANIFEST, PROTOCOL_BUNDLES, missing_route),
+            Err(FactVersionManifestError::MissingRoute { tag: 50 })
+        );
+
+        let mut unmanifested_route = FACT_VERSION_ROUTES.to_vec();
+        unmanifested_route.push(FactVersionRoute::new(99, MESSAGE_V1_STAGES, true));
+        assert_eq!(
+            validate_fact_version_manifest(
+                FACT_VERSION_MANIFEST,
+                PROTOCOL_BUNDLES,
+                &unmanifested_route,
+            ),
+            Err(FactVersionManifestError::UnmanifestedRoute { tag: 99 })
+        );
+    }
+
+    #[test]
     fn received_bytes_are_pending_until_their_tag_is_ceiling_active() {
         assert_eq!(
             classify_received_fact(Some(2), 1, true),
             IngressClassification::Pending(PendingReason::AboveCeiling {
-                intro_version: 2,
+                active_from_protocol: 2,
                 ceiling: 1,
             })
         );
