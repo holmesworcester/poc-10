@@ -31,6 +31,7 @@ fn invite_daemons_accept_and_connect_two_cli_processes() {
     assert!(accepted.contains("connected:"), "{accepted}");
 
     wait_for_connection_count(&host, 1);
+    wait_for_connection_count(&joiner, 1);
     assert_eq!(connection_count(&host), 1);
     assert_eq!(connection_count(&joiner), 1);
     assert_eq!(connection_fact_count(&host), 1);
@@ -59,6 +60,8 @@ fn invite_daemons_accept_two_separate_cli_processes() {
     assert!(accepted_b.contains("connected:"), "{accepted_b}");
 
     wait_for_connection_count(&host, 2);
+    wait_for_connection_count(&joiner_a, 1);
+    wait_for_connection_count(&joiner_b, 1);
     assert_eq!(connection_count(&host), 2);
     assert_eq!(connection_count(&joiner_a), 1);
     assert_eq!(connection_count(&joiner_b), 1);
