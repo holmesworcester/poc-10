@@ -122,9 +122,9 @@ that range without allowing projectors to read the clock.
 - `context.rs` owns the in-memory `ProjectionContext` and matched payload
   helpers visible while processing one fact.
 - `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
-- `project_pending_facts.rs` owns fact admission, pending projection selection,
-  time-wake queue admission, projection context fixpoint growth, and the
-  projection commit boundary.
+- `project_pending_facts.rs` owns fact admission, pending projection SQL
+  helpers, time-wake queue admission, projection context fixpoint growth, and
+  the one-fact projection commit boundary used by `PipelineEngine`.
 - `context_store.rs` owns persisted context edges, range-overlap matching, projection
   context assembly, and wake fanout.
 - `dispatch.rs` owns intent queue claiming, handler input loading, retry
