@@ -11,12 +11,13 @@ use topo::core::pipeline::{
     project_staged, Adapter, Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     ProjectionOutput, SemanticProjector,
 };
-use topo::core::pipeline::{verify_fact_id, FactPipeline, FactRoute};
+use topo::core::pipeline::{verify_fact_id, FactRoute};
 use topo::core::store::TableName;
 use topo::core::versioning::{
-    bundle_for_protocol, classify_received_fact, compute_ceiling, FamilyVersion, FamilyWriter,
-    IngressClassification, PendingReason, ProtocolBundle, ProtocolRange, ReleaseManifestEntry,
-    ReleaseProfile, TrustedTime, WriteVersionError,
+    active_from_protocol_for_tag, bundle_for_protocol, classify_received_fact, compute_ceiling,
+    validate_fact_version_manifest, FactVersionManifestEntry, FactVersionRoute, FactVersionStages,
+    FamilyVersion, FamilyWriter, IngressClassification, PendingReason, ProtocolBundle,
+    ProtocolRange, ReleaseManifestEntry, ReleaseProfile, TrustedTime, WriteVersionError,
 };
 
 const FAMILY: &str = "version_fixture";
@@ -61,6 +62,36 @@ const FIXTURE_BUNDLES: &[ProtocolBundle] = &[
     ProtocolBundle {
         protocol: 2,
         families: PROTOCOL_2_FAMILIES,
+    },
+];
+const FIXTURE_V1_STAGES: FactVersionStages = FactVersionStages::new(
+    "fixture::v1::decode::Codec",
+    "fixture::v1::authenticate::Authenticator",
+    "fixture::v2::adapt::FromV1",
+    "fixture::v2::project::Projector",
+);
+const FIXTURE_V2_STAGES: FactVersionStages = FactVersionStages::new(
+    "fixture::v2::decode::Codec",
+    "fixture::v2::authenticate::Authenticator",
+    "fixture::v2::adapt::Identity",
+    "fixture::v2::project::Projector",
+);
+const FIXTURE_FACT_VERSIONS: &[FactVersionManifestEntry] = &[
+    FactVersionManifestEntry {
+        tag: TYPE_FIXTURE_V1,
+        family: FAMILY,
+        version: 1,
+        active_from_protocol: 1,
+        stages: FIXTURE_V1_STAGES,
+        replayed: true,
+    },
+    FactVersionManifestEntry {
+        tag: TYPE_FIXTURE_V2,
+        family: FAMILY,
+        version: 2,
+        active_from_protocol: 2,
+        stages: FIXTURE_V2_STAGES,
+        replayed: true,
     },
 ];
 
@@ -256,7 +287,7 @@ fn above_ceiling_received_fact_bytes_are_pending_until_admitted() {
     assert_eq!(
         classify_received_fact(Some(2), 1, true),
         IngressClassification::Pending(PendingReason::AboveCeiling {
-            intro_version: 2,
+            active_from_protocol: 2,
             ceiling: 1,
         })
     );
@@ -272,31 +303,28 @@ fn route_metadata_can_describe_deprecated_and_current_fact_versions() {
         FactRoute {
             tag: TYPE_FIXTURE_V1,
             projector: project_fixture_v1,
-            pipeline: FactPipeline::Staged {
-                decode: "fixture::v1::decode::Codec",
-                authenticate: "fixture::v1::authenticate::Authenticator",
-                adapt: "fixture::v2::adapt::FromV1",
-                project: "fixture::v2::project::Projector",
-            },
+            pipeline: FIXTURE_V1_STAGES.pipeline(),
             replayed: true,
         },
         FactRoute {
             tag: TYPE_FIXTURE_V2,
             projector: project_fixture_v2,
-            pipeline: FactPipeline::Staged {
-                decode: "fixture::v2::decode::Codec",
-                authenticate: "fixture::v2::authenticate::Authenticator",
-                adapt: "fixture::v2::adapt::Identity",
-                project: "fixture::v2::project::Projector",
-            },
+            pipeline: FIXTURE_V2_STAGES.pipeline(),
             replayed: true,
         },
     ];
+    let route_manifest = routes.map(FactVersionRoute::from_fact_route);
 
-    let FactPipeline::Staged { adapt, project, .. } = routes[0].pipeline;
-    assert_eq!(adapt, "fixture::v2::adapt::FromV1");
-    assert_eq!(project, "fixture::v2::project::Projector");
-    assert!(routes.iter().all(|route| route.replayed));
+    validate_fact_version_manifest(FIXTURE_FACT_VERSIONS, FIXTURE_BUNDLES, &route_manifest)
+        .expect("fixture manifest matches bundles and route metadata");
+    assert_eq!(
+        active_from_protocol_for_tag(FIXTURE_FACT_VERSIONS, TYPE_FIXTURE_V1),
+        Some(1)
+    );
+    assert_eq!(
+        active_from_protocol_for_tag(FIXTURE_FACT_VERSIONS, TYPE_FIXTURE_V2),
+        Some(2)
+    );
 }
 
 #[test]
