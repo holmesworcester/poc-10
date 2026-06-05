@@ -293,9 +293,7 @@ fn route_metadata_can_describe_deprecated_and_current_fact_versions() {
         },
     ];
 
-    let FactPipeline::Staged { adapt, project, .. } = routes[0].pipeline else {
-        panic!("v1 route should be staged")
-    };
+    let FactPipeline::Staged { adapt, project, .. } = routes[0].pipeline;
     assert_eq!(adapt, "fixture::v2::adapt::FromV1");
     assert_eq!(project, "fixture::v2::project::Projector");
     assert!(routes.iter().all(|route| route.replayed));
