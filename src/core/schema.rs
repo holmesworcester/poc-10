@@ -78,7 +78,8 @@ CREATE INDEX IF NOT EXISTS time_wakes_by_owner
     ON time_wakes (owner);
 
 CREATE TABLE IF NOT EXISTS pending_projection (
-    owner BLOB PRIMARY KEY NOT NULL
+    owner BLOB PRIMARY KEY NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'normal'
 );
 
 CREATE TABLE IF NOT EXISTS pending_time_ranges (

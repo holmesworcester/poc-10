@@ -261,51 +261,40 @@ fn replay_classification_marks_only_deterministic_rebuild_handlers() {
 }
 
 #[test]
-fn only_transport_and_negotiation_facts_are_not_replayed() {
-    use topo::protocol::{connection, sync};
-
-    // Durable facts whose projection materializes live session/negotiation state
-    // must be retained but not re-projected on replay, so a rebuild never
-    // resurrects a dead connection or a stale sync negotiation. The handshake
-    // request/response facts and sync need/have advertisements are this
-    // category. Everything else is durable truth that replay rebuilds
-    // deterministically.
-    let not_replayed: BTreeSet<u8> = MATCH_RUNTIME
-        .fact_routes
-        .iter()
-        .filter(|route| !route.replayed)
-        .map(|route| route.tag)
-        .collect();
-    let expected: BTreeSet<u8> = [
-        connection::request::encode::TYPE_CONNECTION_REQUEST,
-        connection::connection::encode::TYPE_CONNECTION,
-        sync::have_id::encode::TYPE_SYNC_HAVE_ID,
-        sync::need_id::encode::TYPE_SYNC_NEED_ID,
-    ]
-    .into_iter()
-    .collect();
-    assert_eq!(
-        not_replayed, expected,
-        "only connection handshake and sync need/have negotiation facts may be not-replayed"
+fn live_negotiation_projectors_own_replay_noop_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let registry =
+        std::fs::read_to_string(root.join("src/protocol/registry.rs")).expect("read registry");
+    assert!(
+        !registry.contains("not_replayed") && !registry.contains("replayed:"),
+        "fact replay policy belongs in projectors, not route metadata"
     );
 
-    // Truth facts — including the connection fact receipt that carries the
-    // durable learned address — must stay replayed.
-    let replayed: BTreeSet<u8> = MATCH_RUNTIME
-        .fact_routes
-        .iter()
-        .filter(|route| route.replayed)
-        .map(|route| route.tag)
-        .collect();
+    for projector in [
+        "src/protocol/connection/request/project.rs",
+        "src/protocol/connection/connection/project.rs",
+        "src/protocol/sync/have_id/project.rs",
+        "src/protocol/sync/need_id/project.rs",
+    ] {
+        let text = std::fs::read_to_string(root.join(projector)).expect("read projector");
+        assert!(
+            text.contains("context.is_replay()"),
+            "{projector} must explicitly no-op its live session/negotiation projection during replay"
+        );
+    }
+
     for truth_tag in [
-        connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT,
+        topo::protocol::connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT,
         topo::protocol::auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED,
         topo::protocol::content::message::TYPE_CONTENT_MESSAGE,
         topo::protocol::auth::key_wrap::encode::TYPE_KEY_WRAP,
     ] {
         assert!(
-            replayed.contains(&truth_tag),
-            "durable truth fact tag {truth_tag} must be replayed"
+            MATCH_RUNTIME
+                .fact_routes
+                .iter()
+                .any(|route| route.tag == truth_tag),
+            "durable truth fact tag {truth_tag} must remain routed for replay projection"
         );
     }
 }

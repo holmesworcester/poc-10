@@ -37,7 +37,7 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::insert_select;
-use super::{MatchedContext, ProjectionContext};
+use super::{MatchedContext, ProjectionContext, ProjectionMode};
 
 const CONTEXT_NEED_DIRECTION: &str = "need";
 const CONTEXT_OFFER_DIRECTION: &str = "offer";
@@ -372,30 +372,35 @@ fn push_stored_matched_context(
 pub(super) fn wake_context_matches_in_tx(
     store: &Store,
     delta: &ContextSetDelta,
+    mode: ProjectionMode,
 ) -> Result<usize, String> {
     let mut inserted = 0usize;
     for need in &delta.added_needs {
         inserted += insert_pending_projection_from_select_in_tx(
             store,
-            &overlapping_offers_for_need_select(need),
+            &overlapping_offers_for_need_select(need, mode),
             "need",
         )?;
     }
     for offer in &delta.added_offers {
         inserted += insert_pending_projection_from_select_in_tx(
             store,
-            &overlapping_needs_for_offer_select(offer),
+            &overlapping_needs_for_offer_select(offer, mode),
             "offer",
         )?;
     }
     Ok(inserted)
 }
 
-fn overlapping_offers_for_need_select(need: &ContextNeed) -> insert_select::Select {
+fn overlapping_offers_for_need_select(
+    need: &ContextNeed,
+    mode: ProjectionMode,
+) -> insert_select::Select {
     let scope_key = scope_key(&need.scope);
     insert_select::Select::new(
         r#"
-        SELECT :need_owner AS owner
+        SELECT :need_owner AS owner,
+               :mode AS mode
         WHERE EXISTS (
             SELECT 1
             FROM context_edges
@@ -413,15 +418,20 @@ fn overlapping_offers_for_need_select(need: &ContextNeed) -> insert_select::Sele
             insert_select::Param::bytes(":scope_key", scope_key),
             insert_select::Param::bytes(":need_start", need.start_key.as_bytes()),
             insert_select::Param::bytes(":need_end", need.end_key.as_bytes()),
+            insert_select::Param::text(":mode", mode.as_str()),
         ],
     )
 }
 
-fn overlapping_needs_for_offer_select(offer: &ContextOffer) -> insert_select::Select {
+fn overlapping_needs_for_offer_select(
+    offer: &ContextOffer,
+    mode: ProjectionMode,
+) -> insert_select::Select {
     let scope_key = scope_key(&offer.scope);
     insert_select::Select::new(
         r#"
-        SELECT n.owner
+        SELECT n.owner,
+               :mode AS mode
         FROM context_edges n
         JOIN local_fact_admissions a ON a.fact_id = n.owner
         WHERE n.direction = 'need'
@@ -437,6 +447,7 @@ fn overlapping_needs_for_offer_select(offer: &ContextOffer) -> insert_select::Se
             insert_select::Param::bytes(":scope_key", scope_key),
             insert_select::Param::bytes(":offer_start", offer.start_key.as_bytes()),
             insert_select::Param::bytes(":offer_end", offer.end_key.as_bytes()),
+            insert_select::Param::text(":mode", mode.as_str()),
         ],
     )
 }
@@ -446,6 +457,6 @@ fn insert_pending_projection_from_select_in_tx(
     select: &insert_select::Select,
     edge_kind: &str,
 ) -> Result<usize, String> {
-    insert_select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner"], select)
+    insert_select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner", "mode"], select)
         .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
 }

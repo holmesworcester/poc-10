@@ -4,7 +4,9 @@
 //! `authenticate.rs` has opened it with local sender/receiver context and
 //! verified the bootstrap or membership signature. The initiator branch
 //! materializes retryable send state. The responder branch records the receive
-//! receipt and schedules `create_connection`.
+//! receipt and schedules `create_connection`. During replay this live
+//! negotiation state is intentionally not rebuilt; the retained fact remains
+//! evidence, but the projector returns no effects.
 //!
 //! POLICY. A connection_request is admitted iff:
 //!   1. STRUCTURAL. The fact is global; primary byte shape, id, opening, and
@@ -121,6 +123,9 @@ impl SemanticProjector<AuthenticatedConnectionRequest> for ConnectionRequestProj
         // 1. Structural.
         if fact.scope != FactScope::Global {
             return Err("connection request fact must be global".to_string());
+        }
+        if context.is_replay() {
+            return Ok(ProjectionOutput::new());
         }
         // 2-3. Context branch + materialization.
         match semantic {
@@ -331,7 +336,7 @@ mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::RowMutation;
-    use crate::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+    use crate::core::pipeline::{MatchedContext, ProjectionContext, ProjectionMode, Projector};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::invite::{encode as invite_encode, fact::InviteSecretFact};
     use crate::protocol::connection::ephemeral_secret::{
@@ -449,6 +454,15 @@ mod tests {
                 RowMutation::PutRow(row) if row.table == CONNECTION_REQUEST_ROWS
             )
         }));
+
+        let replayed = ConnectionRequestProjector::new()
+            .project(&request_fact, &context.with_mode(ProjectionMode::Replay))
+            .expect("replay request");
+        assert!(replayed.offers.is_empty());
+        assert!(replayed.needs.is_empty());
+        assert!(replayed.effects.facts.is_empty());
+        assert!(replayed.effects.row_mutations.is_empty());
+        assert!(replayed.effects.intents.is_empty());
     }
 
     #[test]

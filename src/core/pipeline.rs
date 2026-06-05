@@ -45,7 +45,7 @@ pub use adapt::Adapter;
 pub use authenticate::{
     authenticate_authored, verify_fact_id, AuthenticatedFact, Authentication, DecodedAuthenticator,
 };
-pub use context::{MatchedContext, ProjectionContext};
+pub use context::{MatchedContext, ProjectionContext, ProjectionMode};
 pub use decode::FactCodec;
 pub use effects::{
     fact_purged_need, fact_purged_offer, fact_purged_range_need, fact_purged_range_offer,
@@ -60,13 +60,13 @@ pub use route::{
 use crate::core::command_context::CommandOutput;
 use crate::core::fact_store::{
     delete_ephemeral_fact_in_tx, ephemeral_pending_fact_ids, insert_fact_and_pending_in_tx,
-    purge_fact_in_tx,
+    insert_pending_owner_with_mode_in_tx, purge_fact_in_tx,
 };
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::schema::{EPHEMERAL_PROJECTION_INPUTS, LOCAL_INTENTS, PENDING_PROJECTION};
 use crate::core::store::{Store, TableName};
-use rusqlite::{params, params_from_iter};
+use rusqlite::params;
 use std::collections::BTreeSet;
 
 use commit_effects::IntentAdmissionPolicy;
@@ -239,6 +239,14 @@ impl HandlerSet {
     }
 }
 
+fn replay_intent_kinds(routes: &'static [HandlerRoute]) -> Vec<&'static str> {
+    routes
+        .iter()
+        .filter(|route| route.runs_during_replay)
+        .map(|route| route.intent_kind)
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct IntentDispatchProgress {
     pub(crate) status: WorkStatus,
@@ -255,6 +263,12 @@ pub(crate) struct ProjectionProgress {
     pub(crate) suppressed_intents: usize,
     /// Whether the pass made progress or hit a retry.
     pub(crate) status: WorkStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingProjectionItem {
+    fact_id: FactId,
+    mode: ProjectionMode,
 }
 
 impl ProjectionProgress {
@@ -276,20 +290,23 @@ pub(crate) struct PipelineEngine<'a> {
     projector: &'a dyn Projector,
     allowed_tables: &'a [TableName],
     fact_admission: Option<FactAdmissionFn>,
+    replay_intent_kinds: Vec<&'static str>,
 }
 
 impl<'a> PipelineEngine<'a> {
-    pub(crate) fn new(
+    pub(crate) fn with_handler_routes(
         store: &'a Store,
         projector: &'a dyn Projector,
         allowed_tables: &'a [TableName],
         fact_admission: Option<FactAdmissionFn>,
+        routes: &'static [HandlerRoute],
     ) -> Self {
         Self {
             store,
             projector,
             allowed_tables,
             fact_admission,
+            replay_intent_kinds: replay_intent_kinds(routes),
         }
     }
 
@@ -364,29 +381,9 @@ impl<'a> PipelineEngine<'a> {
 
     /// Drive one bounded projection drain pass.
     pub(crate) fn drain_projection(&self, limit: usize) -> Result<ProjectionProgress, String> {
-        self.drain_projection_with_policy(limit, IntentAdmissionPolicy::All)
-    }
-
-    /// Drive one bounded replay-mode projection drain pass.
-    pub(crate) fn drain_projection_filtering_intents(
-        &self,
-        limit: usize,
-        allowed_intent_kinds: &[&'static str],
-    ) -> Result<ProjectionProgress, String> {
-        self.drain_projection_with_policy(
-            limit,
-            IntentAdmissionPolicy::AllowKinds(allowed_intent_kinds),
-        )
-    }
-
-    fn drain_projection_with_policy(
-        &self,
-        limit: usize,
-        intent_policy: IntentAdmissionPolicy<'_>,
-    ) -> Result<ProjectionProgress, String> {
         let mut total = ProjectionProgress::default();
         while total.projected < limit {
-            let progress = self.drain_projection_once(limit - total.projected, intent_policy)?;
+            let progress = self.drain_projection_once(limit - total.projected)?;
             let projected = progress.projected > 0;
             total.merge(progress);
             if !projected {
@@ -396,23 +393,18 @@ impl<'a> PipelineEngine<'a> {
         Ok(total)
     }
 
-    fn drain_projection_once(
-        &self,
-        limit: usize,
-        intent_policy: IntentAdmissionPolicy<'_>,
-    ) -> Result<ProjectionProgress, String> {
+    fn drain_projection_once(&self, limit: usize) -> Result<ProjectionProgress, String> {
         let mut progress = ProjectionProgress::default();
 
-        let durable_fact_ids =
+        let durable_items =
             crate::core::perf_profile::measure_result("projection_pending_load", || {
-                pending_durable_fact_ids(self.store, limit)
+                pending_durable_projection_items(self.store, limit)
             })?;
         self.drain_projection_items(
             ProjectionSource::Durable,
-            durable_fact_ids,
+            durable_items,
             &mut progress,
             limit,
-            intent_policy,
         )?;
 
         if progress.projected < limit {
@@ -422,10 +414,15 @@ impl<'a> PipelineEngine<'a> {
                 })?;
             self.drain_projection_items(
                 ProjectionSource::Ephemeral,
-                ephemeral_fact_ids,
+                ephemeral_fact_ids
+                    .into_iter()
+                    .map(|fact_id| PendingProjectionItem {
+                        fact_id,
+                        mode: ProjectionMode::Normal,
+                    })
+                    .collect(),
                 &mut progress,
                 limit,
-                intent_policy,
             )?;
         }
 
@@ -435,23 +432,24 @@ impl<'a> PipelineEngine<'a> {
     fn drain_projection_items(
         &self,
         source: ProjectionSource,
-        fact_ids: Vec<FactId>,
+        items: Vec<PendingProjectionItem>,
         progress: &mut ProjectionProgress,
         limit: usize,
-        intent_policy: IntentAdmissionPolicy<'_>,
     ) -> Result<(), String> {
-        for fact_id in fact_ids {
+        for item in items {
             if progress.projected >= limit {
                 break;
             }
+            let fact_id = item.fact_id;
             let Some(pending_fact) =
                 crate::core::perf_profile::measure_result("projection_load_pending_fact", || {
-                    load_pending_fact(self.store, source, fact_id)
+                    load_pending_fact(self.store, source, fact_id, item.mode)
                 })?
             else {
                 purge_stale_projection_item(self.store, source, fact_id)?;
                 continue;
             };
+            let intent_policy = self.intent_policy_for_mode(item.mode);
             let item = process_projection_item(
                 self.store,
                 self.projector,
@@ -467,6 +465,13 @@ impl<'a> PipelineEngine<'a> {
             }
         }
         Ok(())
+    }
+
+    fn intent_policy_for_mode(&self, mode: ProjectionMode) -> IntentAdmissionPolicy<'_> {
+        match mode {
+            ProjectionMode::Normal => IntentAdmissionPolicy::All,
+            ProjectionMode::Replay => IntentAdmissionPolicy::AllowKinds(&self.replay_intent_kinds),
+        }
     }
 
     /// Drain pending projection until no projection work remains or rounds expire.
@@ -624,17 +629,42 @@ impl<'a> PipelineEngine<'a> {
         end_inclusive: u64,
         limit: usize,
     ) -> Result<usize, String> {
-        process_due_time_range(self.store, timeline, start_exclusive, end_inclusive, limit)
+        process_due_time_range(
+            self.store,
+            timeline,
+            start_exclusive,
+            end_inclusive,
+            limit,
+            ProjectionMode::Normal,
+        )
     }
 
-    /// Mark every retained replayable fact pending for projection.
-    pub(crate) fn enqueue_replayable_facts(&self, excluded_tags: &[u8]) -> Result<usize, String> {
-        enqueue_replayable_facts(self.store, excluded_tags)
+    /// Turn replay due time wakes into replay projection work.
+    pub(crate) fn process_due_time_range_for_replay(
+        &self,
+        timeline: Timeline,
+        start_exclusive: Option<u64>,
+        end_inclusive: u64,
+        limit: usize,
+    ) -> Result<usize, String> {
+        process_due_time_range(
+            self.store,
+            timeline,
+            start_exclusive,
+            end_inclusive,
+            limit,
+            ProjectionMode::Replay,
+        )
     }
 
-    /// Mark one retained fact pending for projection.
-    pub(crate) fn enqueue_replayable_fact(&self, fact_id: FactId) -> Result<bool, String> {
-        enqueue_replayable_fact(self.store, fact_id)
+    /// Mark every retained fact pending for replay projection.
+    pub(crate) fn enqueue_retained_facts_for_replay(&self) -> Result<usize, String> {
+        enqueue_retained_facts_for_replay(self.store)
+    }
+
+    /// Mark one retained fact pending for replay projection.
+    pub(crate) fn enqueue_retained_fact_for_replay(&self, fact_id: FactId) -> Result<bool, String> {
+        enqueue_retained_fact_for_replay(self.store, fact_id)
     }
 }
 
@@ -666,44 +696,28 @@ pub(crate) fn submit_facts_to_store(
     Ok(inserted)
 }
 
-/// Seed replay by queueing all retained facts except live-only fact tags.
-fn enqueue_replayable_facts(store: &Store, excluded_tags: &[u8]) -> Result<usize, String> {
-    let sql = format!(
-        "INSERT OR IGNORE INTO pending_projection (owner) \
-         SELECT id FROM facts{}",
-        replay_excluded_tag_filter(excluded_tags, "WHERE", "bytes")
-    );
-    store
-        .conn()
-        .execute(&sql, params_from_iter(tag_blob_params(excluded_tags)))
-        .map_err(|err| format!("enqueue retained facts for replay: {err}"))
-}
-
-/// Seed replay by queueing one retained fact.
-fn enqueue_replayable_fact(store: &Store, fact_id: FactId) -> Result<bool, String> {
+/// Seed replay by queueing all retained facts as replay work.
+fn enqueue_retained_facts_for_replay(store: &Store) -> Result<usize, String> {
     store
         .conn()
         .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
+            "INSERT OR IGNORE INTO pending_projection (owner, mode)
+             SELECT id, 'replay' FROM facts",
+            [],
+        )
+        .map_err(|err| format!("enqueue retained facts for replay: {err}"))
+}
+
+/// Seed replay by queueing one retained fact as replay work.
+fn enqueue_retained_fact_for_replay(store: &Store, fact_id: FactId) -> Result<bool, String> {
+    store
+        .conn()
+        .execute(
+            "INSERT OR IGNORE INTO pending_projection (owner, mode) VALUES (?1, 'replay')",
             params![fact_id.as_slice()],
         )
         .map(|inserted| inserted > 0)
         .map_err(|err| format!("enqueue retained fact for replay: {err}"))
-}
-
-fn replay_excluded_tag_filter(excluded_tags: &[u8], keyword: &str, bytes_column: &str) -> String {
-    if excluded_tags.is_empty() {
-        return String::new();
-    }
-    let placeholders = (1..=excluded_tags.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(" {keyword} substr({bytes_column}, 1, 1) NOT IN ({placeholders})")
-}
-
-fn tag_blob_params(tags: &[u8]) -> Vec<Vec<u8>> {
-    tags.iter().map(|tag| vec![*tag]).collect()
 }
 
 /// Remove a fact and all core-owned durable rows keyed by its id.
@@ -728,6 +742,7 @@ fn process_due_time_range(
     start_exclusive: Option<u64>,
     end_inclusive: u64,
     limit: usize,
+    mode: ProjectionMode,
 ) -> Result<usize, String> {
     if limit == 0 {
         return Ok(0);
@@ -739,7 +754,7 @@ fn process_due_time_range(
     };
 
     store
-        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit))
+        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit, mode))
         .map_err(|err| format!("process due time range: {err}"))
 }
 
@@ -747,6 +762,7 @@ fn enqueue_due_time_wakes_in_tx(
     store: &Store,
     range: &TimeRange,
     limit: usize,
+    mode: ProjectionMode,
 ) -> rusqlite::Result<usize> {
     let owners = due_time_wake_owners(store, range, limit)?;
     let has_start = range.start_exclusive.is_some();
@@ -756,10 +772,7 @@ fn enqueue_due_time_wakes_in_tx(
 
     let mut inserted = 0;
     for owner in owners {
-        inserted += store.conn().execute(
-            "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
-            params![owner.as_slice()],
-        )?;
+        inserted += insert_pending_owner_with_mode_in_tx(store, owner, mode)?;
         store.conn().execute(
             "INSERT OR IGNORE INTO pending_time_ranges
                 (owner, timeline, has_start, start_exclusive, end_inclusive)
@@ -819,14 +832,17 @@ fn due_time_wake_owners(
 ///
 /// The item commit removes the row only after projection succeeds. Missing
 /// facts are handled by the queue driver as stale pending rows.
-fn pending_durable_fact_ids(store: &Store, limit: usize) -> Result<Vec<FactId>, String> {
+fn pending_durable_projection_items(
+    store: &Store,
+    limit: usize,
+) -> Result<Vec<PendingProjectionItem>, String> {
     let limit =
         i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
     let mut stmt = store
         .conn()
         .prepare(
             r#"
-            SELECT p.owner
+            SELECT p.owner, p.mode
             FROM pending_projection p
             LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
             ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
@@ -836,7 +852,10 @@ fn pending_durable_fact_ids(store: &Store, limit: usize) -> Result<Vec<FactId>, 
         .map_err(|err| format!("load pending projection: {err}"))?;
     let rows = stmt
         .query_map(params![limit], |row| {
-            fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")
+            Ok(PendingProjectionItem {
+                fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+                mode: projection_mode_column(row.get::<_, String>(1)?)?,
+            })
         })
         .map_err(|err| format!("load pending projection: {err}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -872,6 +891,10 @@ fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
     bytes.try_into().map_err(|_| {
         rusqlite::Error::InvalidParameterName(format!("{name} is not a 32-byte fact id"))
     })
+}
+
+fn projection_mode_column(value: String) -> rusqlite::Result<ProjectionMode> {
+    ProjectionMode::from_str(&value).map_err(rusqlite::Error::InvalidParameterName)
 }
 
 fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
@@ -1122,7 +1145,6 @@ mod tests {
                 adapt: "ModelAdapter",
                 project: "ModelProjector",
             },
-            replayed: true,
         };
 
         assert!(route.pipeline.is_staged());

@@ -53,9 +53,9 @@ pub struct RuntimeDescription {
     pub row_mutation_tables: &'static [TableName],
     /// Factory for the projector router.
     pub projector: ProjectorFactory,
-    /// Per-fact-type projector routes, including each type's replay decision.
-    /// Replay reads `replayed` to skip facts whose projection is live session
-    /// state (connection requests and connections) rather than durable truth.
+    /// Per-fact-type projector routes used for registry diagnostics and
+    /// version-manifest checks. Replay policy is projector-owned through
+    /// `ProjectionContext::is_replay()`, not a route-table flag.
     pub fact_routes: &'static [FactRoute],
     /// Optional protocol-owned fact admission check run before core stores facts.
     pub fact_admission: Option<FactAdmissionFn>,
@@ -108,11 +108,12 @@ impl Runtime {
     }
 
     fn pipeline(&self) -> PipelineEngine<'_> {
-        PipelineEngine::new(
+        PipelineEngine::with_handler_routes(
             &self.store,
             self.projector.as_ref(),
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            self.description.handlers,
         )
     }
 
@@ -310,7 +311,6 @@ impl Runtime {
             &self.store,
             self.projector.as_ref(),
             self.description.handlers,
-            self.description.fact_routes,
             self.description.row_mutation_tables,
             self.description.fact_admission,
             replay_time_wakes,

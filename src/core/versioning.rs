@@ -165,29 +165,22 @@ impl FactVersionStages {
 ///
 /// Core routes also carry a projector function pointer. Versioning validation
 /// deliberately ignores that executable pointer and checks only the durable
-/// manifest coordinates that release reviewers need: tag, stage labels, and
-/// replay policy.
+/// manifest coordinates that release reviewers need: tag and stage labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FactVersionRoute {
     pub tag: u8,
     pub stages: FactVersionStages,
-    pub replayed: bool,
 }
 
 impl FactVersionRoute {
-    pub const fn new(tag: u8, stages: FactVersionStages, replayed: bool) -> Self {
-        Self {
-            tag,
-            stages,
-            replayed,
-        }
+    pub const fn new(tag: u8, stages: FactVersionStages) -> Self {
+        Self { tag, stages }
     }
 
     pub const fn from_fact_route(route: FactRoute) -> Self {
         Self {
             tag: route.tag,
             stages: FactVersionStages::from_pipeline(route.pipeline),
-            replayed: route.replayed,
         }
     }
 }
@@ -204,7 +197,6 @@ pub struct FactVersionManifestEntry {
     pub version: FactFamilyVersion,
     pub active_from_protocol: ProtocolVersion,
     pub stages: FactVersionStages,
-    pub replayed: bool,
 }
 
 impl FactVersionManifestEntry {
@@ -381,11 +373,6 @@ pub enum FactVersionManifestError {
         expected: FactVersionStages,
         actual: FactVersionStages,
     },
-    RouteReplayMismatch {
-        tag: u8,
-        expected: bool,
-        actual: bool,
-    },
 }
 
 /// Look up the manifest entry for one routed fact tag.
@@ -409,8 +396,7 @@ pub fn active_from_protocol_for_tag(
 /// This is the static guardrail behind the release manifest plan. A tag must
 /// name exactly one family version, that family version's declared
 /// `active_from_protocol` must match the first protocol bundle that contains it, and
-/// the route table must expose the same decode/authenticate/adapt/project labels
-/// and replay policy.
+/// the route table must expose the same decode/authenticate/adapt/project labels.
 pub fn validate_fact_version_manifest(
     manifest: &[FactVersionManifestEntry],
     bundles: &[ProtocolBundle],
@@ -474,13 +460,6 @@ pub fn validate_fact_version_manifest(
                 tag: entry.tag,
                 expected: entry.stages,
                 actual: route.stages,
-            });
-        }
-        if entry.replayed != route.replayed {
-            return Err(FactVersionManifestError::RouteReplayMismatch {
-                tag: entry.tag,
-                expected: entry.replayed,
-                actual: route.replayed,
             });
         }
     }
@@ -827,7 +806,6 @@ mod tests {
             version: 1,
             active_from_protocol: 1,
             stages: MESSAGE_V1_STAGES,
-            replayed: true,
         },
         FactVersionManifestEntry {
             tag: 51,
@@ -835,7 +813,6 @@ mod tests {
             version: 2,
             active_from_protocol: 2,
             stages: MESSAGE_V2_STAGES,
-            replayed: true,
         },
         FactVersionManifestEntry {
             tag: 52,
@@ -843,7 +820,6 @@ mod tests {
             version: 1,
             active_from_protocol: 1,
             stages: FILE_V1_STAGES,
-            replayed: true,
         },
         FactVersionManifestEntry {
             tag: 53,
@@ -851,7 +827,6 @@ mod tests {
             version: 2,
             active_from_protocol: 3,
             stages: FILE_V2_STAGES,
-            replayed: true,
         },
         FactVersionManifestEntry {
             tag: 54,
@@ -859,15 +834,14 @@ mod tests {
             version: 1,
             active_from_protocol: 1,
             stages: ADMIN_V1_STAGES,
-            replayed: true,
         },
     ];
     const FACT_VERSION_ROUTES: &[FactVersionRoute] = &[
-        FactVersionRoute::new(50, MESSAGE_V1_STAGES, true),
-        FactVersionRoute::new(51, MESSAGE_V2_STAGES, true),
-        FactVersionRoute::new(52, FILE_V1_STAGES, true),
-        FactVersionRoute::new(53, FILE_V2_STAGES, true),
-        FactVersionRoute::new(54, ADMIN_V1_STAGES, true),
+        FactVersionRoute::new(50, MESSAGE_V1_STAGES),
+        FactVersionRoute::new(51, MESSAGE_V2_STAGES),
+        FactVersionRoute::new(52, FILE_V1_STAGES),
+        FactVersionRoute::new(53, FILE_V2_STAGES),
+        FactVersionRoute::new(54, ADMIN_V1_STAGES),
     ];
 
     #[test]
@@ -1138,21 +1112,6 @@ mod tests {
             })
         );
 
-        let mut route_replay_mismatch = FACT_VERSION_ROUTES.to_vec();
-        route_replay_mismatch[0].replayed = false;
-        assert_eq!(
-            validate_fact_version_manifest(
-                FACT_VERSION_MANIFEST,
-                PROTOCOL_BUNDLES,
-                &route_replay_mismatch,
-            ),
-            Err(FactVersionManifestError::RouteReplayMismatch {
-                tag: 50,
-                expected: true,
-                actual: false,
-            })
-        );
-
         let missing_route = &FACT_VERSION_ROUTES[1..];
         assert_eq!(
             validate_fact_version_manifest(FACT_VERSION_MANIFEST, PROTOCOL_BUNDLES, missing_route),
@@ -1160,7 +1119,7 @@ mod tests {
         );
 
         let mut unmanifested_route = FACT_VERSION_ROUTES.to_vec();
-        unmanifested_route.push(FactVersionRoute::new(99, MESSAGE_V1_STAGES, true));
+        unmanifested_route.push(FactVersionRoute::new(99, MESSAGE_V1_STAGES));
         assert_eq!(
             validate_fact_version_manifest(
                 FACT_VERSION_MANIFEST,

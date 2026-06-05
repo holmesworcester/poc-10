@@ -8,16 +8,14 @@ in `src/core` or `src/protocol`.
 - The durable graph is made of facts. Fact ids are deterministic hashes of
   canonical fact bytes.
 - Persistence and replay are independent axes. A fact is durable (on disk) or
-  ephemeral (transient pipeline input); a durable fact is replayed (re-projected
-  by a from-scratch rebuild) or not. Durable protocol *truth* — identities,
-  membership, content, key wraps, learned addresses — is replayed and rebuilds
-  deterministically. A durable fact whose projection materializes live *session*
-  state — a connection request and the connection itself, carrying a secret that
-  is dead after a restart — is **not replayed**: it is kept on disk but a rebuild
-  skips it, so replay wipes its session rows and never resurrects a dead
-  connection. Each projector route declares this with `not_replayed`, the
-  fact-level mirror of a handler route's `runs_during_replay`. Replay state
-  digests therefore cover durable truth, not transport.
+  ephemeral (transient pipeline input). A from-scratch rebuild queues every
+  retained durable fact for projection in replay mode. Durable protocol *truth*
+  — identities, membership, content, key wraps, learned addresses — rebuilds
+  deterministically. A durable fact whose projection materializes live
+  *session* or negotiation state — connection requests, connections, sync
+  need/have prompts — is still projected, but its projector sees
+  `ProjectionContext::is_replay()` and emits no live rows or work. Replay state
+  digests therefore cover durable truth, not resurrected transport.
 - Projectors are pure functions over one fact plus provided context. They return
   context needs, context offers, and intents.
 - Context is explicit. Needs and offers describe relationships that should wake

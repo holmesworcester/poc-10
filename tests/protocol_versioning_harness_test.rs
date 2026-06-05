@@ -83,7 +83,6 @@ const FIXTURE_FACT_VERSIONS: &[FactVersionManifestEntry] = &[
         version: 1,
         active_from_protocol: 1,
         stages: FIXTURE_V1_STAGES,
-        replayed: true,
     },
     FactVersionManifestEntry {
         tag: TYPE_FIXTURE_V2,
@@ -91,7 +90,6 @@ const FIXTURE_FACT_VERSIONS: &[FactVersionManifestEntry] = &[
         version: 2,
         active_from_protocol: 2,
         stages: FIXTURE_V2_STAGES,
-        replayed: true,
     },
 ];
 
@@ -304,13 +302,11 @@ fn route_metadata_can_describe_deprecated_and_current_fact_versions() {
             tag: TYPE_FIXTURE_V1,
             projector: project_fixture_v1,
             pipeline: FIXTURE_V1_STAGES.pipeline(),
-            replayed: true,
         },
         FactRoute {
             tag: TYPE_FIXTURE_V2,
             projector: project_fixture_v2,
             pipeline: FIXTURE_V2_STAGES.pipeline(),
-            replayed: true,
         },
     ];
     let route_manifest = routes.map(FactVersionRoute::from_fact_route);

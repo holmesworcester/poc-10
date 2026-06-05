@@ -27,7 +27,7 @@ use crate::core::fact_store::{
 };
 use crate::core::facts::{Fact, FactId};
 use crate::core::pipeline::{
-    ProjectionContext, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
+    ProjectionContext, ProjectionMode, ProjectionOutput, Projector, TimeRange, TimeWake, Timeline,
 };
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
@@ -56,8 +56,9 @@ fn isolate_rejected_durable_fact_in_tx(
     tx: &Store,
     fact_id: FactId,
     projector: &(impl Projector + ?Sized),
+    mode: ProjectionMode,
 ) -> rusqlite::Result<()> {
-    if durable_fact_fails_without_context(tx, fact_id, projector) {
+    if durable_fact_fails_without_context(tx, fact_id, projector, mode) {
         purge_fact_in_tx(tx, fact_id)?;
         return Ok(());
     }
@@ -79,10 +80,11 @@ fn durable_fact_fails_without_context(
     tx: &Store,
     fact_id: FactId,
     projector: &(impl Projector + ?Sized),
+    mode: ProjectionMode,
 ) -> bool {
     match persisted_fact(tx, &fact_id) {
         Ok(Some(fact)) => projector
-            .project(&fact, &ProjectionContext::default())
+            .project(&fact, &ProjectionContext::default().with_mode(mode))
             .is_err(),
         // Already gone, or unreadable: nothing to purge — just clear the marker.
         _ => false,
@@ -111,6 +113,7 @@ pub(super) fn process_projection_item(
 ) -> Result<ProjectionItemProgress, String> {
     let source = pending_fact.source;
     let fact_id = pending_fact.fact_id;
+    let mode = pending_fact.mode;
     let effects =
         match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
             prepare_projection_effects(
@@ -124,7 +127,7 @@ pub(super) fn process_projection_item(
         }) {
             Ok(effects) => effects,
             Err(_rejection) => {
-                handle_rejected_projection(store, projector, source, fact_id)?;
+                handle_rejected_projection(store, projector, source, fact_id, mode)?;
                 return Ok(ProjectionItemProgress::default());
             }
         };
@@ -143,9 +146,10 @@ fn handle_rejected_projection(
     projector: &(impl Projector + ?Sized),
     source: ProjectionSource,
     fact_id: FactId,
+    mode: ProjectionMode,
 ) -> Result<(), String> {
     match source {
-        ProjectionSource::Durable => isolate_rejected_durable_fact(store, projector, fact_id),
+        ProjectionSource::Durable => isolate_rejected_durable_fact(store, projector, fact_id, mode),
         ProjectionSource::Ephemeral => drop_rejected_ephemeral_input(store, fact_id),
     }
 }
@@ -154,9 +158,10 @@ fn isolate_rejected_durable_fact(
     store: &Store,
     projector: &(impl Projector + ?Sized),
     fact_id: FactId,
+    mode: ProjectionMode,
 ) -> Result<(), String> {
     store
-        .write_transaction(|tx| isolate_rejected_durable_fact_in_tx(tx, fact_id, projector))
+        .write_transaction(|tx| isolate_rejected_durable_fact_in_tx(tx, fact_id, projector, mode))
         .map_err(|err| format!("isolate rejected durable fact: {err}"))
 }
 
@@ -178,6 +183,7 @@ fn prepare_projection_effects(
     let PendingFact {
         source,
         fact_id,
+        mode,
         fact,
         previous_context,
         mut projection_context,
@@ -197,6 +203,7 @@ fn prepare_projection_effects(
     Ok(ProjectionEffects {
         source,
         fact_id,
+        mode,
         next_context: run.context,
         next_time_wakes: run.time_wakes,
         context_delta: run.context_delta,
@@ -253,6 +260,7 @@ fn resolve_projection_context(
 struct ProjectionEffects {
     source: ProjectionSource,
     fact_id: FactId,
+    mode: ProjectionMode,
     next_context: ContextSet,
     next_time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
@@ -330,7 +338,8 @@ fn commit_projection_effects_in_tx(
                 replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)
             })?;
             crate::core::perf_profile::measure_result("projection_wake_context_matches", || {
-                wake_context_matches_in_tx(tx, &effects.context_delta).map_err(sqlite_string_error)
+                wake_context_matches_in_tx(tx, &effects.context_delta, effects.mode)
+                    .map_err(sqlite_string_error)
             })?;
         }
         ProjectionSource::Ephemeral => {
@@ -345,7 +354,13 @@ fn commit_projection_effects_in_tx(
     }
 
     crate::core::perf_profile::measure_result("projection_commit_pipeline_effects", || {
-        commit_pipeline_effects_in_tx(tx, &effects.pipeline, allowed_tables, fact_admission)
+        commit_pipeline_effects_in_tx(
+            tx,
+            &effects.pipeline,
+            allowed_tables,
+            fact_admission,
+            effects.mode,
+        )
     })?;
     Ok(effects.suppressed_intents)
 }
@@ -451,6 +466,7 @@ fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
 pub(super) struct PendingFact {
     source: ProjectionSource,
     fact_id: FactId,
+    mode: ProjectionMode,
     fact: Fact,
     previous_context: ContextSet,
     projection_context: ProjectionContext,
@@ -472,6 +488,7 @@ pub(super) fn load_pending_fact(
     store: &Store,
     source: ProjectionSource,
     fact_id: FactId,
+    mode: ProjectionMode,
 ) -> Result<Option<PendingFact>, String> {
     let fact =
         crate::core::perf_profile::measure_result("projection_load_fact", || match source {
@@ -495,16 +512,19 @@ pub(super) fn load_pending_fact(
                 stored_matching_context(store, &previous_context)
             })?
             .with_time_ranges(time_ranges)
+            .with_mode(mode)
         }
         ProjectionSource::Ephemeral => {
             crate::core::perf_profile::measure_result("projection_initial_context_match", || {
                 stored_matching_context(store, &previous_context)
             })?
+            .with_mode(mode)
         }
     };
     Ok(Some(PendingFact {
         source,
         fact_id,
+        mode,
         fact,
         previous_context,
         projection_context,
@@ -1288,8 +1308,14 @@ mod tests {
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
     ) -> Result<super::super::ProjectionProgress, String> {
-        super::super::PipelineEngine::new(store, projector, allowed_tables, fact_admission)
-            .drain_projection(limit)
+        super::super::PipelineEngine::with_handler_routes(
+            store,
+            projector,
+            allowed_tables,
+            fact_admission,
+            &[],
+        )
+        .drain_projection(limit)
     }
 
     fn intent_payload_for(store: &Store, kind: &str, key: &FactId) -> Vec<u8> {

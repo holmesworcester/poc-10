@@ -148,8 +148,14 @@ fn dispatch_queued_intent_with_policy(
         kind: queued.intent.kind.as_str(),
         idempotence_key: &queued.intent.key,
     };
-    status.progressed =
-        commit_handler_output(store, handled, &output, allowed_tables, fact_admission)?;
+    status.progressed = commit_handler_output(
+        store,
+        handled,
+        &output,
+        allowed_tables,
+        fact_admission,
+        intent_policy.pending_projection_mode(),
+    )?;
     if !status.progressed {
         suppressed_intents = 0;
     }
@@ -256,6 +262,7 @@ fn commit_handler_output(
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    pending_mode: super::ProjectionMode,
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
@@ -266,7 +273,13 @@ fn commit_handler_output(
                 delete_intent_in_tx(tx, LOCAL_INTENTS, handled.kind, handled.idempotence_key)?;
             }
 
-            commit_pipeline_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
+            commit_pipeline_effects_in_tx(
+                tx,
+                effects,
+                allowed_tables,
+                fact_admission,
+                pending_mode,
+            )?;
             Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))

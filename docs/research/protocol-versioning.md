@@ -14,7 +14,7 @@ matrix lives in Part II below.
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
 
-- Tag-routed facts: `FactRoute { tag, projector, pipeline, replayed }` and the
+- Tag-routed facts: `FactRoute { tag, projector, pipeline }` and the
   `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
   `core::pipeline::RouterProjector`.
 - Per-family authenticators: each routed family has `authenticate.rs` and routes
@@ -298,7 +298,7 @@ deterministic root auth, sealed request/connection opener authentication, and
 runtime write admission through the same staged authenticators.
 
 - `FactRoute` becomes the core-owned staged pipeline for one tag: `tag`,
-  `intro_version: u32`, `replayed`, decoder, authenticator, adapt path, author
+  `intro_version: u32`, decoder, authenticator, adapt path, author
   entry when local creation exists, and projector.
 - Core runs `decode -> authenticate -> adapt -> project` as four labelled stages.
   `AuthenticationNeed` parks/wakes the authentication stage; projector
@@ -528,53 +528,44 @@ derived state by replaying with the fixed projector.
 
 ### Fact durability and replay classes
 
-Durability and replay are **two axes**, not one: *retained* (the bytes survive a
-wipe) and *replay-projected* (re-fed through `authenticate → adapt → project` on
-an upgrade wipe to rebuild derived state). The current code represents the
-second axis with `FactRoute.replayed: bool`.
+Durability and replay are **two axes**, not one: *retained* means the bytes
+survive a wipe; *replay behavior* means what the projector emits when those
+bytes are re-fed through `authenticate → adapt → project` in replay mode. The
+current code queues every retained fact for replay projection and exposes replay
+as `ProjectionContext::is_replay()`.
 
-- **Replay-projected** (`replayed == true`) — retained facts that rebuild
-  deterministic derived state on replay. This includes shared content and auth
-  history, deterministic sync rows such as `sync::shared_fact`,
-  `sync::compare`, and `sync::range_request`, connection lifecycle/receipt/frame
-  records, local secrets that are deterministic replay inputs, and the cascade
-  test fact. Future versioned families in this class carry `decode.rs`,
-  `authenticate.rs`, `adapt.rs`, and `project.rs`, plus `encode.rs`/`author.rs`
-  when the family can be locally authored.
-- **Retained but not replay-projected** (`replayed == false`) — facts kept in the
-  store but deliberately excluded from upgrade replay. Today this set is exactly
-  six tags, pinned by a registry guardrail: bootstrap request/response,
-  connection request/response, and sync have/need. These families carry
-  `decode.rs` + `authenticate.rs` + `project.rs`; they may register an identity
-  adapter, but need no physical `adapt.rs` file until a non-identity conversion
-  is useful.
+- **Durable truth** — retained facts that rebuild deterministic derived state on
+  replay. This includes shared content and auth history, deterministic sync rows
+  such as `sync::shared_fact`, `sync::compare`, and `sync::range_request`,
+  connection lifecycle/receipt/frame records, and local secrets that are
+  deterministic replay inputs. Future versioned families in this class carry
+  `decode.rs`, `authenticate.rs`, `adapt.rs`, and `project.rs`, plus
+  `encode.rs`/`author.rs` when the family can be locally authored.
+- **Retained live evidence** — facts kept in the store and still projected
+  during replay, but whose projectors intentionally no-op live session or
+  negotiation materialization when `ProjectionContext::is_replay()` is true.
+  Today this covers connection request, connection, sync have-id, and sync
+  need-id. These families still validate bytes through the same staged route;
+  replay just does not recreate dead connection rows or stale prompts.
 - **Pending / non-protocol input** — raw network bytes before they have become
   a fact, live-only queued work, daemon schedules, and wire-admitted bytes held
   pending because the local runtime cannot yet authenticate, decrypt, or
   ceiling-admit them. Pending bytes are retained/syncable as bytes, but are not
-  replay-projected and do not have an adapter until they re-enter admission and
-  become active facts.
+  replay-derived protocol state until they re-enter admission and become active
+  facts.
 
-So replay-projected families carry a real or identity `adapt.rs` entry.
-Non-replayed families may register an identity adapter in the route but do not
-need a physical `adapt.rs` file until a non-identity conversion is useful.
+So versioned retained families carry a real or identity `adapt.rs` entry. Replay
+mode is a projector input, not a `FactRoute` field.
 
-This **replaces the connection-retirement-before-replay dance** for
-non-replayed connection establishment facts: the wipe simply does not re-project
-bootstrap/connection request/response facts, so replay does not resurrect a dead
-session from those live-session-coupled rows.
+This **replaces the connection-retirement-before-replay dance**: replay
+projects retained connection establishment evidence in replay mode, and those
+projectors emit no live session rows, so replay does not resurrect a dead
+session from live-session-coupled facts.
 
-**Invariant — the replay graph is closed.** A replay-projected fact may depend
-(causally or for context) only on other replay-projected facts. Local-durable and
-ephemeral facts may depend on replay-durable facts, but nothing replay-projected
-may depend on them — else replay would dangle on state it does not rebuild.
-(`connection_response` self-contained is the special case.) A `GUARD` test
-enforces this.
-
-**In code:** the route carries `replayed: bool`; the wipe-and-replay entry point
-marks only `replayed == true` facts pending for projection. The marker is
-orthogonal to `FactScope`, so it is declared explicitly rather than derived from
-scope.
+**Invariant — replay outputs are closed.** A projector that emits replay-mode
+derived state may depend only on state that replay rebuilds. Live-session
+projectors may depend on local/ephemeral observations during normal operation,
+but must no-op those materializations in replay mode.
 
 ### Phase 5 — Rendering uniformity
 
@@ -610,11 +601,12 @@ scope.
   frame cannot become ceiling-active until that frame is sub-floor or the fact
   has an old-frame-compatible chunking path (the `file_slice` precedent —
   chunk, don't grow the frame).
-- **Connections are local-durable, so not replay-projected.** The wipe does not
-  re-project `connection::request`/`response` (see *Fact durability and replay
-  classes*), so rebuilt sync indexes never live-tail over a dead pre-upgrade
-  session — no `connection_close` / upgrade-retirement fact is needed to
-  neutralize them during replay. After the barrier, peers re-handshake fresh.
+- **Connections are local-durable live evidence.** Replay projects retained
+  `connection::request` and `connection::connection` facts in replay mode, but
+  those projectors emit no live session rows or sends (see *Fact durability and
+  replay classes*). Rebuilt sync indexes therefore never live-tail over a dead
+  pre-upgrade session, and no upgrade-retirement fact is needed to neutralize
+  them during replay. After the barrier, peers re-handshake fresh.
 
 ### Phase 7 — Manifest discipline and guardrails
 
@@ -1595,7 +1587,7 @@ per scope where the scope changes the answer.
 
 These tests defend the model's admission/pending/routing rules. Today's code has
 two remaining structural gaps these tests are written to drive out and then
-lock: (a) `FactRoute { tag, projector, pipeline, replayed }` carries no
+lock: (a) `FactRoute { tag, projector, pipeline }` carries no
 `intro_version`; (b) `RouterProjector` is not ceiling-filtered — it dispatches
 every registered tag unconditionally. The staged route runner exists now for
 converted families, while the all-family conversion in `fact-validators.md`
@@ -1724,7 +1716,7 @@ versioning assertions against a future ceiling still start RED.
 ### ROUTE-16 — every FactRoute declares an intro_version (registry completeness)  `guardrail`
 - **Setup:** Registry guardrail test in `registry.rs` tests module, alongside `fact_route_tags_are_globally_unique`.
 - **Action:** Iterate `FACT_ROUTES`; for each entry read its `intro_version`.
-- **Expect:** Every one of the 47 routes has a declared `intro_version` (compile-time: the `FactRoute` struct field is non-optional; runtime: each value is a sane u32, and the set of values is a subset of the protocol versions named by the bundle map). Today `FactRoute` has `{tag, projector, replayed}` — this test forces adding `intro_version` and populating all 47 in `projector_routes!`.
+- **Expect:** Every one of the 47 routes has a declared `intro_version` (compile-time: the `FactRoute` struct field is non-optional; runtime: each value is a sane u32, and the set of values is a subset of the protocol versions named by the bundle map). Today `FactRoute` has `{tag, projector, pipeline}` — this test forces adding `intro_version` and populating all 47 in `projector_routes!`.
 - **Defends:** "every fact route declares intro_version" — registry completeness.
 - **Refs:** `FactRoute`; `projector_routes!` macro; 47 routes in `FACT_ROUTES`.
 
@@ -5529,7 +5521,7 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ---
 
 ### GUARD-01 — every FactRoute in FACT_ROUTES declares an intro_version  `guardrail`
-- **Setup:** the assembled `FACT_ROUTES` table in `src/protocol/registry.rs` (47 entries: 43 authenticated fact families plus four sealed transit carriers) with the target `FactRoute { tag, projector, replayed, intro_version }` shape from `src/core/projectors.rs:402`.
+- **Setup:** the assembled `FACT_ROUTES` table in `src/protocol/registry.rs` (47 entries: 43 authenticated fact families plus four sealed transit carriers) with the target `FactRoute { tag, projector, pipeline, intro_version }` shape from `src/core/projectors.rs:402`.
 - **Action:** iterate `FACT_ROUTES`; for each route read `route.intro_version`.
 - **Expect:** the table compiles only because every `projector_routes!` line supplies an `intro_version`; the test additionally asserts `FACT_ROUTES.len() == 47` and that every `intro_version` is a concrete `u32` (no `Option`, no default-zero sentinel) — i.e. the macro `projector_routes!` requires the field. A route lacking it fails to compile.
 - **Defends:** Mechanism "ROUTES carry intro_version"; underpins invariant (1) VISIBILITY and (3) CEILING MONOTONICITY (a route the ceiling cannot place is meaningless).

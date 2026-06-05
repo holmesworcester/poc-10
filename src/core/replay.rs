@@ -34,9 +34,7 @@
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
-use crate::core::pipeline::{
-    FactAdmissionFn, FactRoute, HandlerRoute, HandlerSet, PipelineEngine, Projector,
-};
+use crate::core::pipeline::{FactAdmissionFn, HandlerRoute, HandlerSet, PipelineEngine, Projector};
 use crate::core::store::{quoted_identifier_list, quoted_table_name_str, Store, TableName};
 use rusqlite::types::ValueRef;
 use std::collections::BTreeSet;
@@ -232,7 +230,6 @@ pub fn run_replay(
     store: &Store,
     projector: &dyn Projector,
     routes: &'static [HandlerRoute],
-    fact_routes: &[FactRoute],
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     replay_time_wakes: &[DaemonTimeWake],
@@ -244,15 +241,6 @@ pub fn run_replay(
         ..ReplayReport::default()
     };
     let facts_before = fact_id_set(store)?;
-
-    // Fact types whose projection is live session state, not durable truth, are
-    // retained on disk but never re-projected: replay wipes their session rows
-    // and does not rebuild them, so a rebuild never resurrects a dead connection.
-    let not_replayed_tags: Vec<u8> = fact_routes
-        .iter()
-        .filter(|route| !route.replayed)
-        .map(|route| route.tag)
-        .collect();
 
     report.wiped_tables = wipe_derived_state(store)?;
     report.retained_facts = table_count(store, "facts")?;
@@ -268,14 +256,12 @@ pub fn run_replay(
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
-            drive
-                .pipeline
-                .enqueue_replayable_facts(&not_replayed_tags)?;
+            drive.pipeline.enqueue_retained_facts_for_replay()?;
             drive.fixpoint(&mut counters)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
-            for fact_id in ordered_fact_ids(store, order, &not_replayed_tags)? {
-                drive.pipeline.enqueue_replayable_fact(fact_id)?;
+            for fact_id in ordered_fact_ids(store, order)? {
+                drive.pipeline.enqueue_retained_fact_for_replay(fact_id)?;
                 drive.fixpoint(&mut counters)?;
             }
             // A final fixpoint settles any work left after the last admission.
@@ -373,7 +359,13 @@ impl<'a> ReplayDrive<'a> {
         let handlers = HandlerSet::new_replay(routes);
         let kinds = handlers.intent_kinds();
         Self {
-            pipeline: PipelineEngine::new(store, projector, allowed_tables, fact_admission),
+            pipeline: PipelineEngine::with_handler_routes(
+                store,
+                projector,
+                allowed_tables,
+                fact_admission,
+                routes,
+            ),
             replay_time_wakes,
             handlers,
             kinds,
@@ -397,9 +389,7 @@ impl<'a> ReplayDrive<'a> {
     fn project_to_idle(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let mut progressed = false;
         loop {
-            let progress = self
-                .pipeline
-                .drain_projection_filtering_intents(REPLAY_WORK_LIMIT, &self.kinds)?;
+            let progress = self.pipeline.drain_projection(REPLAY_WORK_LIMIT)?;
             counters.projected_facts += progress.projected;
             counters.suppressed_live_only_work += progress.suppressed_intents;
             if progress.projected == 0 {
@@ -416,7 +406,7 @@ impl<'a> ReplayDrive<'a> {
             let Some(end_inclusive) = (wake.end_inclusive)(self.pipeline.store())? else {
                 continue;
             };
-            admitted += self.pipeline.process_due_time_range(
+            admitted += self.pipeline.process_due_time_range_for_replay(
                 (wake.timeline)(),
                 None,
                 end_inclusive,
@@ -464,51 +454,20 @@ fn wipe_derived_state(store: &Store) -> Result<usize, String> {
         .map_err(|err| format!("wipe derived state: {err}"))
 }
 
-/// SQL fragment excluding facts whose first byte (type tag) is not replayed.
-///
-/// `bytes_column` is the qualified bytes column (`bytes` or `f.bytes`). Returns
-/// an empty string when nothing is excluded, so the base query is unchanged for
-/// runtimes with no not-replayed fact types.
-fn not_replayed_tag_filter(not_replayed_tags: &[u8], keyword: &str, bytes_column: &str) -> String {
-    if not_replayed_tags.is_empty() {
-        return String::new();
-    }
-    let placeholders = (1..=not_replayed_tags.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(" {keyword} substr({bytes_column}, 1, 1) NOT IN ({placeholders})")
-}
-
-fn tag_blob_params(not_replayed_tags: &[u8]) -> Vec<Vec<u8>> {
-    not_replayed_tags.iter().map(|tag| vec![*tag]).collect()
-}
-
 /// Compute the fact admission order for the requested replay order.
-fn ordered_fact_ids(
-    store: &Store,
-    order: ReplayOrder,
-    not_replayed_tags: &[u8],
-) -> Result<Vec<FactId>, String> {
+fn ordered_fact_ids(store: &Store, order: ReplayOrder) -> Result<Vec<FactId>, String> {
     // Canonical admission order: received_at then fact id, matching the pending
-    // projection batch ordering used in normal operation. Not-replayed fact
-    // types are excluded so a rebuild never re-projects live session facts.
-    let sql = format!(
-        "SELECT f.id
-         FROM facts f
-         JOIN local_fact_admissions m ON m.fact_id = f.id{}
-         ORDER BY m.received_at, f.id",
-        not_replayed_tag_filter(not_replayed_tags, "WHERE", "f.bytes")
-    );
+    // projection batch ordering used in normal operation.
+    let sql = "SELECT f.id
+               FROM facts f
+               JOIN local_fact_admissions m ON m.fact_id = f.id
+               ORDER BY m.received_at, f.id";
     let mut stmt = store
         .conn()
-        .prepare(&sql)
+        .prepare(sql)
         .map_err(|err| format!("load canonical fact order: {err}"))?;
     let rows = stmt
-        .query_map(
-            rusqlite::params_from_iter(tag_blob_params(not_replayed_tags)),
-            |row| row.get::<_, Vec<u8>>(0),
-        )
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
         .map_err(|err| format!("load canonical fact order: {err}"))?;
     let mut canonical = Vec::new();
     for row in rows {

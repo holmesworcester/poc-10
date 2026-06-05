@@ -60,7 +60,7 @@
 
 use crate::core::effects::PipelineEffects;
 use crate::core::fact_store::{
-    insert_ephemeral_fact_in_tx, insert_fact_and_pending_in_tx, purge_fact_in_tx,
+    insert_ephemeral_fact_in_tx, insert_fact_and_pending_with_mode_in_tx, purge_fact_in_tx,
 };
 use crate::core::intents::{
     Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert, Value as SqlValue,
@@ -74,6 +74,7 @@ use std::collections::BTreeMap;
 
 use super::dispatch::{record_intent_in_table_in_tx, record_intent_in_tx};
 use super::route::FactAdmissionFn;
+use super::ProjectionMode;
 
 /// Which follow-up intents may be recorded by this commit path.
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +86,13 @@ pub(super) enum IntentAdmissionPolicy<'a> {
 }
 
 impl IntentAdmissionPolicy<'_> {
+    pub(super) fn pending_projection_mode(self) -> ProjectionMode {
+        match self {
+            Self::All => ProjectionMode::Normal,
+            Self::AllowKinds(_) => ProjectionMode::Replay,
+        }
+    }
+
     fn allows(self, intent: &Intent) -> bool {
         match self {
             Self::All => true,
@@ -273,7 +281,13 @@ pub(crate) fn commit_pipeline_effects_to_store(
     validate_pipeline_effects_for_admission(effects, allowed_tables, fact_admission)?;
     store
         .write_transaction(|tx| {
-            commit_pipeline_effects_in_tx(tx, effects, allowed_tables, fact_admission)
+            commit_pipeline_effects_in_tx(
+                tx,
+                effects,
+                allowed_tables,
+                fact_admission,
+                ProjectionMode::Normal,
+            )
         })
         .map_err(|err| format!("{label}: {err}"))
 }
@@ -293,6 +307,7 @@ pub(crate) fn commit_pipeline_effects_in_tx(
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    pending_mode: ProjectionMode,
 ) -> rusqlite::Result<PipelineEffectCounts> {
     validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
     for purged in &effects.purged_facts {
@@ -301,7 +316,7 @@ pub(crate) fn commit_pipeline_effects_in_tx(
 
     let mut facts = 0usize;
     for fact in &effects.facts {
-        if insert_fact_and_pending_in_tx(tx, fact)? {
+        if insert_fact_and_pending_with_mode_in_tx(tx, fact, pending_mode)? {
             facts += 1;
         }
     }

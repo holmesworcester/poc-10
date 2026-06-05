@@ -6,12 +6,47 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Matched context and due time ranges visible while projecting one fact.
+/// Runtime mode visible while projecting one fact.
+///
+/// This is not fact-derived context. It is ambient execution state supplied by
+/// the queue item being processed: normal live projection or replay rebuild.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectionMode {
+    /// Normal runtime projection.
+    #[default]
+    Normal,
+    /// Replay rebuild projection.
+    Replay,
+}
+
+impl ProjectionMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Replay => "replay",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "normal" => Ok(Self::Normal),
+            "replay" => Ok(Self::Replay),
+            other => Err(format!("unknown projection mode {other}")),
+        }
+    }
+
+    pub fn is_replay(self) -> bool {
+        matches!(self, Self::Replay)
+    }
+}
+
+/// Matched context, mode, and due time ranges visible while projecting one fact.
 ///
 /// Core builds this immediately before calling the projector. It is a snapshot
 /// of matched rows for this run, not a live storage handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionContext {
+    mode: ProjectionMode,
     offers: Vec<ContextOffer>,
     matched: Vec<MatchedContext>,
     matched_by_need: BTreeMap<ContextNeed, Vec<usize>>,
@@ -40,6 +75,7 @@ impl ProjectionContext {
     /// prefer the matched-payload helpers when a proof depends on a need.
     pub fn new(offers: Vec<ContextOffer>) -> Self {
         Self {
+            mode: ProjectionMode::Normal,
             offers,
             matched: Vec::new(),
             matched_by_need: BTreeMap::new(),
@@ -57,11 +93,28 @@ impl ProjectionContext {
         offers.dedup();
         let matched_by_need = index_matches_by_need(&matched);
         Self {
+            mode: ProjectionMode::Normal,
             offers,
             matched,
             matched_by_need,
             time_ranges: Vec::new(),
         }
+    }
+
+    /// Return whether this projection is a normal live run or a replay rebuild.
+    pub fn mode(&self) -> ProjectionMode {
+        self.mode
+    }
+
+    /// Return true when this projection is rebuilding from retained facts.
+    pub fn is_replay(&self) -> bool {
+        self.mode.is_replay()
+    }
+
+    /// Attach the runtime mode for this projection item.
+    pub(crate) fn with_mode(mut self, mode: ProjectionMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Add newly matched context discovered while preparing one projection item.

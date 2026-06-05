@@ -4,6 +4,8 @@
 //! `authenticate.rs` has resolved the request, opened the sealed connection, and
 //! verified handshake material. The responder branch sends the connection fact;
 //! the initiator branch pairs it with the receive observation and seeds sync.
+//! During replay this live session state is intentionally not rebuilt; the
+//! retained fact remains evidence, but the projector returns no effects.
 //!
 //! POLICY. A connection is admitted iff:
 //!   1. STRUCTURAL. The fact is local; primary byte shape, id, request opening,
@@ -103,6 +105,9 @@ impl SemanticProjector<AuthenticatedConnection> for ConnectionProjector {
         // 1. Structural.
         if fact.scope != FactScope::Local {
             return Err("connection fact must have local scope".to_string());
+        }
+        if context.is_replay() {
+            return Ok(ProjectionOutput::new());
         }
         // 2. Context.
         let close_need = close::connection_closed_need(fact.id, fact.id);
@@ -316,6 +321,7 @@ impl ConnectionNeeds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::pipeline::ProjectionMode;
     use crate::protocol::connection::send_network_frame::SEND_NETWORK_FRAME;
     use crate::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 
@@ -375,5 +381,29 @@ mod tests {
             .local_intents
             .iter()
             .any(|intent| intent.kind.as_str() == SEND_NETWORK_FRAME));
+    }
+
+    #[test]
+    fn replay_projection_does_not_rebuild_live_connection_state() {
+        let fact = Fact::new(FactScope::Local, 10, vec![49, 1, 2, 3]);
+        let output = ConnectionProjector::new()
+            .project_semantic(
+                &fact,
+                AuthenticatedConnection::Responder {
+                    connection: connection_fact(),
+                    request_need: request::project::connection_request_need(fact.id, [3; 32]),
+                    request_opener_need: authenticate::all_local_endpoint_need(fact.id),
+                    responder_secret_need: authenticate::all_ephemeral_secret_need(fact.id),
+                    invite_need: None,
+                },
+                &ProjectionContext::default().with_mode(ProjectionMode::Replay),
+            )
+            .expect("replay connection");
+
+        assert!(output.offers.is_empty());
+        assert!(output.needs.is_empty());
+        assert!(output.effects.row_mutations.is_empty());
+        assert!(output.effects.intents.is_empty());
+        assert!(output.effects.local_intents.is_empty());
     }
 }

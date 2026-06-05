@@ -28,6 +28,7 @@
 //! belongs in the protocol fact module and its projector.
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
+use crate::core::pipeline::ProjectionMode;
 use crate::core::schema::{CONTEXT_EDGES, EPHEMERAL_PROJECTION_INPUTS};
 use crate::core::store::Store;
 use crate::core::wire::Writer;
@@ -41,18 +42,36 @@ use rusqlite::{params, OptionalExtension};
 /// the local admission record is a separate local-only fact about those bytes.
 /// Returns whether either row was newly inserted.
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
+    insert_fact_and_pending_with_mode_in_tx(store, fact, ProjectionMode::Normal)
+}
+
+/// Insert a fact and mark it pending with an explicit projection mode.
+pub(crate) fn insert_fact_and_pending_with_mode_in_tx(
+    store: &Store,
+    fact: &Fact,
+    mode: ProjectionMode,
+) -> rusqlite::Result<bool> {
     let inserted = insert_fact_in_tx(store, fact)?;
     if inserted {
-        insert_pending_owner_in_tx(store, fact.id)?;
+        insert_pending_owner_with_mode_in_tx(store, fact.id, mode)?;
     }
     Ok(inserted)
 }
 
-/// Mark `owner` pending so the next projection pass (re)projects it.
-pub(crate) fn insert_pending_owner_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<usize> {
+/// Mark `owner` pending in a specific projection mode.
+pub(crate) fn insert_pending_owner_with_mode_in_tx(
+    store: &Store,
+    owner: FactId,
+    mode: ProjectionMode,
+) -> rusqlite::Result<usize> {
     store.conn().execute(
-        "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
-        params![owner.as_slice()],
+        "INSERT INTO pending_projection (owner, mode) VALUES (?1, ?2)
+         ON CONFLICT(owner) DO UPDATE SET mode =
+             CASE
+                 WHEN excluded.mode = 'replay' OR pending_projection.mode = 'replay' THEN 'replay'
+                 ELSE 'normal'
+             END",
+        params![owner.as_slice(), mode.as_str()],
     )
 }
 

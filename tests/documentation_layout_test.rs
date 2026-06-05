@@ -251,7 +251,7 @@ fn poc10_replay_intent_shape_doc_records_current_upgrade_readiness_plan() {
         "It does not define release ceilings, old-client compatibility, or fact-version migration",
         "Retained facts, including retained local facts, are the durable source of truth",
         "Every poc-10 queued intent is droppable on upgrade",
-        "Projectors are deterministic and replay-blind",
+        "Projectors are deterministic over fact bytes plus projection context, including replay mode",
         "All durable wall-clock `TimeWake` behavior must be replayable",
         "If a wall-clock action is operational and not replayable, it must be a recurring intent instead",
         "Recurring operational work is not durable state",

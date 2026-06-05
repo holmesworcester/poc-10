@@ -10,14 +10,16 @@ retained facts, and resume operational work without preserving queued intents.
 - Retained facts, including retained local facts, are the durable source of
   truth. Queued intents are not protocol truth.
 - Every poc-10 queued intent is droppable on upgrade. After replay, required
-  work is recreated from retained facts, replayed rows, context, or normal live
-  runtime scheduling.
-- Projectors are deterministic and replay-blind. Given the same facts and
-  context, they emit the same rows, needs, offers, semantic time wakes, and
-  intent requests.
-- Core owns replay mode. During replay, core may suppress or defer emitted
-  intents according to intent-registry metadata; projectors do not branch on
-  replay.
+  work is recreated from retained facts, replay-mode projection, context, or
+  normal live runtime scheduling.
+- Projectors are deterministic over fact bytes plus projection context,
+  including replay mode. Durable truth projectors rebuild rows and context in
+  replay; live session/negotiation projectors validate retained evidence and
+  intentionally emit no live state when `ProjectionContext::is_replay()` is
+  true.
+- Core owns replay scheduling. During replay, core queues retained facts in
+  replay mode and may suppress or defer emitted intents according to
+  intent-registry metadata.
 - All durable wall-clock `TimeWake` behavior must be replayable. If a
   wall-clock action is operational and not replayable, it must be a recurring
   intent instead.
@@ -38,8 +40,9 @@ Add an explicit replay entry point to core runtime:
    projection inputs, and temp network queues. Keep retained facts, local fact
    admissions, clock/trusted-time observations, and local facts not covered by
    retained purge or retirement facts.
-4. Mark all retained facts pending for projection.
-5. Drain fact projection.
+4. Mark all retained facts pending for projection in replay mode.
+5. Drain fact projection; projectors decide from replay context whether to
+   rebuild durable state or no-op live session/negotiation state.
 6. Admit replayable semantic time wakes to fixpoint.
 7. Drain replay-allowed work to fixpoint: pending fact projection, context
    match wakeups, replayable semantic time wakes, and replay-allowed intents.
@@ -89,7 +92,7 @@ Initial poc-10 policy:
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
 
 Every handler route should declare this flag. A test should fail if a new
-handler route omits the replay decision.
+handler route omits the handler replay decision.
 
 ## Recurring Intents
 

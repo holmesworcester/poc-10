@@ -844,14 +844,11 @@ macro_rules! projector_route {
     };
 }
 
-// Each route may end with `, not_replayed` to mark a durable fact whose
-// projection materializes live session state (connection requests and the
-// connection itself). A from-scratch replay skips those: the fact stays on disk
-// but its session rows are wiped and not rebuilt, so replay never resurrects a
-// dead connection. Omitting the marker means the fact is durable protocol truth
-// that replay rebuilds deterministically.
+// Projection replay policy is owned by each projector through
+// `ProjectionContext::is_replay()`. The route table only names tag routing and
+// the first-class staged pipeline labels.
 macro_rules! projector_routes {
-    ($($name:ident => $tag:path, $projector:path, $pipeline:path $(, $replay:ident)? ;)+) => {
+    ($($name:ident => $tag:path, $projector:path, $pipeline:path ;)+) => {
         $(projector_route!($name, $projector);)+
 
         pub(crate) const FACT_ROUTES: &[FactRoute] = &[
@@ -859,19 +856,16 @@ macro_rules! projector_routes {
                 tag: $tag,
                 projector: $name,
                 pipeline: $pipeline,
-                replayed: projector_routes!(@replayed $($replay)?),
             },)+
         ];
     };
-    (@replayed) => { true };
-    (@replayed not_replayed) => { false };
 }
 
 projector_routes! {
     project_connection_close => connection::close::encode::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector, connection::close::project::PIPELINE;
     project_connection_ephemeral_secret => connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector, connection::ephemeral_secret::project::PIPELINE;
-    project_connection_request => connection::request::encode::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, connection::request::project::PIPELINE, not_replayed;
-    project_connection => connection::connection::encode::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, connection::connection::project::PIPELINE, not_replayed;
+    project_connection_request => connection::request::encode::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, connection::request::project::PIPELINE;
+    project_connection => connection::connection::encode::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, connection::connection::project::PIPELINE;
     project_content_file => content::file::encode::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector, content::file::project::PIPELINE;
     project_content_file_deletion => content::file_deletion::encode::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector, content::file_deletion::project::PIPELINE;
     project_content_file_slice => content::file_slice::encode::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector, content::file_slice::project::PIPELINE;
@@ -899,8 +893,8 @@ projector_routes! {
     project_sync_range_request => sync::range_request::encode::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector, sync::range_request::project::PIPELINE;
     project_sync_shared_fact => sync::shared_fact::encode::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector, sync::shared_fact::project::PIPELINE;
     project_sync_compare => sync::compare::encode::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector, sync::compare::project::PIPELINE;
-    project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PIPELINE, not_replayed;
-    project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PIPELINE, not_replayed;
+    project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PIPELINE;
+    project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PIPELINE;
     project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PIPELINE;
     project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PIPELINE;
     project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PIPELINE;
