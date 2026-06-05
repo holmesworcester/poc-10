@@ -37,9 +37,8 @@ pub mod decode;
 mod dispatch;
 pub mod effects;
 mod insert_select;
+mod pipeline_one;
 pub mod project;
-mod projection;
-mod projection_queue;
 pub mod route;
 
 pub use adapt::Adapter;
@@ -67,9 +66,10 @@ use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
 
 use commit_effects::IntentAdmissionPolicy;
-use projection::{
-    commit_projected_context_offers, process_due_time_range, purge_fact_from_store,
-    submit_facts_to_store,
+use pipeline_one::{
+    commit_projected_context_offers, load_pending_fact, pending_durable_fact_ids,
+    pending_ephemeral_fact_ids, process_due_time_range, process_projection_item,
+    purge_fact_from_store, purge_stale_projection_item, submit_facts_to_store, ProjectionSource,
 };
 
 /// Factory for one protocol intent handler.
@@ -392,14 +392,89 @@ impl<'a> PipelineEngine<'a> {
         limit: usize,
         intent_policy: IntentAdmissionPolicy<'_>,
     ) -> Result<ProjectionProgress, String> {
-        projection_queue::drain_projection_queue(
-            self.store,
-            self.projector,
-            self.allowed_tables,
-            self.fact_admission,
+        let mut total = ProjectionProgress::default();
+        while total.projected < limit {
+            let progress = self.drain_projection_once(limit - total.projected, intent_policy)?;
+            let projected = progress.projected > 0;
+            total.merge(progress);
+            if !projected {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    fn drain_projection_once(
+        &self,
+        limit: usize,
+        intent_policy: IntentAdmissionPolicy<'_>,
+    ) -> Result<ProjectionProgress, String> {
+        let mut progress = ProjectionProgress::default();
+
+        let durable_fact_ids =
+            crate::core::perf_profile::measure_result("projection_pending_load", || {
+                pending_durable_fact_ids(self.store, limit)
+            })?;
+        self.drain_projection_items(
+            ProjectionSource::Durable,
+            durable_fact_ids,
+            &mut progress,
             limit,
             intent_policy,
-        )
+        )?;
+
+        if progress.projected < limit {
+            let ephemeral_fact_ids =
+                crate::core::perf_profile::measure_result("projection_ephemeral_load", || {
+                    pending_ephemeral_fact_ids(self.store, limit - progress.projected)
+                })?;
+            self.drain_projection_items(
+                ProjectionSource::Ephemeral,
+                ephemeral_fact_ids,
+                &mut progress,
+                limit,
+                intent_policy,
+            )?;
+        }
+
+        Ok(progress)
+    }
+
+    fn drain_projection_items(
+        &self,
+        source: ProjectionSource,
+        fact_ids: Vec<FactId>,
+        progress: &mut ProjectionProgress,
+        limit: usize,
+        intent_policy: IntentAdmissionPolicy<'_>,
+    ) -> Result<(), String> {
+        for fact_id in fact_ids {
+            if progress.projected >= limit {
+                break;
+            }
+            let Some(pending_fact) =
+                crate::core::perf_profile::measure_result("projection_load_pending_fact", || {
+                    load_pending_fact(self.store, source, fact_id)
+                })?
+            else {
+                purge_stale_projection_item(self.store, source, fact_id)?;
+                continue;
+            };
+            let item = process_projection_item(
+                self.store,
+                self.projector,
+                pending_fact,
+                self.allowed_tables,
+                self.fact_admission,
+                intent_policy,
+            )?;
+            progress.suppressed_intents += item.suppressed_intents;
+            if item.projected {
+                progress.projected += 1;
+                progress.status.progressed = true;
+            }
+        }
+        Ok(())
     }
 
     /// Drain pending projection until no projection work remains or rounds expire.
@@ -566,7 +641,7 @@ pub(crate) use dispatch::{
     dispatch_queued_intent, dispatch_queued_intent_filtering_intents, next_queued_intent,
     submit_intent_to_store, submit_local_intent_to_store,
 };
-pub(crate) use projection::submit_fact_to_store;
+pub(crate) use pipeline_one::submit_fact_to_store;
 
 #[cfg(test)]
 mod tests {

@@ -66,7 +66,7 @@ submit_fact_to_store
   -> facts/local_fact_admissions
   -> pending_projection
 
-drain_projection_queue
+PipelineEngine::drain_projection
   -> load fact, standing context, matched payload facts, and due time ranges
   -> run staged route and resolve already-satisfied declared needs
   -> replace context and time wakes for that owner
@@ -122,11 +122,11 @@ projectors to read the clock.
 - `context.rs` owns the in-memory `ProjectionContext` and matched payload
   helpers visible while processing one fact.
 - `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
-- `projection.rs` owns one-item fact projection: fact admission, time-wake
-  queue admission, matched-context loading, projector execution, and the
-  projection commit boundary.
-- `projection_queue.rs` owns pending projection draining over durable facts and
-  ephemeral inputs.
+- `pipeline_one.rs` owns one queued fact pipeline item: fact admission,
+  time-wake queue admission, matched-context loading, staged
+  decode/authenticate/adapt/project execution, and the commit boundary.
+- `pipeline.rs` owns pending projection draining over durable facts and
+  ephemeral inputs as part of the runtime state machine.
 - `context_store.rs` owns persisted context edges, range-overlap matching, projection
   context assembly, and wake fanout.
 - `dispatch.rs` owns intent queue claiming, handler input loading, retry

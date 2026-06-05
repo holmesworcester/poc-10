@@ -1,14 +1,15 @@
-//! One-item fact projection.
+//! One queued fact pipeline item.
 //!
-//! A projection item loads one fact, its standing context, any matched payload
-//! facts, and due time ranges. It then runs the protocol projector, resolves
-//! any newly declared needs that already match stored offers, and commits the
-//! settled output once.
+//! One item loads one fact, its standing context, any matched payload facts,
+//! and due time ranges. It then runs the route's staged pipeline, which may
+//! decode, authenticate, and adapt before the protocol project stage validates
+//! semantic data and emits effects. Core resolves newly declared needs that
+//! already match stored offers and commits the settled output once.
 //!
 //! Queue recursion is explicit outside this item. If projection emits child
 //! facts, shared effect commit stores them in `pending_projection`; if a later
 //! item creates a matching offer, context fanout requeues the dependent owner.
-//! `projection_queue` later processes that work like any other fact.
+//! `PipelineEngine` later processes that work like any other fact.
 
 use super::commit_effects::{
     commit_pipeline_effects_in_tx, sqlite_string_error, suppress_disallowed_intents,
@@ -216,7 +217,7 @@ fn enqueue_due_time_wakes_in_tx(
 ///   kept as evidence: versioning needs different lenses and versions to
 ///   interpret an incorrect fact the same way, and purging would destroy the
 ///   test subject.
-pub(super) fn isolate_rejected_durable_fact_in_tx(
+fn isolate_rejected_durable_fact_in_tx(
     tx: &Store,
     fact_id: FactId,
     projector: &(impl Projector + ?Sized),
@@ -253,6 +254,77 @@ fn durable_fact_fails_without_context(
     }
 }
 
+/// Result of attempting one queued projection item.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ProjectionItemProgress {
+    pub(super) projected: bool,
+    pub(super) suppressed_intents: usize,
+}
+
+/// Run and commit one queued projection item.
+///
+/// Projection rejection consumes the queued item according to its source:
+/// durable facts are either purged or isolated as context-inconsistent
+/// evidence; ephemeral inputs are dropped because they are one-shot.
+pub(super) fn process_projection_item(
+    store: &Store,
+    projector: &(impl Projector + ?Sized),
+    pending_fact: PendingFact,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    intent_policy: IntentAdmissionPolicy<'_>,
+) -> Result<ProjectionItemProgress, String> {
+    let source = pending_fact.source;
+    let fact_id = pending_fact.fact_id;
+    let effects =
+        match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
+            prepare_projection_effects(
+                store,
+                projector,
+                pending_fact,
+                allowed_tables,
+                fact_admission,
+                intent_policy,
+            )
+        }) {
+            Ok(effects) => effects,
+            Err(_rejection) => {
+                handle_rejected_projection(store, projector, source, fact_id)?;
+                return Ok(ProjectionItemProgress::default());
+            }
+        };
+    let suppressed_intents =
+        crate::core::perf_profile::measure_result("projection_commit_effects", || {
+            commit_projection_effects(store, &effects, allowed_tables, fact_admission)
+        })?;
+    Ok(ProjectionItemProgress {
+        projected: true,
+        suppressed_intents,
+    })
+}
+
+fn handle_rejected_projection(
+    store: &Store,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    fact_id: FactId,
+) -> Result<(), String> {
+    match source {
+        ProjectionSource::Durable => isolate_rejected_durable_fact(store, projector, fact_id),
+        ProjectionSource::Ephemeral => drop_rejected_ephemeral_input(store, fact_id),
+    }
+}
+
+fn isolate_rejected_durable_fact(
+    store: &Store,
+    projector: &(impl Projector + ?Sized),
+    fact_id: FactId,
+) -> Result<(), String> {
+    store
+        .write_transaction(|tx| isolate_rejected_durable_fact_in_tx(tx, fact_id, projector))
+        .map_err(|err| format!("isolate rejected durable fact: {err}"))
+}
+
 /// Run the protocol projector for one fact and split its output.
 ///
 /// No rows are written here. The result is an uncommitted `ProjectionEffects`
@@ -260,7 +332,7 @@ fn durable_fact_fails_without_context(
 /// may first declare needs; core then loads already-stored matching offers into
 /// this item's in-memory context and reruns until that context stops growing.
 /// Later offers still use ordinary context wake fanout through the queue.
-pub(super) fn prepare_projection_effects(
+fn prepare_projection_effects(
     store: &Store,
     projector: &(impl Projector + ?Sized),
     pending_fact: PendingFact,
@@ -343,7 +415,7 @@ fn resolve_projection_context(
 }
 
 /// The uncommitted output of projecting one pending fact.
-pub(super) struct ProjectionEffects {
+struct ProjectionEffects {
     source: ProjectionSource,
     fact_id: FactId,
     next_context: ContextSet,
@@ -381,7 +453,7 @@ pub(super) enum ProjectionSource {
 /// Ephemeral inputs are one-shot. They may emit needs as transient probes, but
 /// they cannot leave standing offers or time wakes behind after the projection
 /// commits.
-pub(super) fn commit_projection_effects(
+fn commit_projection_effects(
     store: &Store,
     effects: &ProjectionEffects,
     allowed_tables: &[TableName],
@@ -398,7 +470,7 @@ pub(super) fn commit_projection_effects(
         .map_err(|err| format!("commit projection effects: {err}"))
 }
 
-pub(super) fn commit_projection_effects_in_tx(
+fn commit_projection_effects_in_tx(
     tx: &Store,
     effects: &ProjectionEffects,
     allowed_tables: &[TableName],
@@ -547,12 +619,6 @@ pub(super) struct PendingFact {
     projection_context: ProjectionContext,
 }
 
-impl PendingFact {
-    pub(super) fn fact_id(&self) -> FactId {
-        self.fact_id
-    }
-}
-
 /// Read the next pending fact ids without mutating the queue.
 ///
 /// The commit step removes the row only after projection succeeds. Missing
@@ -593,25 +659,36 @@ pub(super) fn pending_ephemeral_fact_ids(
     ephemeral_pending_fact_ids(store, limit)
 }
 
-pub(super) fn drop_stale_ephemeral_input(store: &Store, fact_id: FactId) -> Result<(), String> {
+pub(super) fn purge_stale_projection_item(
+    store: &Store,
+    source: ProjectionSource,
+    fact_id: FactId,
+) -> Result<(), String> {
+    match source {
+        ProjectionSource::Durable => purge_stale_durable_pending(store, fact_id),
+        ProjectionSource::Ephemeral => drop_stale_ephemeral_input(store, fact_id),
+    }
+}
+
+fn drop_stale_ephemeral_input(store: &Store, fact_id: FactId) -> Result<(), String> {
     store
         .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
         .map_err(|err| format!("purge stale ephemeral projection input: {err}"))?;
     Ok(())
 }
 
-pub(super) fn drop_rejected_ephemeral_input(store: &Store, fact_id: FactId) -> Result<(), String> {
+fn drop_rejected_ephemeral_input(store: &Store, fact_id: FactId) -> Result<(), String> {
     store
         .write_transaction(|tx| delete_ephemeral_fact_in_tx(tx, fact_id))
         .map_err(|err| format!("drop rejected ephemeral projection input: {err}"))?;
     Ok(())
 }
 
-pub(super) fn purge_stale_durable_pending_in_tx(
-    tx: &Store,
-    fact_id: FactId,
-) -> rusqlite::Result<bool> {
-    purge_fact_in_tx(tx, fact_id)
+fn purge_stale_durable_pending(store: &Store, fact_id: FactId) -> Result<(), String> {
+    store
+        .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
+        .map(|_| ())
+        .map_err(|err| format!("purge stale durable pending fact: {err}"))
 }
 
 pub(super) fn load_pending_fact(
@@ -1002,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_queue_revisits_dependent_after_offer_commits() {
+    fn projection_drain_revisits_dependent_after_offer_commits() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1041,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_queue_isolates_a_failed_fact_without_rolling_back_previous_items() {
+    fn projection_drain_isolates_a_failed_fact_without_rolling_back_previous_items() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");
@@ -1081,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_queue_keeps_a_context_inconsistent_fact_as_evidence() {
+    fn projection_drain_keeps_a_context_inconsistent_fact_as_evidence() {
         let store =
             Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
                 .expect("open store");

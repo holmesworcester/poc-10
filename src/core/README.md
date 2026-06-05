@@ -258,13 +258,13 @@ use core syntax and contracts, but core must not import their semantic rules.
   used by queue fanout. It accepts only static comment-free `SELECT` statements
   over declared source tables and bound parameters, keeping dynamic scheduling
   SQL narrow and auditable.
-- `pipeline/projection.rs`: one-item fact projection. It admits facts, turns
-  due time wakes into pending work, loads matched context, resolves already
-  satisfied declared needs, replaces the owner's context/time wakes, and
-  commits projector effects.
-- `pipeline/projection_queue.rs`: pending projection queue drain. It selects
-  durable and ephemeral projection items, applies the one-item projection step,
-  and lets context wakes or emitted child facts re-enter the queue explicitly.
+- `pipeline/pipeline_one.rs`: one queued fact pipeline item. It admits facts,
+  turns due time wakes into pending work, loads matched context, runs staged
+  decode/authenticate/adapt/project routes, replaces the owner's context/time
+  wakes, and commits emitted effects.
+- `pipeline.rs`: pending projection queue drain. It selects durable and
+  ephemeral projection items, applies the one-item pipeline step, and lets
+  context wakes or emitted child facts re-enter the queue explicitly.
 
 ## Example Runtime Graph
 
