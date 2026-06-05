@@ -9,13 +9,10 @@
 //! and independent of fact projection order.
 //!
 //! Ownership boundary. Replay reuses the ordinary projection and dispatch
-//! workers; it adds three things on top: a derived-state wipe that keeps only
-//! the durable inputs (`facts`, `local_fact_admissions`, and the store-local
-//! `clock` observation), a projection-order control used by the reverse and
-//! scrambled diagnostics, and a replay-mode dispatch filter that runs only
-//! handler routes whose `runs_during_replay` flag is set. Live-only intents
-//! emitted during replay are suppressed at the commit boundary; they are never
-//! queued behind the barrier.
+//! workers; it adds three things on top: a store-owned reset of schema-declared
+//! replay tables, projection-order control used by the reverse and scrambled
+//! diagnostics, and replay-mode projection context. Projectors decide how their
+//! facts behave in replay through `ProjectionContext::is_replay()`.
 //!
 //! Invariants. Replay must not perform network IO or run operational wall-clock
 //! decisions. It admits wall-clock context only through the replayable semantic
@@ -24,48 +21,25 @@
 //! the barrier, and replay returns an error instead of a report. Recurring
 //! operational schedules are not installed during replay, so they cannot fire.
 //!
-//! State summary. `state_summary` hashes the replay-relevant protocol state in a
-//! canonical, order-independent way: retained facts, standing context, semantic
-//! time wakes, and every materialized read-model / sync / connection-maintenance
-//! table. It excludes volatile scheduler and socket state — queued intents,
-//! pending-projection markers, temp network queues, the admission log, and the
-//! clock observation — so two replays that reach the same protocol state always
-//! produce the same `state_hash`.
+//! State summary. `state_summary` hashes the store-declared replay summary
+//! tables in a canonical, order-independent way. Core and protocol schema
+//! sources declare which tables are protected, resettable, and summary-visible,
+//! so replay never decides by ad hoc SQLite table enumeration.
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
+use crate::core::network::{INBOUND_TABLE, OUTBOUND_TABLE};
 use crate::core::pipeline::{FactAdmissionFn, HandlerRoute, HandlerSet, PipelineEngine, Projector};
-use crate::core::store::{quoted_identifier_list, quoted_table_name_str, Store, TableName};
-use rusqlite::types::ValueRef;
+use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
+use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
 
 const REPLAY_WORK_LIMIT: usize = 4096;
 const REPLAY_FIXPOINT_ROUNDS: usize = 256;
 
-/// Durable inputs that survive a derived-state wipe.
-///
-/// `facts` and `local_fact_admissions` are the retained source of truth,
-/// including retained local facts. `clock` is the store-local trusted-time
-/// observation replay reads to admit semantic time wakes deterministically.
-const KEEP_TABLES: &[&str] = &["facts", "local_fact_admissions", "clock"];
-
-/// Tables excluded from the state summary because they are volatile scheduler,
-/// socket, admission, or transient projection state rather than protocol state.
-const VOLATILE_TABLES: &[&str] = &[
-    "local_fact_admissions",
-    "clock",
-    "network_out",
-    "network_in",
-    "intents",
-    "local_intents",
-    "pending_projection",
-    "pending_time_ranges",
-    "ephemeral_projection_inputs",
-];
-
 /// Core runtime index tables that are protocol-derived but are not read-model
 /// row mutations; counted separately from materialized rows.
-const RUNTIME_INDEX_TABLES: &[&str] = &["facts", "context_edges", "time_wakes"];
+const RUNTIME_INDEX_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
 
 /// Order in which retained facts are admitted for projection during replay.
 ///
@@ -236,14 +210,14 @@ pub fn run_replay(
     order: ReplayOrder,
 ) -> Result<ReplayReport, String> {
     let mut report = ReplayReport {
-        dropped_durable_intents: table_count(store, "intents")?,
-        dropped_local_intents: table_count(store, "local_intents")?,
+        dropped_durable_intents: table_count(store, INTENTS)?,
+        dropped_local_intents: table_count(store, LOCAL_INTENTS)?,
         ..ReplayReport::default()
     };
     let facts_before = fact_id_set(store)?;
 
     report.wiped_tables = wipe_derived_state(store)?;
-    report.retained_facts = table_count(store, "facts")?;
+    report.retained_facts = table_count(store, FACTS)?;
 
     let drive = ReplayDrive::new(
         store,
@@ -276,12 +250,11 @@ pub fn run_replay(
     report.semantic_time_wakes = counters.time_wake_admissions;
     report.replay_allowed_intents = counters.replay_allowed_intents;
     report.suppressed_live_only_work = counters.suppressed_live_only_work;
-    report.standing_time_wakes = table_count(store, "time_wakes")?;
-    report.context_edges = table_count(store, "context_edges")?;
+    report.standing_time_wakes = table_count(store, TIME_WAKES)?;
+    report.context_edges = table_count(store, CONTEXT_EDGES)?;
     report.row_mutations = materialized_row_count(store)?;
-    let remaining_queued_work =
-        table_count(store, "intents")? + table_count(store, "local_intents")?;
-    report.network_rows = table_count(store, "network_out")? + table_count(store, "network_in")?;
+    let remaining_queued_work = table_count(store, INTENTS)? + table_count(store, LOCAL_INTENTS)?;
+    report.network_rows = table_count(store, OUTBOUND_TABLE)? + table_count(store, INBOUND_TABLE)?;
 
     if remaining_queued_work > 0 {
         return Err(format!(
@@ -302,12 +275,11 @@ pub fn run_replay(
 /// Compute the canonical state digest for the current store.
 pub fn state_summary(store: &Store) -> Result<StateSummary, String> {
     let mut areas = Vec::new();
-    for table in summary_tables(store)? {
-        let (hash, count) = hash_table(store, &table)?;
+    for summary in store.replay_summary_table_hashes()? {
         areas.push(AreaSummary {
-            area: table,
-            hash,
-            count,
+            area: summary.table,
+            hash: summary.hash,
+            count: summary.count,
         });
     }
     areas.sort_by(|left, right| left.area.cmp(&right.area));
@@ -432,26 +404,9 @@ impl<'a> ReplayDrive<'a> {
     }
 }
 
-/// Wipe every derived table, keeping only the durable input tables.
-///
-/// Enumerating tables rather than naming a fixed list means a newly declared
-/// derived table is wiped automatically; only the explicit keep-list survives.
+/// Wipe every schema-declared replay-resettable table.
 fn wipe_derived_state(store: &Store) -> Result<usize, String> {
-    let tables = all_table_names(store)?;
-    store
-        .write_transaction(|tx| {
-            let mut wiped = 0usize;
-            for table in &tables {
-                if KEEP_TABLES.contains(&table.as_str()) {
-                    continue;
-                }
-                let quoted = quoted_table_name_str(table)?;
-                tx.conn().execute(&format!("DELETE FROM {quoted}"), [])?;
-                wiped += 1;
-            }
-            Ok(wiped)
-        })
-        .map_err(|err| format!("wipe derived state: {err}"))
+    store.clear_replay_reset_tables()
 }
 
 /// Compute the fact admission order for the requested replay order.
@@ -519,136 +474,20 @@ fn fact_id_from_bytes(bytes: Vec<u8>) -> Result<FactId, String> {
         .map_err(|_| "fact id column is not 32 bytes".to_string())
 }
 
-/// Enumerate every durable and temp table, excluding SQLite internal tables.
-fn all_table_names(store: &Store) -> Result<Vec<String>, String> {
-    let mut stmt = store
-        .conn()
-        .prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             UNION
-             SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
-        )
-        .map_err(|err| format!("enumerate tables: {err}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|err| format!("enumerate tables: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("enumerate tables: {err}"))
-}
-
-/// State-summary areas: every table that holds protocol state.
-fn summary_tables(store: &Store) -> Result<Vec<String>, String> {
-    Ok(all_table_names(store)?
-        .into_iter()
-        .filter(|name| !VOLATILE_TABLES.contains(&name.as_str()))
-        .collect())
-}
-
 /// Total materialized read-model / sync / connection rows after replay.
 fn materialized_row_count(store: &Store) -> Result<usize, String> {
     let mut total = 0;
-    for table in all_table_names(store)? {
-        if VOLATILE_TABLES.contains(&table.as_str())
-            || RUNTIME_INDEX_TABLES.contains(&table.as_str())
-        {
+    for table in store.replay_summary_tables() {
+        if RUNTIME_INDEX_TABLES.contains(table) {
             continue;
         }
-        total += table_count(store, &table)?;
+        total += table_count(store, *table)?;
     }
     Ok(total)
 }
 
-fn table_count(store: &Store, table: &str) -> Result<usize, String> {
-    let quoted = quoted_table_name_str(table).map_err(|err| err.to_string())?;
+fn table_count(store: &Store, table: TableName) -> Result<usize, String> {
     store
-        .conn()
-        .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map(|count| count as usize)
-        .map_err(|err| format!("count {table}: {err}"))
-}
-
-/// Hash one table's rows canonically, independent of insertion order.
-///
-/// Rows are ordered by every column so the digest depends only on content, and
-/// each cell is serialized with a type tag so distinct SQLite types never alias.
-fn hash_table(store: &Store, table: &str) -> Result<([u8; 32], usize), String> {
-    let quoted = quoted_table_name_str(table).map_err(|err| err.to_string())?;
-    let columns = table_columns(store, &quoted)?;
-    let column_list = quoted_identifier_list(&columns).map_err(|err| err.to_string())?;
-    let order_list = column_list.clone();
-    // An empty column list cannot happen for our tables, but guard the SQL.
-    if columns.is_empty() {
-        return Err(format!("table {table} has no columns to hash"));
-    }
-
-    let mut stmt = store
-        .conn()
-        .prepare(&format!(
-            "SELECT {column_list} FROM {quoted} ORDER BY {order_list}"
-        ))
-        .map_err(|err| format!("prepare hash scan for {table}: {err}"))?;
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"topo:replay-area:v1");
-    hasher.update(&(table.len() as u64).to_le_bytes());
-    hasher.update(table.as_bytes());
-    for column in &columns {
-        hasher.update(&(column.len() as u64).to_le_bytes());
-        hasher.update(column.as_bytes());
-    }
-
-    let column_count = columns.len();
-    let mut count = 0usize;
-    let mut rows = stmt
-        .query([])
-        .map_err(|err| format!("scan {table}: {err}"))?;
-    while let Some(row) = rows.next().map_err(|err| format!("scan {table}: {err}"))? {
-        for index in 0..column_count {
-            let value = row
-                .get_ref(index)
-                .map_err(|err| format!("read {table} cell: {err}"))?;
-            hash_cell(&mut hasher, value);
-        }
-        count += 1;
-    }
-    Ok((*hasher.finalize().as_bytes(), count))
-}
-
-fn hash_cell(hasher: &mut blake3::Hasher, value: ValueRef<'_>) {
-    match value {
-        ValueRef::Null => hasher.update(&[0u8]),
-        ValueRef::Integer(int) => {
-            hasher.update(&[1u8]);
-            hasher.update(&int.to_le_bytes())
-        }
-        ValueRef::Real(real) => {
-            hasher.update(&[2u8]);
-            hasher.update(&real.to_bits().to_le_bytes())
-        }
-        ValueRef::Text(text) => {
-            hasher.update(&[3u8]);
-            hasher.update(&(text.len() as u64).to_le_bytes());
-            hasher.update(text)
-        }
-        ValueRef::Blob(blob) => {
-            hasher.update(&[4u8]);
-            hasher.update(&(blob.len() as u64).to_le_bytes());
-            hasher.update(blob)
-        }
-    };
-}
-
-fn table_columns(store: &Store, quoted_table: &str) -> Result<Vec<String>, String> {
-    let mut stmt = store
-        .conn()
-        .prepare(&format!("PRAGMA table_info({quoted_table})"))
-        .map_err(|err| format!("read columns: {err}"))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|err| format!("read columns: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("read columns: {err}"))
+        .table_row_count(table)
+        .map_err(|err| format!("count {}: {err}", table.as_str()))
 }

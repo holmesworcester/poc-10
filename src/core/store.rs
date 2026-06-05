@@ -26,11 +26,12 @@
 //! matching, intent dispatch, and protocol validation.
 //!
 //! The only dynamic SQL in this file is table-name interpolation for row
-//! operations. Values are always bound parameters, and table names are accepted
-//! only from `TableName` after a conservative identifier check.
+//! operations, replay reset, and state-summary hashing. Values are always bound
+//! parameters, and table names are accepted only from `TableName` after a
+//! conservative identifier check.
 
 use crate::core::row_schema::RowTableSchema;
-use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
+use rusqlite::{params, types::ValueRef, Connection as SqliteConnection, OptionalExtension};
 use std::path::Path;
 use std::time::Duration;
 
@@ -54,6 +55,30 @@ impl TableName {
     }
 }
 
+/// Replay lifecycle declarations for tables created by one schema source.
+///
+/// `protected` tables are durable input state and are never cleared by replay.
+/// `reset` tables are derived, queued, or process-local state that replay can
+/// clear before rebuilding. `summary` tables are hashed by replay-check.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayTables {
+    /// Durable input tables that replay reset must not clear.
+    pub protected: &'static [TableName],
+    /// Tables cleared by replay reset.
+    pub reset: &'static [TableName],
+    /// Tables included in replay-check state summaries.
+    pub summary: &'static [TableName],
+}
+
+impl ReplayTables {
+    /// Empty replay lifecycle declarations for tests and non-replay schemas.
+    pub const EMPTY: Self = Self {
+        protected: &[],
+        reset: &[],
+        summary: &[],
+    };
+}
+
 /// One executable schema batch plus the opaque row tables it declares.
 ///
 /// Typed tables live entirely in `ddl`. The `row_tables` list is only the
@@ -69,6 +94,9 @@ pub struct SchemaSource {
     /// helpers. These are the migration target for handwritten `rows.rs`
     /// modules; store still persists them through the same key/value boundary.
     pub row_schemas: &'static [RowTableSchema],
+    /// Replay reset and summary lifecycle declarations for this source's
+    /// tables.
+    pub replay: ReplayTables,
 }
 
 /// Quote a declared table name after rejecting unsafe identifier bytes.
@@ -138,6 +166,52 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     Some(upper)
 }
 
+fn unique_table_names<'a>(tables: impl IntoIterator<Item = &'a TableName>) -> Vec<TableName> {
+    let mut unique = Vec::new();
+    for table in tables {
+        if !unique.contains(table) {
+            unique.push(*table);
+        }
+    }
+    unique
+}
+
+fn validate_replay_lifecycle(protected: &[TableName], reset: &[TableName]) -> rusqlite::Result<()> {
+    for table in reset {
+        if protected.contains(table) {
+            return Err(store_error(format!(
+                "table {} cannot be both replay-protected and replay-resettable",
+                table.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn hash_cell(hasher: &mut blake3::Hasher, value: ValueRef<'_>) {
+    match value {
+        ValueRef::Null => hasher.update(&[0u8]),
+        ValueRef::Integer(int) => {
+            hasher.update(&[1u8]);
+            hasher.update(&int.to_le_bytes())
+        }
+        ValueRef::Real(real) => {
+            hasher.update(&[2u8]);
+            hasher.update(&real.to_bits().to_le_bytes())
+        }
+        ValueRef::Text(text) => {
+            hasher.update(&[3u8]);
+            hasher.update(&(text.len() as u64).to_le_bytes());
+            hasher.update(text)
+        }
+        ValueRef::Blob(blob) => {
+            hasher.update(&[4u8]);
+            hasher.update(&(blob.len() as u64).to_le_bytes());
+            hasher.update(blob)
+        }
+    };
+}
+
 /// The only durable substrate core offers protocol code.
 ///
 /// Durable and memory tables are both ordinary SQLite tables on this one
@@ -147,6 +221,20 @@ pub struct Store {
     conn: SqliteConnection,
     row_tables: Vec<TableName>,
     row_schemas: Vec<RowTableSchema>,
+    replay_protected_tables: Vec<TableName>,
+    replay_reset_tables: Vec<TableName>,
+    replay_summary_tables: Vec<TableName>,
+}
+
+/// Canonical digest of one declared table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSummary {
+    /// Table name owning this area.
+    pub table: String,
+    /// Canonical hash of the table's rows.
+    pub hash: [u8; 32],
+    /// Row count in the table.
+    pub count: usize,
 }
 
 impl Store {
@@ -194,7 +282,21 @@ impl Store {
             .iter()
             .flat_map(|source| source.row_schemas.iter().copied())
             .collect();
-        let store = Self::from_connection_parts(conn, row_tables, row_schemas)?;
+        let replay_protected_tables =
+            unique_table_names(sources.iter().flat_map(|source| source.replay.protected));
+        let replay_reset_tables =
+            unique_table_names(sources.iter().flat_map(|source| source.replay.reset));
+        let replay_summary_tables =
+            unique_table_names(sources.iter().flat_map(|source| source.replay.summary));
+        validate_replay_lifecycle(&replay_protected_tables, &replay_reset_tables)?;
+        let store = Self::from_connection_parts(
+            conn,
+            row_tables,
+            row_schemas,
+            replay_protected_tables,
+            replay_reset_tables,
+            replay_summary_tables,
+        )?;
         for source in sources {
             store.conn.execute_batch(source.ddl)?;
         }
@@ -205,6 +307,9 @@ impl Store {
         conn: SqliteConnection,
         row_tables: Vec<TableName>,
         row_schemas: Vec<RowTableSchema>,
+        replay_protected_tables: Vec<TableName>,
+        replay_reset_tables: Vec<TableName>,
+        replay_summary_tables: Vec<TableName>,
     ) -> rusqlite::Result<Self> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
@@ -215,12 +320,57 @@ impl Store {
             conn,
             row_tables,
             row_schemas,
+            replay_protected_tables,
+            replay_reset_tables,
+            replay_summary_tables,
         })
     }
 
     /// Schema-backed opaque row declarations registered for this store.
     pub fn row_schemas(&self) -> &[RowTableSchema] {
         &self.row_schemas
+    }
+
+    /// Tables protected from replay reset.
+    pub fn replay_protected_tables(&self) -> &[TableName] {
+        &self.replay_protected_tables
+    }
+
+    /// Tables replay reset is allowed to clear.
+    pub fn replay_reset_tables(&self) -> &[TableName] {
+        &self.replay_reset_tables
+    }
+
+    /// Tables replay-check hashes as protocol/runtime state.
+    pub fn replay_summary_tables(&self) -> &[TableName] {
+        &self.replay_summary_tables
+    }
+
+    /// Clear every schema-declared replay-resettable table.
+    ///
+    /// Replay callers do not provide a keep-list. Protected tables are excluded
+    /// by construction when the store opens, so immutable fact storage cannot be
+    /// cleared by a replay bug in a caller.
+    pub fn clear_replay_reset_tables(&self) -> Result<usize, String> {
+        self.write_transaction(|tx| {
+            let mut cleared = 0usize;
+            for table in &self.replay_reset_tables {
+                let quoted = quoted_table_name(*table)?;
+                tx.conn.execute(&format!("DELETE FROM {quoted}"), [])?;
+                cleared += 1;
+            }
+            Ok(cleared)
+        })
+        .map_err(|err| format!("clear replay reset tables: {err}"))
+    }
+
+    /// Hash every schema-declared replay-summary table.
+    pub fn replay_summary_table_hashes(&self) -> Result<Vec<TableSummary>, String> {
+        let mut summaries = Vec::with_capacity(self.replay_summary_tables.len());
+        for table in &self.replay_summary_tables {
+            summaries.push(self.hash_table(*table)?);
+        }
+        Ok(summaries)
     }
 
     /// Write a standalone, consistent copy of this store to `path`.
@@ -370,6 +520,71 @@ impl Store {
             .map(|count| count as usize)
     }
 
+    /// Hash one table's rows canonically, independent of insertion order.
+    ///
+    /// Rows are ordered by every column so the digest depends only on content,
+    /// and each cell is serialized with a type tag so distinct SQLite types
+    /// never alias.
+    fn hash_table(&self, table: TableName) -> Result<TableSummary, String> {
+        let quoted = quoted_table_name(table).map_err(|err| err.to_string())?;
+        let columns = self.table_columns(&quoted)?;
+        if columns.is_empty() {
+            return Err(format!("table {} has no columns to hash", table.as_str()));
+        }
+        let column_list = quoted_identifier_list(&columns).map_err(|err| err.to_string())?;
+
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {column_list} FROM {quoted} ORDER BY {column_list}"
+            ))
+            .map_err(|err| format!("prepare hash scan for {}: {err}", table.as_str()))?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"topo:store-table-summary:v1");
+        hasher.update(&(table.as_str().len() as u64).to_le_bytes());
+        hasher.update(table.as_str().as_bytes());
+        for column in &columns {
+            hasher.update(&(column.len() as u64).to_le_bytes());
+            hasher.update(column.as_bytes());
+        }
+
+        let column_count = columns.len();
+        let mut count = 0usize;
+        let mut rows = stmt
+            .query([])
+            .map_err(|err| format!("scan {}: {err}", table.as_str()))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|err| format!("scan {}: {err}", table.as_str()))?
+        {
+            for index in 0..column_count {
+                let value = row
+                    .get_ref(index)
+                    .map_err(|err| format!("read {} cell: {err}", table.as_str()))?;
+                hash_cell(&mut hasher, value);
+            }
+            count += 1;
+        }
+        Ok(TableSummary {
+            table: table.as_str().to_string(),
+            hash: *hasher.finalize().as_bytes(),
+            count,
+        })
+    }
+
+    fn table_columns(&self, quoted_table: &str) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({quoted_table})"))
+            .map_err(|err| format!("read columns: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|err| format!("read columns: {err}"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|err| format!("read columns: {err}"))
+    }
+
     /// Scan one declared table in key order.
     pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let table_name = self.row_table_name(table)?;
@@ -441,6 +656,7 @@ CREATE TABLE IF NOT EXISTS "test.rows" (
 "#,
         row_tables: &[TEST_ROWS],
         row_schemas: &[],
+        replay: ReplayTables::EMPTY,
     };
 
     const MEMORY_ROWS_SCHEMA: SchemaSource = SchemaSource {
@@ -452,6 +668,7 @@ CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
 "#,
         row_tables: &[MEMORY_ROWS],
         row_schemas: &[],
+        replay: ReplayTables::EMPTY,
     };
 
     #[test]

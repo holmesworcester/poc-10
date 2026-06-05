@@ -74,7 +74,8 @@ Protocol code enters core through declarations and effect values:
 - `effects::PipelineEffects` is the shared language for facts to admit,
   ephemeral facts, purges, row mutations, durable intents, and local intents.
 - `store::SchemaSource` lets core, network IO, and protocol registry code
-  declare their own SQL DDL and opaque row-table allowlists.
+  declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
+  protected, resettable, and state-summary tables.
 
 Data leaves core through the same narrow surfaces: commands receive
 `CliOutput`, protocol queries read schema-owned rows through `Store`, daemon

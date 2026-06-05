@@ -4,13 +4,15 @@ use rusqlite::{params, Connection};
 use topo::core::crypto;
 use topo::core::row_schema::{RowField, RowTableSchema, RowValue};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::{SchemaSource, Store, TableName, TableRow};
+use topo::core::store::{ReplayTables, SchemaSource, Store, TableName, TableRow};
 use topo::protocol::content::{file, reaction};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 const TYPED_MESSAGES: TableName = TableName::new("typed_messages");
 const TEST_ROWS: TableName = TableName::new("test_rows");
 const SCHEMA_BACKED_ROWS: TableName = TableName::new("schema_backed_rows");
+const REPLAY_PROTECTED_ROWS: TableName = TableName::new("replay_protected_rows");
+const REPLAY_RESET_ROWS: TableName = TableName::new("replay_reset_rows");
 
 const SCHEMA_BACKED_KEY: &[RowField] = &[RowField::bytes32("owner")];
 const SCHEMA_BACKED_VALUE: &[RowField] = &[
@@ -34,6 +36,7 @@ CREATE INDEX IF NOT EXISTS typed_messages_by_workspace_created
 "#,
     row_tables: &[],
     row_schemas: &[],
+    replay: ReplayTables::EMPTY,
 };
 
 const TEST_ROWS_SCHEMA: SchemaSource = SchemaSource {
@@ -45,6 +48,7 @@ CREATE TABLE IF NOT EXISTS test_rows (
 "#,
     row_tables: &[TEST_ROWS],
     row_schemas: &[],
+    replay: ReplayTables::EMPTY,
 };
 
 const SCHEMA_BACKED_ROWS_SCHEMA: SchemaSource = SchemaSource {
@@ -56,6 +60,27 @@ CREATE TABLE IF NOT EXISTS schema_backed_rows (
 "#,
     row_tables: &[],
     row_schemas: &[SCHEMA_BACKED_ROW_SCHEMA],
+    replay: ReplayTables::EMPTY,
+};
+
+const REPLAY_LIFECYCLE_SCHEMA: SchemaSource = SchemaSource {
+    ddl: r#"
+CREATE TABLE IF NOT EXISTS replay_protected_rows (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replay_reset_rows (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+"#,
+    row_tables: &[REPLAY_PROTECTED_ROWS, REPLAY_RESET_ROWS],
+    row_schemas: &[],
+    replay: ReplayTables {
+        protected: &[REPLAY_PROTECTED_ROWS],
+        reset: &[REPLAY_RESET_ROWS],
+        summary: &[REPLAY_PROTECTED_ROWS, REPLAY_RESET_ROWS],
+    },
 };
 
 fn checked_schema_sources() -> [SchemaSource; 2] {
@@ -352,6 +377,95 @@ fn content_read_model_rows_materialize_into_typed_tables() {
 }
 
 #[test]
+fn replay_lifecycle_reset_preserves_protected_tables() {
+    let store = Store::open_memory_with_schema_sources(&[REPLAY_LIFECYCLE_SCHEMA])
+        .expect("open lifecycle store");
+    store
+        .insert_table_rows(vec![
+            TableRow {
+                table: REPLAY_PROTECTED_ROWS,
+                key: b"protected".to_vec(),
+                value: b"kept".to_vec(),
+            },
+            TableRow {
+                table: REPLAY_RESET_ROWS,
+                key: b"derived".to_vec(),
+                value: b"cleared".to_vec(),
+            },
+        ])
+        .expect("seed lifecycle rows");
+
+    assert_eq!(
+        store
+            .clear_replay_reset_tables()
+            .expect("clear replay reset"),
+        1
+    );
+    assert_eq!(
+        store
+            .table_row(REPLAY_PROTECTED_ROWS, b"protected")
+            .expect("read protected row"),
+        Some(b"kept".to_vec())
+    );
+    assert_eq!(
+        store
+            .table_row(REPLAY_RESET_ROWS, b"derived")
+            .expect("read reset row"),
+        None
+    );
+
+    let summaries = store
+        .replay_summary_table_hashes()
+        .expect("hash replay summary tables");
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.table == REPLAY_PROTECTED_ROWS.as_str())
+            .expect("protected summary")
+            .count,
+        1
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.table == REPLAY_RESET_ROWS.as_str())
+            .expect("reset summary")
+            .count,
+        0
+    );
+}
+
+#[test]
+fn replay_lifecycle_rejects_protected_reset_overlap() {
+    const BAD_SCHEMA: SchemaSource = SchemaSource {
+        ddl: r#"
+CREATE TABLE IF NOT EXISTS replay_protected_rows (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
+"#,
+        row_tables: &[REPLAY_PROTECTED_ROWS],
+        row_schemas: &[],
+        replay: ReplayTables {
+            protected: &[REPLAY_PROTECTED_ROWS],
+            reset: &[REPLAY_PROTECTED_ROWS],
+            summary: &[],
+        },
+    };
+
+    let err = match Store::open_memory_with_schema_sources(&[BAD_SCHEMA]) {
+        Ok(_) => panic!("overlapping replay lifecycle declarations must reject"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("cannot be both replay-protected and replay-resettable"),
+        "{err}"
+    );
+}
+
+#[test]
 fn typed_tables_reject_opaque_row_helpers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("typed-row-store.db");
@@ -380,9 +494,10 @@ CREATE TABLE IF NOT EXISTS legacy_key_value_shape (
     row_key BLOB PRIMARY KEY NOT NULL,
     row_value BLOB NOT NULL
 );
-"#,
+        "#,
         row_tables: &[],
         row_schemas: &[],
+        replay: ReplayTables::EMPTY,
     };
 
     let store = Store::open_disk_with_schema_sources(&path, &[key_value_shape])

@@ -298,10 +298,11 @@ impl Runtime {
 
     /// Run the replay entry point against this runtime's store.
     ///
-    /// Replay drops queued intents, wipes derived state, and reprojects retained
-    /// facts to a fixpoint using only replay-allowed handler routes. The caller
-    /// supplies the replayable semantic time-wake timelines; replay must not run
-    /// network IO, recurring schedules, or operational wall-clock decisions.
+    /// Replay drops queued intents, clears schema-declared replay-resettable
+    /// state, and reprojects retained facts to a fixpoint using only
+    /// replay-allowed handler routes. The caller supplies the replayable
+    /// semantic time-wake timelines; replay must not run network IO, recurring
+    /// schedules, or operational wall-clock decisions.
     pub fn replay(
         &mut self,
         replay_time_wakes: &[crate::core::daemon::DaemonTimeWake],

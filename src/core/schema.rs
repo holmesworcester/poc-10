@@ -23,7 +23,43 @@
 //! in a protocol module when it stores protocol meaning, even if core commits
 //! the row mutation.
 
-use crate::core::store::{SchemaSource, TableName};
+use crate::core::store::{ReplayTables, SchemaSource, TableName};
+
+/// Content-addressed durable fact byte table.
+pub(crate) const FACTS: TableName = TableName::new("facts");
+/// Local admission metadata table for content-addressed fact bytes.
+pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
+/// Standing context edge table.
+pub(crate) const CONTEXT_EDGES: TableName = TableName::new("context_edges");
+/// Semantic time wake table.
+pub(crate) const TIME_WAKES: TableName = TableName::new("time_wakes");
+/// Pending projection queue table.
+pub(crate) const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
+/// Pending projection time-context table.
+pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_ranges");
+/// Durable intent queue table.
+pub(crate) const INTENTS: TableName = TableName::new("intents");
+/// Ephemeral intent queue table.
+pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
+/// Ephemeral projectable-input queue table.
+pub(crate) const EPHEMERAL_PROJECTION_INPUTS: TableName =
+    TableName::new("ephemeral_projection_inputs");
+/// Store-local trusted clock observation table.
+pub(crate) const CLOCK: TableName = TableName::new("clock");
+
+const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS, CLOCK];
+
+const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
+    CONTEXT_EDGES,
+    TIME_WAKES,
+    PENDING_PROJECTION,
+    PENDING_TIME_RANGES,
+    INTENTS,
+    LOCAL_INTENTS,
+    EPHEMERAL_PROJECTION_INPUTS,
+];
+
+const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
 
 /// The core SQLite schema source applied to every runtime store.
 ///
@@ -123,18 +159,9 @@ CREATE TABLE IF NOT EXISTS clock (
 "#,
     row_tables: &[],
     row_schemas: &[],
+    replay: ReplayTables {
+        protected: CORE_REPLAY_PROTECTED_TABLES,
+        reset: CORE_REPLAY_RESET_TABLES,
+        summary: CORE_REPLAY_SUMMARY_TABLES,
+    },
 };
-
-/// Local admission metadata table for content-addressed fact bytes.
-pub(crate) const LOCAL_FACT_ADMISSIONS: TableName = TableName::new("local_fact_admissions");
-/// Standing context edge table.
-pub(crate) const CONTEXT_EDGES: TableName = TableName::new("context_edges");
-/// Pending projection queue table.
-pub(crate) const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
-/// Durable intent queue table.
-pub(crate) const INTENTS: TableName = TableName::new("intents");
-/// Ephemeral intent queue table.
-pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
-/// Ephemeral projectable-input queue table.
-pub(crate) const EPHEMERAL_PROJECTION_INPUTS: TableName =
-    TableName::new("ephemeral_projection_inputs");

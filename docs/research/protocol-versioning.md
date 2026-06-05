@@ -3030,7 +3030,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 
 ### REPLAY-01 — Wipe+replay rebuilds all read-model rows from retained facts only `replay-cli`
 - **Setup:** Single `con` node, protocol ceiling covers `content:1` (message tag 50). Create a workspace, send N messages, react, send a file (`content::file` 54 + `content::file_slice` 55). Capture `con state-summary` -> baseline `state_hash` H0 and per-area counts (CONTENT_MESSAGES, CONTENT_REACTIONS, CONTENT_FILES, FILE_SLICES).
-- **Action:** Run `con replay` (canonical pass: drops queued intents, wipes derived state — read-model rows, sync indexes, context edges, time_wakes, pending projection rows, ephemeral projection inputs, temp network queues — marks all retained facts pending, drains fact projection to fixpoint).
+- **Action:** Run `con replay` (canonical pass: drops queued intents, clears schema-declared replay-resettable state — read-model rows, sync indexes, context edges, time_wakes, pending projection rows, ephemeral projection inputs, intent queues, temp network queues — marks all retained facts pending, drains fact projection to fixpoint). Retained fact storage and local admissions are schema-protected inputs, not replay's keep-list.
 - **Expect:** `con state-summary` after replay returns the SAME `state_hash` H0 and identical per-area counts; every read-model row is reconstructed solely from retained facts (no queued intent contributed). Replay counters report `dropped_intents>=0`, `projected_facts == retained fact count`, `blocked network/live-only work == 0`.
 - **Defends:** Invariant (4) — wipe+replay rebuilds derived state from retained facts.
 - **Refs:** `con replay`/`state-summary`; `core::replay` entry point; read_models OPENED_MESSAGES/CONTENT_MESSAGES/CONTENT_REACTIONS/CONTENT_FILES/FILE_SLICES.
@@ -3227,7 +3227,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 ### REPLAY-29 — recurring-intents/intent-registry expose maintain_connections as live-only (no durable replay state) `guardrail`
 - **Setup:** Node with retained connection/endpoint facts. Recurring operational work (`maintain_connections`, presence refresh, sync polling, bootstrap retry) is registry metadata, not durable rows.
 - **Action:** Run `con recurring-intents` and `con intent-registry`; then `con replay` and re-inspect.
-- **Expect:** `recurring-intents` lists `maintain_connections` from STATIC registry metadata (no persisted job rows); `intent-registry` shows recurrence/network-IO flags; `con replay` does NOT fire any recurring intent (they do not fire until replay completes and the daemon runs normally) and does not wipe/replay any persisted recurring-job row (there are none). `state-summary` excludes volatile scheduler state.
+- **Expect:** `recurring-intents` lists `maintain_connections` from STATIC registry metadata (no persisted job rows); `intent-registry` shows recurrence/network-IO flags; `con replay` does NOT fire any recurring intent (they do not fire until replay completes and the daemon runs normally) and does not wipe/replay any persisted recurring-job row (there are none). `state-summary` excludes volatile scheduler state because no schema source marks scheduler state summary-visible.
 - **Defends:** Invariant (4) barrier — recurring operational work is not durable replay state; doc Recurring-intent test.
 - **Refs:** planned `con recurring-intents`/`con intent-registry`; doc Recurring Intents section (`RecurringIntentSpec`, no persisted rows); HandlerRoute recurrence metadata.
 

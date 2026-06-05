@@ -31,7 +31,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use crate::core::store::{SchemaSource, Store, TableName, TableRow};
+use crate::core::store::{ReplayTables, SchemaSource, Store, TableName, TableRow};
 
 /// Ephemeral outbound network queue table.
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
@@ -59,6 +59,11 @@ CREATE TEMP TABLE IF NOT EXISTS network_in (
 "#,
     row_tables: &[OUTBOUND_TABLE, INBOUND_TABLE],
     row_schemas: &[],
+    replay: ReplayTables {
+        protected: &[],
+        reset: &[OUTBOUND_TABLE, INBOUND_TABLE],
+        summary: &[],
+    },
 };
 
 /// Destination for opaque outbound frame bytes.

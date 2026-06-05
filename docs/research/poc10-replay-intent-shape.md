@@ -8,7 +8,9 @@ retained facts, and resume operational work without preserving queued intents.
 ## Target Invariants
 
 - Retained facts, including retained local facts, are the durable source of
-  truth. Queued intents are not protocol truth.
+  truth. Core schema marks fact storage and local admission metadata as
+  replay-protected, so replay reset cannot delete them. Queued intents are not
+  protocol truth.
 - Every poc-10 queued intent is droppable on upgrade. After replay, required
   work is recreated from retained facts, replay-mode projection, context, or
   normal live runtime scheduling.
@@ -20,6 +22,9 @@ retained facts, and resume operational work without preserving queued intents.
 - Core owns replay scheduling. During replay, core queues retained facts in
   replay mode and may suppress or defer emitted intents according to
   intent-registry metadata.
+- Store and schema declarations own table lifecycle. Core and protocol schema
+  sources declare protected input tables, resettable derived/queue tables, and
+  state-summary tables; replay does not discover a keep-list from SQLite.
 - All durable wall-clock `TimeWake` behavior must be replayable. If a
   wall-clock action is operational and not replayable, it must be a recurring
   intent instead.
@@ -35,11 +40,12 @@ Add an explicit replay entry point to core runtime:
 
 1. Stop handler dispatch and network activity.
 2. Drop durable and local queued intents.
-3. Wipe derived state: read-model rows, sync indexes, context edges,
-   `time_wakes`, pending projection rows, pending time ranges, ephemeral
-   projection inputs, and temp network queues. Keep retained facts, local fact
-   admissions, clock/trusted-time observations, and local facts not covered by
-   retained purge or retirement facts.
+3. Clear schema-declared replay-resettable state: read-model rows, sync
+   indexes, context edges, `time_wakes`, pending projection rows, pending time
+   ranges, ephemeral projection inputs, intent queues, and temp network queues.
+   Protected inputs such as retained facts, local fact admissions,
+   clock/trusted-time observations, and local facts not covered by retained
+   purge or retirement facts are outside the resettable table set.
 4. Mark all retained facts pending for projection in replay mode.
 5. Drain fact projection; projectors decide from replay context whether to
    rebuild durable state or no-op live session/negotiation state.
@@ -210,13 +216,14 @@ an actual upgrade:
   match wakeups, semantic time wakes, replay-allowed intents, emitted facts,
   purged facts, row mutations, and blocked network/live-only work.
 - `state-summary`: print a stable hashable summary of replay-relevant state:
-  retained facts, materialized rows, context edges, semantic time wakes,
-  replay-allowed queues, sync indexes, local key-material rows,
-  connection-maintenance rows, and side-effect counters. The output should
-  include one overall `state_hash` plus per-area hashes and counts, computed
-  from canonical row serialization with deterministic ordering. It must exclude
-  volatile scheduler state, socket state, temp network queues, and wall-clock
-  timestamps that are not protocol state.
+  retained facts, materialized rows, context edges, semantic time wakes, sync
+  indexes, local key-material rows, and connection-maintenance rows. The output
+  should include one overall `state_hash` plus per-area hashes and counts for
+  schema-declared summary tables, computed from canonical row serialization
+  with deterministic ordering. Volatile scheduler state, socket state, temp
+  network queues, and wall-clock timestamps that are not protocol state stay
+  out of the summary because their schema sources do not mark them
+  summary-visible.
 - `replay-check`: copy the database to scratch snapshots, run canonical replay,
   an idempotent replay, `replay --reverse`, and several
   `replay --scramble --seed N` passes, then compare the same state summary

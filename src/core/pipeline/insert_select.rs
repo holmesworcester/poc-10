@@ -167,7 +167,7 @@ fn sql_identifier_tokens(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::SchemaSource;
+    use crate::core::store::{ReplayTables, SchemaSource};
 
     const SOURCE_TABLE: TableName = TableName::new("source_rows");
     const TARGET_TABLE: TableName = TableName::new("target_queue");
@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS target_values (
 "#,
         row_tables: &[],
         row_schemas: &[],
+        replay: ReplayTables::EMPTY,
     };
 
     fn open_store() -> Store {

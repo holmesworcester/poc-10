@@ -27,7 +27,7 @@ use crate::core::pipeline::{
     authenticate_authored, FactRoute, HandlerRoute, ProjectionContext, ProjectionOutput, Projector,
     RecurringIntentSpec, RouterProjector,
 };
-use crate::core::store::{SchemaSource, TableName};
+use crate::core::store::{ReplayTables, SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
 
@@ -423,6 +423,43 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
     }
 }
 
+const FACT_REPLAY_TABLES: &[TableName] = &[
+    read_models::OPENED_MESSAGE_ROWS,
+    read_models::MESSAGE_TOMBSTONE_ROWS,
+    read_models::FILE_SLICE_ROWS,
+    auth::workspace::WORKSPACE_ROWS,
+    auth::key_wrap::KEY_WRAP_ROWS,
+    auth::user::USER_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
+    auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
+    auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
+    auth::admin::ADMIN_ROWS,
+    read_models::CONTENT_MESSAGE_ROWS,
+    read_models::REACTION_ROWS,
+    read_models::FILE_ROWS,
+    connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
+    connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
+    connection::request::CONNECTION_REQUEST_ROWS,
+    connection::connection::CONNECTION_ROWS,
+    auth::invite_accepted::INVITE_ACCEPTED_ROWS,
+    auth::invite_server::INVITE_SERVER_ROWS,
+    auth::user_invite::USER_INVITE_ROWS,
+    auth::device_invite::DEVICE_INVITE_ROWS,
+    auth::invite::INVITE_SECRET_ROWS,
+    sync::compare::SYNC_COMPARE_ROWS,
+    sync::have_id::SYNC_HAVE_ID_ROWS,
+    sync::need_id::SYNC_NEED_ID_ROWS,
+    sync::shared_fact::index::SHAREABLE_FACT_ROWS,
+    sync::shared_fact::index::NEGENTROPY_LEAF_ROWS,
+    sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
+    sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
+    read_models::MESSAGE_DELETION_ROWS,
+    read_models::FILE_DELETION_ROWS,
+    content::retention_policy::RETENTION_POLICY_ROWS,
+];
+
 pub const FACTS_SCHEMA_SOURCE: SchemaSource = SchemaSource {
     ddl: r#"
 CREATE TABLE IF NOT EXISTS opened_message_rows (
@@ -606,6 +643,11 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::need_id::SYNC_NEED_ID_ROW_SCHEMA,
         content::retention_policy::RETENTION_POLICY_ROW_SCHEMA,
     ],
+    replay: ReplayTables {
+        protected: &[],
+        reset: FACT_REPLAY_TABLES,
+        summary: FACT_REPLAY_TABLES,
+    },
 };
 
 // Every CLI command's host function must live in `protocol::cli`. This macro
