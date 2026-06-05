@@ -67,7 +67,6 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
         ScopeDocs {
             scope: "sync",
             fact_modules: &[
-                "cascade_test_fact",
                 "compare",
                 "have_id",
                 "need_id",

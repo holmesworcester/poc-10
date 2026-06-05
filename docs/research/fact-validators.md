@@ -291,8 +291,7 @@ intents.
   private row-mutation builders, while `queries.rs` owns result structs and read
   SQL. Typed-table rows should not detour through a per-family row file.
 - The remaining sync support files are intentionally named for their role:
-  `sync/cascade_test_fact/staging.rs` for staged replay-test facts and
-  `sync/shared_fact/index.rs` for the sync contribution/negentropy index.
+  `sync/shared_fact/index.rs` owns the sync contribution/negentropy index.
 - Documentation should be readable by following the pipeline. Each converted
   family needs top-of-file docs saying what that role owns, and reviewers should
   be able to line up the route declaration with the role files.
@@ -482,7 +481,7 @@ Success means all of the following are true:
 - routed families have no transitional `layout.rs`, `create.rs`, or
   handwritten fact-family `rows.rs`;
 - sync support files that are not fact-family role files are named for their
-  role, currently `shared_fact/index.rs` and `cascade_test_fact/staging.rs`;
+  role, currently `shared_fact/index.rs`;
 - every authenticator has credible malformed-input tests, and any
   context-waiting authenticator has parking/authentication tests;
 - projector tests exercise the staged path through real bytes;

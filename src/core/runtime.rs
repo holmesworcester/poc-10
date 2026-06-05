@@ -23,9 +23,8 @@
 //! ordering changes.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
-use crate::core::context::ContextOffer;
 use crate::core::fact_store::persisted_facts;
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::Fact;
 use crate::core::intents::Intent;
 use crate::core::pipeline::{
     FactAdmissionFn, FactRoute, HandlerSet, PipelineEngine, Projector, Timeline,
@@ -192,15 +191,6 @@ impl Runtime {
         self.pipeline()
             .purge_fact(fact_id)
             .expect("runtime fact purge should persist")
-    }
-
-    pub(crate) fn commit_projected_context_offers(
-        &self,
-        offers: &[ContextOffer],
-        completed_fact_ids: &[FactId],
-    ) -> Result<usize, String> {
-        self.pipeline()
-            .commit_projected_context_offers(offers, completed_fact_ids)
     }
 
     /// Queue durable idempotent work for the protocol handler registry.

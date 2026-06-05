@@ -2,9 +2,8 @@
 //!
 //! Sync facts describe what this store has, what a peer needs, and how two
 //! stores converge without sending every fact eagerly. Compare facts summarize
-//! timestamp ranges, have/need facts request exact ids, sync contribution rows
-//! record which facts are shareable on a connection, and cascade facts support
-//! test and dependency replay flows.
+//! timestamp ranges, have/need facts request exact ids, and sync contribution
+//! rows record which facts are shareable on a connection.
 //!
 //! Sync does not decide whether a protocol fact is valid. It sends and
 //! advertises facts whose own modules already define layout, scope, and
@@ -16,7 +15,6 @@
 //! connection-scoped sharing behavior. Change the owning fact family when the
 //! payload being synced needs a new validation rule.
 
-pub mod cascade_test_fact;
 pub mod compare;
 pub mod have_id;
 pub mod need_id;

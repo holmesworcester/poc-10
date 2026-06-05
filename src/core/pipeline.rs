@@ -58,7 +58,6 @@ pub use route::{
 };
 
 use crate::core::command_context::CommandOutput;
-use crate::core::context::{ContextOffer, ContextSetDelta};
 use crate::core::fact_store::{
     delete_ephemeral_fact_in_tx, ephemeral_pending_fact_ids, insert_fact_and_pending_in_tx,
     purge_fact_in_tx,
@@ -67,11 +66,10 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, IntentHandler};
 use crate::core::schema::{EPHEMERAL_PROJECTION_INPUTS, LOCAL_INTENTS, PENDING_PROJECTION};
 use crate::core::store::{Store, TableName};
-use rusqlite::params;
+use rusqlite::{params, params_from_iter};
 use std::collections::BTreeSet;
 
-use commit_effects::{sqlite_string_error, IntentAdmissionPolicy};
-use context_store::{insert_context_offer_in_tx, wake_context_matches_in_tx};
+use commit_effects::IntentAdmissionPolicy;
 use pipeline_one::{load_pending_fact, process_projection_item, ProjectionSource};
 
 /// Factory for one protocol intent handler.
@@ -335,14 +333,6 @@ impl<'a> PipelineEngine<'a> {
     /// Remove one fact and its core-owned derived rows.
     pub(crate) fn purge_fact(&self, fact_id: FactId) -> Result<bool, String> {
         purge_fact_from_store(self.store, fact_id)
-    }
-
-    pub(crate) fn commit_projected_context_offers(
-        &self,
-        offers: &[ContextOffer],
-        completed_fact_ids: &[FactId],
-    ) -> Result<usize, String> {
-        commit_projected_context_offers(self.store, offers, completed_fact_ids)
     }
 
     /// Queue durable idempotent handler work.
@@ -636,6 +626,16 @@ impl<'a> PipelineEngine<'a> {
     ) -> Result<usize, String> {
         process_due_time_range(self.store, timeline, start_exclusive, end_inclusive, limit)
     }
+
+    /// Mark every retained replayable fact pending for projection.
+    pub(crate) fn enqueue_replayable_facts(&self, excluded_tags: &[u8]) -> Result<usize, String> {
+        enqueue_replayable_facts(self.store, excluded_tags)
+    }
+
+    /// Mark one retained fact pending for projection.
+    pub(crate) fn enqueue_replayable_fact(&self, fact_id: FactId) -> Result<bool, String> {
+        enqueue_replayable_fact(self.store, fact_id)
+    }
 }
 
 /// Insert a fact and mark it pending in the same transaction.
@@ -666,6 +666,46 @@ pub(crate) fn submit_facts_to_store(
     Ok(inserted)
 }
 
+/// Seed replay by queueing all retained facts except live-only fact tags.
+fn enqueue_replayable_facts(store: &Store, excluded_tags: &[u8]) -> Result<usize, String> {
+    let sql = format!(
+        "INSERT OR IGNORE INTO pending_projection (owner) \
+         SELECT id FROM facts{}",
+        replay_excluded_tag_filter(excluded_tags, "WHERE", "bytes")
+    );
+    store
+        .conn()
+        .execute(&sql, params_from_iter(tag_blob_params(excluded_tags)))
+        .map_err(|err| format!("enqueue retained facts for replay: {err}"))
+}
+
+/// Seed replay by queueing one retained fact.
+fn enqueue_replayable_fact(store: &Store, fact_id: FactId) -> Result<bool, String> {
+    store
+        .conn()
+        .execute(
+            "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
+            params![fact_id.as_slice()],
+        )
+        .map(|inserted| inserted > 0)
+        .map_err(|err| format!("enqueue retained fact for replay: {err}"))
+}
+
+fn replay_excluded_tag_filter(excluded_tags: &[u8], keyword: &str, bytes_column: &str) -> String {
+    if excluded_tags.is_empty() {
+        return String::new();
+    }
+    let placeholders = (1..=excluded_tags.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" {keyword} substr({bytes_column}, 1, 1) NOT IN ({placeholders})")
+}
+
+fn tag_blob_params(tags: &[u8]) -> Vec<Vec<u8>> {
+    tags.iter().map(|tag| vec![*tag]).collect()
+}
+
 /// Remove a fact and all core-owned durable rows keyed by its id.
 ///
 /// Protocol-owned read-model rows are removed by projector row mutations or
@@ -675,44 +715,6 @@ fn purge_fact_from_store(store: &Store, owner: FactId) -> Result<bool, String> {
         .write_transaction(|tx| purge_fact_in_tx(tx, owner))
         .map_err(|err| format!("purge fact: {err}"))?;
     Ok(changed)
-}
-
-/// Commit pre-materialized context offers and clear their pending fact rows.
-///
-/// This is a bounded sync/replay shortcut for already-verified rows. Normal
-/// fact projection should go through `pipeline_one`; this helper preserves the
-/// same transaction rule for the shortcut: newly visible context and completed
-/// pending work commit together.
-fn commit_projected_context_offers(
-    store: &Store,
-    offers: &[ContextOffer],
-    completed_fact_ids: &[FactId],
-) -> Result<usize, String> {
-    store
-        .write_transaction(|tx| {
-            let mut added_offers = Vec::new();
-            for offer in offers {
-                if insert_context_offer_in_tx(tx, offer)? {
-                    added_offers.push(offer.clone());
-                }
-            }
-            let woken_facts = wake_context_matches_in_tx(
-                tx,
-                &ContextSetDelta {
-                    added_offers,
-                    ..ContextSetDelta::default()
-                },
-            )
-            .map_err(sqlite_string_error)?;
-            for id in completed_fact_ids {
-                tx.conn().execute(
-                    "DELETE FROM pending_projection WHERE owner = ?1",
-                    params![id.as_slice()],
-                )?;
-            }
-            Ok(woken_facts)
-        })
-        .map_err(|err| format!("commit projected context offers: {err}"))
 }
 
 /// Turn due time wakes into pending projection work plus time context.

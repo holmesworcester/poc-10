@@ -199,11 +199,6 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
         .copied()
         .ok_or_else(|| "cannot admit empty fact bytes".to_string())?;
     match tag {
-        sync::cascade_test_fact::encode::TYPE_CASCADE_TEST_FACT => authenticate_admission_arm!(
-            fact,
-            sync::cascade_test_fact::Codec,
-            sync::cascade_test_fact::authenticate::CascadeTestFactAuthenticator
-        ),
         connection::close::encode::TYPE_CONNECTION_CLOSE => authenticate_admission_arm!(
             fact,
             connection::close::Codec,
@@ -473,7 +468,6 @@ CREATE TABLE IF NOT EXISTS local_endpoint_signing_public_key_rows (row_key BLOB 
 CREATE TABLE IF NOT EXISTS local_endpoint_signing_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_endpoint_shared_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
-CREATE TABLE IF NOT EXISTS cascade_staged_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS admin_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
 CREATE TABLE IF NOT EXISTS content_messages (
@@ -573,7 +567,6 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
         auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
         auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
-        sync::cascade_test_fact::staging::CASCADE_STAGED_FACT_ROWS,
         auth::admin::ADMIN_ROWS,
         connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
@@ -752,16 +745,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("generate", content::message::cli::GENERATE_USAGE, generate),
     cli_command!(
-        "test-generate-deps",
-        sync::cascade_test_fact::cli::GENERATE_DEPS_USAGE,
-        generate_deps
-    ),
-    cli_command!(
-        "test-replay-deps-reverse",
-        sync::cascade_test_fact::cli::REPLAY_DEPS_REVERSE_USAGE,
-        replay_deps_reverse
-    ),
-    cli_command!(
         "sync-status",
         sync::shared_fact::cli::SYNC_STATUS_USAGE,
         sync_status
@@ -799,7 +782,6 @@ pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
-    sync::cascade_test_fact::staging::CASCADE_STAGED_FACT_ROWS,
     connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
     connection::request::CONNECTION_REQUEST_ROWS,
@@ -886,7 +868,6 @@ macro_rules! projector_routes {
 }
 
 projector_routes! {
-    project_cascade_test_fact => sync::cascade_test_fact::encode::TYPE_CASCADE_TEST_FACT, sync::cascade_test_fact::project::CascadeTestFactProjector, sync::cascade_test_fact::project::PIPELINE;
     project_connection_close => connection::close::encode::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector, connection::close::project::PIPELINE;
     project_connection_ephemeral_secret => connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector, connection::ephemeral_secret::project::PIPELINE;
     project_connection_request => connection::request::encode::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, connection::request::project::PIPELINE, not_replayed;

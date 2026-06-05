@@ -1269,10 +1269,10 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 
 ### TIME-28 — in BLOCKED MODE, wipe+REPLAY runs to completion and rebuilds derived state  `replay-cli`
 - **Setup:** (proposed) `con` in BLOCKED MODE with a populated store and prior above-ceiling inputs retained as pending ingress.
-- **Action:** run the wipe+replay path (today: the cascade replay surface `con test-replay-deps-reverse`; conceptually the upgrade replay).
+- **Action:** run the wipe+replay path with `con replay`.
 - **Expect:** replay completes, derived rows rebuilt deterministically; replay observes NO fresh time, sends NO frames, signs NO new shared facts (design rule 8); blocked mode does not abort replay. Pending above-ceiling inputs stay inert unless the replay's admission ceiling/context now admits them.
 - **Defends:** model "in blocked mode ... replay still run[s]"; INVARIANT 4 (replay deterministic, ceiling-independent); design rule 8.
-- **Refs:** `replay`, `replay-check`, `state-summary`, and `test-replay-deps-reverse` replay surfaces.
+- **Refs:** `replay`, `replay --reverse`, `replay --scramble --seed N`, `replay-check`, and `state-summary` replay surfaces.
 
 ### TIME-29 — pending above-ceiling input activates on next wipe+replay once the ceiling rises  `replay-cli`
 - **Setup:** (proposed) client previously retained a wire-admitted fact with a future tag as pending; client subsequently leaves blocked mode AND ceiling rises (e.g. blocking release expired) to cover that tag.
@@ -2453,16 +2453,14 @@ dispatch (cli.rs:94), name-uniqueness check `validate_command_names`
 - **Refs:** `content::message::cli::send` vs `messages`, trusted-time/staleness gate, `Runtime::submit_fact`.
 
 ### CLI-25 — replay-class CLI command runs in blocked mode and is ceiling-independent  `replay-cli`
-- **Setup:** The two real replay/deps commands `test-generate-deps` and
-  `test-replay-deps-reverse` (sync::cascade_test_fact, tag 2). Blocked mode;
-  ceiling lowered.
-- **Action:** `con --db DB test-replay-deps-reverse <args>` after a generate.
+- **Setup:** A populated retained fact log. Blocked mode; ceiling lowered.
+- **Action:** `con --db DB replay --reverse` and `con --db DB replay --scramble --seed N`.
 - **Expect:** Replay rebuilds derived state from retained facts regardless of
   ceiling and regardless of blocked mode (each fact replays via the adapter
   keyed by its own tag). No shared production is emitted by the replay path.
 - **Defends:** invariant (4) replay determinism + ceiling-independence; blocked
   mode still permits replay.
-- **Refs:** `sync::cascade_test_fact::cli` GENERATE_DEPS_USAGE/REPLAY_DEPS_REVERSE_USAGE, `MATCH_COMMANDS`, and the replay/status commands in `src`.
+- **Refs:** `MATCH_COMMANDS`, `replay`, `replay-check`, and `state-summary` commands in `src`.
 
 ### CLI-26 — alpha release may bind an above-ceiling run fn that production hides  `handler-unit`
 - **Setup:** `send` run-fn list `{1 -> send_v1, 3 -> send_v3}`; manifest ceiling
@@ -2904,10 +2902,10 @@ Verified grounding from `/home/holmes/poc-10/src`:
 
 ### PROJ-16 — replay is order-independent for the same fact set `replay-cli`
 - **Setup:** Current binary, a fixed set of retained facts (a `content::message` plus its signer endpoint_shared, author user, secret).
-- **Action:** Replay once in natural order; replay again with `--reverse`/`--scramble --seed N` (the planned replay flags) OR, since those subcommands are not yet shipped (inventory section 6), via the existing `test-replay-deps-reverse` cascade harness over `sync::cascade_test_fact`.
+- **Action:** Replay once in natural order; replay again with `--reverse` and `--scramble --seed N`.
 - **Expect:** Final read-model rows and context are identical regardless of fact ordering. The fixed-point projection loop (projectors.rs:29-33 reruns until context stabilizes) reaches the same fixed point.
 - **Defends:** Invariant 4 (order-independent replay).
-- **Refs:** `test-replay-deps-reverse` -> `replay_deps_reverse` (registry.rs:489-491), `sync::cascade_test_fact`; projection fixed-point note (projectors.rs:29-33).
+- **Refs:** `con replay --reverse`, `con replay --scramble --seed N`, `replay-check`; projection fixed-point note.
 
 ### PROJ-17 — proposed user_profile_v2 projector PARKS on missing auth_user anchor `projector-unit`
 - **Setup:** Proposed new family `auth::user_profile_v2` (does not exist yet; inventory section 1) whose projector needs both an `auth_user` anchor (offered by `UserProjector`, user/project.rs:91) and an `auth_endpoint_shared` anchor (offered by `EndpointSharedProjector`, endpoint_shared/project.rs:88). ProjectionContext has the endpoint_shared offer but NO `auth_user` payload.
@@ -3026,15 +3024,10 @@ the planned verbs this cluster validates): `replay [--reverse | --scramble
 `replay-check` (snapshots the DB, runs canonical + idempotent + `--reverse` +
 several `--scramble --seed N` passes, compares `state_hash`), `intent-registry`
 (lists `runs_during_replay` / recurrence / network-IO per `HandlerRoute`), and
-`recurring-intents`. The existing in-tree harness that exercises the replay path
-today is `con test-generate-deps` (-> `generate_deps`) + `con
-test-replay-deps-reverse` (-> `replay_deps_reverse`) in
-`sync::cascade_test_fact::commands`. Where a test names `con replay` / `con
-state-summary` etc. it targets the planned replay entry point described in the
-runtime-changes section of that doc; per the inventory these verbs are not yet
-shipped, so those tests are RED until the replay entry point lands and assert the
-documented behavior. Tests that can run today against shipped code are marked as
-such in their Refs.
+`recurring-intents`. The in-tree replay diagnostics now exercise the real replay
+entry point directly: `con replay`, `con replay --reverse`, `con replay
+--scramble --seed N`, and `con replay-check` all rebuild through the ordinary
+pipeline rather than a synthetic dependency fixture.
 
 Per the charter, the `{new version}/{old version}` axis is enumerated as
 separate tests for the representative versioned families (`content::message`,
@@ -3048,7 +3041,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** Run `con replay` (canonical pass: drops queued intents, wipes derived state — read-model rows, sync indexes, context edges, time_wakes, pending projection rows, ephemeral projection inputs, temp network queues — marks all retained facts pending, drains fact projection to fixpoint).
 - **Expect:** `con state-summary` after replay returns the SAME `state_hash` H0 and identical per-area counts; every read-model row is reconstructed solely from retained facts (no queued intent contributed). Replay counters report `dropped_intents>=0`, `projected_facts == retained fact count`, `blocked network/live-only work == 0`.
 - **Defends:** Invariant (4) — wipe+replay rebuilds derived state from retained facts.
-- **Refs:** `con replay`/`state-summary`; `core::runtime` replay entry point (doc runtime-changes 1-9); read_models OPENED_MESSAGES/CONTENT_MESSAGES/CONTENT_REACTIONS/CONTENT_FILES/FILE_SLICES (registry.rs 36-182); shipped analog `replay_deps_reverse` (`sync/cascade_test_fact/commands.rs`).
+- **Refs:** `con replay`/`state-summary`; `core::replay` entry point; read_models OPENED_MESSAGES/CONTENT_MESSAGES/CONTENT_REACTIONS/CONTENT_FILES/FILE_SLICES.
 
 ### REPLAY-02 — Replay rebuilds with MIXED fact versions present (message v1 + message v2 facts) `replay-cli`
 - **Setup:** Node at a ceiling that covers BOTH `message:1` (tag 50) and a hypothetical `message:2` (new tag, sibling `content/message_v2/`, kept-forever projector). Retained store holds some v1 message facts (tag 50) AND some v2 message facts (new tag), all ceiling-active. Capture baseline `state_hash` H0.
@@ -3069,7 +3062,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** `con replay --reverse` (admit retained facts newest-first), then `con state-summary`.
 - **Expect:** `state_hash == Hc`. Reverse admission order produces byte-identical derived state across all per-area hashes; the dependency cascade (reactions need their target message; file_slice needs its file) resolves via context match wakeups regardless of admission order.
 - **Defends:** Invariant (4) — order-independent rebuild with mixed versions.
-- **Refs:** planned `con replay --reverse`; shipped precedent `replay_deps_reverse` (reverse staged-dep replay, `sync/cascade_test_fact/commands.rs:84`); context match wakeups (`core::pipeline::context`).
+- **Refs:** `con replay --reverse`; `con replay --scramble --seed N`; context match wakeups (`core::pipeline::context`).
 
 ### REPLAY-05 — Order-independent: scramble seeds yield same state_hash (replay-check) with mixed versions `replay-cli`
 - **Setup:** Node retains mixed v1+v2 message facts + reactions + file + slices. 
@@ -3246,12 +3239,12 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Defends:** Invariant (4) barrier — recurring operational work is not durable replay state; doc Recurring-intent test.
 - **Refs:** planned `con recurring-intents`/`con intent-registry`; doc Recurring Intents section (`RecurringIntentSpec`, no persisted rows); HandlerRoute recurrence metadata.
 
-### REPLAY-30 — Cascade-dep reverse replay (shipped) rebuilds applied set order-independently `replay-cli`
-- **Setup:** Open a runtime from `MATCH_RUNTIME`. `con test-generate-deps COUNT DEPS_PER_FACT` stages a dependency graph of `sync::cascade_test_fact` (tag 2) facts in CASCADE_STAGED_FACT_ROWS without submitting.
-- **Action:** `con test-replay-deps-reverse` submits the staged graph newest-first (reverse) and materializes the context offers that appear only after each dependency completes.
-- **Expect:** `ReplayDepsReceipt { replayed_facts == COUNT, applied_facts == COUNT }` when all deps present; applied set is independent of the reverse admission order (a fact applies only once all declared deps have offered completion). Deleting one staged dependency row -> that fact is not replayed and dependents are not applied (`applied_facts == 0`).
-- **Defends:** Invariant (4) order-independence — the SHIPPED replay precedent runnable today.
-- **Refs:** SHIPPED `con test-generate-deps`/`test-replay-deps-reverse` (`sync/cascade_test_fact/commands.rs` `generate_deps`/`replay_deps_reverse`); CASCADE_STAGED_FACT_ROWS; sync::cascade_test_fact (tag 2); `Runtime::submit_facts` (`core/runtime.rs:274`).
+### REPLAY-30 — Replay order diagnostics rebuild retained-fact state order-independently `replay-cli`
+- **Setup:** Open a runtime from `MATCH_RUNTIME` with a retained fact graph whose projections park on missing context.
+- **Action:** Run `con replay --reverse`, then `con replay --scramble --seed N`, and compare each state summary with canonical replay.
+- **Expect:** Final rows and context are independent of admission order. Facts that park on missing context are woken by ordinary context matching once their dependencies project.
+- **Defends:** Invariant (4) order-independence using the shipped replay entry point.
+- **Refs:** `con replay --reverse`; `con replay --scramble --seed N`; `con replay-check`; `Runtime::replay`.
 
 ### REPLAY-31 — Replay drops queued intents but rebuilds required work from retained facts `replay-cli`
 - **Setup:** Node has durable + local queued intents pending (e.g. a `share_fact_with_sync` and a `create_key_wrap` queued) plus retained facts that justify them. `con state-summary` baseline.
@@ -4179,8 +4172,8 @@ Reference files:
 
 ### SYNC-28 — compare/have/need fact tags (165/166/167) are globally unique and unchanged by a new content version  `guardrail`
 - **Setup:** Registry-level boundary test.
-- **Action:** Run/extend `fact_route_tags_are_globally_unique` (registry.rs:717-729) and assert the sync tags `sync::compare=165`, `sync::have_id=166`, `sync::need_id=167`, `sync::shared_fact=162`, `sync::range_request=160`, `sync::cascade_test_fact=2` are present and distinct.
-- **Expect:** All 43 `FactRoute.tag` values distinct; sync's six tags stable. Introducing `content::message:2` adds a NEW content tag (or reuses 50 under the kept-forever-projector contract) but never collides with or mutates the sync envelope tags.
+- **Action:** Run/extend `fact_route_tags_are_globally_unique` and assert the sync tags `sync::compare=165`, `sync::have_id=166`, `sync::need_id=167`, `sync::shared_fact=162`, and `sync::range_request=160` are present and distinct.
+- **Expect:** All `FactRoute.tag` values distinct; sync's five tags stable. Introducing `content::message:2` adds a NEW content tag (or reuses 50 under the kept-forever-projector contract) but never collides with or mutates the sync envelope tags.
 - **Defends:** Mechanism: a new wire shape = new tag in every scope; sync envelope tags are independent of content versions.
 - **Refs:** `registry.rs` `fact_route_tags_are_globally_unique`, `FACT_ROUTES`.
 
@@ -4236,7 +4229,7 @@ Reference anchors used throughout: `RouterProjector::project` unknown-tag
 
 ### CONTENT-01 — message v1 (tag 50) replays under its own adapter into current rows  `replay-cli`
 - **Setup:** A store seeded by a current-head `con` build holding `content::message` facts created via `con send WORKSPACE_ID_HEX TEXT` (tag 50, `CONTENT_MESSAGE_BYTES` fixed-width, fields workspace_id/created_at_ms/author_user_id/signer_id/signer_public_key/frontier_id/local_history_node_secret_id/expires_at_minute/retention_policy_id/minute/nonce/ciphertext(128)/signature). Protocol version = head; ceiling = head.
-- **Action:** Wipe derived state and replay all retained facts (`test-replay-deps-reverse` style full wipe+replay over the fact log).
+- **Action:** Wipe derived state and replay all retained facts with `con replay`.
 - **Expect:** Every tag-50 fact routes to `content::message::project::ContentMessageProjector` via `FACT_ROUTES` and rebuilds identical `CONTENT_MESSAGES` + `OPENED_MESSAGES` rows; `con messages WORKSPACE_ID_HEX` and `con view` produce byte-identical output to pre-wipe. No "no target projector" error.
 - **Defends:** Invariant 4 (replay determinism, adapter keyed by own tag); invariant 2 (rendering uniformity).
 - **Refs:** `content/message/encode.rs` TYPE_CONTENT_MESSAGE=50, `content/message/project.rs` ContentMessageProjector and row builders, registry.rs `read_models`, registry.rs:604.
@@ -4678,10 +4671,10 @@ admission rule (`RouterProjector::project` Err path, projectors.rs:456). Where a
 
 ### AUTHZ-27 — replay determinism: authority graph is identical under reverse/scramble fact order  `replay-cli`
 - **Setup:** A workspace whose authority graph spans all eight families (workspace -> bootstrap user_invite -> user -> endpoint_shared -> device_invite -> delegated user_invite -> delegated admin -> invite_accepted). Retained fact set fixed.
-- **Action:** Wipe+replay forward; wipe+replay reverse; wipe+replay scrambled (the cascade test harness `test-replay-deps-reverse` is the existing analogue) — each rebuilding via per-tag historical adapters and context needs/offers.
+- **Action:** Wipe+replay forward; wipe+replay reverse; wipe+replay scrambled — each rebuilding via per-tag historical adapters and context needs/offers.
 - **Expect:** Identical final authority rows and offers in all three orders (context needs defer non-ready facts until anchors resolve). No order grants or drops an edge.
 - **Defends:** invariant (4) order-independent, ceiling-independent replay for authority.
-- **Refs:** context `need`/`offer` deferral across all `auth::*::project`; `sync::cascade_test_fact::cli` (`replay_deps_reverse`).
+- **Refs:** context `need`/`offer` deferral across all `auth::*::project`; `con replay --reverse`; `con replay --scramble --seed N`.
 
 ### AUTHZ-28 — BLOCKED MODE withholds new authority sharing but still serves local authority reads and replay  `blackbox-cli`
 - **Setup:** Node whose trusted-time staleness window S has elapsed without a manifest refresh (or a backward clock rollback beyond tolerance) -> BLOCKED MODE.
@@ -5550,9 +5543,9 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 - **Refs:** `src/protocol/registry.rs` `HANDLER_ROUTES`/`handler_route!` (639-710), `src/core/runtime.rs:71`.
 
 ### GUARD-03 — every CliCommand in MATCH_COMMANDS declares an intro_version  `guardrail`
-- **Setup:** the 47-entry `MATCH_COMMANDS` table (registry.rs 367-526) with target `CliCommand { name, usage, help, run, intro_version }` and the per-name version-tagged run list.
-- **Action:** iterate `MATCH_COMMANDS`; read `intro_version` for each of the 47 stable names (`create-workspace` … `recurring-intents`, including `test-generate-deps` and `test-replay-deps-reverse`).
-- **Expect:** all 47 commands carry an `intro_version`; `MATCH_COMMANDS.len() == 47`; the `cli_command!` macro forces the field. Asserts `key-rotate-recipient` maps to run fn `key_recipient_rotation` AND carries an `intro_version` (guards the name/fn mismatch noted in the inventory).
+- **Setup:** the `MATCH_COMMANDS` table with target `CliCommand { name, usage, help, run, intro_version }` and the per-name version-tagged run list.
+- **Action:** iterate `MATCH_COMMANDS`; read `intro_version` for every stable name (`create-workspace` … `recurring-intents`).
+- **Expect:** all commands carry an `intro_version`; the `cli_command!` macro forces the field. Asserts `key-rotate-recipient` maps to run fn `key_recipient_rotation` AND carries an `intro_version` (guards the name/fn mismatch noted in the inventory).
 - **Defends:** Mechanism "CliCommand = stable name -> version-tagged list; ceiling selects highest intro_version<=ceiling".
 - **Refs:** `src/protocol/registry.rs` `MATCH_COMMANDS`/`cli_command!` (356-510), `src/core/cli.rs` `CliCommand`.
 
@@ -5767,10 +5760,10 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 
 ### KEYS-GAP10c — create_key_wrap idempotence converges across the v2-activation + rotation replay (no entropy amplification)  `replay-cli`
 - **Setup:** a variant of GAP10a where the chop-now retirement does NOT cover one surviving root S_keep (e.g. S_keep has `created_at_ms = T_keep >= T_rot` and is in a frontier/workspace the chop floor does not reach, so no `LocalSecretRetirement` targets it), while R0→R1 rotation and the `key_wrap_v2` activation still both land on the same wipe+replay. After rotation, R1's `min_frontier_created_at_ms = T_rot` and S_keep (`T_keep >= T_rot`) is the single eligible proactive wrap source; its `local_signer_secret` is present.
-- **Action:** wipe + replay TWICE at ceiling N+1 with different retained-fact replay orders (forward and `test-replay-deps-reverse`-style reverse), each driving `process_all_work_until_idle`.
+- **Action:** wipe + replay TWICE at ceiling N+1 with different retained-fact replay orders (canonical and `--reverse`), each driving replay to idle.
 - **Expect:** R1 emits exactly ONE proactive `create_key_wrap_intent` for S_keep whose idempotence key from `create_key_wrap_key(W, F, R1, FrontierRoot-coordinate)` is IDENTICAL across both replay orders and excludes `source_fact_id`/`signer_secret_fact_id` and any request entropy (KEYS-21/36) — so the deterministic handler produces ONE byte-identical tag-155 wrap (same `sender_wrap_public_key`/`nonce`/`ciphertext` via `deterministic_wrap_info`), fact id stable across both runs. The independently-activated `key_wrap_v2` fact materializes its own v2 row via its own-tag adapter and does NOT collide with, duplicate, or alter the v1 wrap's idempotence key (distinct tag → distinct convergence domain). No duplicate wraps, no order-dependent state.
 - **Defends:** `create_key_wrap_key` idempotence still converges when v2-activation and rotation coincide (the gap's "create_key_wrap_key must still converge"); rotation floor admits exactly the post-rotation eligible source; redesign activation is additive and tag-isolated; invariants 4 + "no request entropy amplifying keys."
-- **Refs:** `auth/create_key_wrap.rs::create_key_wrap_key`, `auth/key_wrap/create.rs::{create_key_wrap_fact,deterministic_sender_wrap_secret,deterministic_nonce,deterministic_wrap_info}`, `auth/recipient_key/project.rs::recipient_key` (post-rotation `min_frontier_created_at_ms`, single eligible source), `auth/key_wrap/project.rs::{matching_wrap_sources_with_signer,wrap_source_offer_valid_for_need}`, `sync::cascade_test_fact::cli` (`test-replay-deps-reverse` for order independence), `auth/key_wrap/_v2/` (model).
+- **Refs:** `auth/create_key_wrap.rs::create_key_wrap_key`, `auth/key_wrap/create.rs::{create_key_wrap_fact,deterministic_sender_wrap_secret,deterministic_nonce,deterministic_wrap_info}`, `auth/recipient_key/project.rs::recipient_key` (post-rotation `min_frontier_created_at_ms`, single eligible source), `auth/key_wrap/project.rs::{matching_wrap_sources_with_signer,wrap_source_offer_valid_for_need}`, `con replay --reverse`, `auth/key_wrap/_v2/` (model).
 ### REPLAY-GAP11a — Pending file_slice_v2 whose parent content::file is purged during the pending window parks forever (does NOT error) on activation  `replay-cli`
 - **Setup:** Node at a ceiling that covers only the v1 content families. A `content::file` (tag 54) `F` exists and is projected (CONTENT_FILES row present), authored under a parent `content::message` (tag 50). The node then RECEIVES, over sync, an above-ceiling `file_slice_v2` fact `S` (a proposed new-tag sibling of `content::file_slice` tag 55, intro_version = N+1, with the SAME `file_id` as `F`). Per ADMISSION, `S` is PENDING: retained as opaque bytes, unprojected, undisplayed, uncounted — NOT routed to a missing projector (it must NOT hit the `core/projectors.rs:456` "no target projector registered" error today). WHILE `S` is pending, `con delete-file` is run against `F`, producing a `content::file_deletion` (tag 53). The file projector resolves its `file_deletion_need` (`content/file/project.rs:111,125`), validates the deletion, and returns `delete_file_projection(...).purge_self(fact.id)` (`content/file/project.rs:126-135`) — so `F` is removed from the retained store and its CONTENT_FILES/FILE_SLICES rows are dropped. The retained log now holds `S` (pending) and the `file_deletion`, but NOT `F`.
 - **Action:** A fleet-wide signed manifest raises the ceiling so `file_slice_v2`'s tag is ceiling-active (its kept-forever v2 projector + sibling `content/file_slice_v2/` directory are present and routed), trusted_time advances past `blocker.expires_at + M`. Then wipe derived state and replay all retained facts via the historical adapter keyed by each fact's OWN tag (the `con replay` canonical path / `drain_pending_projection`).
@@ -5973,10 +5966,10 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 
 ### GUARD-GAP111b — ephemeral-secret purge from close does not race the pending-activation replay pass: the close purge runs and commits before the wipe+replay that activates a newly-covered tag  `replay-cli`
 - **Setup:** (proposed) Continue from GUARD-GAP111a's pre-replay state: an in-blocked-mode (or mid ceiling-transition) node holding (i) an open connection with response row + E1/E2 ephemeral rows, and (ii) a pending above-ceiling fact whose tag will be covered after the ceiling rises (TIME-29 shape). The retire-before-replay sequence per the model TRANSPORT rule "Retire connections … before replay" is: project the `connection::close` (tag 45) to purge first, THEN raise the ceiling and run wipe+replay.
-- **Action:** Drive the two phases in order: phase 1 — submit + project `connection::close` so E1, E2 (tag 43) and the response (tag 44) self-purge and their rows are deleted, and commit; phase 2 — raise the ceiling to cover the pending fact's tag, then run the wipe+replay pass (`con test-replay-deps-reverse` cascade surface today; the upgrade replay conceptually) that re-projects every retained fact via its own tag adapter and activates the formerly-pending fact.
+- **Action:** Drive the two phases in order: phase 1 — submit + project `connection::close` so E1, E2 (tag 43) and the response (tag 44) self-purge and their rows are deleted, and commit; phase 2 — raise the ceiling to cover the pending fact's tag, then run the wipe+replay pass with `con replay` that re-projects every retained fact via its own tag adapter and activates the formerly-pending fact.
 - **Expect:** The two passes are serialized, not interleaved: the close-driven purge fully commits (E1/E2/response bytes removed, `CONNECTION_EPHEMERAL_SECRET_ROWS` + `CONNECTION_RESPONSE_ROWS` rows deleted) BEFORE the pending-activation replay begins, so the replay rebuilds derived state from RETAINED facts only — it never re-derives a `connection_ephemeral_secret` row from a purged secret and never live-tails the retired session (the CONN-20 guarantee). The replay does not resurrect E1/E2: their bytes are gone, the surviving tag-45 `connection::close` fact replays deterministically via its own adapter, and the now-active formerly-pending fact projects to its own rows independently of the retired connection. Replay observes no fresh time, sends no frames, and the ephemeral purge result is order-independent w.r.t. the activation of the pending fact (no read-after-purge of E1/E2 by the activating projector, and no purge-after-activation that could strand a half-retired session).
 - **Defends:** Model TRANSPORT "Retire connections … before replay" sequenced ahead of pending activation; INVARIANT (4) REPLAY DETERMINISM (order-independent, ceiling-independent, recreates only deterministic facts from retained bytes) crossed with ADMISSION pending-activation (TIME-29); CONN-20 (no phantom live connection after close+replay); CONN-21 secret hygiene preserved across the activation pass.
-- **Refs:** `connection/ephemeral_secret/project.rs:69-87` (close-gate purge of E1+E2), `connection/response/project.rs:389-396` (`closed_output` purge), `connection/close/project.rs` (`ConnectionCloseProjector`), `core/projectors.rs:356` (`purge_self`), `core/projectors.rs` `RouterProjector::project` (per-tag adapter, projectors.rs:448-459), `sync::cascade_test_fact::cli` `test-replay-deps-reverse`; CONN-19, CONN-20, CONN-21, CONN-28, TIME-28, TIME-29.
+- **Refs:** `connection/ephemeral_secret/project.rs:69-87` (close-gate purge of E1+E2), `connection/response/project.rs:389-396` (`closed_output` purge), `connection/close/project.rs` (`ConnectionCloseProjector`), `core/projectors.rs:356` (`purge_self`), `core/projectors.rs` `RouterProjector::project` (per-tag adapter, projectors.rs:448-459), `con replay`; CONN-19, CONN-20, CONN-21, CONN-28, TIME-28, TIME-29.
 
 ### GUARD-GAP111c — a forged/global connection::close cannot smuggle a secret purge through the blocked-mode operational-safety exemption  `projector-unit`
 - **Setup:** (proposed) Blocked-mode node with the same open connection (response row + E1/E2 ephemeral rows). Craft a `connection::close` fact submitted with `FactScope::Global` (or local but with NO matching `connection_response` context for its named `connection_id`) — i.e. an attempt to exploit the TIME-25 "close is always allowed in blocked mode" exemption to drive a purge of another session's secrets.

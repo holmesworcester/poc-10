@@ -202,7 +202,6 @@ fn project_files(root: &Path) -> Vec<PathBuf> {
 fn imported_black_box_behavior_files(root: &Path) -> Vec<PathBuf> {
     [
         "black_box_sync_test.rs",
-        "cascade_cli_test.rs",
         "cli_surface_test.rs",
         "content_cli_test.rs",
         "daemon_lifecycle_cli_test.rs",

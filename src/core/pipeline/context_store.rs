@@ -42,19 +42,6 @@ use super::{MatchedContext, ProjectionContext};
 const CONTEXT_NEED_DIRECTION: &str = "need";
 const CONTEXT_OFFER_DIRECTION: &str = "offer";
 
-/// Load a fact's standing context, returning `None` when it has none.
-pub(crate) fn persisted_context(
-    store: &Store,
-    owner: &FactId,
-) -> Result<Option<ContextSet>, String> {
-    let context = stored_context_for_owner(store, owner)?;
-    if context.needs.is_empty() && context.offers.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(context))
-    }
-}
-
 /// Load a fact's standing context: the needs and offers it currently owns.
 pub(super) fn stored_context_for_owner(
     store: &Store,

@@ -80,6 +80,25 @@ fn con_negentropy_drain_is_not_registered() {
 }
 
 #[test]
+fn con_cascade_fixture_commands_are_not_registered() {
+    for command in ["test-generate-deps", "test-replay-deps-reverse"] {
+        let output = con_cli(&[command]);
+
+        assert!(
+            !output.status.success(),
+            "`{command}` should not remain as a product CLI command"
+        );
+        let stderr = cli_harness::stderr(&output);
+        assert!(
+            stderr.contains(&format!("unknown command `{command}`"))
+                && stderr.contains("con --db PATH replay [--reverse | --scramble --seed N]")
+                && !stderr.contains("cascade"),
+            "`{command}` should be rejected while replay order diagnostics remain available; got:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn con_create_workspace_accepts_positional_identity_shape() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = temp_db(&temp, "con.db");

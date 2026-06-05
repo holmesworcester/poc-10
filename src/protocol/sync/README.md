@@ -16,8 +16,8 @@ summaries, compare/have/need facts, and sync handler work.
 
 Data enters sync as ordinary sync facts from connection receive paths, as
 sync-owned intents dispatched by core, and from CLI/test commands that create
-range or cascade facts. Other scopes may enqueue sync-owned intents as
-follow-up work, but core treats those payloads as opaque queued work.
+range facts. Other scopes may enqueue sync-owned intents as follow-up work, but
+core treats those payloads as opaque queued work.
 
 Data leaves sync as:
 
@@ -35,8 +35,8 @@ scope and tag sendability through the owning helpers.
 ## Managed Row State
 
 Sync owns shareable-fact rows, negentropy leaf rows, negentropy context-have
-rows, negentropy node rows, compare rows, have-id rows, need-id rows, and
-cascade-test staging rows. These rows are the durable visibility index:
+rows, negentropy node rows, compare rows, have-id rows, and need-id rows. These
+rows are the durable visibility index:
 shareable and leaf rows record which owner facts are eligible to send in a sync
 scope, context-have rows record direct validated dependency facts supplied by
 the owner projector, node rows store deterministic range counts and
@@ -50,9 +50,9 @@ interface.
 
 ### Context Interface
 
-Sync-owned facts publish context for replication planning. `shared_fact` and
-`cascade_test_fact` publish `sync_exact_fact`. The matched projector still
-validates the payload fact after core supplies the context match.
+Sync-owned facts publish context for replication planning. `shared_fact`
+publishes `sync_exact_fact`. The matched projector still validates the payload
+fact after core supplies the context match.
 
 ### Other Interfaces
 
@@ -268,23 +268,6 @@ unsendable local/private payloads, and queues `send_facts_on_connection`.
 Sync facts are the durable messages in the convergence loop. They are created,
 sent, projected, and handled as ordinary facts; each one moves the loop one
 step closer to equal range summaries.
-
-### `cascade_test_fact` (tag 2)
-
-Test-only process step for dependency replay. A test creates a chain of these
-facts with explicit dependency ids, then replays them out of order. Projection
-waits for each dependency as `sync_exact_fact` in the same scope. When all
-dependencies are present it offers its own `sync_exact_fact`, waking downstream
-facts and proving that dependency closure can unblock a graph without a
-separate dependency executor.
-
-```text
-cascade_test_fact {
-  timestamp: 1715000000000
-  dependencies: [fact:dep_a, fact:dep_b]
-  payload: bytes:16_byte_test_payload
-}
-```
 
 ### `range_request` (tag 160)
 

@@ -268,12 +268,14 @@ pub fn run_replay(
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
-            mark_all_pending(store, &not_replayed_tags)?;
+            drive
+                .pipeline
+                .enqueue_replayable_facts(&not_replayed_tags)?;
             drive.fixpoint(&mut counters)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(store, order, &not_replayed_tags)? {
-                mark_one_pending(store, &fact_id)?;
+                drive.pipeline.enqueue_replayable_fact(fact_id)?;
                 drive.fixpoint(&mut counters)?;
             }
             // A final fixpoint settles any work left after the last admission.
@@ -462,23 +464,6 @@ fn wipe_derived_state(store: &Store) -> Result<usize, String> {
         .map_err(|err| format!("wipe derived state: {err}"))
 }
 
-/// Mark every retained fact pending for projection in one statement.
-fn mark_all_pending(store: &Store, not_replayed_tags: &[u8]) -> Result<(), String> {
-    let sql = format!(
-        "INSERT OR IGNORE INTO pending_projection (owner) \
-         SELECT id FROM facts{}",
-        not_replayed_tag_filter(not_replayed_tags, "WHERE", "bytes")
-    );
-    store
-        .conn()
-        .execute(
-            &sql,
-            rusqlite::params_from_iter(tag_blob_params(not_replayed_tags)),
-        )
-        .map(|_| ())
-        .map_err(|err| format!("mark retained facts pending: {err}"))
-}
-
 /// SQL fragment excluding facts whose first byte (type tag) is not replayed.
 ///
 /// `bytes_column` is the qualified bytes column (`bytes` or `f.bytes`). Returns
@@ -497,18 +482,6 @@ fn not_replayed_tag_filter(not_replayed_tags: &[u8], keyword: &str, bytes_column
 
 fn tag_blob_params(not_replayed_tags: &[u8]) -> Vec<Vec<u8>> {
     not_replayed_tags.iter().map(|tag| vec![*tag]).collect()
-}
-
-/// Mark one retained fact pending for projection.
-fn mark_one_pending(store: &Store, fact_id: &FactId) -> Result<(), String> {
-    store
-        .conn()
-        .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner) VALUES (?1)",
-            rusqlite::params![fact_id.as_slice()],
-        )
-        .map(|_| ())
-        .map_err(|err| format!("mark retained fact pending: {err}"))
 }
 
 /// Compute the fact admission order for the requested replay order.
