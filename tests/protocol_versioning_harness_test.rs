@@ -14,11 +14,13 @@ use topo::core::pipeline::{
 use topo::core::pipeline::{verify_fact_id, FactPipeline, FactRoute};
 use topo::core::store::TableName;
 use topo::core::versioning::{
-    classify_received_fact, compute_ceiling, FamilyWriter, IngressClassification, PendingReason,
-    ProtocolRange, ReleaseManifestEntry, ReleaseProfile, TrustedTime, WriteVersionError,
+    bundle_for_protocol, classify_received_fact, compute_ceiling, FamilyVersion, FamilyWriter,
+    IngressClassification, PendingReason, ProtocolBundle, ProtocolRange, ReleaseManifestEntry,
+    ReleaseProfile, TrustedTime, WriteVersionError,
 };
 
 const FAMILY: &str = "version_fixture";
+const OTHER_FAMILY: &str = "unchanged_fixture";
 const TYPE_FIXTURE_V1: u8 = 221;
 const TYPE_FIXTURE_V2: u8 = 222;
 const VERSION_FIXTURE_ROWS: TableName = TableName::new("version_fixture_rows");
@@ -31,6 +33,36 @@ const WRITE_V2_WRITERS: &[FamilyWriter] = &[FamilyWriter {
     family: FAMILY,
     version: 2,
 }];
+const PROTOCOL_1_FAMILIES: &[FamilyVersion] = &[
+    FamilyVersion {
+        family: FAMILY,
+        version: 1,
+    },
+    FamilyVersion {
+        family: OTHER_FAMILY,
+        version: 1,
+    },
+];
+const PROTOCOL_2_FAMILIES: &[FamilyVersion] = &[
+    FamilyVersion {
+        family: FAMILY,
+        version: 2,
+    },
+    FamilyVersion {
+        family: OTHER_FAMILY,
+        version: 1,
+    },
+];
+const FIXTURE_BUNDLES: &[ProtocolBundle] = &[
+    ProtocolBundle {
+        protocol: 1,
+        families: PROTOCOL_1_FAMILIES,
+    },
+    ProtocolBundle {
+        protocol: 2,
+        families: PROTOCOL_2_FAMILIES,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FixtureV1 {
@@ -186,24 +218,37 @@ fn release_fixture_profiles_keep_write_activation_release_fixed() {
 
     let before = compute_ceiling(&entries, TrustedTime::fresh(120), 20);
     assert_eq!(before.active_ceiling(), Ok(1));
-    assert_eq!(read_ahead.write_version(FAMILY, 1), Ok(1));
+    let before_bundle =
+        bundle_for_protocol(FIXTURE_BUNDLES, before.active_ceiling().unwrap()).unwrap();
+    assert_eq!(before_bundle.family_version(FAMILY), Some(1));
     assert_eq!(
-        write_v2.write_version(FAMILY, 1),
+        read_ahead.write_version_for_bundle(FAMILY, before_bundle),
+        Ok(1)
+    );
+    assert_eq!(
+        write_v2.write_version_for_bundle(FAMILY, before_bundle),
         Err(WriteVersionError::AboveCeiling {
             family: FAMILY,
             writer_version: 2,
-            ceiling: 1,
+            ceiling_version: 1,
         })
     );
 
     let after = compute_ceiling(&entries, TrustedTime::fresh(121), 20);
     assert_eq!(after.active_ceiling(), Ok(2));
+    let after_bundle =
+        bundle_for_protocol(FIXTURE_BUNDLES, after.active_ceiling().unwrap()).unwrap();
+    assert_eq!(after_bundle.family_version(FAMILY), Some(2));
+    assert_eq!(after_bundle.family_version(OTHER_FAMILY), Some(1));
     assert_eq!(
-        read_ahead.write_version(FAMILY, 2),
+        read_ahead.write_version_for_bundle(FAMILY, after_bundle),
         Ok(1),
         "a read-ahead release keeps writing v1 after the ceiling permits v2"
     );
-    assert_eq!(write_v2.write_version(FAMILY, 2), Ok(2));
+    assert_eq!(
+        write_v2.write_version_for_bundle(FAMILY, after_bundle),
+        Ok(2)
+    );
 }
 
 #[test]

@@ -9,13 +9,20 @@
 //!
 //! The important split is permission versus activation. The ceiling is a
 //! permission bound over what this node may safely admit, render, and share.
-//! A release profile separately declares which fact versions this binary can
-//! write. A binary may therefore continue writing an older shape after the
-//! ceiling permits a newer one; switching writers is a release-profile change,
-//! not a side effect of time passing inside a running client.
+//! The ceiling's protocol `u32` resolves through a bundle table to concrete
+//! fact-family versions. A release profile separately declares which fact
+//! versions this binary can write. A binary may therefore continue writing an
+//! older shape after the ceiling permits a newer one; switching writers is a
+//! release-profile change, not a side effect of time passing inside a running
+//! client.
+
+use std::collections::BTreeMap;
 
 /// Fleet-wide protocol version.
 pub type ProtocolVersion = u32;
+
+/// Version number inside one fact family.
+pub type FactFamilyVersion = u32;
 
 /// Store-local trusted time in milliseconds.
 ///
@@ -59,6 +66,167 @@ impl ProtocolRange {
     pub const fn contains(self, version: ProtocolVersion) -> bool {
         self.start <= version && version <= self.end
     }
+}
+
+/// One family-version member of a protocol bundle.
+///
+/// A family version maps to one durable fact tag and its kept-forever
+/// decoder/authenticator plus its adapter edge toward the ceiling semantic
+/// value. The routed fact tag is still the versioning knob; this value is the
+/// human-scale manifest coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FamilyVersion {
+    pub family: &'static str,
+    pub version: FactFamilyVersion,
+}
+
+/// Complete fact-family version set named by one protocol version.
+///
+/// Bundles are snapshots, not deltas. If protocol 3 only changes `message`, the
+/// protocol 3 bundle still lists every other family at its carried-forward
+/// version. That makes rendering and write gating read from one table instead
+/// of replaying history at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct ProtocolBundle {
+    pub protocol: ProtocolVersion,
+    pub families: &'static [FamilyVersion],
+}
+
+impl ProtocolBundle {
+    pub fn family_version(self, family: &'static str) -> Option<FactFamilyVersion> {
+        self.families
+            .iter()
+            .find(|member| member.family == family)
+            .map(|member| member.version)
+    }
+
+    pub fn contains(self, member: FamilyVersion) -> bool {
+        self.family_version(member.family) == Some(member.version)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolBundleError {
+    Empty,
+    DuplicateProtocol {
+        protocol: ProtocolVersion,
+    },
+    NonMonotonicProtocol {
+        previous: ProtocolVersion,
+        current: ProtocolVersion,
+    },
+    DuplicateFamily {
+        protocol: ProtocolVersion,
+        family: &'static str,
+    },
+    FamilyDropped {
+        protocol: ProtocolVersion,
+        family: &'static str,
+    },
+    FamilyVersionRegression {
+        protocol: ProtocolVersion,
+        family: &'static str,
+        previous: FactFamilyVersion,
+        current: FactFamilyVersion,
+    },
+    UnknownProtocol {
+        protocol: ProtocolVersion,
+    },
+    MissingFamily {
+        protocol: ProtocolVersion,
+        family: &'static str,
+    },
+}
+
+/// Validate the static protocol bundle table.
+///
+/// Protocol versions must be strictly increasing. Family versions may stay the
+/// same or increase, but never regress or disappear after introduction.
+pub fn validate_protocol_bundles(bundles: &[ProtocolBundle]) -> Result<(), ProtocolBundleError> {
+    if bundles.is_empty() {
+        return Err(ProtocolBundleError::Empty);
+    }
+
+    let mut previous_protocol = None;
+    let mut previous_families = BTreeMap::<&'static str, FactFamilyVersion>::new();
+
+    for bundle in bundles {
+        if let Some(previous) = previous_protocol {
+            if bundle.protocol == previous {
+                return Err(ProtocolBundleError::DuplicateProtocol {
+                    protocol: bundle.protocol,
+                });
+            }
+            if bundle.protocol < previous {
+                return Err(ProtocolBundleError::NonMonotonicProtocol {
+                    previous,
+                    current: bundle.protocol,
+                });
+            }
+        }
+
+        let mut current_families = BTreeMap::new();
+        for member in bundle.families {
+            if current_families
+                .insert(member.family, member.version)
+                .is_some()
+            {
+                return Err(ProtocolBundleError::DuplicateFamily {
+                    protocol: bundle.protocol,
+                    family: member.family,
+                });
+            }
+            if let Some(previous_version) = previous_families.get(member.family) {
+                if member.version < *previous_version {
+                    return Err(ProtocolBundleError::FamilyVersionRegression {
+                        protocol: bundle.protocol,
+                        family: member.family,
+                        previous: *previous_version,
+                        current: member.version,
+                    });
+                }
+            }
+        }
+
+        for family in previous_families.keys().copied() {
+            if !current_families.contains_key(family) {
+                return Err(ProtocolBundleError::FamilyDropped {
+                    protocol: bundle.protocol,
+                    family,
+                });
+            }
+        }
+
+        previous_protocol = Some(bundle.protocol);
+        previous_families = current_families;
+    }
+
+    Ok(())
+}
+
+/// Look up the complete family-version set for one protocol version.
+pub fn bundle_for_protocol(
+    bundles: &[ProtocolBundle],
+    protocol: ProtocolVersion,
+) -> Result<ProtocolBundle, ProtocolBundleError> {
+    validate_protocol_bundles(bundles)?;
+    bundles
+        .iter()
+        .copied()
+        .find(|bundle| bundle.protocol == protocol)
+        .ok_or(ProtocolBundleError::UnknownProtocol { protocol })
+}
+
+/// Look up one family's version in the named protocol bundle.
+pub fn family_version_for_protocol(
+    bundles: &[ProtocolBundle],
+    protocol: ProtocolVersion,
+    family: &'static str,
+) -> Result<FactFamilyVersion, ProtocolBundleError> {
+    let bundle = bundle_for_protocol(bundles, protocol)?;
+    bundle
+        .family_version(family)
+        .ok_or(ProtocolBundleError::MissingFamily { protocol, family })
 }
 
 /// Signed release metadata after signature verification by the caller.
@@ -155,7 +323,7 @@ pub fn compute_ceiling(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyWriter {
     pub family: &'static str,
-    pub version: ProtocolVersion,
+    pub version: FactFamilyVersion,
 }
 
 /// Release-local read/write profile.
@@ -178,22 +346,36 @@ impl ReleaseProfile {
     pub fn write_version(
         self,
         family: &'static str,
-        ceiling: ProtocolVersion,
-    ) -> Result<ProtocolVersion, WriteVersionError> {
+        ceiling_family_version: FactFamilyVersion,
+    ) -> Result<FactFamilyVersion, WriteVersionError> {
         let writer = self
             .writers
             .iter()
             .find(|writer| writer.family == family)
             .copied()
             .ok_or(WriteVersionError::NoAuthor { family })?;
-        if writer.version > ceiling {
+        if writer.version > ceiling_family_version {
             return Err(WriteVersionError::AboveCeiling {
                 family,
                 writer_version: writer.version,
-                ceiling,
+                ceiling_version: ceiling_family_version,
             });
         }
         Ok(writer.version)
+    }
+
+    pub fn write_version_for_bundle(
+        self,
+        family: &'static str,
+        ceiling_bundle: ProtocolBundle,
+    ) -> Result<FactFamilyVersion, WriteVersionError> {
+        let ceiling_version = ceiling_bundle.family_version(family).ok_or(
+            WriteVersionError::FamilyNotInCeilingBundle {
+                family,
+                protocol: ceiling_bundle.protocol,
+            },
+        )?;
+        self.write_version(family, ceiling_version)
     }
 }
 
@@ -204,8 +386,12 @@ pub enum WriteVersionError {
     },
     AboveCeiling {
         family: &'static str,
-        writer_version: ProtocolVersion,
-        ceiling: ProtocolVersion,
+        writer_version: FactFamilyVersion,
+        ceiling_version: FactFamilyVersion,
+    },
+    FamilyNotInCeilingBundle {
+        family: &'static str,
+        protocol: ProtocolVersion,
     },
 }
 
@@ -262,6 +448,9 @@ mod tests {
     use super::*;
 
     const FAMILY: &str = "fixture";
+    const MESSAGE: &str = "message";
+    const FILE: &str = "file";
+    const ADMIN: &str = "auth_admin";
     const V1_WRITER: &[FamilyWriter] = &[FamilyWriter {
         family: FAMILY,
         version: 1,
@@ -270,6 +459,62 @@ mod tests {
         family: FAMILY,
         version: 2,
     }];
+    const PROTOCOL_1_FAMILIES: &[FamilyVersion] = &[
+        FamilyVersion {
+            family: MESSAGE,
+            version: 1,
+        },
+        FamilyVersion {
+            family: FILE,
+            version: 1,
+        },
+        FamilyVersion {
+            family: ADMIN,
+            version: 1,
+        },
+    ];
+    const PROTOCOL_2_FAMILIES: &[FamilyVersion] = &[
+        FamilyVersion {
+            family: MESSAGE,
+            version: 2,
+        },
+        FamilyVersion {
+            family: FILE,
+            version: 1,
+        },
+        FamilyVersion {
+            family: ADMIN,
+            version: 1,
+        },
+    ];
+    const PROTOCOL_3_FAMILIES: &[FamilyVersion] = &[
+        FamilyVersion {
+            family: MESSAGE,
+            version: 2,
+        },
+        FamilyVersion {
+            family: FILE,
+            version: 2,
+        },
+        FamilyVersion {
+            family: ADMIN,
+            version: 1,
+        },
+    ];
+    const PROTOCOL_BUNDLES: &[ProtocolBundle] = &[
+        ProtocolBundle {
+            protocol: 1,
+            families: PROTOCOL_1_FAMILIES,
+        },
+        ProtocolBundle {
+            protocol: 2,
+            families: PROTOCOL_2_FAMILIES,
+        },
+        ProtocolBundle {
+            protocol: 3,
+            families: PROTOCOL_3_FAMILIES,
+        },
+    ];
 
     #[test]
     fn ceiling_waits_for_expiry_plus_skew_margin() {
@@ -332,7 +577,110 @@ mod tests {
             Err(WriteVersionError::AboveCeiling {
                 family: FAMILY,
                 writer_version: 2,
-                ceiling: 1,
+                ceiling_version: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn protocol_bundles_are_complete_family_version_sets() {
+        validate_protocol_bundles(PROTOCOL_BUNDLES).expect("valid bundle table");
+
+        let protocol_2 = bundle_for_protocol(PROTOCOL_BUNDLES, 2).expect("protocol 2 bundle");
+        assert_eq!(protocol_2.family_version(MESSAGE), Some(2));
+        assert_eq!(protocol_2.family_version(FILE), Some(1));
+        assert_eq!(protocol_2.family_version(ADMIN), Some(1));
+        assert!(protocol_2.contains(FamilyVersion {
+            family: MESSAGE,
+            version: 2,
+        }));
+
+        assert_eq!(
+            family_version_for_protocol(PROTOCOL_BUNDLES, 3, FILE),
+            Ok(2)
+        );
+        assert_eq!(
+            family_version_for_protocol(PROTOCOL_BUNDLES, 3, "missing"),
+            Err(ProtocolBundleError::MissingFamily {
+                protocol: 3,
+                family: "missing",
+            })
+        );
+    }
+
+    #[test]
+    fn protocol_bundle_validation_rejects_ambiguous_or_non_monotonic_tables() {
+        const DUPLICATE_FAMILIES: &[FamilyVersion] = &[
+            FamilyVersion {
+                family: MESSAGE,
+                version: 1,
+            },
+            FamilyVersion {
+                family: MESSAGE,
+                version: 1,
+            },
+        ];
+        let duplicate_family = [ProtocolBundle {
+            protocol: 1,
+            families: DUPLICATE_FAMILIES,
+        }];
+        assert_eq!(
+            validate_protocol_bundles(&duplicate_family),
+            Err(ProtocolBundleError::DuplicateFamily {
+                protocol: 1,
+                family: MESSAGE,
+            })
+        );
+
+        const MESSAGE_REGRESSION: &[FamilyVersion] = &[
+            FamilyVersion {
+                family: MESSAGE,
+                version: 1,
+            },
+            FamilyVersion {
+                family: FILE,
+                version: 1,
+            },
+        ];
+        let regression = [
+            ProtocolBundle {
+                protocol: 1,
+                families: PROTOCOL_2_FAMILIES,
+            },
+            ProtocolBundle {
+                protocol: 2,
+                families: MESSAGE_REGRESSION,
+            },
+        ];
+        assert_eq!(
+            validate_protocol_bundles(&regression),
+            Err(ProtocolBundleError::FamilyVersionRegression {
+                protocol: 2,
+                family: MESSAGE,
+                previous: 2,
+                current: 1,
+            })
+        );
+
+        const MESSAGE_ONLY: &[FamilyVersion] = &[FamilyVersion {
+            family: MESSAGE,
+            version: 2,
+        }];
+        let dropped = [
+            ProtocolBundle {
+                protocol: 1,
+                families: PROTOCOL_2_FAMILIES,
+            },
+            ProtocolBundle {
+                protocol: 2,
+                families: MESSAGE_ONLY,
+            },
+        ];
+        assert_eq!(
+            validate_protocol_bundles(&dropped),
+            Err(ProtocolBundleError::FamilyDropped {
+                protocol: 2,
+                family: ADMIN,
             })
         );
     }
