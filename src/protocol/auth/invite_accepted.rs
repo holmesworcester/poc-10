@@ -22,6 +22,7 @@ use crate::core::store::{TableName, TableRow};
 pub(crate) use decode::Codec;
 
 pub const TYPE_INVITE_ACCEPTED: u8 = encode::TYPE_INVITE_ACCEPTED;
+pub const AUTH_WORKSPACE_ACCEPTED_ROLE: &str = "auth_workspace_accepted";
 
 /// Invite-accepted projection rows, keyed by
 /// `accepted_endpoint_id || workspace_id || invite_fact_id`.
@@ -64,4 +65,30 @@ pub fn invite_accepted_row(
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteAcceptedFact, String> {
     decode::decode_fact(bytes)
+}
+
+pub fn workspace_accepted_need(
+    owner: crate::core::facts::FactId,
+    workspace_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        AUTH_WORKSPACE_ACCEPTED_ROLE,
+        crate::core::facts::FactScope::Global,
+        workspace_id,
+        workspace_id,
+    )
+}
+
+pub fn workspace_accepted_offer(
+    owner: crate::core::facts::FactId,
+    workspace_id: crate::core::facts::FactId,
+) -> crate::core::context::ContextOffer {
+    crate::core::context::ContextOffer::range(
+        owner,
+        AUTH_WORKSPACE_ACCEPTED_ROLE,
+        crate::core::facts::FactScope::Global,
+        workspace_id,
+        workspace_id,
+    )
 }

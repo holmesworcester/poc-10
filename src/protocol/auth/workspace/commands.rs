@@ -48,7 +48,9 @@ pub fn create_workspace_with_identity(
         auth::endpoint::commands::local_or_create(ctx.store(), created_at_ms + 4)?;
     let endpoint = endpoint_output.receipt.endpoint;
     let user_public = endpoint.signing_public_key;
-    let workspace = author::create_workspace(created_at_ms, endpoint.signing_secret, name)?;
+    let workspace_private_key = crypto::random_ed25519_private_key();
+    let first_invite_secret = crypto::random_ed25519_private_key();
+    let workspace = author::create_workspace(created_at_ms, workspace_private_key, name)?;
     authenticate_authored::<super::decode::Codec, super::authenticate::WorkspaceAuthenticator>(
         &workspace,
     )?;
@@ -58,31 +60,32 @@ pub fn create_workspace_with_identity(
         created_at_ms + 1,
         workspace_id,
         user_public,
-        endpoint.signing_secret,
+        workspace_private_key,
     )?;
+    let accepted =
+        auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
+            created_at_ms: created_at_ms + 2,
+            accepted_endpoint_id: endpoint.endpoint,
+            bootstrap_secret: first_invite_secret,
+            workspace_id,
+            invite_fact_id: user_invite.id,
+        })?;
     let user = user_fact(
-        created_at_ms + 2,
+        created_at_ms + 4,
         workspace_id,
         user_invite.id,
         endpoint.signing_secret,
         identity.username,
     )?;
-    let root_admin = root_admin_fact(
-        created_at_ms + 3,
+    let bootstrap_admin = bootstrap_admin_fact(
+        created_at_ms + 5,
         workspace_id,
-        user_public,
-        endpoint.signing_secret,
-    )?;
-    let creator_admin = creator_admin_fact(
-        created_at_ms + 4,
-        workspace_id,
-        user_public,
-        root_admin.id,
         user.id,
-        endpoint.signing_secret,
+        user_public,
+        workspace_private_key,
     )?;
     let device_invite = device_invite_fact(
-        created_at_ms + 5,
+        created_at_ms + 6,
         workspace_id,
         user.id,
         user_invite.id,
@@ -90,7 +93,7 @@ pub fn create_workspace_with_identity(
         endpoint.signing_secret,
     )?;
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
-        created_at_ms: created_at_ms + 6,
+        created_at_ms: created_at_ms + 7,
         workspace_id,
         user_id: user.id,
         signing_public_key: user_public,
@@ -100,19 +103,16 @@ pub fn create_workspace_with_identity(
         new_endpoint_fact: endpoint_output.effects.facts.first(),
         store: ctx.store(),
     })?;
-    let mut facts = vec![
-        workspace,
-        user_invite,
-        user,
-        root_admin,
-        creator_admin,
-        device_invite,
-        endpoint_shared,
-    ];
+    let user_id = user.id;
+    let mut facts = vec![workspace, user_invite];
+    facts.extend(accepted.effects.facts);
+    facts.extend([user, bootstrap_admin, device_invite, endpoint_shared]);
     if identity.ttl_minutes != Some(0) {
         facts.push(initial_retention_policy_fact(
-            created_at_ms + 7,
+            created_at_ms + 8,
             workspace_id,
+            user_id,
+            endpoint.endpoint,
             identity.ttl_minutes.unwrap_or(60),
             endpoint.signing_secret,
         )?);
@@ -203,47 +203,27 @@ fn user_fact(
     )
 }
 
-fn root_admin_fact(
+fn bootstrap_admin_fact(
     created_at_ms: u64,
     workspace_id: FactId,
+    user_fact_id: FactId,
     public_key: Ed25519PublicKey,
-    signer_private_key: [u8; 32],
+    workspace_private_key: [u8; 32],
 ) -> Result<Fact, String> {
     let payload = auth::admin::fact::AdminFact {
         created_at_ms,
         workspace_id,
         public_key,
         authority_fact_id: workspace_id,
-        user_fact_id: workspace_id,
-        signer_id: workspace_id,
-        signer_public_key: crypto::ed25519_public_key(&signer_private_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    auth::admin::author::signed_admin_fact(created_at_ms, workspace_id, signer_private_key, payload)
-}
-
-fn creator_admin_fact(
-    created_at_ms: u64,
-    workspace_id: FactId,
-    public_key: Ed25519PublicKey,
-    authority_fact_id: FactId,
-    user_fact_id: FactId,
-    signer_private_key: [u8; 32],
-) -> Result<Fact, String> {
-    let payload = auth::admin::fact::AdminFact {
-        created_at_ms,
-        workspace_id,
-        public_key,
-        authority_fact_id,
         user_fact_id,
-        signer_id: authority_fact_id,
-        signer_public_key: crypto::ed25519_public_key(&signer_private_key),
+        signer_id: workspace_id,
+        signer_public_key: crypto::ed25519_public_key(&workspace_private_key),
         signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     auth::admin::author::signed_admin_fact(
         created_at_ms,
-        authority_fact_id,
-        signer_private_key,
+        workspace_id,
+        workspace_private_key,
         payload,
     )
 }
@@ -270,6 +250,8 @@ fn device_invite_fact(
 fn initial_retention_policy_fact(
     created_at_ms: u64,
     workspace_id: FactId,
+    author_user_id: FactId,
+    signer_endpoint_id: FactId,
     ttl_minutes: u32,
     signer_private_key: [u8; 32],
 ) -> Result<Fact, String> {
@@ -280,8 +262,8 @@ fn initial_retention_policy_fact(
         0,
         SCOPE_KIND_WORKSPACE,
         workspace_id,
-        workspace_id,
-        workspace_id,
+        author_user_id,
+        signer_endpoint_id,
         created_at_ms,
         signer_private_key,
     )

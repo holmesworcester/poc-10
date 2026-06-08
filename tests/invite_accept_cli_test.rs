@@ -111,8 +111,8 @@ fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
     );
     assert_eq!(
         invite_accepted_count(&host),
-        0,
-        "invite creator stores invite_secret authority, not invite_accepted provenance"
+        1,
+        "workspace creator should retain the transparent first-invite acceptance"
     );
 
     let duplicate = topo(&[

@@ -3,9 +3,10 @@
 //! POLICY. An admin grant is admitted iff:
 //!   1. STRUCTURAL. The fact is global, signed, contains an admin payload, and
 //!      all selector fields are non-zero.
-//!   2. AUTHORITY. Bootstrap grants are signed by the workspace root and grant
-//!      that same root user; delegated grants are signed by the named admin
-//!      authority and target a user in the same workspace.
+//!   2. AUTHORITY. Bootstrap grants are signed by the workspace root and target
+//!      a real user who joined through a workspace-signed bootstrap invite;
+//!      delegated grants are signed by the named admin authority and target a
+//!      user in the same workspace.
 //!   3. MATERIALIZE. Once the authority path validates, write the admin row,
 //!      publish exact/key offers, and mark the fact shareable with the workspace.
 
@@ -17,6 +18,7 @@ use crate::core::pipeline::{
 };
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::user;
+use crate::protocol::auth::user_invite;
 use crate::protocol::auth::workspace;
 use crate::protocol::auth::workspace::fact::WorkspaceFact;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
@@ -72,9 +74,10 @@ impl SemanticProjector<AdminFact> for AdminProjector {
         // 2. Authority.
         //
         // The workspace id is the bootstrap discriminator: if the admin's
-        // authority is the workspace itself, the workspace root key must sign a
-        // root admin for that same workspace. Otherwise the signer must be the
-        // named admin authority, and the target user must match the grant.
+        // authority is the workspace itself, the workspace root key may grant
+        // admin to a real user from the workspace-signed bootstrap invite.
+        // Otherwise the signer must be the named admin authority, and the
+        // target user must match the grant.
         if admin.authority_fact_id == admin.workspace_id {
             project_bootstrap_admin(fact, &admin, context)
         } else {
@@ -89,29 +92,51 @@ fn project_bootstrap_admin(
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
     let needs = BootstrapAdminNeeds::new(fact.id, admin);
-    let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
+    let Some(workspace_fact) = context.payload_for_checked(&needs.workspace, "admin workspace")?
+    else {
         return Ok(needs.output());
     };
     let workspace = decode_workspace_context(workspace_fact, admin.workspace_id)?;
+    let Some(user_fact) = context.payload_for_checked(&needs.user, "bootstrap admin user")? else {
+        return Ok(needs.output());
+    };
+    let user = decode_user_context(user_fact, admin)?;
+    let user_invite_need = auth_user_invite_need(fact.id, user.signer_id);
+    let Some(user_invite_fact) =
+        context.payload_for_checked(&user_invite_need, "bootstrap admin user_invite")?
+    else {
+        return Ok(needs.output().need(user_invite_need));
+    };
+    let invite = decode_user_invite_context(user_invite_fact, &user, admin.workspace_id)?;
 
     if admin.signer_id != admin.workspace_id {
         return Err("bootstrap admin must use workspace as signer and authority".to_string());
-    }
-    if admin.user_fact_id != admin.workspace_id {
-        return Err("workspace admin authority can only bootstrap root admin".to_string());
     }
     if admin.signer_public_key != workspace.public_key {
         return Err(
             "signed bootstrap admin signer key does not match workspace public key".to_string(),
         );
     }
-    if admin.public_key != workspace.public_key {
-        return Err("admin public_key does not match root workspace public_key".to_string());
+    if invite.authority_fact_id != admin.workspace_id || invite.signer_id != admin.workspace_id {
+        return Err(
+            "bootstrap admin target user must come from workspace bootstrap invite".to_string(),
+        );
     }
-    let context_have = context_have_from_needs(context, [&needs.workspace]);
+    if invite.signer_public_key != workspace.public_key {
+        return Err(
+            "bootstrap user_invite signer key does not match workspace public key".to_string(),
+        );
+    }
+    let context_have =
+        context_have_from_needs(context, [&needs.workspace, &needs.user, &user_invite_need]);
 
     // 3. Materialize.
-    materialized_output(fact, admin, needs.output(), context_have)
+    materialized_output(
+        fact,
+        admin,
+        needs.output().need(user_invite_need),
+        context_have,
+    )
 }
 
 fn project_delegated_admin(
@@ -167,6 +192,7 @@ fn project_delegated_admin(
 
 struct BootstrapAdminNeeds {
     workspace: ContextNeed,
+    user: ContextNeed,
 }
 
 impl BootstrapAdminNeeds {
@@ -179,11 +205,20 @@ impl BootstrapAdminNeeds {
                 admin.workspace_id,
                 admin.workspace_id,
             ),
+            user: crate::core::context::ContextNeed::range(
+                owner,
+                "auth_user",
+                crate::core::facts::FactScope::Global,
+                admin.user_fact_id,
+                admin.user_fact_id,
+            ),
         }
     }
 
     fn output(&self) -> ProjectionOutput {
-        ProjectionOutput::new().need(self.workspace.clone())
+        ProjectionOutput::new()
+            .need(self.workspace.clone())
+            .need(self.user.clone())
     }
 }
 
@@ -277,4 +312,51 @@ fn decode_admin_payload(fact: &Fact) -> Result<super::fact::AdminFact, String> {
 fn decode_user_payload(fact: &Fact) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
     let user = user::decode_fact_payload(fact.body())?;
     Ok(user)
+}
+
+fn auth_user_invite_need(owner: FactId, invite_id: FactId) -> ContextNeed {
+    crate::core::context::ContextNeed::range(
+        owner,
+        "auth_user_invite",
+        crate::core::facts::FactScope::Global,
+        invite_id,
+        invite_id,
+    )
+}
+
+fn decode_user_context(
+    user_fact: &Fact,
+    admin: &AdminFact,
+) -> Result<crate::protocol::auth::user::fact::UserFact, String> {
+    if user_fact.id != admin.user_fact_id {
+        return Err("bootstrap admin user context payload id mismatch".to_string());
+    }
+    let user = decode_user_payload(user_fact)
+        .map_err(|_| "bootstrap admin user dependency must be a user fact".to_string())?;
+    if user.workspace_id != admin.workspace_id {
+        return Err("bootstrap admin user belongs to a different workspace".to_string());
+    }
+    if user.public_key != admin.public_key {
+        return Err("bootstrap admin public_key does not match user public_key".to_string());
+    }
+    Ok(user)
+}
+
+fn decode_user_invite_context(
+    user_invite_fact: &Fact,
+    user: &crate::protocol::auth::user::fact::UserFact,
+    workspace_id: FactId,
+) -> Result<crate::protocol::auth::user_invite::fact::UserInviteFact, String> {
+    if user_invite_fact.id != user.signer_id {
+        return Err("bootstrap admin user_invite context payload id mismatch".to_string());
+    }
+    let invite = user_invite::decode_fact_payload(user_invite_fact.body())
+        .map_err(|_| "bootstrap admin user signer must be a user_invite fact".to_string())?;
+    if invite.workspace_id != workspace_id {
+        return Err("bootstrap admin user_invite belongs to a different workspace".to_string());
+    }
+    if invite.public_key != user.signer_public_key {
+        return Err("bootstrap admin user_invite key does not match user".to_string());
+    }
+    Ok(invite)
 }

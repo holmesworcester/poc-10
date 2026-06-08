@@ -5,8 +5,9 @@
 //!      non-zero.
 //!   2. CONTEXT. Matched invite_secret context must be local and scoped to the
 //!      same workspace/invite/bootstrap hash.
-//!   3. MATERIALIZE. Write the invite_accepted row; broader network effects
-//!      remain explicit intent-handler work.
+//!   3. MATERIALIZE. Write the invite_accepted row and publish accepted
+//!      workspace context; broader network effects remain explicit
+//!      intent-handler work.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -69,12 +70,11 @@ impl SemanticProjector<super::fact::InviteAcceptedFact> for InviteAcceptedProjec
             accepted.invite_secret_fact_id,
             accepted.invite_secret_fact_id,
         );
-        let Some(secret_fact) = context.payload_for(&secret_need) else {
+        let Some(secret_fact) =
+            context.payload_for_checked(&secret_need, "invite_accepted invite_secret")?
+        else {
             return Ok(ProjectionOutput::new().need(secret_need));
         };
-        if secret_fact.id != accepted.invite_secret_fact_id {
-            return Err("invite_accepted invite_secret context payload id mismatch".to_string());
-        }
         if secret_fact.scope != FactScope::Local {
             return Err("invite_accepted invite_secret context must be local".to_string());
         }
@@ -93,8 +93,68 @@ impl SemanticProjector<super::fact::InviteAcceptedFact> for InviteAcceptedProjec
         // 3. Materialize.
         Ok(ProjectionOutput::new()
             .need(secret_need)
+            .offer(super::workspace_accepted_offer(
+                fact.id,
+                accepted.workspace_id,
+            ))
             .row_mutation(RowMutation::PutRow(invite_accepted_row(
                 fact.id, &accepted,
             )?)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::context::ContextOffer;
+    use crate::core::pipeline::MatchedContext;
+    use crate::protocol::auth::invite;
+
+    #[test]
+    fn invite_accepted_offers_accepted_workspace_not_workspace_authority() {
+        let (_secret, secret_fact) =
+            invite::author::scoped_secret_fact([7; 32], [1; 32], [2; 32], 10)
+                .expect("invite secret");
+        let secret = invite::decode_fact_payload(secret_fact.body()).expect("secret payload");
+        let (_accepted, accepted_fact) = super::super::author::accepted_fact(
+            [1; 32],
+            [2; 32],
+            secret_fact.id,
+            secret.bootstrap_hash,
+            [3; 32],
+            11,
+        )
+        .expect("accepted fact");
+        let secret_need = crate::core::context::ContextNeed::range(
+            accepted_fact.id,
+            "auth_invite_secret",
+            crate::core::facts::FactScope::Global,
+            secret_fact.id,
+            secret_fact.id,
+        );
+        let context = ProjectionContext::from_matches(vec![MatchedContext {
+            need: secret_need,
+            offer: ContextOffer::range(
+                secret_fact.id,
+                "auth_invite_secret",
+                crate::core::facts::FactScope::Global,
+                secret_fact.id,
+                secret_fact.id,
+            ),
+            payload: secret_fact,
+        }]);
+
+        let output = InviteAcceptedProjector::new()
+            .project(&accepted_fact, &context)
+            .expect("accepted invite projects");
+
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role.as_str() == super::super::AUTH_WORKSPACE_ACCEPTED_ROLE));
+        assert!(!output
+            .offers
+            .iter()
+            .any(|offer| offer.role.as_str() == "auth_workspace"));
     }
 }

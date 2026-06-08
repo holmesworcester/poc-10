@@ -121,9 +121,10 @@ Auth fact families are grouped by protocol role:
 
 - `workspace` creates the shared namespace for users, endpoints, content, and
   sync.
-- `user`, `admin`, `user_invite`, `device_invite`, `invite`,
-  `invite_accepted`, and `invite_server` form shared authority edges for
-  joining, granting, and accepting workspace authority.
+- `user`, `admin`, `user_invite`, `device_invite`, `invite`, and
+  `invite_server` form shared authority edges for joining and granting
+  workspace authority; `invite_accepted` is the local retained acceptance edge
+  that selects which workspace roots this store admits.
 - `endpoint` and `endpoint_shared` hold local and shared endpoint identity
   material.
 - `removal_frontier` names a content-key frontier and its owner.
@@ -289,9 +290,10 @@ call them directly.
 
 ### `workspace` (tag 131)
 
-Creates a workspace namespace. Projection requires global scope and a valid
-workspace root signature, then writes `workspace_rows`, offers
-`auth_workspace`, and shares the fact with sync.
+Creates a workspace namespace. Projection requires global scope, a valid
+workspace root signature, and local `auth_workspace_accepted` context from
+`invite_accepted`, then writes `workspace_rows`, offers `auth_workspace`, and
+shares the fact with sync.
 
 ```text
 workspace {
@@ -342,9 +344,10 @@ user {
 ### `admin` (tag 139)
 
 Grants admin authority to a public key/user in a workspace. A bootstrap grant
-is signed by the workspace root and grants the root user; delegated grants are
-signed by a prior admin and target an existing user. Projection writes
-`admin_rows`, offers `auth_admin`, and shares the fact.
+is signed by the workspace root and targets a real user who joined through a
+workspace-signed bootstrap invite; delegated grants are signed by a prior admin
+and target an existing user. Projection writes `admin_rows`, offers
+`auth_admin`, and shares the fact.
 
 ```text
 admin {
@@ -439,7 +442,8 @@ invite_secret {
 ### `invite_accepted` (tag 146)
 
 Records local acceptance of an invite link. Projection requires local scope and
-a matching scoped `invite_secret`, then writes `invite_accepted_rows`.
+a matching scoped `invite_secret`, then writes `invite_accepted_rows` and offers
+`auth_workspace_accepted` for the accepted workspace.
 
 ```text
 invite_accepted {

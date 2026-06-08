@@ -2,16 +2,17 @@
 //!
 //! POLICY. A workspace fact is admitted iff:
 //!   1. STRUCTURAL. The outer fact is global and the workspace payload decodes.
-//!   2. CONTEXT. No authority context is required; the workspace is the root
-//!      identity object for later grants.
+//!   2. CONTEXT. A retained local invite_accepted fact must select this
+//!      workspace and publish accepted-workspace context.
 //!   3. MATERIALIZE. Write the workspace row, publish workspace context, and
-//!      mark the workspace fact shareable with itself.
+//!      mark the workspace fact shareable.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
+use crate::protocol::auth::invite_accepted;
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
 /// Staged read pipeline for the workspace fact.
@@ -57,9 +58,23 @@ impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
+        // 2. Context.
+        let accepted_need = invite_accepted::workspace_accepted_need(fact.id, fact.id);
+        let Some(accepted_fact) =
+            _context.payload_for_checked(&accepted_need, "workspace accepted")?
+        else {
+            return Ok(ProjectionOutput::new().need(accepted_need));
+        };
+        let accepted = invite_accepted::decode_fact_payload(accepted_fact.body())
+            .map_err(|_| "workspace accepted context is not invite_accepted".to_string())?;
+        if accepted.workspace_id != fact.id {
+            return Err("workspace accepted context points to a different workspace".to_string());
+        }
+
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
+                .need(accepted_need.clone())
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
                     "auth_workspace",
@@ -80,14 +95,34 @@ impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
 #[cfg(test)]
 mod projector_tests {
     use super::*;
+    use crate::core::context::{ContextNeed, ContextOffer};
+    use crate::core::pipeline::MatchedContext;
     use crate::protocol::auth::workspace::{author, encode, queries};
+    use crate::protocol::auth::{invite, invite_accepted};
     use std::collections::BTreeSet;
 
     #[test]
-    fn workspace_projector_emits_sync_share_contribution() {
+    fn workspace_projector_waits_for_accepted_workspace_context() {
         let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
         let projected = WorkspaceProjector::new()
             .project(&fact, &ProjectionContext::default())
+            .expect("project workspace without context");
+
+        assert!(projected.effects.row_mutations.is_empty());
+        assert!(projected.offers.is_empty());
+        assert_eq!(projected.needs.len(), 1);
+        assert_eq!(
+            projected.needs[0],
+            invite_accepted::workspace_accepted_need(fact.id, fact.id)
+        );
+    }
+
+    #[test]
+    fn workspace_projector_emits_sync_share_contribution_after_acceptance() {
+        let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
+        let accepted = accepted_fact(fact.id, fact.id, 124_000);
+        let projected = WorkspaceProjector::new()
+            .project(&fact, &accepted_context(fact.id, &accepted))
             .expect("project workspace");
 
         let intent_kinds = projected
@@ -97,6 +132,21 @@ mod projector_tests {
             .map(|intent| intent.kind.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(intent_kinds, BTreeSet::from(["share_fact_with_sync"]));
+        assert!(projected
+            .offers
+            .iter()
+            .any(|offer| offer.role.as_str() == "auth_workspace"));
+    }
+
+    #[test]
+    fn workspace_projector_rejects_mismatched_accepted_payload() {
+        let fact = author::create_workspace(123_000, [9; 32], "Runtime").expect("workspace fact");
+        let accepted = accepted_fact([8; 32], [8; 32], 124_000);
+        let err = WorkspaceProjector::new()
+            .project(&fact, &accepted_context(fact.id, &accepted))
+            .expect_err("mismatched accepted workspace must reject");
+
+        assert!(err.contains("different workspace"), "{err}");
     }
 
     #[test]
@@ -121,5 +171,46 @@ mod projector_tests {
         assert_eq!(decoded.created_at_ms, 42);
         assert_eq!(decoded.public_key, [7; 32]);
         assert_eq!(decoded.name, "Engineering");
+    }
+
+    fn accepted_fact(
+        workspace_id: crate::core::facts::FactId,
+        invite_fact_id: crate::core::facts::FactId,
+        created_at_ms: u64,
+    ) -> Fact {
+        let (_secret, secret_fact) = invite::author::scoped_secret_fact(
+            [7; 32],
+            workspace_id,
+            invite_fact_id,
+            created_at_ms,
+        )
+        .expect("invite secret");
+        let (_accepted, accepted_fact) = invite_accepted::author::accepted_fact(
+            workspace_id,
+            invite_fact_id,
+            secret_fact.id,
+            invite::decode_fact_payload(secret_fact.body())
+                .expect("decode invite secret")
+                .bootstrap_hash,
+            [5; 32],
+            created_at_ms + 1,
+        )
+        .expect("accepted fact");
+        accepted_fact
+    }
+
+    fn accepted_context(
+        workspace_id: crate::core::facts::FactId,
+        accepted: &Fact,
+    ) -> ProjectionContext {
+        let need: ContextNeed =
+            invite_accepted::workspace_accepted_need(workspace_id, workspace_id);
+        let offer: ContextOffer =
+            invite_accepted::workspace_accepted_offer(accepted.id, workspace_id);
+        ProjectionContext::from_matches(vec![MatchedContext {
+            need,
+            offer,
+            payload: accepted.clone(),
+        }])
     }
 }

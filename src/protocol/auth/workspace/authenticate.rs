@@ -7,9 +7,8 @@
 //!      the verifier key is embedded in the fact, so this needs no context.
 //!
 //! Admission scope (`Global`) is unsigned local metadata, not part of these
-//! bytes, so the projector checks it. The workspace requires no authority
-//! context — it is the root identity object — and materialization stays in the
-//! projector.
+//! bytes, so the projector checks it. Local workspace admission requires
+//! retained invite acceptance context and materialization stays in the projector.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{

@@ -8,11 +8,12 @@ use topo::core::command_context::{
 };
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::auth::workspace::commands::{
-    create_workspace_with_identity, BootstrapIdentity,
-};
 use topo::protocol::auth::workspace::{
     authenticate as workspace_authenticate, decode as workspace_decode,
+};
+use topo::protocol::auth::{
+    admin, invite, invite_accepted, user, user_invite,
+    workspace::commands::{create_workspace_with_identity, BootstrapIdentity},
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -76,6 +77,103 @@ fn create_workspace_emits_decodable_workspace_fact() {
     workspace_authenticate::verify_signature(&decoded).expect("workspace signature");
     assert_eq!(decoded.name, "Research");
     assert_eq!(decoded.created_at_ms, 60_000);
+}
+
+#[test]
+fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant() {
+    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+        .expect("store");
+    let clock = FixedClock(Cell::new(70_000));
+    let vault = EmptyVault;
+    let ctx = CommandContext::new(&store, &clock, &vault);
+
+    let output = create_workspace_with_identity(
+        &ctx,
+        "Research",
+        BootstrapIdentity {
+            username: "alice",
+            device_name: "alice-laptop",
+            ttl_minutes: Some(0),
+        },
+    )
+    .expect("create_workspace");
+    let workspace_id = output.receipt.workspace_fact_id;
+    let workspace = workspace_decode::decode_fact(
+        output
+            .effects
+            .facts
+            .iter()
+            .find(|fact| fact.id == workspace_id)
+            .expect("workspace fact")
+            .body(),
+    )
+    .expect("decode workspace");
+
+    let user_invite_fact = output
+        .effects
+        .facts
+        .iter()
+        .find(|fact| fact.body().first() == Some(&user_invite::TYPE_USER_INVITE))
+        .expect("user invite fact");
+    let first_invite =
+        user_invite::decode_fact_payload(user_invite_fact.body()).expect("decode user invite");
+    assert_eq!(first_invite.workspace_id, workspace_id);
+    assert_eq!(first_invite.authority_fact_id, workspace_id);
+    assert_eq!(first_invite.signer_id, workspace_id);
+    assert_eq!(first_invite.signer_public_key, workspace.public_key);
+
+    let accepted_fact = output
+        .effects
+        .facts
+        .iter()
+        .find(|fact| fact.body().first() == Some(&invite_accepted::TYPE_INVITE_ACCEPTED))
+        .expect("invite_accepted fact");
+    let accepted =
+        invite_accepted::decode_fact_payload(accepted_fact.body()).expect("decode invite_accepted");
+    assert_eq!(accepted.workspace_id, workspace_id);
+    assert_eq!(accepted.invite_fact_id, user_invite_fact.id);
+
+    let invite_secret_fact = output
+        .effects
+        .facts
+        .iter()
+        .find(|fact| fact.id == accepted.invite_secret_fact_id)
+        .expect("invite secret fact");
+    let secret = invite::decode_fact_payload(invite_secret_fact.body()).expect("decode secret");
+    assert_eq!(secret.workspace_id, Some(workspace_id));
+    assert_eq!(secret.invite_fact_id, Some(user_invite_fact.id));
+    assert_eq!(secret.bootstrap_hash, accepted.bootstrap_hash);
+
+    let user_fact = output
+        .effects
+        .facts
+        .iter()
+        .find(|fact| fact.body().first() == Some(&user::TYPE_USER))
+        .expect("user fact");
+    let created_user = user::decode_fact_payload(user_fact.body()).expect("decode user");
+    assert_eq!(created_user.workspace_id, workspace_id);
+    assert_eq!(created_user.signer_id, user_invite_fact.id);
+    assert_eq!(created_user.signer_public_key, first_invite.public_key);
+
+    let admins = output
+        .effects
+        .facts
+        .iter()
+        .filter(|fact| fact.body().first() == Some(&admin::TYPE_ADMIN))
+        .map(|fact| admin::decode_fact_payload(fact.body()).expect("decode admin"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        admins.len(),
+        1,
+        "creator bootstrap should emit one admin grant"
+    );
+    let bootstrap_admin = &admins[0];
+    assert_eq!(bootstrap_admin.workspace_id, workspace_id);
+    assert_eq!(bootstrap_admin.authority_fact_id, workspace_id);
+    assert_eq!(bootstrap_admin.signer_id, workspace_id);
+    assert_eq!(bootstrap_admin.signer_public_key, workspace.public_key);
+    assert_eq!(bootstrap_admin.user_fact_id, user_fact.id);
+    assert_eq!(bootstrap_admin.public_key, created_user.public_key);
 }
 
 #[test]
