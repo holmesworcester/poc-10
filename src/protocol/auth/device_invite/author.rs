@@ -10,7 +10,7 @@ use crate::protocol::auth::device_invite::encode;
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_device_invite_fact(
+pub fn authored_device_invite_fact(
     created_at_ms: u64,
     workspace_id: FactId,
     user_authority_fact_id: FactId,

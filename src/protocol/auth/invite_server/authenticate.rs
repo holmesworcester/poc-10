@@ -57,7 +57,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::invite_server::author::signed_invite_server_fact;
+    use crate::protocol::auth::invite_server::author::authored_invite_server_fact;
     use crate::protocol::auth::invite_server::fact::InviteServerFact;
 
     use super::InviteServerAuthenticator;
@@ -65,7 +65,7 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_invite_server_fact(
+        authored_invite_server_fact(
             100,
             [1; 32],
             [2; 32],
@@ -73,7 +73,7 @@ mod tests {
             [4; 32],
             crypto::ed25519_public_key(&SIGNER_KEY),
         )
-        .expect("signed invite_server fact")
+        .expect("authored invite_server fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, InviteServerFact> {

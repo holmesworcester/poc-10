@@ -171,7 +171,7 @@ pub fn create_recipient_key(
     }
     let recipient_secret = crypto::random_x25519_private_key();
     let recipient_key = crypto::x25519_public_key(&recipient_secret);
-    let recipient_fact = auth::recipient_key::author::signed_recipient_key_fact(
+    let recipient_fact = auth::recipient_key::author::authored_recipient_key_fact(
         input.workspace_id,
         membership.endpoint_id,
         recipient_key,
@@ -211,7 +211,7 @@ pub fn create_key_frontier(
     if membership.endpoint_id != endpoint.endpoint {
         return Err("local endpoint membership does not match local endpoint".to_string());
     }
-    let frontier_fact = auth::removal_frontier::author::signed_removal_frontier_fact(
+    let frontier_fact = auth::removal_frontier::author::authored_removal_frontier_fact(
         input.workspace_id,
         endpoint.endpoint,
         input.created_at_ms,

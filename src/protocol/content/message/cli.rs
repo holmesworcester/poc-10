@@ -150,7 +150,7 @@ pub fn react(
         ciphertext: reaction::fact::ReactionCiphertext::new(&ciphertext)
             .map_err(|err| format!("reaction ciphertext: {err}"))?,
     };
-    let authored = signed_reaction_fact(ctx, workspace_id, created_at_ms, reaction)?;
+    let authored = authored_reaction_fact(ctx, workspace_id, created_at_ms, reaction)?;
     Ok(CommandOutput::new(ReactReceipt {
         workspace_id,
         reaction_fact_id: authored.fact.id,
@@ -237,7 +237,7 @@ pub fn send_file(
         sealed_metadata: file::fact::SealedMetadata::new(&sealed_metadata)
             .map_err(|err| format!("file metadata: {err}"))?,
     };
-    let descriptor = signed_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
+    let descriptor = authored_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
     let descriptor_fact_id = descriptor.fact.id;
     let mut facts = message_output.effects.facts;
     facts.extend(descriptor.into_facts());
@@ -253,7 +253,7 @@ pub fn send_file(
                 .map_err(|err| format!("file slice bao proof: {err}"))?,
         };
         facts.extend(
-            signed_file_slice_fact(ctx, parsed.workspace_id, slice.created_at_ms, slice)?
+            authored_file_slice_fact(ctx, parsed.workspace_id, slice.created_at_ms, slice)?
                 .into_facts(),
         );
     }
@@ -930,14 +930,14 @@ fn signing_fields(
     ))
 }
 
-fn signed_reaction_fact(
+fn authored_reaction_fact(
     ctx: &CommandContext<'_>,
     workspace_id: FactId,
     created_at_ms: u64,
     reaction: reaction::fact::ContentReactionFact,
 ) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    let fact = reaction::author::signed_reaction_fact(
+    let fact = reaction::author::authored_reaction_fact(
         created_at_ms,
         workspace_id,
         reaction.target_message_id,
@@ -952,14 +952,14 @@ fn signed_reaction_fact(
     Ok(auth::signature::author::AuthoredFactEvidence { fact, signature })
 }
 
-fn signed_file_fact(
+fn authored_file_fact(
     ctx: &CommandContext<'_>,
     workspace_id: FactId,
     created_at_ms: u64,
     file: file::fact::ContentFileFact,
 ) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    let fact = file::author::signed_file_fact(
+    let fact = file::author::authored_file_fact(
         workspace_id,
         created_at_ms,
         file.message_id,
@@ -978,14 +978,14 @@ fn signed_file_fact(
     Ok(auth::signature::author::AuthoredFactEvidence { fact, signature })
 }
 
-fn signed_file_slice_fact(
+fn authored_file_slice_fact(
     ctx: &CommandContext<'_>,
     workspace_id: FactId,
     created_at_ms: u64,
     slice: file_slice::fact::ContentFileSliceFact,
 ) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    let fact = file_slice::author::signed_file_slice_fact(
+    let fact = file_slice::author::authored_file_slice_fact(
         workspace_id,
         created_at_ms,
         slice.file_id,

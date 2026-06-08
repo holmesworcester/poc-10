@@ -307,7 +307,7 @@ fn latest_local_key_secret(
 // Message retention (expiry, deletion, and floor support).
 //
 // Retention is the point where message state intentionally stops being a live
-// row. These helpers decode signed message facts into the fields needed for
+// row. These helpers decode signature-evidenced message facts into the fields needed for
 // expiration, write tombstones that preserve deletion history, and remove live
 // message rows through the same atomic effect commit path used by normal
 // projection. Message projection invokes them when matched context tells the

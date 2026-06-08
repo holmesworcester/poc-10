@@ -90,14 +90,14 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
 }
 
 #[test]
-fn runtime_routes_signed_content_message_to_content_message_projector() {
+fn runtime_routes_signature_evidenced_content_message_to_projector() {
     let workspace_id = [42; 32];
     let signer_id = [11; 32];
     let signer_private = [7; 32];
     let frontier = removal_frontier_fact(workspace_id, [33; 32]);
     let frontier_id = frontier.id;
     let key_secret = [9; crypto::XCHACHA20_POLY1305_KEY_BYTES];
-    let message = signed_content_message_fact(SignedContentMessageInput {
+    let message = content_message_fact_with_signer(ContentMessageWithSignerInput {
         workspace_id,
         author_user_id: [44; 32],
         signer_id,
@@ -105,7 +105,7 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
         frontier_id,
         key_secret,
         created_at_ms: 60_000,
-        text: "runtime signed message",
+        text: "runtime signature-evidenced message",
     });
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
 
@@ -119,7 +119,7 @@ fn runtime_routes_signed_content_message_to_content_message_projector() {
     runtime.submit_fact(message);
     let status = runtime
         .process_projection_until_idle(8, 64)
-        .expect("drain signed message projection");
+        .expect("drain signature-evidenced message projection");
 
     assert!(status.progressed);
     assert!(
@@ -195,7 +195,7 @@ fn local_key_secret_fact(
     )
 }
 
-struct SignedContentMessageInput<'a> {
+struct ContentMessageWithSignerInput<'a> {
     workspace_id: [u8; 32],
     author_user_id: [u8; 32],
     signer_id: [u8; 32],
@@ -206,7 +206,7 @@ struct SignedContentMessageInput<'a> {
     text: &'a str,
 }
 
-fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
+fn content_message_fact_with_signer(input: ContentMessageWithSignerInput<'_>) -> Fact {
     let minute = input.created_at_ms / 60_000;
     let nonce = [7; content_message::fact::NONCE_BYTES];
     let plaintext =

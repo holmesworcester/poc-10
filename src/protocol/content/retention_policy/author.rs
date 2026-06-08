@@ -11,7 +11,7 @@ use crate::protocol::content::retention_policy::encode;
 use crate::protocol::content::retention_policy::fact::RetentionPolicyFact;
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_retention_policy_fact(
+pub fn authored_retention_policy_fact(
     workspace_id: FactId,
     supersedes_policy_id: Option<FactId>,
     ttl_minutes: u32,

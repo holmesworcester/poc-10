@@ -1,7 +1,7 @@
 //! Local signer-secret fact family.
 //!
 //! A local signer secret is private key material that lets this node produce
-//! natural signatures for one workspace signer. It is a local fact, never a
+//! signature evidence for one workspace signer. It is a local fact, never a
 //! shareable envelope, and its only projection output is local signer context
 //! for commands and projectors that need signing authority.
 

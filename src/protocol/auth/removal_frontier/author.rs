@@ -9,7 +9,7 @@ use crate::core::facts::Fact;
 use crate::protocol::auth::removal_frontier::encode;
 use crate::protocol::auth::removal_frontier::fact::{EndpointId, RemovalFrontierFact, WorkspaceId};
 
-pub fn signed_removal_frontier_fact(
+pub fn authored_removal_frontier_fact(
     workspace_id: WorkspaceId,
     owner_endpoint_id: EndpointId,
     created_at_ms: u64,

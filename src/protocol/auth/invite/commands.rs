@@ -182,7 +182,7 @@ pub fn create_device_link(
         .ok_or_else(|| "local endpoint user is missing".to_string())?;
 
     let invite_private_key = crypto::random_ed25519_private_key();
-    let device_invite_fact = auth::device_invite::author::signed_device_invite_fact(
+    let device_invite_fact = auth::device_invite::author::authored_device_invite_fact(
         input.created_at_ms.saturating_add(1),
         input.workspace_id,
         user.user_id,
@@ -237,7 +237,7 @@ pub fn create_invite_server(
     let local = endpoint_output.receipt.endpoint;
     let authority = local_admin_id(ctx.store(), input.workspace_id, local.signing_public_key)?;
     let invite_private_key = crypto::random_ed25519_private_key();
-    let invite_server_fact = auth::invite_server::author::signed_invite_server_fact(
+    let invite_server_fact = auth::invite_server::author::authored_invite_server_fact(
         input.created_at_ms.saturating_add(1),
         crypto::ed25519_public_key(&invite_private_key),
         input.workspace_id,
@@ -344,13 +344,15 @@ pub fn accept(
             return Err("device name must not be empty".to_string());
         }
 
-        let user = auth::user::commands::create_signed(auth::user::commands::CreateSignedUser {
-            created_at_ms: input.created_at_ms.saturating_add(4),
-            workspace_id: input.invite.workspace_id,
-            signer_id: input.invite.invite_fact_id,
-            signer_private_key: input.invite.bootstrap_secret,
-            username,
-        })?;
+        let user = auth::user::commands::create_with_authority(
+            auth::user::commands::CreateUserWithAuthority {
+                created_at_ms: input.created_at_ms.saturating_add(4),
+                workspace_id: input.invite.workspace_id,
+                signer_id: input.invite.invite_fact_id,
+                signer_private_key: input.invite.bootstrap_secret,
+                username,
+            },
+        )?;
         user_id = Some(user.receipt.user_id);
         facts.extend(user.effects.facts);
 
@@ -413,7 +415,7 @@ fn workspace_accept_device_invite_fact(
     user_invite_fact_id: FactId,
     bootstrap_secret: [u8; 32],
 ) -> Result<AuthoredFactEvidence, String> {
-    let fact = auth::device_invite::author::signed_device_invite_fact(
+    let fact = auth::device_invite::author::authored_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_id,
@@ -564,7 +566,7 @@ struct EndpointSharedFactInput<'a> {
 fn endpoint_shared_fact(
     input: EndpointSharedFactInput<'_>,
 ) -> Result<AuthoredFactEvidence, String> {
-    let fact = auth::endpoint_shared::author::signed_endpoint_shared_fact(
+    let fact = auth::endpoint_shared::author::authored_endpoint_shared_fact(
         input.created_at_ms,
         input.workspace_id,
         input.user_id,

@@ -10,7 +10,7 @@ use crate::protocol::content::file::encode;
 use crate::protocol::content::file::fact::{ContentFileFact, RootHash, SealedMetadata};
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_file_fact(
+pub fn authored_file_fact(
     workspace_id: FactId,
     created_at_ms: u64,
     message_id: FactId,

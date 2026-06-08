@@ -1,6 +1,6 @@
 //! Recipient-key authenticator.
 //!
-//! POLICY. Authenticating a `recipient_key` fact proves, over its signed bytes
+//! POLICY. Authenticating a `recipient_key` fact proves, over its canonical bytes
 //! alone:
 //!   1. LAYOUT. The bytes decode to a canonical recipient-key fact.
 //!   2. ID. The content id equals `hash(bytes)`.
@@ -57,7 +57,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::recipient_key::author::signed_recipient_key_fact;
+    use crate::protocol::auth::recipient_key::author::authored_recipient_key_fact;
     use crate::protocol::auth::recipient_key::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 
     use super::RecipientKeyAuthenticator;
@@ -67,7 +67,7 @@ mod tests {
     fn canonical_fact() -> Fact {
         let private_key = SIGNER_KEY;
         let signer_public_key = crypto::ed25519_public_key(&private_key);
-        signed_recipient_key_fact(
+        authored_recipient_key_fact(
             [1; 32],
             [2; 32],
             [3; 32],

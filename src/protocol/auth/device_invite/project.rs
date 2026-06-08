@@ -1,11 +1,11 @@
 //! Poc-10 device-invite projector.
 //!
 //! POLICY. A device_invite is admitted iff:
-//!   1. STRUCTURAL. The outer fact is global, signed, contains a device_invite,
+//!   1. STRUCTURAL. The outer fact is global, carries signer identity, contains a device_invite,
 //!      and all selector fields are non-zero.
 //!   2. AUTHORITY. The invite follows one of two named authority paths:
-//!      user-signed invites require workspace, user, and user_invite context;
-//!      endpoint-signed invites require workspace and endpoint_shared context.
+//!      user-authorized invites require workspace, user, and user_invite context;
+//!      endpoint-authorized invites require workspace and endpoint_shared context.
 //!   3. MATERIALIZE. Once the path validates, write the row, publish exact/key
 //!      offers, and mark the fact shareable with the workspace.
 
@@ -68,8 +68,8 @@ impl SemanticProjector<DeviceInviteFact> for DeviceInviteProjector {
         // 2. Authority.
         //
         // `user_invite_fact_id` is the authority-chain discriminator:
-        // Some(id) means the device invite must be signed by the user fact
-        // authorized by that user_invite; None means it must be signed by an
+        // Some(id) means the device invite must be authorized by the user fact
+        // authorized by that user_invite; None means it must be authorized by an
         // already-trusted endpoint_shared fact for the same user/workspace.
         let signature_need = signature::project::signature_proof_need(
             fact.id,
@@ -89,26 +89,26 @@ impl SemanticProjector<DeviceInviteFact> for DeviceInviteProjector {
         }
 
         match device_invite.user_invite_fact_id {
-            Some(user_invite_fact_id) => project_user_signed(
+            Some(user_invite_fact_id) => project_user_authorized(
                 fact,
                 &device_invite,
                 user_invite_fact_id,
                 context,
                 signature_need,
             ),
-            None => project_endpoint_signed(fact, &device_invite, context, signature_need),
+            None => project_endpoint_authorized(fact, &device_invite, context, signature_need),
         }
     }
 }
 
-fn project_user_signed(
+fn project_user_authorized(
     fact: &Fact,
     invite: &DeviceInviteFact,
     user_invite_fact_id: FactId,
     context: &ProjectionContext,
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = UserSignedNeeds::new(fact.id, invite, user_invite_fact_id, signature_need);
+    let needs = UserAuthorityNeeds::new(fact.id, invite, user_invite_fact_id, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -122,7 +122,7 @@ fn project_user_signed(
     validate_workspace_context(workspace_fact, invite.workspace_id)?;
 
     if invite.signer_id != invite.user_authority_fact_id {
-        return Err("user-signed device_invite authority must match signer user".to_string());
+        return Err("user-authorized device_invite authority must match signer user".to_string());
     }
     if user_fact.id != invite.user_authority_fact_id {
         return Err("device_invite user context payload id mismatch".to_string());
@@ -137,7 +137,9 @@ fn project_user_signed(
     }
 
     if user.signer_id != user_invite_fact_id {
-        return Err("device_invite user_invite dependency does not match signed user".to_string());
+        return Err(
+            "device_invite user_invite dependency does not match authorized user".to_string(),
+        );
     }
     if user_invite_fact.id != user_invite_fact_id {
         return Err("device_invite user_invite context payload id mismatch".to_string());
@@ -164,13 +166,13 @@ fn project_user_signed(
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
-fn project_endpoint_signed(
+fn project_endpoint_authorized(
     fact: &Fact,
     invite: &DeviceInviteFact,
     context: &ProjectionContext,
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = EndpointSignedNeeds::new(fact.id, invite, invite.signer_id, signature_need);
+    let needs = EndpointAuthorityNeeds::new(fact.id, invite, invite.signer_id, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -193,12 +195,12 @@ fn project_endpoint_signed(
     }
     if signer.workspace_id != invite.workspace_id {
         return Err(
-            "endpoint_shared-signed device_invite workspace does not match signer".to_string(),
+            "endpoint-authorized device_invite workspace does not match signer".to_string(),
         );
     }
     if signer.user_authority_fact_id != invite.user_authority_fact_id {
         return Err(
-            "endpoint_shared-signed device_invite user authority does not match signer".to_string(),
+            "endpoint-authorized device_invite user authority does not match signer".to_string(),
         );
     }
     let context_have = context_have_from_needs(
@@ -210,14 +212,14 @@ fn project_endpoint_signed(
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
-struct UserSignedNeeds {
+struct UserAuthorityNeeds {
     signature: ContextNeed,
     workspace: ContextNeed,
     user: ContextNeed,
     user_invite: ContextNeed,
 }
 
-impl UserSignedNeeds {
+impl UserAuthorityNeeds {
     fn new(
         owner: FactId,
         invite: &DeviceInviteFact,
@@ -259,13 +261,13 @@ impl UserSignedNeeds {
     }
 }
 
-struct EndpointSignedNeeds {
+struct EndpointAuthorityNeeds {
     signature: ContextNeed,
     workspace: ContextNeed,
     endpoint_shared: ContextNeed,
 }
 
-impl EndpointSignedNeeds {
+impl EndpointAuthorityNeeds {
     fn new(
         owner: FactId,
         invite: &DeviceInviteFact,

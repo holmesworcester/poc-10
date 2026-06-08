@@ -1,6 +1,6 @@
 //! Content-file authenticator.
 //!
-//! POLICY. Authenticating a `content_file` fact proves, over its signed bytes
+//! POLICY. Authenticating a `content_file` fact proves, over its canonical bytes
 //! alone:
 //!   1. LAYOUT. The bytes decode to a canonical content-file descriptor.
 //!   2. ID. The content id equals `hash(bytes)`.
@@ -98,7 +98,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::content::file::author::signed_file_fact;
+    use crate::protocol::content::file::author::authored_file_fact;
     use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
 
     use super::ContentFileAuthenticator;
@@ -106,7 +106,7 @@ mod tests {
     const PRIVATE_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_file_fact(
+        authored_file_fact(
             [1; 32],
             100,
             [2; 32],
@@ -120,7 +120,7 @@ mod tests {
             SealedMetadata::new(b"sealed-filename-and-mime").expect("sealed metadata"),
             PRIVATE_KEY,
         )
-        .expect("signed content file fact")
+        .expect("authored content file fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentFileFact> {

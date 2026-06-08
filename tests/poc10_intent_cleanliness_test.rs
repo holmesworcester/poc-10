@@ -936,7 +936,71 @@ fn retired_signing_wrapper_and_content_event_families_do_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "signed_fact, signed_envelope, and content_event are retired protocol wrappers. Shareable facts own natural signer fields, while deterministic key_wrap remains the raw exception:\n{}",
+        "signed_fact, signed_envelope, and content_event are retired protocol wrappers. Shareable facts own signer identity fields, while deterministic key_wrap remains the raw exception:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn signer_bearing_author_helpers_do_not_claim_to_sign() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let forbidden_helpers = [
+        "signed_admin_fact",
+        "signed_device_invite_fact",
+        "signed_endpoint_shared_fact",
+        "signed_file_fact",
+        "signed_file_slice_fact",
+        "signed_invite_server_fact",
+        "signed_reaction_fact",
+        "signed_recipient_key_fact",
+        "signed_removal_frontier_fact",
+        "signed_retention_policy_fact",
+        "signed_user_fact",
+        "signed_user_invite_fact",
+        "CreateSignedUser",
+        "create_signed",
+    ];
+    let mut offenders = Vec::new();
+
+    for path in rust_files(&root.join("src/protocol")) {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        let production =
+            strip_line_comments(production_text_before_unit_tests(&source_text(&path)));
+        for marker in forbidden_helpers {
+            if production.contains(marker) {
+                offenders.push(format!("{relative} contains {marker:?}"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "target fact helpers should author signer identity only; commands create separate signature evidence:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn live_readme_examples_keep_signature_evidence_separate() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+
+    for relative in [
+        "src/protocol/auth/README.md",
+        "src/protocol/content/README.md",
+    ] {
+        let text = source_text(&root.join(relative));
+        for (index, block) in text.split("```text").skip(1).enumerate() {
+            let block = block.split("```").next().unwrap_or(block);
+            if block.contains("signature: sig(") && !block.trim_start().starts_with("signature {") {
+                offenders.push(format!("{relative} text block {}", index + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "live README target fact examples must not embed signatures; use a separate signature evidence block:\n{}",
         offenders.join("\n")
     );
 }
@@ -973,7 +1037,7 @@ fn signing_wrappers_stay_out_of_projector_routing() {
 
     assert!(
         offenders.is_empty(),
-        "signing wrappers are retired; child fact projectors verify natural signatures directly:\n{}",
+        "signing wrappers are retired; target fact projectors consume signature evidence:\n{}",
         offenders.join("\n")
     );
 }
@@ -1954,7 +2018,7 @@ fn retired_signed_envelope_module_does_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "auth::signed_envelope is retired; facts carry natural signatures directly:\n{}",
+        "auth::signed_envelope is retired; signer-bearing facts use separate signature evidence:\n{}",
         offenders.join("\n")
     );
 }

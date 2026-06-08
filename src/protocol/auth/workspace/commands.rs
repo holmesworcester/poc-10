@@ -171,7 +171,7 @@ fn endpoint_shared_fact(
             .ok_or_else(|| "local endpoint row is missing".to_string())?;
         id32(&value, "local endpoint")?
     };
-    let fact = auth::endpoint_shared::author::signed_endpoint_shared_fact(
+    let fact = auth::endpoint_shared::author::authored_endpoint_shared_fact(
         input.created_at_ms,
         input.workspace_id,
         input.user_id,
@@ -203,7 +203,7 @@ fn user_invite_fact(
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
 ) -> Result<AuthoredFactEvidence, String> {
-    let fact = auth::user_invite::author::signed_user_invite_fact(
+    let fact = auth::user_invite::author::authored_user_invite_fact(
         created_at_ms,
         public_key,
         workspace_id,
@@ -227,7 +227,7 @@ fn user_fact(
     signer_private_key: [u8; 32],
     username: &str,
 ) -> Result<AuthoredFactEvidence, String> {
-    let fact = auth::user::author::signed_user_fact(
+    let fact = auth::user::author::authored_user_fact(
         created_at_ms,
         workspace_id,
         crypto::ed25519_public_key(&signer_private_key),
@@ -260,7 +260,7 @@ fn bootstrap_admin_fact(
         signer_id: workspace_id,
         signer_public_key: crypto::ed25519_public_key(&workspace_private_key),
     };
-    let fact = auth::admin::author::signed_admin_fact(
+    let fact = auth::admin::author::authored_admin_fact(
         created_at_ms,
         workspace_id,
         workspace_private_key,
@@ -283,7 +283,7 @@ fn device_invite_fact(
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
 ) -> Result<AuthoredFactEvidence, String> {
-    let fact = auth::device_invite::author::signed_device_invite_fact(
+    let fact = auth::device_invite::author::authored_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_authority_fact_id,
@@ -309,7 +309,7 @@ fn initial_retention_policy_fact(
     ttl_minutes: u32,
     signer_private_key: [u8; 32],
 ) -> Result<AuthoredFactEvidence, String> {
-    let fact = content::retention_policy::author::signed_retention_policy_fact(
+    let fact = content::retention_policy::author::authored_retention_policy_fact(
         workspace_id,
         None,
         ttl_minutes,

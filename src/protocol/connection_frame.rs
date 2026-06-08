@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_signed_identity_uses_payload_created_timestamp() {
+    fn admitted_signer_identity_uses_payload_created_timestamp() {
         let signing_secret = [10; 32];
         let user = UserFact {
             created_at_ms: 66_666,
@@ -702,7 +702,8 @@ mod tests {
         };
         let bytes = auth::user::encode::encode_fact(&user).expect("user payload");
 
-        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");
+        let admitted =
+            admit_received_fact_bytes(bytes.clone()).expect("admit user with signer identity");
 
         assert_eq!(admitted.scope, FactScope::Global);
         assert_eq!(admitted.timestamp, user.created_at_ms);

@@ -3,8 +3,8 @@
 //! POLICY. A user_invite is admitted iff:
 //!   1. STRUCTURAL. The fact is global, signed, contains a user_invite payload,
 //!      and all selector fields are non-zero.
-//!   2. AUTHORITY. Bootstrap invites are signed directly by the workspace root;
-//!      delegated invites are signed by an endpoint_shared fact whose user owns
+//!   2. AUTHORITY. Bootstrap invites require signature evidence from the workspace root;
+//!      delegated invites require signature evidence from an endpoint_shared fact whose user owns
 //!      the named admin grant in the same workspace.
 //!   3. MATERIALIZE. Once the authority path validates, write the user_invite
 //!      row, publish exact/key offers, and mark the fact shareable.
@@ -89,20 +89,20 @@ impl SemanticProjector<UserInviteFact> for UserInviteProjector {
         }
 
         if user_invite.authority_fact_id == user_invite.workspace_id {
-            project_workspace_signed(fact, &user_invite, context, signature_need)
+            project_workspace_authorized(fact, &user_invite, context, signature_need)
         } else {
-            project_endpoint_signed(fact, &user_invite, context, signature_need)
+            project_endpoint_authorized(fact, &user_invite, context, signature_need)
         }
     }
 }
 
-fn project_workspace_signed(
+fn project_workspace_authorized(
     fact: &Fact,
     invite: &UserInviteFact,
     context: &ProjectionContext,
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = WorkspaceSignedNeeds::new(fact.id, invite, signature_need);
+    let needs = WorkspaceAuthorityNeeds::new(fact.id, invite, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -117,7 +117,7 @@ fn project_workspace_signed(
         .map_err(|_| "user_invite authority is not a workspace fact".to_string())?;
     if workspace.public_key != invite.signer_public_key {
         return Err(
-            "signed user_invite signer key does not match workspace public key".to_string(),
+            "user_invite signature signer key does not match workspace public key".to_string(),
         );
     }
     let context_have = context_have_from_needs(context, [&needs.signature, &needs.workspace]);
@@ -126,7 +126,7 @@ fn project_workspace_signed(
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
-fn project_endpoint_signed(
+fn project_endpoint_authorized(
     fact: &Fact,
     invite: &UserInviteFact,
     context: &ProjectionContext,
@@ -147,7 +147,8 @@ fn project_endpoint_signed(
         .map_err(|_| "user_invite signer must be workspace or endpoint_shared".to_string())?;
     if endpoint.signing_public_key != invite.signer_public_key {
         return Err(
-            "signed user_invite signer key does not match endpoint_shared signing key".to_string(),
+            "user_invite signature signer key does not match endpoint_shared signing key"
+                .to_string(),
         );
     }
     if endpoint.workspace_id != invite.workspace_id {
@@ -174,12 +175,12 @@ fn project_endpoint_signed(
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
-struct WorkspaceSignedNeeds {
+struct WorkspaceAuthorityNeeds {
     signature: ContextNeed,
     workspace: ContextNeed,
 }
 
-impl WorkspaceSignedNeeds {
+impl WorkspaceAuthorityNeeds {
     fn new(owner: FactId, invite: &UserInviteFact, signature: ContextNeed) -> Self {
         Self {
             signature,

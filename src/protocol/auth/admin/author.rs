@@ -9,7 +9,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth::admin::encode;
 use crate::protocol::auth::admin::fact::AdminFact;
 
-pub fn signed_admin_fact(
+pub fn authored_admin_fact(
     created_at_ms: u64,
     signer_id: FactId,
     signer_private_key: Ed25519PrivateKey,

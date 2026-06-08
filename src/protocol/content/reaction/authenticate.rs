@@ -48,7 +48,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::content::reaction::author::signed_reaction_fact;
+    use crate::protocol::content::reaction::author::authored_reaction_fact;
     use crate::protocol::content::reaction::fact::{
         ContentReactionFact, ReactionCiphertext, REACTION_NONCE_BYTES,
     };
@@ -58,7 +58,7 @@ mod tests {
     const PRIVATE_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_reaction_fact(
+        authored_reaction_fact(
             100,
             [1; 32],
             [2; 32],
@@ -68,7 +68,7 @@ mod tests {
             ReactionCiphertext::new(b"sealed-reaction").expect("reaction ciphertext"),
             PRIVATE_KEY,
         )
-        .expect("signed content reaction fact")
+        .expect("authored content reaction fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentReactionFact> {

@@ -61,7 +61,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::content::retention_policy::author::signed_retention_policy_fact;
+    use crate::protocol::content::retention_policy::author::authored_retention_policy_fact;
     use crate::protocol::content::retention_policy::fact::{
         RetentionPolicyFact, SCOPE_KIND_WORKSPACE,
     };
@@ -72,7 +72,7 @@ mod tests {
     const WORKSPACE_ID: [u8; 32] = [1; 32];
 
     fn canonical_fact() -> Fact {
-        signed_retention_policy_fact(
+        authored_retention_policy_fact(
             WORKSPACE_ID,
             None,
             60,

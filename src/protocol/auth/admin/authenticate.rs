@@ -1,6 +1,6 @@
 //! Admin-grant authenticator.
 //!
-//! POLICY. Authenticating an `admin` fact proves, over its signed bytes alone:
+//! POLICY. Authenticating an `admin` fact proves, over its canonical bytes alone:
 //!   1. LAYOUT. The bytes decode to a canonical admin fact.
 //!   2. ID. The content id equals `hash(bytes)`.
 //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
@@ -57,7 +57,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::admin::author::signed_admin_fact;
+    use crate::protocol::auth::admin::author::authored_admin_fact;
     use crate::protocol::auth::admin::fact::AdminFact;
 
     use super::AdminAuthenticator;
@@ -74,7 +74,7 @@ mod tests {
             signer_id: [3; 32],
             signer_public_key: [0; 32],
         };
-        signed_admin_fact(100, [3; 32], SIGNER_KEY, grant).expect("signed admin fact")
+        authored_admin_fact(100, [3; 32], SIGNER_KEY, grant).expect("signed admin fact")
     }
 
     // Enter through the staged path (codec decode -> authenticate_decoded) so the

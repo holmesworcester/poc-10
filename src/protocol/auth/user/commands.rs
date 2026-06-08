@@ -1,9 +1,10 @@
 //! Command constructors for user facts.
 //!
 //! User creation records a workspace member name and signing public key. This
-//! file owns local construction, including the signed variant used when another
-//! authority vouches for the user. Projection still validates that the user is
-//! connected to a valid invite or authority chain before rows become visible.
+//! file owns local construction, including the authority-backed variant used
+//! when another authority vouches for the user. Projection still validates that
+//! the user is connected to a valid invite or authority chain before rows become
+//! visible.
 
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
@@ -21,7 +22,7 @@ pub struct CreateUser {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateSignedUser {
+pub struct CreateUserWithAuthority {
     pub created_at_ms: u64,
     pub workspace_id: FactId,
     pub signer_id: FactId,
@@ -46,9 +47,11 @@ pub fn create(input: CreateUser) -> Result<CommandOutput<CreateUserReceipt>, Str
     .with_facts(vec![fact]))
 }
 
-pub fn create_signed(input: CreateSignedUser) -> Result<CommandOutput<CreateUserReceipt>, String> {
+pub fn create_with_authority(
+    input: CreateUserWithAuthority,
+) -> Result<CommandOutput<CreateUserReceipt>, String> {
     let public_key = crate::core::crypto::ed25519_public_key(&input.signer_private_key);
-    let fact = signed_user_fact(&input, public_key)?;
+    let fact = authored_user_fact(&input, public_key)?;
     let signature = auth::signature::author::sign_fact(
         input.workspace_id,
         &fact,
@@ -65,14 +68,14 @@ pub fn create_signed(input: CreateSignedUser) -> Result<CommandOutput<CreateUser
 
 pub fn user_fact(input: &CreateUser) -> Result<Fact, String> {
     let _ = input;
-    Err("user facts must be signed by an invite authority".to_string())
+    Err("user facts require signature evidence from an invite authority".to_string())
 }
 
-pub fn signed_user_fact(
-    input: &CreateSignedUser,
+pub fn authored_user_fact(
+    input: &CreateUserWithAuthority,
     public_key: Ed25519PublicKey,
 ) -> Result<Fact, String> {
-    author::signed_user_fact(
+    author::authored_user_fact(
         input.created_at_ms,
         input.workspace_id,
         public_key,

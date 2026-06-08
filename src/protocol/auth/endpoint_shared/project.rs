@@ -162,7 +162,7 @@ fn has_valid_authority(
     }
     if shared.endpoint_role == EndpointRole::Device {
         let invite = device_invite::decode_fact_payload(authority_fact.body()).map_err(|_| {
-            "endpoint_shared dependency is not a signed endpoint invite".to_string()
+            "endpoint_shared dependency is not an authorized endpoint invite".to_string()
         })?;
         if invite.public_key != shared.signer_public_key {
             return Err(
@@ -178,8 +178,10 @@ fn has_valid_authority(
         return Ok(true);
     }
 
-    let invite_server = invite_server::decode_fact_payload(authority_fact.body())
-        .map_err(|_| "endpoint_shared dependency is not a signed endpoint invite".to_string())?;
+    let invite_server =
+        invite_server::decode_fact_payload(authority_fact.body()).map_err(|_| {
+            "endpoint_shared dependency is not an authorized endpoint invite".to_string()
+        })?;
     if invite_server.workspace_id != shared.workspace_id {
         return Err("endpoint_shared workspace does not match invite_server".to_string());
     }

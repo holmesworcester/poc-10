@@ -12,7 +12,7 @@ use crate::protocol::auth::endpoint_shared::fact::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_endpoint_shared_fact(
+pub fn authored_endpoint_shared_fact(
     created_at_ms: u64,
     workspace_id: FactId,
     user_authority_fact_id: FactId,

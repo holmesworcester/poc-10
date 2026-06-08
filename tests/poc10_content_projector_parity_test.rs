@@ -10,8 +10,8 @@ const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [11; 32];
 const CONTENT_ENDPOINT_ID: FactId = [21; 32];
 
 #[test]
-fn raw_content_events_reject_projection() {
-    let message = unsigned_message_fact(WORKSPACE, [31; 32]);
+fn content_facts_without_signature_evidence_wait() {
+    let message = message_fact_without_signature_evidence(WORKSPACE, [31; 32]);
     let output = content::message::project::ContentMessageProjector::new()
         .project(&message, &ProjectionContext::default())
         .expect("message without signature evidence parks");
@@ -21,7 +21,7 @@ fn raw_content_events_reject_projection() {
         .iter()
         .any(|need| need.role == "signature_proof"));
 
-    let file = unsigned_file_fact(WORKSPACE, [31; 32]);
+    let file = file_fact_without_signature_evidence(WORKSPACE, [31; 32]);
     assert_waits_for_signature(
         content::file::project::ContentFileProjector::new()
             .project(&file, &ProjectionContext::default())
@@ -114,7 +114,7 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
         ])
         .expect("message ciphertext"),
     };
-    let fact = signed_content_fact_in_workspace(
+    let fact = content_fact_with_signer_key(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::message::encode::encode_fact(&message).expect("encode message"),
@@ -153,7 +153,7 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
     };
-    let fact = signed_content_fact_in_workspace(
+    let fact = content_fact_with_signer_key(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::file::encode::encode_fact(&file).expect("encode file"),
@@ -197,7 +197,7 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
     };
-    let fact = signed_content_fact_in_workspace(
+    let fact = content_fact_with_signer_key(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::file::encode::encode_fact(&file).expect("encode file"),
@@ -235,7 +235,7 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
         ciphertext: content::reaction::fact::ReactionCiphertext::new(b"sealed-reaction")
             .expect("reaction ciphertext"),
     };
-    let fact = signed_content_fact_in_workspace(
+    let fact = content_fact_with_signer_key(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::reaction::encode::encode_fact(&reaction).expect("encode reaction"),
@@ -269,7 +269,7 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         signer_id: CONTENT_ENDPOINT_ID,
         signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
     };
-    let fact = signed_content_fact_in_workspace(
+    let fact = content_fact_with_signer_key(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::message_deletion::encode::encode_fact(&deletion).expect("encode deletion"),
@@ -313,7 +313,7 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
         signer_id: CONTENT_ENDPOINT_ID,
         signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
     };
-    let fact = signed_content_fact_in_workspace(
+    let fact = content_fact_with_signer_key(
         CONTENT_ENDPOINT_ID,
         CONTENT_SIGNING_KEY,
         content::file_deletion::encode::encode_fact(&deletion).expect("encode deletion"),
@@ -397,7 +397,7 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     )
 }
 
-fn unsigned_message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
+fn message_fact_without_signature_evidence(workspace_id: FactId, author_user_id: FactId) -> Fact {
     let message = content::message::fact::ContentMessageFact {
         workspace_id,
         author_user_id,
@@ -446,7 +446,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     )
 }
 
-fn unsigned_file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
+fn file_fact_without_signature_evidence(workspace_id: FactId, author_user_id: FactId) -> Fact {
     let file = content::file::fact::ContentFileFact {
         workspace_id,
         created_at_ms: 70_000,
@@ -469,13 +469,13 @@ fn unsigned_file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
     )
 }
 
-fn signed_content_fact_in_workspace(
+fn content_fact_with_signer_key(
     _signer_id: FactId,
     private_key: [u8; 32],
     payload: Vec<u8>,
     timestamp: u64,
 ) -> Fact {
-    let signed = sign_payload(private_key, payload).expect("sign content fact");
+    let signed = sign_payload(private_key, payload).expect("attach signer key");
     Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         timestamp,

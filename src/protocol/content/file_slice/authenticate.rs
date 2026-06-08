@@ -48,7 +48,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::content::file_slice::author::signed_file_slice_fact;
+    use crate::protocol::content::file_slice::author::authored_file_slice_fact;
     use crate::protocol::content::file_slice::fact::{ContentFileSliceFact, FileSliceProof};
 
     use super::ContentFileSliceAuthenticator;
@@ -56,7 +56,7 @@ mod tests {
     const PRIVATE_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_file_slice_fact(
+        authored_file_slice_fact(
             [1; 32],
             100,
             [2; 32],
@@ -65,7 +65,7 @@ mod tests {
             FileSliceProof::new(b"bao-slice-proof").expect("slice proof"),
             &PRIVATE_KEY,
         )
-        .expect("signed content file slice fact")
+        .expect("authored content file slice fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, ContentFileSliceFact> {

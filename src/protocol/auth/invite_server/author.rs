@@ -10,7 +10,7 @@ use crate::protocol::auth::invite_server::encode;
 use crate::protocol::auth::invite_server::fact::{InviteServerFact, WorkspaceId};
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_invite_server_fact(
+pub fn authored_invite_server_fact(
     created_at_ms: u64,
     public_key: Ed25519PublicKey,
     workspace_id: WorkspaceId,

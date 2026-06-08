@@ -54,7 +54,7 @@ pub fn create_with_secret(
         workspace_id: input.workspace_id,
         authority_fact_id: input.authority_fact_id,
     };
-    let fact = signed_user_invite_fact(create, input.signer_id, input.signer_private_key)?;
+    let fact = authored_user_invite_fact(create, input.signer_id, input.signer_private_key)?;
     let signature = auth::signature::author::sign_fact(
         input.workspace_id,
         &fact,
@@ -70,15 +70,15 @@ pub fn create_with_secret(
 
 pub fn user_invite_fact(input: CreateUserInvite) -> Result<Fact, String> {
     let _ = input;
-    Err("user_invite facts must be signed by their authority".to_string())
+    Err("user_invite facts require signature evidence from their authority".to_string())
 }
 
-pub fn signed_user_invite_fact(
+pub fn authored_user_invite_fact(
     input: CreateUserInvite,
     signer_id: FactId,
     signer_private_key: Ed25519PrivateKey,
 ) -> Result<Fact, String> {
-    author::signed_user_invite_fact(
+    author::authored_user_invite_fact(
         input.created_at_ms,
         input.public_key,
         input.workspace_id,

@@ -1,6 +1,6 @@
 //! User authenticator.
 //!
-//! POLICY. Authenticating a `user` fact proves, over its signed bytes alone:
+//! POLICY. Authenticating a `user` fact proves, over its canonical bytes alone:
 //!   1. LAYOUT. The bytes decode to a canonical user fact.
 //!   2. ID. The content id equals `hash(bytes)`.
 //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
@@ -55,7 +55,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::user::author::signed_user_fact;
+    use crate::protocol::auth::user::author::authored_user_fact;
     use crate::protocol::auth::user::fact::UserFact;
 
     use super::UserAuthenticator;
@@ -63,8 +63,8 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_user_fact(100, [1; 32], [2; 32], "alice", [3; 32], SIGNER_KEY)
-            .expect("signed user fact")
+        authored_user_fact(100, [1; 32], [2; 32], "alice", [3; 32], SIGNER_KEY)
+            .expect("authored user fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, UserFact> {

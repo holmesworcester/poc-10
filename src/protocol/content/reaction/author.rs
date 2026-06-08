@@ -13,7 +13,7 @@ use crate::protocol::content::reaction::fact::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_reaction_fact(
+pub fn authored_reaction_fact(
     created_at_ms: u64,
     workspace_id: FactId,
     target_message_id: FactId,

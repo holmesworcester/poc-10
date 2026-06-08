@@ -10,7 +10,7 @@ use crate::protocol::content::file_slice::encode;
 use crate::protocol::content::file_slice::fact::{ContentFileSliceFact, FileSliceProof, SignerId};
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_file_slice_fact(
+pub fn authored_file_slice_fact(
     workspace_id: FactId,
     created_at_ms: u64,
     file_id: FactId,

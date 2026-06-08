@@ -63,7 +63,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::endpoint_shared::author::signed_endpoint_shared_fact;
+    use crate::protocol::auth::endpoint_shared::author::authored_endpoint_shared_fact;
     use crate::protocol::auth::endpoint_shared::fact::{EndpointRole, EndpointSharedFact};
 
     use super::EndpointSharedAuthenticator;
@@ -71,7 +71,7 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_endpoint_shared_fact(
+        authored_endpoint_shared_fact(
             100,
             [1; 32],
             [2; 32],
@@ -82,7 +82,7 @@ mod tests {
             [5; 32],
             SIGNER_KEY,
         )
-        .expect("signed endpoint_shared fact")
+        .expect("authored endpoint_shared fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, EndpointSharedFact> {

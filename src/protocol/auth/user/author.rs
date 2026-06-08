@@ -11,7 +11,7 @@ use super::encode;
 use super::fact::{UserFact, Username};
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_user_fact(
+pub fn authored_user_fact(
     created_at_ms: u64,
     workspace_id: FactId,
     public_key: Ed25519PublicKey,

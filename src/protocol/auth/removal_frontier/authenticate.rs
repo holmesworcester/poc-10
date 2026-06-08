@@ -46,7 +46,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::removal_frontier::author::signed_removal_frontier_fact;
+    use crate::protocol::auth::removal_frontier::author::authored_removal_frontier_fact;
     use crate::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
 
     use super::RemovalFrontierAuthenticator;
@@ -54,7 +54,7 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_removal_frontier_fact([1; 32], [2; 32], 100, SIGNER_KEY)
+        authored_removal_frontier_fact([1; 32], [2; 32], 100, SIGNER_KEY)
             .expect("signed removal_frontier fact")
     }
 

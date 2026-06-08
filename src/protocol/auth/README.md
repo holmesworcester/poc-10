@@ -95,10 +95,12 @@ Global facts are peer-visible authority statements. Workspace-scoped facts are
 visible only inside `FactScope::Scoped { kind: "workspace", id }`. Local facts
 must never leave the store, and connection frame send code rejects their tags.
 
-Signatures are natural signatures over canonical signing bytes. Projectors
-verify the signature and the context witness that makes the signer meaningful.
-A local private key fact never grants remote authority by itself; it only
-publishes local context that other projectors may consume.
+Signatures are represented by separate `auth::signature` evidence facts over
+canonical target fact ids. Projectors for signer-bearing shared facts first
+wait for matching `signature_proof` context, then validate the context witness
+that makes the signer meaningful. A local private key fact never grants remote
+authority by itself; it only publishes local context that commands can use to
+create signature evidence and that projectors may consume.
 
 Key material has two surfaces. Shared facts name recipient keys, frontiers, key
 requests, and encrypted wraps. Local facts hold private secrets, publish wrap
@@ -108,12 +110,31 @@ coverage belong in auth key-material modules, not in content or sync.
 
 ## Authority And Key Material Model
 
-Auth combines workspace identity, endpoint authority, naturally signed facts,
+Auth combines workspace identity, endpoint authority, signature-evidenced facts,
 recipient public keys, removal frontiers, deterministic key wraps, and local
 secret material because those facts form one proof boundary: who can act in a
 workspace and what this store is allowed to open or share for that authority.
 Content retention and deletion live in `protocol::content`; they interact with
 auth keys by emitting purge context that auth projectors can range-match.
+
+### Signature Evidence
+
+Signer-bearing shared facts store signer identity fields, not embedded
+signature bytes. Commands emit the target fact and an `auth::signature` fact
+that points at the target. The signature projector verifies the signature over
+`workspace_id || target_fact_id` and offers `signature_proof(target_fact_id,
+signer_public_key)`. Target projectors consume that proof before they validate
+workspace, user, admin, endpoint, or invite authority.
+
+```text
+signature {
+  workspace_id: fact:workspace_acme
+  created_at_ms: 1715000000100
+  target_fact_id: fact:user_invite_alice
+  signer_public_key: ed25519:bob_laptop_signing
+  signature: ed25519_signature(workspace_acme, user_invite_alice)
+}
+```
 
 ### Fact Family Roles
 
@@ -253,9 +274,10 @@ time-only cleanup path.
 ### Open Content
 
 Opening encrypted content is projector work when all inputs are provided as
-context and the operation is deterministic: validate the signed content-message
-context, find covering local key material, derive or validate the leaf, decrypt
-the encrypted fields, and emit opened rows via row mutations.
+context and the operation is deterministic: validate content-message signature
+evidence and signer context, find covering local key material, derive or
+validate the leaf, decrypt the encrypted fields, and emit opened rows via row
+mutations.
 
 Message metadata is intentionally separate from opened content. After signer
 and author context validate, a content-message projector may emit
@@ -290,32 +312,33 @@ call them directly.
 
 ### `workspace` (tag 131)
 
-Creates a workspace namespace. Projection requires global scope, a valid
-workspace root signature, and local `auth_workspace_accepted` context from
-`invite_accepted`, then writes `workspace_rows`, offers `auth_workspace`, and
-shares the fact with sync.
+Creates a workspace namespace. Projection requires global scope, matching
+workspace-root signature evidence, and local `auth_workspace_accepted` context
+from `invite_accepted`, then writes `workspace_rows`, offers `auth_workspace`,
+and shares the fact with sync.
 
 The creator path uses the same fact DAG as later joins: the creation command
-emits the workspace, a workspace-signed first `user_invite`, a local
-`invite_accepted` fact for that invite, the first `user`, and a single
-bootstrap `admin` grant signed by the temporary workspace key. After that
-grant, admin authority flows only through existing admin facts.
+emits the workspace, a first `user_invite` with workspace-root signature
+evidence, a local `invite_accepted` fact for that invite, the first `user`, and
+a single bootstrap `admin` grant with temporary workspace-key signature
+evidence. After that grant, admin authority flows only through existing admin
+facts.
 
 ```text
 workspace {
   created_at_ms: 1715000000000
   public_key: ed25519:workspace_root
   name: "Acme Lab"
-  signature: sig(workspace_root)
 }
 ```
 
 ### `user_invite` (tag 10)
 
-Publishes an invite public key that can sign a `user` fact. Bootstrap invites
-are signed by the workspace root; delegated invites are signed by an
-endpoint whose user owns the named admin grant. Projection writes
-`user_invite_rows`, offers `auth_user_invite`, and shares the fact.
+Publishes an invite public key that can authorize a `user` fact. Bootstrap
+invites require workspace-root signature evidence; delegated invites require
+signature evidence from an endpoint whose user owns the named admin grant.
+Projection writes `user_invite_rows`, offers `auth_user_invite`, and shares the
+fact.
 
 ```text
 user_invite {
@@ -325,7 +348,6 @@ user_invite {
   authority_fact_id: fact:admin_bob
   signer_id: fact:endpoint_bob_laptop
   signer_public_key: ed25519:bob_laptop_signing
-  signature: sig(bob_laptop_signing)
 }
 ```
 
@@ -343,17 +365,16 @@ user {
   username: "alice"
   signer_id: fact:user_invite_alice
   signer_public_key: ed25519:invite_alice
-  signature: sig(invite_alice)
 }
 ```
 
 ### `admin` (tag 139)
 
 Grants admin authority to a public key/user in a workspace. A bootstrap grant
-is signed by the workspace root and targets a real user who joined through a
-workspace-signed bootstrap invite; delegated grants are signed by a prior admin
-and target an existing user. Projection writes `admin_rows`, offers
-`auth_admin`, and shares the fact.
+requires workspace-root signature evidence and targets a real user who joined
+through a bootstrap invite with workspace-root evidence; delegated grants
+require evidence from a prior admin endpoint and target an existing user.
+Projection writes `admin_rows`, offers `auth_admin`, and shares the fact.
 
 ```text
 admin {
@@ -364,14 +385,13 @@ admin {
   user_fact_id: fact:user_alice
   signer_id: fact:workspace_acme
   signer_public_key: ed25519:workspace_root
-  signature: sig(workspace_root)
 }
 ```
 
 ### `device_invite` (tag 134)
 
-Authorizes an endpoint-shared device binding. A user-signed device invite
-points back to the `user_invite` that admitted the user; an endpoint-signed
+Authorizes an endpoint-shared device binding. A user-authorized device invite
+points back to the `user_invite` that admitted the user; an endpoint-authorized
 invite omits that field and uses an already trusted endpoint for the same user.
 Projection writes `device_invite_rows`, offers `auth_device_invite`, and shares
 the fact.
@@ -385,7 +405,6 @@ device_invite {
   public_key: ed25519:alice_phone_invite
   signer_id: fact:user_alice
   signer_public_key: ed25519:alice_user
-  signature: sig(alice_user)
 }
 ```
 
@@ -407,7 +426,6 @@ endpoint_shared {
   device_name: "Alice phone"
   signer_id: fact:device_invite_alice_phone
   signer_public_key: ed25519:alice_phone_invite
-  signature: sig(alice_phone_invite)
 }
 ```
 
@@ -426,7 +444,6 @@ invite_server {
   authority_fact_id: fact:admin_alice
   signer_id: fact:endpoint_alice_laptop
   signer_public_key: ed25519:alice_laptop_signing
-  signature: sig(alice_laptop_signing)
 }
 ```
 
@@ -518,7 +535,6 @@ recipient_key {
   previous_recipient_key_id: fact:recipient_key_v1
   created_at_ms: 1715000000700
   signer_public_key: ed25519:alice_laptop_signing
-  signature: sig(alice_laptop_signing)
 }
 ```
 
@@ -551,7 +567,6 @@ removal_frontier {
   owner_endpoint_id: fact:endpoint_alice_laptop
   created_at_ms: 1715000000800
   signer_public_key: ed25519:alice_laptop_signing
-  signature: sig(alice_laptop_signing)
 }
 ```
 
@@ -611,7 +626,6 @@ key_request {
   recipient_key_id: fact:recipient_key_phone
   created_at_ms: 1715000001000
   signer_public_key: ed25519:alice_phone_signing
-  signature: sig(alice_phone_signing)
 }
 ```
 

@@ -1,6 +1,6 @@
 //! User-invite authenticator.
 //!
-//! POLICY. Authenticating a `user_invite` fact proves, over its signed bytes
+//! POLICY. Authenticating a `user_invite` fact proves, over its canonical bytes
 //! alone:
 //!   1. LAYOUT. The bytes decode to a canonical user_invite fact.
 //!   2. ID. The content id equals `hash(bytes)`.
@@ -58,7 +58,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::user_invite::author::signed_user_invite_fact;
+    use crate::protocol::auth::user_invite::author::authored_user_invite_fact;
     use crate::protocol::auth::user_invite::fact::UserInviteFact;
 
     use super::UserInviteAuthenticator;
@@ -66,8 +66,8 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_user_invite_fact(100, [1; 32], [2; 32], [3; 32], [4; 32], SIGNER_KEY)
-            .expect("signed user_invite fact")
+        authored_user_invite_fact(100, [1; 32], [2; 32], [3; 32], [4; 32], SIGNER_KEY)
+            .expect("authored user_invite fact")
     }
 
     fn authenticate(fact: &Fact) -> Authentication<'_, UserInviteFact> {

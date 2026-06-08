@@ -57,7 +57,7 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
-    use crate::protocol::auth::device_invite::author::signed_device_invite_fact;
+    use crate::protocol::auth::device_invite::author::authored_device_invite_fact;
     use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 
     use super::DeviceInviteAuthenticator;
@@ -65,7 +65,7 @@ mod tests {
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
     fn canonical_fact() -> Fact {
-        signed_device_invite_fact(100, [1; 32], [2; 32], None, [3; 32], [4; 32], SIGNER_KEY)
+        authored_device_invite_fact(100, [1; 32], [2; 32], None, [3; 32], [4; 32], SIGNER_KEY)
             .expect("signed device_invite fact")
     }
 

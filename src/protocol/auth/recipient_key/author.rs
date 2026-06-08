@@ -9,7 +9,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth::recipient_key::encode;
 use crate::protocol::auth::recipient_key::fact::{EndpointId, RecipientKeyFact, WorkspaceId};
 
-pub fn signed_recipient_key_fact(
+pub fn authored_recipient_key_fact(
     workspace_id: WorkspaceId,
     endpoint_id: EndpointId,
     recipient_key: FactId,

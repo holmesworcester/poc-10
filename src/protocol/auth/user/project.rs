@@ -1,7 +1,7 @@
 //! Poc-10 user projector.
 //!
 //! POLICY. A user fact is admitted iff:
-//!   1. STRUCTURAL. The outer fact is global, signed, contains a user payload,
+//!   1. STRUCTURAL. The outer fact is global, carries signer identity, contains a user payload,
 //!      and the workspace/public key/name fields are non-empty.
 //!   2. AUTHORITY. Matched user_invite context must match the signer id,
 //!      signer public key, and workspace.
@@ -101,7 +101,9 @@ impl SemanticProjector<super::fact::UserFact> for UserProjector {
             return Err("user workspace does not match user_invite workspace".to_string());
         }
         if invite.public_key != user.signer_public_key {
-            return Err("signed user signer key does not match user_invite public key".to_string());
+            return Err(
+                "user signature signer key does not match user_invite public key".to_string(),
+            );
         }
         let user_invite_id = invite_fact.id;
         let context_have = context_have_from_needs(context, [&signature_need, &invite_need]);

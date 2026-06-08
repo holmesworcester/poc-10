@@ -10,7 +10,7 @@ use crate::protocol::auth::user_invite::encode;
 use crate::protocol::auth::user_invite::fact::UserInviteFact;
 
 #[allow(clippy::too_many_arguments)]
-pub fn signed_user_invite_fact(
+pub fn authored_user_invite_fact(
     created_at_ms: u64,
     public_key: Ed25519PublicKey,
     workspace_id: FactId,

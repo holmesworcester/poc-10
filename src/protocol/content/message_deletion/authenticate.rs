@@ -1,7 +1,7 @@
 //! Content-message-deletion authenticator.
 //!
 //! POLICY. Authenticating a `content_message_deletion` fact proves, over its
-//! signed bytes alone:
+//! canonical bytes alone:
 //!   1. LAYOUT. The bytes decode to a canonical content-message-deletion fact.
 //!   2. ID. The content id equals `hash(bytes)`.
 //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;

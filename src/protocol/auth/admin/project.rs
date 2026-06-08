@@ -3,9 +3,9 @@
 //! POLICY. An admin grant is admitted iff:
 //!   1. STRUCTURAL. The fact is global, signed, contains an admin payload, and
 //!      all selector fields are non-zero.
-//!   2. AUTHORITY. Bootstrap grants are signed by the workspace root and target
+//!   2. AUTHORITY. Bootstrap grants require signature evidence from the workspace root and target
 //!      a real user who joined through a workspace-signed bootstrap invite;
-//!      delegated grants are signed by the named admin authority and target a
+//!      delegated grants require signature evidence from the named admin authority and target a
 //!      user in the same workspace.
 //!   3. MATERIALIZE. Once the authority path validates, write the admin row,
 //!      publish exact/key offers, and mark the fact shareable with the workspace.

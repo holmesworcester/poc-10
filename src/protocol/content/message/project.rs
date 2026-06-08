@@ -734,7 +734,7 @@ pub fn signer_need(owner: FactId, workspace_id: FactId, signer_id: FactId) -> Co
 }
 
 /// Checks that the context payload satisfying a signer need is the endpoint
-/// authority the signed content relies on.
+/// authority the content fact relies on.
 pub fn validate_signer_context(
     context: &ProjectionContext,
     need: &ContextNeed,

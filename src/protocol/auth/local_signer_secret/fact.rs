@@ -2,7 +2,7 @@
 //!
 //! This local fact stores the private Ed25519 material for one signer id in a
 //! workspace. The public key must match the private key, and projection exposes
-//! only local context. Signed envelope verification belongs to the consuming
+//! only local context. Signature evidence creation belongs to command
 //! projector, not to this fact family.
 
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};

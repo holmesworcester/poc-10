@@ -274,7 +274,7 @@ fn policy_fact(
 ) -> Result<AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, signer_private_key) =
         local_signing_material(store, workspace_id)?;
-    let fact = author::signed_retention_policy_fact(
+    let fact = author::authored_retention_policy_fact(
         workspace_id,
         supersedes_policy_id,
         ttl_minutes,

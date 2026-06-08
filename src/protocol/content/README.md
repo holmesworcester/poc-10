@@ -27,8 +27,8 @@ Data leaves content projection as:
 
 Core owns idempotent storage, replacement context, time-wake scheduling, and
 transactional commit. Content owns all semantic admission: scope checks,
-signature checks, parent/deletion validation, encryption-key matching, BAO proof
-validation, and read-model row shape.
+signature-evidence checks, parent/deletion validation, encryption-key matching,
+BAO proof validation, and read-model row shape.
 
 ## Managed Row State
 
@@ -46,9 +46,9 @@ below names the read.
 
 ### Context Interface
 
-Auth provides `content_signer`, `auth_user`, `auth_admin`, and
-`secret_coverage` context. Content never opens encrypted text or admits signed
-content until those witnesses match the payload. Content publishes
+Auth provides `signature_proof`, `content_signer`, `auth_user`, `auth_admin`,
+and `secret_coverage` context. Content never opens encrypted text or admits
+signature-evidenced content until those witnesses match the payload. Content publishes
 `content_message`, `content_message_meta`, `content_file`, generic core
 `fact_purged`, and `content_retention_floor` context so child content,
 deletion, retention, and key-material projectors can make bounded progress
@@ -97,6 +97,23 @@ after signer/author proof, but `opened_message_rows` are written only when the
 matching local secret coverage can decrypt the text. File slices verify BAO
 proofs against the descriptor root before writing ciphertext rows.
 
+Signer-bearing content facts store signer identity fields, not embedded
+signature bytes. Commands emit the target content fact plus an `auth::signature`
+evidence fact. The signature projector verifies the evidence and offers
+`signature_proof(target_fact_id, signer_public_key)`, which the content
+projector consumes before checking author, signer, parent, deletion, retention,
+or key-material context.
+
+```text
+signature {
+  workspace_id: fact:workspace_acme
+  created_at_ms: 1715000060000
+  target_fact_id: fact:message_hello
+  signer_public_key: ed25519:alice_phone_signing
+  signature: ed25519_signature(workspace_acme, message_hello)
+}
+```
+
 Retention has two independent removal paths. Per-message expiry is scheduled by
 `content_message_expiry` time wakes. Retention policies publish
 `content_retention_floor`, letting message projectors retire older messages
@@ -113,10 +130,10 @@ those scopes own the follow-up work.
 
 ### `message` (tag 50)
 
-Encrypted text message. Projection requires workspace scope, signature, signer
-context, author context, secret coverage, deletion context, retention-floor
-context, and time-wake checks. It writes `content_messages` after metadata
-validation, writes `opened_message_rows` only after decryption, offers
+Encrypted text message. Projection requires workspace scope, signature proof,
+signer context, author context, secret coverage, deletion context,
+retention-floor context, and time-wake checks. It writes `content_messages`
+after metadata validation, writes `opened_message_rows` only after decryption, offers
 `content_message_meta` and `content_message`, shares the fact, and self-purges
 on deletion/expiry/retention.
 
@@ -134,7 +151,6 @@ message {
   minute: 28583334
   nonce: nonce:message
   ciphertext: bytes:sealed_text
-  signature: sig(alice_phone_signing)
 }
 ```
 
@@ -156,16 +172,15 @@ message_deletion {
   author_user_id: fact:user_alice
   signer_id: fact:endpoint_alice_phone
   signer_public_key: ed25519:alice_phone_signing
-  signature: sig(alice_phone_signing)
 }
 ```
 
 ### `reaction` (tag 52)
 
 Encrypted emoji reaction attached to a message. Projection requires workspace
-scope, signature, signer, opened target message, target deletion watch, and
-author context. Live reactions write `content_reactions` and share the fact;
-deleted targets remove the reaction row and self-purge the reaction fact.
+scope, signature proof, signer, opened target message, target deletion watch,
+and author context. Live reactions write `content_reactions` and share the
+fact; deleted targets remove the reaction row and self-purge the reaction fact.
 
 ```text
 reaction {
@@ -177,7 +192,6 @@ reaction {
   signer_public_key: ed25519:bob_laptop_signing
   nonce: nonce:reaction
   ciphertext: bytes:sealed_emoji
-  signature: sig(bob_laptop_signing)
 }
 ```
 
@@ -197,15 +211,14 @@ file_deletion {
   author_user_id: fact:user_alice
   signer_id: fact:endpoint_alice_phone
   signer_public_key: ed25519:alice_phone_signing
-  signature: sig(alice_phone_signing)
 }
 ```
 
 ### `file` (tag 54)
 
 Encrypted file descriptor attached to a message. Projection validates descriptor
-fields, signature, signer, parent message, author, file deletion, and parent
-message deletion context. Live files write `content_files`, offer
+fields, signature proof, signer, parent message, author, file deletion, and
+parent message deletion context. Live files write `content_files`, offer
 `content_file` and `sync_exact_fact`, and share the fact. Deletion removes the
 descriptor row and self-purges.
 
@@ -223,17 +236,16 @@ file {
   slice_bytes: 262144
   root_hash: blake3:encrypted_blob_root
   sealed_metadata: bytes:sealed_filename_mime
-  signature: sig(alice_phone_signing)
 }
 ```
 
 ### `file_slice` (tag 55)
 
 One BAO-proven encrypted file slice. Projection requires parent file context,
-parent message context, signature, valid slice index, BAO proof verification
-against the file root hash, and file/message deletion watches. Live slices
-write `file_slice_rows` with verified ciphertext and share the fact. Deleted
-parents remove the slice row and self-purge.
+parent message context, signature proof, valid slice index, BAO proof
+verification against the file root hash, and file/message deletion watches.
+Live slices write `file_slice_rows` with verified ciphertext and share the
+fact. Deleted parents remove the slice row and self-purge.
 
 ```text
 file_slice {
@@ -244,14 +256,13 @@ file_slice {
   signer_id: fact:endpoint_alice_phone
   signer_public_key: ed25519:alice_phone_signing
   proof: bytes:bao_slice_proof_with_ciphertext
-  signature: sig(alice_phone_signing)
 }
 ```
 
 ### `retention_policy` (tag 147)
 
 Disappearing-message TTL policy for a workspace/channel/thread scope. Projection
-requires non-zero TTL/time, valid signature, admin or workspace-bootstrap
+requires non-zero TTL/time, signature proof, admin or workspace-bootstrap
 authority, optional signer context, and optional predecessor policy context. It
 rejects regressing `retire_minute`, writes `retention_policy_rows`, offers
 `sync_exact_fact` and `content_retention_floor`, and shares the fact.
@@ -268,7 +279,6 @@ retention_policy {
   signer_id: fact:endpoint_alice_phone
   signer_public_key: ed25519:alice_phone_signing
   created_at_ms: 1715000300000
-  signature: sig(alice_phone_signing)
 }
 ```
 

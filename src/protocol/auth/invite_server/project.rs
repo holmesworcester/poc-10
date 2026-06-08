@@ -3,8 +3,8 @@
 //! POLICY. An invite_server grant is admitted iff:
 //!   1. STRUCTURAL. The fact is global, signed, contains an invite_server
 //!      payload, and all selector fields are non-zero.
-//!   2. AUTHORITY. Bootstrap grants are signed directly by the workspace root;
-//!      delegated grants are signed by an endpoint_shared fact whose user owns
+//!   2. AUTHORITY. Bootstrap grants require signature evidence from the workspace root;
+//!      delegated grants require signature evidence from an endpoint_shared fact whose user owns
 //!      the named admin grant in the same workspace.
 //!   3. MATERIALIZE. Once the authority path validates, write the invite_server
 //!      row, publish exact/key offers, and mark the fact shareable.
@@ -89,20 +89,20 @@ impl SemanticProjector<InviteServerFact> for InviteServerProjector {
         }
 
         if invite_server.authority_fact_id == invite_server.workspace_id {
-            project_workspace_signed(fact, &invite_server, context, signature_need)
+            project_workspace_authorized(fact, &invite_server, context, signature_need)
         } else {
-            project_endpoint_signed(fact, &invite_server, context, signature_need)
+            project_endpoint_authorized(fact, &invite_server, context, signature_need)
         }
     }
 }
 
-fn project_workspace_signed(
+fn project_workspace_authorized(
     fact: &Fact,
     invite: &InviteServerFact,
     context: &ProjectionContext,
     signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = WorkspaceSignedNeeds::new(fact.id, invite, signature_need);
+    let needs = WorkspaceAuthorityNeeds::new(fact.id, invite, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -119,7 +119,7 @@ fn project_workspace_signed(
         .map_err(|_| "invite_server authority is not a workspace fact".to_string())?;
     if workspace.public_key != invite.signer_public_key {
         return Err(
-            "signed invite_server signer key does not match workspace public key".to_string(),
+            "invite_server signature signer key does not match workspace public key".to_string(),
         );
     }
     let context_have = context_have_from_needs(context, [&needs.signature, &needs.workspace]);
@@ -128,7 +128,7 @@ fn project_workspace_signed(
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
-fn project_endpoint_signed(
+fn project_endpoint_authorized(
     fact: &Fact,
     invite: &InviteServerFact,
     context: &ProjectionContext,
@@ -149,7 +149,7 @@ fn project_endpoint_signed(
         .map_err(|_| "invite_server signer must be workspace or endpoint_shared".to_string())?;
     if endpoint.signing_public_key != invite.signer_public_key {
         return Err(
-            "signed invite_server signer key does not match endpoint_shared signing key"
+            "invite_server signature signer key does not match endpoint_shared signing key"
                 .to_string(),
         );
     }
@@ -177,12 +177,12 @@ fn project_endpoint_signed(
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
-struct WorkspaceSignedNeeds {
+struct WorkspaceAuthorityNeeds {
     signature: ContextNeed,
     workspace: ContextNeed,
 }
 
-impl WorkspaceSignedNeeds {
+impl WorkspaceAuthorityNeeds {
     fn new(owner: FactId, invite: &InviteServerFact, signature: ContextNeed) -> Self {
         Self {
             signature,

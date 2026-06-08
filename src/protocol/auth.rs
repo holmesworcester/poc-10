@@ -41,6 +41,6 @@ pub mod user_invite;
 pub mod workspace;
 
 // Intents: work that needs exact fact inputs after projection proves
-// eligibility - create a signed key wrap or unwrap a received wrap.
+// eligibility - create a shared key wrap or unwrap a received wrap.
 pub mod create_key_wrap;
 pub mod unwrap_key_wrap;

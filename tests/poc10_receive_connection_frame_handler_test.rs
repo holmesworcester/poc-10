@@ -415,7 +415,7 @@ fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() 
 }
 
 #[test]
-fn well_formed_frame_opens_signed_key_wrap_and_records_fact_receipt() {
+fn well_formed_frame_opens_key_wrap_and_records_fact_receipt() {
     let (frame, connection_fact, connection, local_endpoint, signed_wrap) = encrypted_small_frame();
     let input_fact = connection_frame_small_fact(frame.clone());
     let context =

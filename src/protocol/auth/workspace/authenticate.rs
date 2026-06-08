@@ -1,6 +1,6 @@
 //! Workspace authenticator.
 //!
-//! POLICY. Authenticating a `workspace` fact proves, over its signed bytes alone:
+//! POLICY. Authenticating a `workspace` fact proves, over its canonical bytes alone:
 //!   1. LAYOUT. The bytes decode to a canonical workspace fact.
 //!   2. ID. The content id equals `hash(bytes)`.
 //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;

@@ -59,7 +59,7 @@ pub fn grant_admin(
         signer_id: authority_admin_id,
         signer_public_key: local_endpoint.signing_public_key,
     };
-    let fact = author::signed_admin_fact(
+    let fact = author::authored_admin_fact(
         input.created_at_ms,
         authority_admin_id,
         local_endpoint.signing_secret,
@@ -75,11 +75,11 @@ pub fn grant_admin(
         .with_facts(vec![fact, signature]))
 }
 
-pub fn signed_admin_fact(
+pub fn authored_admin_fact(
     created_at_ms: u64,
     signer_id: FactId,
     signer_private_key: Ed25519PrivateKey,
     grant: AdminFact,
 ) -> Result<Fact, String> {
-    author::signed_admin_fact(created_at_ms, signer_id, signer_private_key, grant)
+    author::authored_admin_fact(created_at_ms, signer_id, signer_private_key, grant)
 }
