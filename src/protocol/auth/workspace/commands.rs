@@ -49,7 +49,6 @@ pub fn create_workspace_with_identity(
     let endpoint = endpoint_output.receipt.endpoint;
     let user_public = endpoint.signing_public_key;
     let workspace_private_key = crypto::random_ed25519_private_key();
-    let first_invite_secret = crypto::random_ed25519_private_key();
     let workspace = author::create_workspace(created_at_ms, workspace_private_key, name)?;
     authenticate_authored::<super::decode::Codec, super::authenticate::WorkspaceAuthenticator>(
         &workspace,
@@ -66,7 +65,7 @@ pub fn create_workspace_with_identity(
         auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
             created_at_ms: created_at_ms + 2,
             accepted_endpoint_id: endpoint.endpoint,
-            bootstrap_secret: first_invite_secret,
+            bootstrap_secret: endpoint.signing_secret,
             workspace_id,
             invite_fact_id: user_invite.id,
         })?;

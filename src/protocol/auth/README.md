@@ -295,6 +295,12 @@ workspace root signature, and local `auth_workspace_accepted` context from
 `invite_accepted`, then writes `workspace_rows`, offers `auth_workspace`, and
 shares the fact with sync.
 
+The creator path uses the same fact DAG as later joins: the creation command
+emits the workspace, a workspace-signed first `user_invite`, a local
+`invite_secret`/`invite_accepted` pair for that invite, the first `user`, and a
+single bootstrap `admin` grant signed by the temporary workspace key. After that
+grant, admin authority flows only through existing admin facts.
+
 ```text
 workspace {
   created_at_ms: 1715000000000
@@ -316,7 +322,7 @@ user_invite {
   created_at_ms: 1715000000100
   public_key: ed25519:invite_alice
   workspace_id: fact:workspace_acme
-  authority_fact_id: fact:admin_root
+  authority_fact_id: fact:admin_bob
   signer_id: fact:endpoint_bob_laptop
   signer_public_key: ed25519:bob_laptop_signing
   signature: sig(bob_laptop_signing)
@@ -354,9 +360,9 @@ admin {
   created_at_ms: 1715000000300
   workspace_id: fact:workspace_acme
   public_key: ed25519:alice_user
-  authority_fact_id: fact:admin_root
+  authority_fact_id: fact:workspace_acme
   user_fact_id: fact:user_alice
-  signer_id: fact:admin_root
+  signer_id: fact:workspace_acme
   signer_public_key: ed25519:workspace_root
   signature: sig(workspace_root)
 }
@@ -427,8 +433,11 @@ invite_server {
 ### `invite_secret` (tag 129)
 
 Stores the local bootstrap secret behind an invite link. Projection requires
-local scope, validates the hash/scope pairing, writes `invite_secret_rows`, and
-offers both `auth_invite_secret` and `connection_invite_secret`.
+local scope, validates the hash/scope pairing, writes `invite_secret_rows`
+keyed by `(bootstrap_hash, workspace_id_or_zero, invite_fact_id_or_zero)`, and
+offers both `auth_invite_secret` and `connection_invite_secret`. Including scope
+in the row key lets one retained local secret back multiple scoped acceptances
+without treating them as conflicting rows.
 
 ```text
 invite_secret {
@@ -648,7 +657,7 @@ local_secret_retirement {
 ```text
 workspace_acme
   -> user_invite_alice -> user_alice
-  -> admin_root -> admin_alice
+  -> admin_bootstrap_alice -> admin_delegated_bob
   -> device_invite_alice_phone -> endpoint_shared_alice_phone
   -> removal_frontier_alice
 

@@ -21,19 +21,19 @@ use crate::core::store::{TableName, TableRow};
 
 pub(crate) use decode::Codec;
 
-/// Invite-secret projection rows, keyed by `bootstrap_hash`. A connection
-/// bootstrap proves knowledge of the bootstrap secret by presenting the
-/// matching hash; this projector stores the private value beside the hash so
-/// the bootstrap path can look it up locally without exposing the private value
-/// in the fact.
+/// Invite-secret projection rows, keyed by
+/// `bootstrap_hash || workspace_id_or_zero || invite_fact_id_or_zero`. A
+/// connection bootstrap proves knowledge of the bootstrap secret by presenting
+/// the matching hash; the scoped key lets the same local secret back separate
+/// workspace/invite acceptances without row conflicts.
 pub const INVITE_SECRET_ROWS: TableName = TableName::new("invite_secret_rows");
 
-const INVITE_SECRET_ROW_KEY_FIELDS: &[RowField] = &[RowField::bytes32("bootstrap_hash")];
-const INVITE_SECRET_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::bytes32("bootstrap_secret"),
+const INVITE_SECRET_ROW_KEY_FIELDS: &[RowField] = &[
+    RowField::bytes32("bootstrap_hash"),
     RowField::bytes32("workspace_id_or_zero"),
     RowField::bytes32("invite_fact_id_or_zero"),
 ];
+const INVITE_SECRET_ROW_VALUE_FIELDS: &[RowField] = &[RowField::bytes32("bootstrap_secret")];
 
 pub const INVITE_SECRET_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
     INVITE_SECRET_ROWS,
@@ -43,12 +43,12 @@ pub const INVITE_SECRET_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
 
 pub fn invite_secret_row(fact: &fact::InviteSecretFact) -> Result<TableRow, String> {
     INVITE_SECRET_ROW_SCHEMA.row(
-        &[RowValue::Bytes(fact.bootstrap_hash.to_vec())],
         &[
-            RowValue::Bytes(fact.bootstrap_secret.to_vec()),
+            RowValue::Bytes(fact.bootstrap_hash.to_vec()),
             RowValue::Bytes(fact.workspace_id.unwrap_or([0; 32]).to_vec()),
             RowValue::Bytes(fact.invite_fact_id.unwrap_or([0; 32]).to_vec()),
         ],
+        &[RowValue::Bytes(fact.bootstrap_secret.to_vec())],
     )
 }
 

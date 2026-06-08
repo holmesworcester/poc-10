@@ -21,9 +21,9 @@ pub fn decode_invite_secret_row(key: &[u8], value: &[u8]) -> Result<InviteSecret
     let value_fields = INVITE_SECRET_ROW_SCHEMA.decode_value(value)?;
     Ok(InviteSecretRow {
         bootstrap_hash: key_fields[0].as_bytes32("bootstrap_hash")?,
+        workspace_id: optional_id(key_fields[1].as_bytes32("workspace_id_or_zero")?),
+        invite_fact_id: optional_id(key_fields[2].as_bytes32("invite_fact_id_or_zero")?),
         bootstrap_secret: value_fields[0].as_bytes32("bootstrap_secret")?,
-        workspace_id: optional_id(value_fields[1].as_bytes32("workspace_id_or_zero")?),
-        invite_fact_id: optional_id(value_fields[2].as_bytes32("invite_fact_id_or_zero")?),
     })
 }
 
@@ -72,5 +72,18 @@ mod tests {
         assert_eq!(decoded.bootstrap_secret, [6; 32]);
         assert_eq!(decoded.workspace_id, None);
         assert_eq!(decoded.invite_fact_id, None);
+    }
+
+    #[test]
+    fn invite_secret_row_key_includes_scope() {
+        let first = InviteSecretFact::scoped([7; 32], [1; 32], [2; 32]);
+        let second = InviteSecretFact::scoped([7; 32], [3; 32], [4; 32]);
+
+        let first_row = super::super::invite_secret_row(&first).expect("first row");
+        let second_row = super::super::invite_secret_row(&second).expect("second row");
+
+        assert_eq!(first.bootstrap_hash, second.bootstrap_hash);
+        assert_ne!(first_row.key, second_row.key);
+        assert_eq!(first_row.value, second_row.value);
     }
 }

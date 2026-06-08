@@ -1,9 +1,10 @@
 //! Admin grant fact shape for the poc-10 target tree.
 //!
 //! An admin grant binds a public key to administrative authority within a single
-//! workspace. Bootstrap grants name the workspace itself as both authority and
-//! user; ongoing grants name a prior admin fact as authority and a user fact as
-//! the target binding.
+//! workspace. Bootstrap grants name the workspace itself as authority and grant
+//! a real user who joined through a workspace-signed bootstrap invite; ongoing
+//! grants name a prior admin fact as authority and a user fact as the target
+//! binding.
 
 use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
 use crate::core::facts::FactId;

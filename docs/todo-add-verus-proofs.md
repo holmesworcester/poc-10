@@ -284,7 +284,9 @@ Admin closure:
 
 ```text
 workspace root
-  -> bootstrap admin
+  -> workspace-signed first user_invite
+  -> first user
+  -> bootstrap admin for that first user
   -> delegated admin
   -> user / invite / endpoint / content-signer authority
 ```
@@ -295,8 +297,18 @@ cases:
 ```text
 bootstrap:
   workspace exists
+  valid_user_invite_offer(bootstrap_invite)
+  bootstrap_invite.workspace_id == workspace_id
+  bootstrap_invite.authority_fact_id == workspace_id
+  bootstrap_invite.signer_id == workspace_id
+  bootstrap_invite.signer_public_key == workspace.public_key
+  valid_user_offer(user)
+  user.signer_id == bootstrap_invite.id
+  user.workspace_id == workspace_id
+  user.public_key == admin.public_key
   admin.authority_fact_id == workspace_id
-  admin.user_fact_id == workspace_id
+  admin.user_fact_id == user.id
+  admin.signer_id == workspace_id
   admin.signer_public_key == workspace.public_key
   admin.signature verifies under workspace.public_key
 

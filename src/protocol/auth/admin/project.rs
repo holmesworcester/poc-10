@@ -122,6 +122,8 @@ fn project_bootstrap_admin(
             "bootstrap admin target user must come from workspace bootstrap invite".to_string(),
         );
     }
+    // Redundant with a correctly projected workspace-signed auth_user_invite,
+    // but repeated here to make the bootstrap-admin rule self-contained.
     if invite.signer_public_key != workspace.public_key {
         return Err(
             "bootstrap user_invite signer key does not match workspace public key".to_string(),
@@ -336,6 +338,8 @@ fn decode_user_context(
     if user.workspace_id != admin.workspace_id {
         return Err("bootstrap admin user belongs to a different workspace".to_string());
     }
+    // Mostly implied by auth_user projection, which already validated the user
+    // against its invite. Keep the cheap defensive check at the admin boundary.
     if user.public_key != admin.public_key {
         return Err("bootstrap admin public_key does not match user public_key".to_string());
     }
@@ -355,6 +359,8 @@ fn decode_user_invite_context(
     if invite.workspace_id != workspace_id {
         return Err("bootstrap admin user_invite belongs to a different workspace".to_string());
     }
+    // Mostly implied by auth_user projection because this invite id is the
+    // user's signer_id; repeated here to keep the boundary explicit.
     if invite.public_key != user.signer_public_key {
         return Err("bootstrap admin user_invite key does not match user".to_string());
     }

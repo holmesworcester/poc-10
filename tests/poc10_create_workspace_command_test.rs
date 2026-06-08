@@ -12,7 +12,7 @@ use topo::protocol::auth::workspace::{
     authenticate as workspace_authenticate, decode as workspace_decode,
 };
 use topo::protocol::auth::{
-    admin, invite, invite_accepted, user, user_invite,
+    admin, endpoint, invite, invite_accepted, user, user_invite,
     workspace::commands::{create_workspace_with_identity, BootstrapIdentity},
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -143,6 +143,19 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     assert_eq!(secret.workspace_id, Some(workspace_id));
     assert_eq!(secret.invite_fact_id, Some(user_invite_fact.id));
     assert_eq!(secret.bootstrap_hash, accepted.bootstrap_hash);
+
+    let endpoint_fact = output
+        .effects
+        .facts
+        .iter()
+        .find(|fact| fact.body().first() == Some(&endpoint::TYPE_LOCAL_ENDPOINT))
+        .expect("endpoint fact");
+    let local_endpoint =
+        endpoint::decode_fact_payload(endpoint_fact.body()).expect("decode endpoint");
+    assert_eq!(
+        secret.bootstrap_secret, local_endpoint.signing_secret,
+        "creator acceptance should use the first user's endpoint signing secret"
+    );
 
     let user_fact = output
         .effects
