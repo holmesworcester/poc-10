@@ -5,6 +5,7 @@
 
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::facts::FactId;
+use crate::protocol::auth;
 
 use super::author;
 use super::fact::{AuthorId, WorkspaceId};
@@ -34,6 +35,12 @@ pub fn delete_file(
         target_file_id,
         author_user_id,
     )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &signing.private_key,
+        created_at_ms,
+    )?;
     Ok(CommandOutput::new(DeleteFileReceipt {
         workspace_id,
         deletion_fact_id: fact.id,
@@ -41,5 +48,5 @@ pub fn delete_file(
         author_user_id,
         created_at_ms,
     })
-    .with_facts(vec![fact]))
+    .with_facts(vec![fact, signature]))
 }

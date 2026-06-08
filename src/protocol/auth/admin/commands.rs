@@ -7,7 +7,7 @@
 //! grant when it is later submitted or received.
 
 use crate::core::command_context::{CommandContext, CommandOutput};
-use crate::core::crypto::{self, Ed25519PrivateKey};
+use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth;
 
@@ -58,7 +58,6 @@ pub fn grant_admin(
         user_fact_id: target.user_id,
         signer_id: authority_admin_id,
         signer_public_key: local_endpoint.signing_public_key,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = author::signed_admin_fact(
         input.created_at_ms,
@@ -66,7 +65,14 @@ pub fn grant_admin(
         local_endpoint.signing_secret,
         grant,
     )?;
-    Ok(CommandOutput::new(GrantAdminReceipt { admin_id: fact.id }).with_facts(vec![fact]))
+    let signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &fact,
+        &local_endpoint.signing_secret,
+        input.created_at_ms,
+    )?;
+    Ok(CommandOutput::new(GrantAdminReceipt { admin_id: fact.id })
+        .with_facts(vec![fact, signature]))
 }
 
 pub fn signed_admin_fact(

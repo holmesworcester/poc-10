@@ -9,7 +9,7 @@
 //! material is handled by the file-send/admit path, and parent-descriptor
 //! existence is enforced before projection materializes rows.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature, XCHACHA20_POLY1305_TAG_BYTES};
+use crate::core::crypto::{Ed25519PublicKey, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::facts::FactId;
 use crate::core::wire::FixedSlot;
 
@@ -80,7 +80,6 @@ pub struct ContentFileSliceFact {
     pub signer_public_key: Ed25519PublicKey,
     /// BAO slice proof whose verified payload is the encrypted slice bytes.
     pub proof: FileSliceProof,
-    pub signature: Ed25519Signature,
 }
 
 #[cfg(test)]

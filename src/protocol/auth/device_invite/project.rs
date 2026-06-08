@@ -16,7 +16,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
-use crate::protocol::auth::{endpoint_shared, user, user_invite, workspace};
+use crate::protocol::auth::{endpoint_shared, signature, user, user_invite, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::device_invite_row;
@@ -71,11 +71,32 @@ impl SemanticProjector<DeviceInviteFact> for DeviceInviteProjector {
         // Some(id) means the device invite must be signed by the user fact
         // authorized by that user_invite; None means it must be signed by an
         // already-trusted endpoint_shared fact for the same user/workspace.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            crate::protocol::auth::workspace::scope(device_invite.workspace_id),
+            fact.id,
+            device_invite.signer_public_key,
+        )?;
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            device_invite.workspace_id,
+            fact.id,
+            device_invite.signer_public_key,
+            "device_invite",
+        )? {
+            return Ok(ProjectionOutput::new().need(signature_need));
+        }
+
         match device_invite.user_invite_fact_id {
-            Some(user_invite_fact_id) => {
-                project_user_signed(fact, &device_invite, user_invite_fact_id, context)
-            }
-            None => project_endpoint_signed(fact, &device_invite, context),
+            Some(user_invite_fact_id) => project_user_signed(
+                fact,
+                &device_invite,
+                user_invite_fact_id,
+                context,
+                signature_need,
+            ),
+            None => project_endpoint_signed(fact, &device_invite, context, signature_need),
         }
     }
 }
@@ -85,8 +106,9 @@ fn project_user_signed(
     invite: &DeviceInviteFact,
     user_invite_fact_id: FactId,
     context: &ProjectionContext,
+    signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = UserSignedNeeds::new(fact.id, invite, user_invite_fact_id);
+    let needs = UserSignedNeeds::new(fact.id, invite, user_invite_fact_id, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -128,8 +150,15 @@ fn project_user_signed(
     if user_invite.public_key != user.signer_public_key {
         return Err("device_invite user_invite key does not match user".to_string());
     }
-    let context_have =
-        context_have_from_needs(context, [&needs.workspace, &needs.user, &needs.user_invite]);
+    let context_have = context_have_from_needs(
+        context,
+        [
+            &needs.signature,
+            &needs.workspace,
+            &needs.user,
+            &needs.user_invite,
+        ],
+    );
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output(), context_have)
@@ -139,8 +168,9 @@ fn project_endpoint_signed(
     fact: &Fact,
     invite: &DeviceInviteFact,
     context: &ProjectionContext,
+    signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = EndpointSignedNeeds::new(fact.id, invite, invite.signer_id);
+    let needs = EndpointSignedNeeds::new(fact.id, invite, invite.signer_id, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -171,21 +201,31 @@ fn project_endpoint_signed(
             "endpoint_shared-signed device_invite user authority does not match signer".to_string(),
         );
     }
-    let context_have = context_have_from_needs(context, [&needs.workspace, &needs.endpoint_shared]);
+    let context_have = context_have_from_needs(
+        context,
+        [&needs.signature, &needs.workspace, &needs.endpoint_shared],
+    );
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
 struct UserSignedNeeds {
+    signature: ContextNeed,
     workspace: ContextNeed,
     user: ContextNeed,
     user_invite: ContextNeed,
 }
 
 impl UserSignedNeeds {
-    fn new(owner: FactId, invite: &DeviceInviteFact, user_invite_fact_id: FactId) -> Self {
+    fn new(
+        owner: FactId,
+        invite: &DeviceInviteFact,
+        user_invite_fact_id: FactId,
+        signature: ContextNeed,
+    ) -> Self {
         Self {
+            signature,
             workspace: crate::core::context::ContextNeed::range(
                 owner,
                 "auth_workspace",
@@ -212,6 +252,7 @@ impl UserSignedNeeds {
 
     fn output(&self) -> ProjectionOutput {
         ProjectionOutput::new()
+            .need(self.signature.clone())
             .need(self.workspace.clone())
             .need(self.user.clone())
             .need(self.user_invite.clone())
@@ -219,13 +260,20 @@ impl UserSignedNeeds {
 }
 
 struct EndpointSignedNeeds {
+    signature: ContextNeed,
     workspace: ContextNeed,
     endpoint_shared: ContextNeed,
 }
 
 impl EndpointSignedNeeds {
-    fn new(owner: FactId, invite: &DeviceInviteFact, signer_id: FactId) -> Self {
+    fn new(
+        owner: FactId,
+        invite: &DeviceInviteFact,
+        signer_id: FactId,
+        signature: ContextNeed,
+    ) -> Self {
         Self {
+            signature,
             workspace: crate::core::context::ContextNeed::range(
                 owner,
                 "auth_workspace",
@@ -245,6 +293,7 @@ impl EndpointSignedNeeds {
 
     fn output(&self) -> ProjectionOutput {
         ProjectionOutput::new()
+            .need(self.signature.clone())
             .need(self.workspace.clone())
             .need(self.endpoint_shared.clone())
     }

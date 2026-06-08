@@ -1,7 +1,7 @@
 //! Byte decoding for content-file-deletion target facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 
@@ -34,7 +34,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileDeletionFact, String> {
         author_user_id: reader.array().map_err(wire_err)?,
         signer_id: reader.array().map_err(wire_err)?,
         signer_public_key: reader.array().map_err(wire_err)?,
-        signature: reader.array().map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
     Ok(fact)
@@ -47,7 +46,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::content::file_deletion::encode::{
         encode_fact, CONTENT_FILE_DELETION_BYTES, TYPE_CONTENT_FILE_DELETION,
     };
@@ -60,7 +58,6 @@ mod tests {
             author_user_id: [3; 32],
             signer_id: [9; 32],
             signer_public_key: [10; 32],
-            signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }
 

@@ -323,7 +323,6 @@ mod tests {
                     device_name: EndpointDeviceName::new("remote").expect("device name"),
                     signer_id: [6; 32],
                     signer_public_key: crypto::ed25519_public_key(&[17; 32]),
-                    signature: [18; crypto::ED25519_SIGNATURE_BYTES],
                 },
             )
             .expect("endpoint shared row"),

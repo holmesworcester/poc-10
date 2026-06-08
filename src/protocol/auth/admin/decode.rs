@@ -1,7 +1,7 @@
 //! Byte decoding for admin-grant facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 
@@ -37,8 +37,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<AdminFact, String> {
     signer_id.copy_from_slice(&bytes[137..169]);
     let mut signer_public_key = [0; 32];
     signer_public_key.copy_from_slice(&bytes[169..201]);
-    let mut signature = [0; crate::core::crypto::ED25519_SIGNATURE_BYTES];
-    signature.copy_from_slice(&bytes[201..265]);
     Ok(AdminFact {
         created_at_ms,
         workspace_id,
@@ -47,7 +45,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<AdminFact, String> {
         user_fact_id,
         signer_id,
         signer_public_key,
-        signature,
     })
 }
 
@@ -58,7 +55,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::auth::admin::encode::{encode_fact, FACT_BYTES};
 
     fn fact() -> AdminFact {
@@ -70,7 +66,6 @@ mod tests {
             user_fact_id: [4; 32],
             signer_id: [3; 32],
             signer_public_key: [5; 32],
-            signature: [6; ED25519_SIGNATURE_BYTES],
         }
     }
 

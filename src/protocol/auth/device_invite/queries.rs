@@ -44,7 +44,6 @@ pub fn decode_device_invite_row(key: &[u8], value: &[u8]) -> Result<DeviceInvite
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 
     #[test]
@@ -57,7 +56,6 @@ mod tests {
             public_key: [3; 32],
             signer_id: [5; 32],
             signer_public_key: [6; 32],
-            signature: [7; ED25519_SIGNATURE_BYTES],
         };
         let row = super::super::device_invite_row([9; 32], &fact).expect("device invite row");
         let decoded =
@@ -80,7 +78,6 @@ mod tests {
             public_key: [3; 32],
             signer_id: [5; 32],
             signer_public_key: [6; 32],
-            signature: [7; ED25519_SIGNATURE_BYTES],
         };
         let row = super::super::device_invite_row([9; 32], &fact).expect("device invite row");
         let decoded =

@@ -17,9 +17,10 @@ use std::str::FromStr;
 
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto;
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::FactId;
 use crate::core::store::Store;
 use crate::protocol::auth;
+use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 
 const INVITE_PREFIX: &str = "topo://invite/";
 const INVITE_VERSION: &str = "v6";
@@ -190,6 +191,12 @@ pub fn create_device_link(
         membership.endpoint_shared_id,
         local.signing_secret,
     )?;
+    let device_invite_signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &device_invite_fact,
+        &local.signing_secret,
+        input.created_at_ms.saturating_add(1),
+    )?;
     let (_invite_secret, invite_secret_fact) = super::author::scoped_secret_fact(
         invite_private_key,
         input.workspace_id,
@@ -198,6 +205,7 @@ pub fn create_device_link(
     )?;
     let mut facts = endpoint_output.effects.facts;
     facts.push(device_invite_fact.clone());
+    facts.push(device_invite_signature);
     facts.push(invite_secret_fact.clone());
 
     let link = format_invite(Invite {
@@ -236,7 +244,12 @@ pub fn create_invite_server(
         authority.admin_id,
         authority.signer_id,
         local.signing_public_key,
+    )?;
+    let invite_server_signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &invite_server_fact,
         &local.signing_secret,
+        input.created_at_ms.saturating_add(1),
     )?;
     let (_invite_secret, invite_secret_fact) = super::author::scoped_secret_fact(
         invite_private_key,
@@ -246,6 +259,7 @@ pub fn create_invite_server(
     )?;
     let mut facts = endpoint_output.effects.facts;
     facts.push(invite_server_fact.clone());
+    facts.push(invite_server_signature);
     facts.push(invite_secret_fact.clone());
 
     let link = format_invite(Invite {
@@ -348,8 +362,7 @@ pub fn accept(
             input.invite.bootstrap_secret,
         )?;
 
-        facts.push(device_invite.clone());
-        facts.push(endpoint_shared_fact(EndpointSharedFactInput {
+        let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
             created_at_ms: input.created_at_ms.saturating_add(6),
             workspace_id: input.invite.workspace_id,
             user_id: user.receipt.user_id,
@@ -357,9 +370,11 @@ pub fn accept(
             signing_public_key: local.signing_public_key,
             endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
             device_name: &device_name,
-            signer_id: device_invite.id,
+            signer_id: device_invite.fact.id,
             signer_private_key: input.invite.bootstrap_secret,
-        })?);
+        })?;
+        facts.extend(device_invite.into_facts());
+        facts.extend(endpoint_shared.into_facts());
     }
     let accepted =
         auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
@@ -397,8 +412,8 @@ fn workspace_accept_device_invite_fact(
     user_id: FactId,
     user_invite_fact_id: FactId,
     bootstrap_secret: [u8; 32],
-) -> Result<Fact, String> {
-    auth::device_invite::author::signed_device_invite_fact(
+) -> Result<AuthoredFactEvidence, String> {
+    let fact = auth::device_invite::author::signed_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_id,
@@ -406,7 +421,10 @@ fn workspace_accept_device_invite_fact(
         crypto::ed25519_public_key(&bootstrap_secret),
         user_id,
         bootstrap_secret,
-    )
+    )?;
+    let signature =
+        auth::signature::author::sign_fact(workspace_id, &fact, &bootstrap_secret, created_at_ms)?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn endpoint_role_for_shared(role: InviteEndpointRole) -> auth::endpoint_shared::fact::EndpointRole {
@@ -460,14 +478,14 @@ pub fn accept_device_link(
             identity_scope: true,
         })?;
     let mut facts = endpoint_output.effects.facts;
-    facts.push(endpoint_shared.clone());
+    facts.extend(endpoint_shared.clone().into_facts());
     facts.extend(accepted.effects.facts);
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
         workspace_id: Some(input.invite.workspace_id),
         user_id: Some(user_id),
-        endpoint_shared_id: Some(endpoint_shared.id),
+        endpoint_shared_id: Some(endpoint_shared.fact.id),
         endpoint_role: Some(InviteEndpointRole::Device),
     })
     .with_facts(facts))
@@ -518,14 +536,14 @@ pub fn accept_invite_server(
             identity_scope: true,
         })?;
     let mut facts = endpoint_output.effects.facts;
-    facts.push(endpoint_shared.clone());
+    facts.extend(endpoint_shared.clone().into_facts());
     facts.extend(accepted.effects.facts);
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
         workspace_id: Some(input.invite.workspace_id),
         user_id: None,
-        endpoint_shared_id: Some(endpoint_shared.id),
+        endpoint_shared_id: Some(endpoint_shared.fact.id),
         endpoint_role: Some(InviteEndpointRole::InviteServer),
     })
     .with_facts(facts))
@@ -543,35 +561,27 @@ struct EndpointSharedFactInput<'a> {
     signer_private_key: [u8; 32],
 }
 
-fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, String> {
-    let endpoint = auth::endpoint_shared::fact::EndpointSharedFact {
-        created_at_ms: input.created_at_ms,
-        workspace_id: input.workspace_id,
-        user_authority_fact_id: input.user_id,
-        endpoint_id: input.endpoint_id,
-        signing_public_key: input.signing_public_key,
-        endpoint_role: input.endpoint_role,
-        device_name: auth::endpoint_shared::fact::EndpointDeviceName::new(input.device_name)
-            .map_err(|err| format!("endpoint device name: {err}"))?,
-        signer_id: input.signer_id,
-        signer_public_key: crypto::ed25519_public_key(&input.signer_private_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-    };
-    let mut endpoint = endpoint;
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &input.signer_private_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            &endpoint,
-            auth::endpoint_shared::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-    );
-    endpoint.signature = signature;
-    Ok(Fact::new(
-        FactScope::Global,
+fn endpoint_shared_fact(
+    input: EndpointSharedFactInput<'_>,
+) -> Result<AuthoredFactEvidence, String> {
+    let fact = auth::endpoint_shared::author::signed_endpoint_shared_fact(
         input.created_at_ms,
-        auth::endpoint_shared::encode::encode_fact(&endpoint)?,
-    ))
+        input.workspace_id,
+        input.user_id,
+        input.endpoint_id,
+        input.signing_public_key,
+        input.endpoint_role,
+        input.device_name,
+        input.signer_id,
+        input.signer_private_key,
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &fact,
+        &input.signer_private_key,
+        input.created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 pub fn parse(value: &str) -> Result<Invite, String> {

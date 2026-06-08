@@ -12,8 +12,8 @@ use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
-use crate::protocol::auth::invite_accepted;
-use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
+use crate::protocol::auth::{invite_accepted, signature};
+use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 /// Staged read pipeline for the workspace fact.
 pub const PIPELINE: FactPipeline = FactPipeline::Staged {
@@ -58,12 +58,31 @@ impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
         if fact.scope != FactScope::Global {
             return Err("workspace fact must have global scope".to_string());
         }
-        // 2. Context.
+        // 2. Context and signature evidence.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            crate::protocol::auth::workspace::scope(fact.id),
+            fact.id,
+            workspace.public_key,
+        )?;
         let accepted_need = invite_accepted::workspace_accepted_need(fact.id, fact.id);
+        let waiting = ProjectionOutput::new()
+            .need(signature_need.clone())
+            .need(accepted_need.clone());
+        if !signature::project::signature_proof_ready(
+            _context,
+            &signature_need,
+            fact.id,
+            fact.id,
+            workspace.public_key,
+            "workspace",
+        )? {
+            return Ok(waiting);
+        }
         let Some(accepted_fact) =
             _context.payload_for_checked(&accepted_need, "workspace accepted")?
         else {
-            return Ok(ProjectionOutput::new().need(accepted_need));
+            return Ok(waiting);
         };
         let accepted = invite_accepted::decode_fact_payload(accepted_fact.body())
             .map_err(|_| "workspace accepted context is not invite_accepted".to_string())?;
@@ -74,6 +93,7 @@ impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
+                .need(signature_need.clone())
                 .need(accepted_need.clone())
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,
@@ -87,7 +107,7 @@ impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
                 )?)),
             fact.id,
             fact,
-            Vec::new(),
+            context_have_from_needs(_context, [&signature_need]),
         ))
     }
 }
@@ -111,11 +131,14 @@ mod projector_tests {
 
         assert!(projected.effects.row_mutations.is_empty());
         assert!(projected.offers.is_empty());
-        assert_eq!(projected.needs.len(), 1);
-        assert_eq!(
-            projected.needs[0],
-            invite_accepted::workspace_accepted_need(fact.id, fact.id)
-        );
+        assert_eq!(projected.needs.len(), 2);
+        assert!(projected
+            .needs
+            .contains(&invite_accepted::workspace_accepted_need(fact.id, fact.id)));
+        assert!(projected
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "signature_proof"));
     }
 
     #[test]
@@ -156,7 +179,6 @@ mod projector_tests {
             created_at_ms: 42,
             public_key: [7; 32],
             name: super::super::fact::WorkspaceName::new("Engineering").expect("name"),
-            signature: [8; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         };
 
         let row = super::super::workspace_row([9; 32], &fact).expect("workspace row");
@@ -204,10 +226,43 @@ mod projector_tests {
             invite_accepted::workspace_accepted_need(workspace_id, workspace_id);
         let offer: ContextOffer =
             invite_accepted::workspace_accepted_offer(accepted.id, workspace_id);
-        ProjectionContext::from_matches(vec![MatchedContext {
-            need,
-            offer,
-            payload: accepted.clone(),
-        }])
+        ProjectionContext::from_matches(vec![
+            signature_match(workspace_id),
+            MatchedContext {
+                need,
+                offer,
+                payload: accepted.clone(),
+            },
+        ])
+    }
+
+    fn signature_match(workspace_id: crate::core::facts::FactId) -> MatchedContext {
+        let private_key = [9; 32];
+        let signer_public_key = crate::core::crypto::ed25519_public_key(&private_key);
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        let signature = crate::protocol::auth::signature::author::create_signature(
+            workspace_id,
+            workspace_id,
+            &private_key,
+            123_000,
+        )
+        .expect("workspace signature fact");
+        MatchedContext {
+            need: crate::protocol::auth::signature::project::signature_proof_need(
+                workspace_id,
+                scope.clone(),
+                workspace_id,
+                signer_public_key,
+            )
+            .expect("signature need"),
+            offer: crate::protocol::auth::signature::project::signature_proof_offer(
+                signature.id,
+                scope,
+                workspace_id,
+                signer_public_key,
+            )
+            .expect("signature offer"),
+            payload: signature,
+        }
     }
 }

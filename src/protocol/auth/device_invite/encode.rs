@@ -7,7 +7,6 @@
 //! user_authority_fact_id(32) || user_invite_fact_id_or_zero(32) ||
 //! public_key(32)`.
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
 use super::fact::DeviceInviteFact;
@@ -16,7 +15,7 @@ pub const TYPE_DEVICE_INVITE: u8 = 134;
 /// Layout: `type(1) || created_at_ms(8) || workspace_id(32) ||
 /// user_authority_fact_id(32) || user_invite_fact_id_or_zero(32) ||
 /// public_key(32)`.
-pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 32 + 32 + ED25519_SIGNATURE_BYTES;
+pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 32 + 32;
 pub fn encode_fact(fact: &DeviceInviteFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
     wire::put_u8(TYPE_DEVICE_INVITE, &mut out[0..1]).map_err(wire_err)?;
@@ -27,7 +26,6 @@ pub fn encode_fact(fact: &DeviceInviteFact) -> Result<Vec<u8>, String> {
     out[105..137].copy_from_slice(&fact.public_key);
     out[137..169].copy_from_slice(&fact.signer_id);
     out[169..201].copy_from_slice(&fact.signer_public_key);
-    out[201..265].copy_from_slice(&fact.signature);
     Ok(out)
 }
 

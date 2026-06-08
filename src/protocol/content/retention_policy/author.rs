@@ -1,8 +1,8 @@
 //! Deterministic constructor for retention policy facts.
 //!
 //! This layer takes already-resolved parameters and the signer private key and
-//! returns the canonical, signed fact bytes. API and CLI workflows that need
-//! command context, local capabilities, or multi-fact orchestration belong in
+//! returns canonical fact bytes. API and CLI workflows that need command
+//! context, local capabilities, or multi-fact orchestration belong in
 //! `commands.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
@@ -24,7 +24,7 @@ pub fn signed_retention_policy_fact(
     signer_private_key: Ed25519PrivateKey,
 ) -> Result<Fact, String> {
     let signer_public_key = crypto::ed25519_public_key(&signer_private_key);
-    let mut payload = RetentionPolicyFact {
+    let payload = RetentionPolicyFact {
         workspace_id,
         supersedes_policy_id,
         ttl_minutes,
@@ -35,17 +35,7 @@ pub fn signed_retention_policy_fact(
         signer_id,
         signer_public_key,
         created_at_ms,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &signer_private_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            &payload,
-            encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-    );
-    payload.signature = signature;
     Ok(Fact::new(
         FactScope::Global,
         created_at_ms,

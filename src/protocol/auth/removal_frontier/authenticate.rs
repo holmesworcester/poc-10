@@ -37,25 +37,7 @@ fn prove_decoded_removal_frontier(
 ) -> Result<RemovalFrontierFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&frontier)?;
     Ok(frontier)
-}
-
-/// Verify the removal frontier's signature over its canonical envelope. The
-/// verifier key is embedded in the fact, so this is a context-free fact-boundary
-/// proof.
-pub fn verify_signature(fact: &RemovalFrontierFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_removal_frontier,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "removal frontier",
-    )
 }
 
 #[cfg(test)]
@@ -116,19 +98,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

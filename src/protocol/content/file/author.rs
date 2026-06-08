@@ -25,7 +25,7 @@ pub fn signed_file_fact(
     private_key: Ed25519PrivateKey,
 ) -> Result<Fact, String> {
     let signer_public_key = crypto::ed25519_public_key(&private_key);
-    let mut file = ContentFileFact {
+    let file = ContentFileFact {
         workspace_id,
         created_at_ms,
         message_id,
@@ -38,17 +38,7 @@ pub fn signed_file_fact(
         slice_bytes,
         root_hash,
         sealed_metadata,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &private_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            &file,
-            encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-    );
-    file.signature = signature;
     let bytes = encode::encode_fact(&file)?;
     Ok(Fact::new(
         crate::protocol::auth::workspace::scope(workspace_id),

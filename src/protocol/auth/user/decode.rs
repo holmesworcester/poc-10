@@ -1,10 +1,9 @@
 //! Byte decoding for user facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, field order, and
-//! canonical username padding. Id and signature checks live in
+//! canonical username padding. Id checks live in
 //! `authenticate.rs`.
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 use crate::core::wire::FixedText;
 
@@ -38,9 +37,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<UserFact, String> {
     signer_id.copy_from_slice(&bytes[signer_start..signer_start + 32]);
     let mut signer_public_key = [0; 32];
     signer_public_key.copy_from_slice(&bytes[signer_start + 32..signer_start + 64]);
-    let mut signature = [0; ED25519_SIGNATURE_BYTES];
-    signature
-        .copy_from_slice(&bytes[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]);
     Ok(UserFact {
         created_at_ms,
         workspace_id,
@@ -48,7 +44,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<UserFact, String> {
         username,
         signer_id,
         signer_public_key,
-        signature,
     })
 }
 
@@ -76,7 +71,6 @@ mod tests {
             username: Username::new("alice").expect("username"),
             signer_id: [8; 32],
             signer_public_key: [9; 32],
-            signature: [10; ED25519_SIGNATURE_BYTES],
         }
     }
 

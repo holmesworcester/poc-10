@@ -1,7 +1,7 @@
 //! Byte decoding for content-file-slice facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 
@@ -36,7 +36,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
     let proof = reader
         .fixed_slot_value::<FILE_SLICE_BAO_PROOF_BYTES>()
         .map_err(wire_err)?;
-    let signature = reader.array().map_err(wire_err)?;
     reader.finish().map_err(wire_err)?;
     Ok(ContentFileSliceFact {
         workspace_id,
@@ -46,7 +45,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
         signer_id,
         signer_public_key,
         proof,
-        signature,
     })
 }
 
@@ -57,7 +55,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::content::file_slice::encode::{
         encode_fact, CONTENT_FILE_SLICE_BYTES, TYPE_CONTENT_FILE_SLICE,
     };
@@ -84,7 +81,6 @@ mod tests {
             signer_public_key: [10; 32],
             proof: crate::protocol::content::file_slice::fact::FileSliceProof::new(&[0xaa; 128])
                 .expect("proof"),
-            signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }
 

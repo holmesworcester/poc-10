@@ -37,29 +37,12 @@ fn prove_decoded_key_request(
 ) -> Result<KeyRequestFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&request)?;
     Ok(request)
-}
-
-/// Verify the key request's signature over its canonical envelope. The verifier
-/// key is embedded in the fact, so this is a context-free fact-boundary proof.
-pub fn verify_signature(fact: &KeyRequestFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_key_request,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "key request",
-    )
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
+    use crate::core::crypto;
     use crate::core::facts::Fact;
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
@@ -75,7 +58,7 @@ mod tests {
     fn canonical_fact() -> Fact {
         let private_key = SIGNER_KEY;
         let workspace_id = [1; 32];
-        let mut request = KeyRequestFact {
+        let request = KeyRequestFact {
             workspace_id,
             requester_endpoint_id: [2; 32],
             responder_endpoint_id: [3; 32],
@@ -83,18 +66,7 @@ mod tests {
             recipient_key_id: [5; 32],
             created_at_ms: 100,
             signer_public_key: crypto::ed25519_public_key(&private_key),
-            signature: [0; ED25519_SIGNATURE_BYTES],
         };
-        let (_, signature) = crypto::ed25519_sign_canonical(
-            &private_key,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &request,
-                encode::encode_key_request,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("signing bytes"),
-        );
-        request.signature = signature;
         let bytes = encode::encode_key_request(&request).expect("encode key request");
         Fact::new(workspace::scope(workspace_id), request.created_at_ms, bytes)
     }
@@ -139,19 +111,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

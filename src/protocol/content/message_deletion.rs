@@ -38,7 +38,6 @@ pub struct MessageDeletionView {
 
 pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<MessageDeletionView, String> {
     let deletion = decode::decode_fact(fact.body())?;
-    authenticate::verify_signature(&deletion)?;
     semantic_message_deletion(deletion)
 }
 

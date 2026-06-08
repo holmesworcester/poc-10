@@ -1,9 +1,8 @@
 //! Byte decoding for retention policy facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
 use super::encode::{FACT_BYTES, NO_PREVIOUS_POLICY_ID, TYPE_RETENTION_POLICY};
@@ -41,8 +40,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<RetentionPolicyFact, String> {
     let retire_minute = wire::take_u64be(&bytes[174..182]).map_err(wire_err)?;
     let mut supersedes_raw = [0; 32];
     supersedes_raw.copy_from_slice(&bytes[182..214]);
-    let mut signature = [0; ED25519_SIGNATURE_BYTES];
-    signature.copy_from_slice(&bytes[214..278]);
     let supersedes_policy_id = if supersedes_raw == NO_PREVIOUS_POLICY_ID {
         None
     } else {
@@ -59,7 +56,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<RetentionPolicyFact, String> {
         signer_id,
         signer_public_key,
         created_at_ms,
-        signature,
     })
 }
 
@@ -86,7 +82,6 @@ mod tests {
             signer_id: [9; 32],
             signer_public_key: [10; 32],
             created_at_ms: 6_000_000,
-            signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }
 

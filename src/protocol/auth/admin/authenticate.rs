@@ -35,8 +35,6 @@ impl DecodedAuthenticator<super::Codec> for AdminAuthenticator {
 fn prove_decoded_admin(fact: &Fact, admin: AdminFact) -> Result<AdminFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&admin)?;
     // 4. Non-zero selector fields.
     if admin.workspace_id == [0u8; 32] {
         return Err("admin workspace_id must not be zero".to_string());
@@ -53,24 +51,8 @@ fn prove_decoded_admin(fact: &Fact, admin: AdminFact) -> Result<AdminFact, Strin
     Ok(admin)
 }
 
-/// Verify the admin grant's signature over its canonical envelope. The verifier
-/// key is embedded in the fact, so this is a context-free fact-boundary proof.
-pub fn verify_signature(fact: &AdminFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "admin",
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::core::crypto;
     use crate::core::facts::Fact;
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
@@ -91,7 +73,6 @@ mod tests {
             user_fact_id: [4; 32],
             signer_id: [3; 32],
             signer_public_key: [0; 32],
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
         signed_admin_fact(100, [3; 32], SIGNER_KEY, grant).expect("signed admin fact")
     }
@@ -138,19 +119,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

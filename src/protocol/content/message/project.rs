@@ -22,6 +22,7 @@ use crate::core::pipeline::{
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
+use crate::protocol::auth::signature;
 use crate::protocol::content::{message_deletion, retention_policy};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
@@ -217,7 +218,7 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
         }
 
         // 2. Context, signature evidence, and deletion gates.
-        let signature_need = crate::protocol::auth::signature::project::signature_proof_need(
+        let signature_need = signature::project::signature_proof_need(
             fact.id,
             scope.clone(),
             fact.id,
@@ -270,7 +271,14 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
         else {
             return Ok(base_output);
         };
-        validate_signature_proof(signature_payload, &signature_need, fact.id, &message)?;
+        signature::project::validate_signature_proof_payload(
+            signature_payload,
+            &signature_need,
+            message.workspace_id,
+            fact.id,
+            message.signer_public_key,
+            "content message",
+        )?;
         let signature_context_have = context_have_from_needs(context, [&signature_need]);
         let Some(signer_payload) = context.payload_for(&signer_need) else {
             return Ok(base_wait_output(
@@ -429,31 +437,6 @@ fn validate_message_signer_context(
         return Err(
             "content message signer context public key does not match message signature key"
                 .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_signature_proof(
-    payload: &Fact,
-    need: &ContextNeed,
-    message_fact_id: FactId,
-    message: &super::fact::ContentMessageFact,
-) -> Result<(), String> {
-    if payload.scope != need.scope {
-        return Err("content message signature proof scope does not match message".to_string());
-    }
-    let proof = auth::signature::decode_fact_payload(payload.body())
-        .map_err(|_| "content message signature proof is not a signature fact".to_string())?;
-    if proof.workspace_id != message.workspace_id {
-        return Err("content message signature proof workspace does not match message".to_string());
-    }
-    if proof.target_fact_id != message_fact_id {
-        return Err("content message signature proof target does not match message".to_string());
-    }
-    if proof.signer_public_key != message.signer_public_key {
-        return Err(
-            "content message signature proof key does not match message signer key".to_string(),
         );
     }
     Ok(())
@@ -1148,7 +1131,7 @@ mod projector_tests {
         let (message, fact, _key) = message_fact(author_fact.id, "delete me");
         let signer_fact = signer_fact(&message);
         let signature_fact = signature_fact(&message, &fact);
-        let mut deletion = ContentMessageDeletionFact {
+        let deletion = ContentMessageDeletionFact {
             workspace_id: message.workspace_id,
             created_at_ms: message.created_at_ms + 1,
             target_message_id: fact.id,
@@ -1157,17 +1140,7 @@ mod projector_tests {
             author_user_id: message.author_user_id,
             signer_id: message.signer_id,
             signer_public_key: message.signer_public_key,
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        deletion.signature = crypto::ed25519_sign(
-            &CONTENT_SIGNING_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &deletion,
-                deletion_layout::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("deletion signing bytes"),
-        );
         let deletion_fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
@@ -1206,24 +1179,14 @@ mod projector_tests {
 
     fn user_fact(workspace_id: [u8; 32]) -> Fact {
         let signing_key = [21; 32];
-        let mut user = UserFact {
+        let user = UserFact {
             created_at_ms: 12_000,
             workspace_id,
             public_key: [22; 32],
             username: topo::protocol::auth::user::fact::Username::new("alice").expect("username"),
             signer_id: [23; 32],
             signer_public_key: crypto::ed25519_public_key(&signing_key),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        user.signature = crypto::ed25519_sign(
-            &signing_key,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &user,
-                user_layout::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("user signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             user.created_at_ms,
@@ -1278,7 +1241,7 @@ mod projector_tests {
     }
 
     fn signer_fact(message: &ContentMessageFact) -> Fact {
-        let mut signer = EndpointSharedFact {
+        let signer = EndpointSharedFact {
             created_at_ms: message.created_at_ms,
             workspace_id: message.workspace_id,
             user_authority_fact_id: message.author_user_id,
@@ -1291,17 +1254,7 @@ mod projector_tests {
             .expect("device name"),
             signer_id: [1; 32],
             signer_public_key: crypto::ed25519_public_key(&ENDPOINT_AUTHORITY_KEY),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        signer.signature = crypto::ed25519_sign(
-            &ENDPOINT_AUTHORITY_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &signer,
-                endpoint_shared_layout::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("endpoint signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             message.created_at_ms,

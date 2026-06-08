@@ -5,7 +5,6 @@
 //! stable public fields needed to name that namespace. Membership, roles, and
 //! local secrets are modeled by separate fact families.
 
-use crate::core::crypto::Ed25519Signature;
 use crate::core::facts::FactId;
 use crate::core::wire::FixedText;
 
@@ -20,5 +19,4 @@ pub struct WorkspaceFact {
     pub created_at_ms: u64,
     pub public_key: WorkspacePublicKey,
     pub name: WorkspaceName,
-    pub signature: Ed25519Signature,
 }

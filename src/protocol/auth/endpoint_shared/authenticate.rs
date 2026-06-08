@@ -41,8 +41,6 @@ fn prove_decoded_endpoint_shared(
 ) -> Result<EndpointSharedFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&shared)?;
     // 4. Intrinsic fields.
     if shared.endpoint_id.iter().all(|byte| *byte == 0) {
         return Err("endpoint_shared endpoint_id cannot be empty".to_string());
@@ -57,22 +55,6 @@ fn prove_decoded_endpoint_shared(
         return Err("endpoint device name cannot contain NUL".to_string());
     }
     Ok(shared)
-}
-
-/// Verify the endpoint-shared fact's signature over its canonical envelope. The
-/// verifier key is embedded in the fact, so this is a context-free fact-boundary
-/// proof.
-pub fn verify_signature(fact: &EndpointSharedFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "endpoint shared",
-    )
 }
 
 #[cfg(test)]
@@ -143,19 +125,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

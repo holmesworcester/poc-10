@@ -162,22 +162,12 @@ fn runtime_dispatches_every_protocol_handler_registration() {
 
 fn removal_frontier_fact(workspace_id: [u8; 32], owner_endpoint_id: [u8; 32]) -> Fact {
     let signing_key = [5; 32];
-    let mut body = RemovalFrontierFact {
+    let body = RemovalFrontierFact {
         workspace_id,
         owner_endpoint_id,
         created_at_ms: 1,
         signer_public_key: crypto::ed25519_public_key(&signing_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    body.signature = crypto::ed25519_sign(
-        &signing_key,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &body,
-            removal_frontier_layout::encode_removal_frontier,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("frontier signing bytes"),
-    );
     Fact::new(
         workspace_scope(workspace_id),
         1,

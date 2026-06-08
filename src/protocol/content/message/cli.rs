@@ -15,7 +15,7 @@ use crate::core::cli::{
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::{self, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
 use crate::core::fact_store::persisted_facts;
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::FactId;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::content::{file, file_slice, message, message_deletion, reaction};
@@ -149,17 +149,16 @@ pub fn react(
         nonce,
         ciphertext: reaction::fact::ReactionCiphertext::new(&ciphertext)
             .map_err(|err| format!("reaction ciphertext: {err}"))?,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let fact = signed_reaction_fact(ctx, workspace_id, created_at_ms, reaction)?;
+    let authored = signed_reaction_fact(ctx, workspace_id, created_at_ms, reaction)?;
     Ok(CommandOutput::new(ReactReceipt {
         workspace_id,
-        reaction_fact_id: fact.id,
+        reaction_fact_id: authored.fact.id,
         target_message_id: target.message_id,
         emoji: emoji.to_string(),
         created_at_ms,
     })
-    .with_facts(vec![fact]))
+    .with_facts(authored.into_facts().to_vec()))
 }
 
 pub fn react_output(receipt: &ReactReceipt) -> CliOutput {
@@ -237,11 +236,11 @@ pub fn send_file(
         root_hash,
         sealed_metadata: file::fact::SealedMetadata::new(&sealed_metadata)
             .map_err(|err| format!("file metadata: {err}"))?,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let descriptor_fact = signed_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
+    let descriptor = signed_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
+    let descriptor_fact_id = descriptor.fact.id;
     let mut facts = message_output.effects.facts;
-    facts.push(descriptor_fact.clone());
+    facts.extend(descriptor.into_facts());
     for encrypted in encrypted_slices {
         let slice = file_slice::fact::ContentFileSliceFact {
             workspace_id: parsed.workspace_id,
@@ -252,20 +251,17 @@ pub fn send_file(
             signer_public_key: [0; 32],
             proof: file_slice::fact::FileSliceProof::new(&encrypted.proof)
                 .map_err(|err| format!("file slice bao proof: {err}"))?,
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        facts.push(signed_file_slice_fact(
-            ctx,
-            parsed.workspace_id,
-            slice.created_at_ms,
-            slice,
-        )?);
+        facts.extend(
+            signed_file_slice_fact(ctx, parsed.workspace_id, slice.created_at_ms, slice)?
+                .into_facts(),
+        );
     }
 
     Ok(CommandOutput::new(SendFileReceipt {
         workspace_id: parsed.workspace_id,
         message_fact_id: message_receipt.message_fact_id,
-        file_fact_id: descriptor_fact.id,
+        file_fact_id: descriptor_fact_id,
         file_id,
         filename,
         mime: parsed.mime,
@@ -939,9 +935,9 @@ fn signed_reaction_fact(
     workspace_id: FactId,
     created_at_ms: u64,
     reaction: reaction::fact::ContentReactionFact,
-) -> Result<Fact, String> {
+) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    reaction::author::signed_reaction_fact(
+    let fact = reaction::author::signed_reaction_fact(
         created_at_ms,
         workspace_id,
         reaction.target_message_id,
@@ -950,7 +946,10 @@ fn signed_reaction_fact(
         reaction.nonce,
         reaction.ciphertext,
         private_key,
-    )
+    )?;
+    let signature =
+        auth::signature::author::sign_fact(workspace_id, &fact, &private_key, created_at_ms)?;
+    Ok(auth::signature::author::AuthoredFactEvidence { fact, signature })
 }
 
 fn signed_file_fact(
@@ -958,9 +957,9 @@ fn signed_file_fact(
     workspace_id: FactId,
     created_at_ms: u64,
     file: file::fact::ContentFileFact,
-) -> Result<Fact, String> {
+) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    file::author::signed_file_fact(
+    let fact = file::author::signed_file_fact(
         workspace_id,
         created_at_ms,
         file.message_id,
@@ -973,7 +972,10 @@ fn signed_file_fact(
         file.root_hash,
         file.sealed_metadata,
         private_key,
-    )
+    )?;
+    let signature =
+        auth::signature::author::sign_fact(workspace_id, &fact, &private_key, created_at_ms)?;
+    Ok(auth::signature::author::AuthoredFactEvidence { fact, signature })
 }
 
 fn signed_file_slice_fact(
@@ -981,9 +983,9 @@ fn signed_file_slice_fact(
     workspace_id: FactId,
     created_at_ms: u64,
     slice: file_slice::fact::ContentFileSliceFact,
-) -> Result<Fact, String> {
+) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
-    file_slice::author::signed_file_slice_fact(
+    let fact = file_slice::author::signed_file_slice_fact(
         workspace_id,
         created_at_ms,
         slice.file_id,
@@ -991,7 +993,10 @@ fn signed_file_slice_fact(
         signer_id,
         slice.proof,
         &private_key,
-    )
+    )?;
+    let signature =
+        auth::signature::author::sign_fact(workspace_id, &fact, &private_key, created_at_ms)?;
+    Ok(auth::signature::author::AuthoredFactEvidence { fact, signature })
 }
 
 struct EncryptedFileSlice {

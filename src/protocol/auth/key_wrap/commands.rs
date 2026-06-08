@@ -178,7 +178,12 @@ pub fn create_recipient_key(
         input.previous_recipient_key_id,
         input.created_at_ms,
         signing.public_key,
-        signing.private_key,
+    )?;
+    let recipient_signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &recipient_fact,
+        &signing.private_key,
+        input.created_at_ms,
     )?;
     let (_local, local_fact) = auth::local_recipient_key::author::recipient_key_fact(
         input.workspace_id,
@@ -192,7 +197,7 @@ pub fn create_recipient_key(
         recipient_key_id: recipient_fact.id,
         recipient_key,
     })
-    .with_facts(vec![recipient_fact, local_fact]))
+    .with_facts(vec![recipient_fact, recipient_signature, local_fact]))
 }
 
 pub fn create_key_frontier(
@@ -211,6 +216,12 @@ pub fn create_key_frontier(
         endpoint.endpoint,
         input.created_at_ms,
         endpoint.signing_secret,
+    )?;
+    let frontier_signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &frontier_fact,
+        &endpoint.signing_secret,
+        input.created_at_ms,
     )?;
     let (_local_secret, local_secret_fact) = auth::local_key_secret::author::random_secret_fact(
         input.workspace_id,
@@ -231,7 +242,12 @@ pub fn create_key_frontier(
         local_key_secret_id: local_secret_fact.id,
         local_signer_secret_id: signer_fact.id,
     })
-    .with_facts(vec![frontier_fact, local_secret_fact, signer_fact]))
+    .with_facts(vec![
+        frontier_fact,
+        frontier_signature,
+        local_secret_fact,
+        signer_fact,
+    ]))
 }
 
 pub fn latest_local_recipient_key(

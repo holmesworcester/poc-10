@@ -59,24 +59,14 @@ fn handler_materializes_real_root_key_wrap_from_exact_fact_context() {
 
 fn recipient_key_fact(workspace_id: [u8; 32], endpoint_id: [u8; 32], public_key: [u8; 32]) -> Fact {
     let private_key = [9; 32];
-    let mut recipient = RecipientKeyFact {
+    let recipient = RecipientKeyFact {
         workspace_id,
         endpoint_id,
         recipient_key: public_key,
         previous_recipient_key_id: NO_PREVIOUS_RECIPIENT_KEY,
         created_at_ms: 10,
         signer_public_key: topo::core::crypto::ed25519_public_key(&private_key),
-        signature: [0; topo::core::crypto::ED25519_SIGNATURE_BYTES],
     };
-    recipient.signature = topo::core::crypto::ed25519_sign(
-        &private_key,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &recipient,
-            recipient_key_layout::encode_recipient_key,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("recipient signing bytes"),
-    );
     Fact::new(
         workspace_scope(workspace_id),
         10,

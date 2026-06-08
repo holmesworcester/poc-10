@@ -36,6 +36,17 @@ pub struct GenerateReceipt {
     pub fact_ids: Vec<FactId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthoredMessageFacts {
+    message: Fact,
+    signature: Fact,
+}
+
+struct MessageCommandAuthoring {
+    snapshot: author::MessageAuthoringSnapshot,
+    signer_private_key: crate::core::crypto::Ed25519PrivateKey,
+}
+
 pub fn send_message(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
@@ -71,7 +82,7 @@ pub fn generate_messages(
         .ok_or_else(|| "generate timestamp range overflows u64".to_string())?;
     let message_text_bytes = requested_message_text_bytes.min(MAX_TEXT_BYTES);
     let authoring = crate::core::perf_profile::measure_result("authoring_snapshot", || {
-        prepare_authoring_snapshot(ctx, workspace_id)
+        prepare_authoring(ctx, workspace_id)
     })?;
 
     let mut facts = Vec::with_capacity(count.saturating_mul(2));
@@ -84,7 +95,7 @@ pub fn generate_messages(
             deterministic_generated_text(&workspace_id, timestamp, index, message_text_bytes)
         });
         let authored = crate::core::perf_profile::measure_result("message_fact_build", || {
-            authoring.build_message_facts(&text, timestamp)
+            build_message_facts_from_authoring(&authoring, &text, timestamp)
         })?;
         authenticate_authored::<
             super::decode::Codec,
@@ -110,23 +121,28 @@ pub fn generate_messages(
     .with_facts(facts))
 }
 
-fn prepare_authoring_snapshot(
+fn prepare_authoring(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
-) -> Result<author::MessageAuthoringSnapshot, String> {
+) -> Result<MessageCommandAuthoring, String> {
     let signing = ctx.local_signing_capability(workspace_id)?;
+    let signer_private_key = signing.private_key;
     let encryption = ctx.local_encryption_capability(workspace_id)?;
     let author_user_id = local_author_user_id(ctx, workspace_id)?.unwrap_or(signing.signer_id);
     let active_policy = retention_policy::queries::active_for_workspace(ctx.store(), workspace_id)?;
     let retained_floor_minute = retained_floor_from_tombstones(ctx, workspace_id)?;
-    author::MessageAuthoringSnapshot::new(
+    let snapshot = author::MessageAuthoringSnapshot::new(
         workspace_id,
         signing,
         encryption,
         author_user_id,
         active_policy,
         retained_floor_minute,
-    )
+    )?;
+    Ok(MessageCommandAuthoring {
+        snapshot,
+        signer_private_key,
+    })
 }
 
 fn build_message_facts(
@@ -134,18 +150,32 @@ fn build_message_facts(
     workspace_id: WorkspaceId,
     text: &str,
     created_at_ms: u64,
-) -> Result<author::AuthoredMessageFacts, String> {
+) -> Result<AuthoredMessageFacts, String> {
     author::validate_message_text(text)?;
-    let facts =
-        prepare_authoring_snapshot(ctx, workspace_id)?.build_message_facts(text, created_at_ms)?;
+    let authoring = prepare_authoring(ctx, workspace_id)?;
+    build_message_facts_from_authoring(&authoring, text, created_at_ms)
+}
+
+fn build_message_facts_from_authoring(
+    authoring: &MessageCommandAuthoring,
+    text: &str,
+    created_at_ms: u64,
+) -> Result<AuthoredMessageFacts, String> {
+    let message = authoring.snapshot.build_message_fact(text, created_at_ms)?;
+    let signature = auth::signature::author::sign_fact(
+        authoring.snapshot.workspace_id(),
+        &message,
+        &authoring.signer_private_key,
+        created_at_ms,
+    )?;
     authenticate_authored::<super::decode::Codec, super::authenticate::ContentMessageAuthenticator>(
-        &facts.message,
+        &message,
     )?;
     authenticate_authored::<
         auth::signature::Codec,
         auth::signature::authenticate::SignatureAuthenticator,
-    >(&facts.signature)?;
-    Ok(facts)
+    >(&signature)?;
+    Ok(AuthoredMessageFacts { message, signature })
 }
 
 fn deterministic_generated_text(

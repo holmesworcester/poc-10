@@ -106,7 +106,6 @@ pub fn peers_in_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::auth::endpoint_shared::endpoint_shared_row;
     use crate::protocol::auth::endpoint_shared::fact::{EndpointDeviceName, EndpointSharedFact};
 
@@ -122,7 +121,6 @@ mod tests {
             device_name: EndpointDeviceName::new("laptop").expect("device name"),
             signer_id: [6; 32],
             signer_public_key: [7; 32],
-            signature: [8; ED25519_SIGNATURE_BYTES],
         };
         let row = endpoint_shared_row([9; 32], &fact).expect("endpoint shared row");
         let decoded =

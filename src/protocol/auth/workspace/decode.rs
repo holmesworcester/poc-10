@@ -1,7 +1,7 @@
 //! Byte decoding for workspace facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, field order, and
-//! canonical name padding. Id and signature checks live in `authenticate.rs`.
+//! canonical name padding. Id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 use crate::core::wire::FixedText;
@@ -39,14 +39,10 @@ fn decode_payload_fields(bytes: &[u8]) -> Result<WorkspaceFact, String> {
     let mut public_key: WorkspacePublicKey = [0; 32];
     public_key.copy_from_slice(&bytes[8..40]);
     let name = decode_name(&bytes[40..40 + WORKSPACE_NAME_BYTES])?;
-    let signature = bytes[40 + WORKSPACE_NAME_BYTES..]
-        .try_into()
-        .map_err(|_| "workspace signature slot has wrong length".to_string())?;
     Ok(WorkspaceFact {
         created_at_ms,
         public_key,
         name,
-        signature,
     })
 }
 
@@ -64,14 +60,11 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
-
     fn fact() -> WorkspaceFact {
         WorkspaceFact {
             created_at_ms: 42,
             public_key: [7; 32],
             name: WorkspaceName::new("Engineering").expect("name"),
-            signature: [8; ED25519_SIGNATURE_BYTES],
         }
     }
 

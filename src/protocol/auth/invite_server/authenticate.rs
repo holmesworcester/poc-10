@@ -37,8 +37,6 @@ fn prove_decoded_invite_server(
 ) -> Result<InviteServerFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&invite_server)?;
     // 4. Non-zero selector fields.
     if invite_server.workspace_id == [0; 32] {
         return Err("invite_server fact has empty workspace_id".to_string());
@@ -50,22 +48,6 @@ fn prove_decoded_invite_server(
         return Err("invite_server fact has empty public_key".to_string());
     }
     Ok(invite_server)
-}
-
-/// Verify the invite-server's signature over its canonical envelope. The
-/// verifier key is embedded in the fact, so this is a context-free
-/// fact-boundary proof.
-pub fn verify_signature(fact: &InviteServerFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "invite server",
-    )
 }
 
 #[cfg(test)]
@@ -90,7 +72,6 @@ mod tests {
             [3; 32],
             [4; 32],
             crypto::ed25519_public_key(&SIGNER_KEY),
-            &SIGNER_KEY,
         )
         .expect("signed invite_server fact")
     }
@@ -135,19 +116,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

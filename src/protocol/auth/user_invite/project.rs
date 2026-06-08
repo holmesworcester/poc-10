@@ -16,7 +16,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::user_invite::fact::UserInviteFact;
-use crate::protocol::auth::{admin, endpoint_shared, workspace};
+use crate::protocol::auth::{admin, endpoint_shared, signature, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::user_invite_row;
@@ -71,10 +71,27 @@ impl SemanticProjector<UserInviteFact> for UserInviteProjector {
         // workspace root signs directly. Any other authority id selects the
         // delegated path, where an endpoint_shared signer must be backed by the
         // named admin grant.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            crate::protocol::auth::workspace::scope(user_invite.workspace_id),
+            fact.id,
+            user_invite.signer_public_key,
+        )?;
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            user_invite.workspace_id,
+            fact.id,
+            user_invite.signer_public_key,
+            "user_invite",
+        )? {
+            return Ok(ProjectionOutput::new().need(signature_need));
+        }
+
         if user_invite.authority_fact_id == user_invite.workspace_id {
-            project_workspace_signed(fact, &user_invite, context)
+            project_workspace_signed(fact, &user_invite, context, signature_need)
         } else {
-            project_endpoint_signed(fact, &user_invite, context)
+            project_endpoint_signed(fact, &user_invite, context, signature_need)
         }
     }
 }
@@ -83,8 +100,9 @@ fn project_workspace_signed(
     fact: &Fact,
     invite: &UserInviteFact,
     context: &ProjectionContext,
+    signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = WorkspaceSignedNeeds::new(fact.id, invite);
+    let needs = WorkspaceSignedNeeds::new(fact.id, invite, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -102,7 +120,7 @@ fn project_workspace_signed(
             "signed user_invite signer key does not match workspace public key".to_string(),
         );
     }
-    let context_have = context_have_from_needs(context, [&needs.workspace]);
+    let context_have = context_have_from_needs(context, [&needs.signature, &needs.workspace]);
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output(), context_have)
@@ -112,8 +130,9 @@ fn project_endpoint_signed(
     fact: &Fact,
     invite: &UserInviteFact,
     context: &ProjectionContext,
+    signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = EndpointAdminNeeds::new(fact.id, invite, invite.signer_id);
+    let needs = EndpointAdminNeeds::new(fact.id, invite, invite.signer_id, signature_need);
     let Some(endpoint_fact) = context.payload_for(&needs.endpoint_shared) else {
         return Ok(needs.output());
     };
@@ -146,19 +165,24 @@ fn project_endpoint_signed(
     if endpoint.user_authority_fact_id != admin.user_fact_id {
         return Err("user_invite signer user does not match admin authority user".to_string());
     }
-    let context_have = context_have_from_needs(context, [&needs.endpoint_shared, &needs.admin]);
+    let context_have = context_have_from_needs(
+        context,
+        [&needs.signature, &needs.endpoint_shared, &needs.admin],
+    );
 
     // 3. Materialize.
     materialized_output(fact, invite, needs.output(), context_have)
 }
 
 struct WorkspaceSignedNeeds {
+    signature: ContextNeed,
     workspace: ContextNeed,
 }
 
 impl WorkspaceSignedNeeds {
-    fn new(owner: FactId, invite: &UserInviteFact) -> Self {
+    fn new(owner: FactId, invite: &UserInviteFact, signature: ContextNeed) -> Self {
         Self {
+            signature,
             workspace: crate::core::context::ContextNeed::range(
                 owner,
                 "auth_workspace",
@@ -170,18 +194,27 @@ impl WorkspaceSignedNeeds {
     }
 
     fn output(&self) -> ProjectionOutput {
-        ProjectionOutput::new().need(self.workspace.clone())
+        ProjectionOutput::new()
+            .need(self.signature.clone())
+            .need(self.workspace.clone())
     }
 }
 
 struct EndpointAdminNeeds {
+    signature: ContextNeed,
     endpoint_shared: ContextNeed,
     admin: ContextNeed,
 }
 
 impl EndpointAdminNeeds {
-    fn new(owner: FactId, invite: &UserInviteFact, signer_id: FactId) -> Self {
+    fn new(
+        owner: FactId,
+        invite: &UserInviteFact,
+        signer_id: FactId,
+        signature: ContextNeed,
+    ) -> Self {
         Self {
+            signature,
             endpoint_shared: crate::core::context::ContextNeed::range(
                 owner,
                 "auth_endpoint_shared",
@@ -201,6 +234,7 @@ impl EndpointAdminNeeds {
 
     fn output(&self) -> ProjectionOutput {
         ProjectionOutput::new()
+            .need(self.signature.clone())
             .need(self.endpoint_shared.clone())
             .need(self.admin.clone())
     }

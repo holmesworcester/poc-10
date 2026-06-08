@@ -39,8 +39,6 @@ fn prove_decoded_user_invite(
 ) -> Result<UserInviteFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&user_invite)?;
     // 4. Non-zero selector fields.
     if user_invite.workspace_id == [0; 32] {
         return Err("user_invite fact has empty workspace_id".to_string());
@@ -52,19 +50,6 @@ fn prove_decoded_user_invite(
         return Err("user_invite fact has empty public_key".to_string());
     }
     Ok(user_invite)
-}
-
-pub fn verify_signature(fact: &UserInviteFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "user invite",
-    )
 }
 
 #[cfg(test)]
@@ -125,19 +110,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

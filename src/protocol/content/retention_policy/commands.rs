@@ -7,8 +7,9 @@
 use crate::core::clock;
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::FactId;
 use crate::core::store::Store;
+use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 use crate::protocol::{auth, content};
 use std::collections::BTreeSet;
 
@@ -102,7 +103,7 @@ pub fn author_set_with_auto_floor(
         None => auto_floor,
     };
 
-    let fact = policy_fact(
+    let authored = policy_fact(
         store,
         input.workspace_id,
         previous_policy_id,
@@ -112,11 +113,11 @@ pub fn author_set_with_auto_floor(
         input.now_ms,
     )?;
     Ok(CommandOutput::new(AuthorSetReport {
-        policy_fact_id: fact.id,
+        policy_fact_id: authored.fact.id,
         previous_floor_minute: previous_floor,
         new_floor_minute: new_floor,
     })
-    .with_facts(vec![fact]))
+    .with_facts(authored.into_facts().to_vec()))
 }
 
 pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, String> {
@@ -159,7 +160,7 @@ pub fn author_tighten(
                 .to_string(),
         );
     }
-    let fact = policy_fact(
+    let authored = policy_fact(
         store,
         input.workspace_id,
         previous_policy_id,
@@ -169,11 +170,11 @@ pub fn author_tighten(
         input.now_ms,
     )?;
     Ok(CommandOutput::new(AuthorTightenReport {
-        policy_fact_id: fact.id,
+        policy_fact_id: authored.fact.id,
         previous_floor_minute: previous_floor,
         target_floor_minute: target_floor,
     })
-    .with_facts(vec![fact]))
+    .with_facts(authored.into_facts().to_vec()))
 }
 
 pub fn author_compact(
@@ -187,7 +188,7 @@ pub fn author_compact(
     let target_floor = active
         .retire_minute
         .max(now_minute.saturating_sub(u64::from(active.ttl_minutes)));
-    let fact = policy_fact(
+    let authored = policy_fact(
         store,
         input.workspace_id,
         Some(active.policy_id),
@@ -197,12 +198,12 @@ pub fn author_compact(
         input.now_ms,
     )?;
     Ok(CommandOutput::new(AuthorCompactReport {
-        policy_fact_id: fact.id,
+        policy_fact_id: authored.fact.id,
         ttl_minutes: active.ttl_minutes,
         previous_floor_minute: active.retire_minute,
         new_floor_minute: target_floor,
     })
-    .with_facts(vec![fact]))
+    .with_facts(authored.into_facts().to_vec()))
 }
 
 pub fn count_messages_below_minute(
@@ -270,10 +271,10 @@ fn policy_fact(
     retire_minute: u64,
     author_user_id: FactId,
     created_at_ms: u64,
-) -> Result<Fact, String> {
+) -> Result<AuthoredFactEvidence, String> {
     let (signer_id, _signer_public_key, signer_private_key) =
         local_signing_material(store, workspace_id)?;
-    author::signed_retention_policy_fact(
+    let fact = author::signed_retention_policy_fact(
         workspace_id,
         supersedes_policy_id,
         ttl_minutes,
@@ -284,7 +285,14 @@ fn policy_fact(
         signer_id,
         created_at_ms,
         signer_private_key,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &signer_private_key,
+        created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn local_signing_material(

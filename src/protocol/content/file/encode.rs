@@ -17,7 +17,6 @@
 //!   root_hash (32)
 //!   sealed_metadata (FixedSlot<SEALED_METADATA_BYTES>)
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 use crate::core::wire::FixedLayout;
 
@@ -27,7 +26,7 @@ pub const TYPE_CONTENT_FILE: u8 = 54;
 pub const FACT_PREFIX_BYTES: usize =
     1 + 32 + 8 + 32 + 32 + 32 + 32 + 32 + 8 + 4 + 4 + FILE_ROOT_HASH_BYTES;
 pub const CONTENT_FILE_BYTES: usize =
-    FACT_PREFIX_BYTES + wire::FixedSlot::<SEALED_METADATA_BYTES>::LEN + ED25519_SIGNATURE_BYTES;
+    FACT_PREFIX_BYTES + wire::FixedSlot::<SEALED_METADATA_BYTES>::LEN;
 pub fn encode_fact(fact: &ContentFileFact) -> Result<Vec<u8>, String> {
     let mut out = wire::Writer::with_capacity(CONTENT_FILE_BYTES);
     out.u8(TYPE_CONTENT_FILE);
@@ -44,7 +43,6 @@ pub fn encode_fact(fact: &ContentFileFact) -> Result<Vec<u8>, String> {
     out.fixed(&fact.root_hash);
     out.fixed_slot_value(&fact.sealed_metadata)
         .map_err(wire_err)?;
-    out.fixed(&fact.signature);
     out.finish_exact(CONTENT_FILE_BYTES).map_err(wire_err)
 }
 

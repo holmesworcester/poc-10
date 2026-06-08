@@ -12,14 +12,12 @@
 //!   || device_name_utf8_zero_padded(64)
 //! ```
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
 use super::fact::{EndpointDeviceName, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES};
 
 pub const TYPE_ENDPOINT_SHARED: u8 = 135;
-pub const FACT_BYTES: usize =
-    1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES + 32 + 32 + ED25519_SIGNATURE_BYTES;
+pub const FACT_BYTES: usize = 1 + 8 + 32 + 32 + 32 + 32 + 1 + ENDPOINT_DEVICE_NAME_BYTES + 32 + 32;
 pub fn encode_fact(fact: &EndpointSharedFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
     wire::put_u8(TYPE_ENDPOINT_SHARED, &mut out[0..1]).map_err(wire_err)?;
@@ -36,8 +34,6 @@ pub fn encode_fact(fact: &EndpointSharedFact) -> Result<Vec<u8>, String> {
     let signer_start = 138 + ENDPOINT_DEVICE_NAME_BYTES;
     out[signer_start..signer_start + 32].copy_from_slice(&fact.signer_id);
     out[signer_start + 32..signer_start + 64].copy_from_slice(&fact.signer_public_key);
-    out[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]
-        .copy_from_slice(&fact.signature);
     Ok(out)
 }
 

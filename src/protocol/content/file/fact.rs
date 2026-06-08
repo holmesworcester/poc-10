@@ -13,7 +13,7 @@
 //! authority belongs to the content-file projector, and per-slice BAO
 //! verification belongs to the content-file-slice projector.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 use crate::core::wire::FixedSlot;
 
@@ -45,5 +45,4 @@ pub struct ContentFileFact {
     pub root_hash: RootHash,
     /// Opaque sealed descriptor metadata (filename + mime + AEAD tag).
     pub sealed_metadata: SealedMetadata,
-    pub signature: Ed25519Signature,
 }

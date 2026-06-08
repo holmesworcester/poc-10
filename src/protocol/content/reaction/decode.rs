@@ -1,7 +1,7 @@
 //! Byte decoding for content-reaction target facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 
@@ -38,7 +38,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentReactionFact, String> {
         ciphertext: reader
             .fixed_slot_value::<REACTION_CIPHERTEXT_BYTES>()
             .map_err(wire_err)?,
-        signature: reader.array().map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
     Ok(fact)
@@ -51,7 +50,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::content::reaction::encode::{
         encode_fact, CONTENT_REACTION_BYTES, TYPE_CONTENT_REACTION,
     };
@@ -70,7 +68,6 @@ mod tests {
                 b"sealed-reaction",
             )
             .expect("ciphertext"),
-            signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }
 

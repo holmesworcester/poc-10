@@ -1,7 +1,7 @@
 //! Byte decoding for content-file facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 
@@ -39,7 +39,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileFact, String> {
     let sealed_metadata = reader
         .fixed_slot_value::<SEALED_METADATA_BYTES>()
         .map_err(wire_err)?;
-    let signature = reader.array().map_err(wire_err)?;
     reader.finish().map_err(wire_err)?;
     Ok(ContentFileFact {
         workspace_id,
@@ -54,7 +53,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileFact, String> {
         slice_bytes,
         root_hash,
         sealed_metadata,
-        signature,
     })
 }
 
@@ -65,7 +63,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::content::file::encode::{
         encode_fact, CONTENT_FILE_BYTES, TYPE_CONTENT_FILE,
     };
@@ -88,7 +85,6 @@ mod tests {
                 b"sealed-filename-and-mime",
             )
             .expect("metadata"),
-            signature: [11; ED25519_SIGNATURE_BYTES],
         }
     }
 

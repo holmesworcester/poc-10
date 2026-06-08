@@ -20,7 +20,7 @@ pub fn signed_file_slice_fact(
     private_key: &Ed25519PrivateKey,
 ) -> Result<Fact, String> {
     let signer_public_key = crypto::ed25519_public_key(private_key);
-    let mut slice = ContentFileSliceFact {
+    let slice = ContentFileSliceFact {
         workspace_id,
         created_at_ms,
         file_id,
@@ -28,17 +28,7 @@ pub fn signed_file_slice_fact(
         signer_id,
         signer_public_key,
         proof,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        private_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            &slice,
-            encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-    );
-    slice.signature = signature;
     Ok(Fact::new(
         crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,

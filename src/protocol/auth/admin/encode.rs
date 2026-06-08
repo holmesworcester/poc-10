@@ -9,16 +9,15 @@
 //! ```text
 //! type(1) || created_at_ms(8) || workspace_id(32) || public_key(32)
 //!         || authority_fact_id(32) || user_fact_id(32) || signer_id(32)
-//!         || signer_public_key(32) || signature(64)
+//!         || signer_public_key(32)
 //! ```
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
 use super::fact::AdminFact;
 
 pub const TYPE_ADMIN: u8 = 139;
-pub const FACT_BYTES: usize = 1 + 8 + (32 * 6) + ED25519_SIGNATURE_BYTES;
+pub const FACT_BYTES: usize = 1 + 8 + (32 * 6);
 pub fn encode_fact(fact: &AdminFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; FACT_BYTES];
     wire::put_u8(TYPE_ADMIN, &mut out[0..1]).map_err(wire_err)?;
@@ -29,7 +28,6 @@ pub fn encode_fact(fact: &AdminFact) -> Result<Vec<u8>, String> {
     out[105..137].copy_from_slice(&fact.user_fact_id);
     out[137..169].copy_from_slice(&fact.signer_id);
     out[169..201].copy_from_slice(&fact.signer_public_key);
-    out[201..265].copy_from_slice(&fact.signature);
     Ok(out)
 }
 

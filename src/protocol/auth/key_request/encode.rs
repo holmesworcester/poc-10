@@ -3,13 +3,12 @@
 //! This file owns byte construction only: the fact tag, fixed field order and
 //! widths. It does not sign, authenticate, inspect context, or materialize rows.
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
 use super::fact::KeyRequestFact;
 
 pub const TYPE_KEY_REQUEST: u8 = 154;
-pub const KEY_REQUEST_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 32 + 8 + 32 + ED25519_SIGNATURE_BYTES;
+pub const KEY_REQUEST_BYTES: usize = 1 + 32 + 32 + 32 + 32 + 32 + 8 + 32;
 pub fn encode_key_request(fact: &KeyRequestFact) -> Result<Vec<u8>, String> {
     let mut out = vec![0; KEY_REQUEST_BYTES];
     wire::put_u8(TYPE_KEY_REQUEST, &mut out[0..1]).map_err(wire_err)?;
@@ -20,7 +19,6 @@ pub fn encode_key_request(fact: &KeyRequestFact) -> Result<Vec<u8>, String> {
     out[129..161].copy_from_slice(&fact.recipient_key_id);
     wire::put_u64be(fact.created_at_ms, &mut out[161..169]).map_err(wire_err)?;
     out[169..201].copy_from_slice(&fact.signer_public_key);
-    out[201..265].copy_from_slice(&fact.signature);
     Ok(out)
 }
 

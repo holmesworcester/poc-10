@@ -10,6 +10,7 @@ use super::author;
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
+use crate::protocol::auth;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateUserInvite {
@@ -54,11 +55,17 @@ pub fn create_with_secret(
         authority_fact_id: input.authority_fact_id,
     };
     let fact = signed_user_invite_fact(create, input.signer_id, input.signer_private_key)?;
+    let signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &fact,
+        &input.signer_private_key,
+        input.created_at_ms,
+    )?;
     Ok(CommandOutput::new(CreateUserInviteReceipt {
         user_invite_id: fact.id,
         public_key: create.public_key,
     })
-    .with_facts(vec![fact]))
+    .with_facts(vec![fact, signature]))
 }
 
 pub fn user_invite_fact(input: CreateUserInvite) -> Result<Fact, String> {
@@ -98,7 +105,7 @@ mod tests {
         })
         .expect("create");
 
-        assert_eq!(output.effects.facts.len(), 1);
+        assert_eq!(output.effects.facts.len(), 2);
         assert_eq!(output.receipt.user_invite_id, output.effects.facts[0].id);
         assert_eq!(
             output.receipt.public_key,

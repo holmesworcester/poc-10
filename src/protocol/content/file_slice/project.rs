@@ -21,6 +21,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
+use crate::protocol::auth::signature;
 use crate::protocol::content::file;
 use crate::protocol::content::file_deletion;
 use crate::protocol::content::message;
@@ -95,7 +96,13 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
         let scope = crate::protocol::auth::workspace::scope(slice.workspace_id);
         require_fact_scope(fact, &scope)?;
 
-        // 2. Context and deletion gates.
+        // 2. Context, signature evidence, and deletion gates.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            slice.signer_public_key,
+        )?;
         let file_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_file",
@@ -103,8 +110,18 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
             slice.file_id,
             slice.file_id,
         );
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            slice.workspace_id,
+            fact.id,
+            slice.signer_public_key,
+            "file slice",
+        )? {
+            return Ok(ProjectionOutput::new().need(signature_need).need(file_need));
+        }
         let Some(parent) = context_payload(context, &file_need, "file slice parent")? else {
-            return Ok(ProjectionOutput::new().need(file_need));
+            return Ok(ProjectionOutput::new().need(signature_need).need(file_need));
         };
         let file = message_project::decode_typed_fact(
             parent,
@@ -139,7 +156,10 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
         let Some(message_payload) =
             context_payload(context, &message_need, "file slice message parent")?
         else {
-            return Ok(ProjectionOutput::new().need(file_need).need(message_need));
+            return Ok(ProjectionOutput::new()
+                .need(signature_need)
+                .need(file_need)
+                .need(message_need));
         };
         let parent_message = message_project::decode_typed_fact(
             message_payload,
@@ -183,6 +203,7 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
             )?;
             return Ok(retract_fact_from_sync(
                 ProjectionOutput::new()
+                    .need(signature_need)
                     .need(file_need)
                     .need(message_need)
                     .need(file_deletion_need)
@@ -204,6 +225,7 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
             validate_file_deletion(deletion, file.workspace_id, parent.id, file.author_user_id)?;
             return Ok(retract_fact_from_sync(
                 ProjectionOutput::new()
+                    .need(signature_need)
                     .need(file_need)
                     .need(message_need)
                     .need(file_deletion_need)
@@ -222,6 +244,7 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
         let context_have = context_have_from_needs(
             context,
             [
+                &signature_need,
                 &file_need,
                 &message_need,
                 &file_deletion_need,
@@ -232,6 +255,7 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
+                .need(signature_need)
                 .need(file_need)
                 .need(message_need)
                 .need(file_deletion_need)
@@ -398,7 +422,6 @@ mod tests {
             slice_bytes: 5,
             root_hash,
             sealed_metadata: SealedMetadata::new(b"sealed").expect("metadata"),
-            signature: [7; crypto::ED25519_SIGNATURE_BYTES],
         }
     }
 
@@ -418,7 +441,6 @@ mod tests {
             signer_id: [4; 32],
             signer_public_key: [5; 32],
             proof: FileSliceProof::new(&proof).expect("proof slot"),
-            signature: [8; crypto::ED25519_SIGNATURE_BYTES],
         };
 
         let verified = verified_slice_ciphertext(&slice, &file(root_hash)).expect("verify");
@@ -439,7 +461,6 @@ mod tests {
             signer_id: [4; 32],
             signer_public_key: [5; 32],
             proof: FileSliceProof::new(&proof).expect("proof slot"),
-            signature: [8; crypto::ED25519_SIGNATURE_BYTES],
         };
 
         let err = verified_slice_ciphertext(&slice, &file([0xff; 32])).expect_err("reject");
@@ -478,7 +499,6 @@ mod tests {
             signer_public_key: [7; 32],
             proof: crate::protocol::content::file_slice::fact::FileSliceProof::new(&[0xdd; 16])
                 .expect("proof"),
-            signature: [0; crate::core::crypto::ED25519_SIGNATURE_BYTES],
         };
         let row = content_file_slice_row([9; 32], &fact, vec![0xcc; 16]);
         assert_eq!(row.table, FILE_SLICE_ROWS);

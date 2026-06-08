@@ -15,6 +15,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
+use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::content::{message, message_deletion};
 use crate::protocol::registry::read_models;
@@ -87,7 +88,13 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
         let scope = crate::protocol::auth::workspace::scope(reaction.workspace_id);
         require_fact_scope(fact, &scope)?;
 
-        // 2. Context and deletion gates.
+        // 2. Context, signature evidence, and deletion gates.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            reaction.signer_public_key,
+        )?;
         let signer_need = project::signer_need(fact.id, reaction.workspace_id, reaction.signer_id);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
@@ -103,6 +110,21 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
             reaction.author_user_id,
             reaction.author_user_id,
         );
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            reaction.workspace_id,
+            fact.id,
+            reaction.signer_public_key,
+            "reaction",
+        )? {
+            return Ok(output_with_needs([
+                Some(signature_need),
+                Some(signer_need),
+                Some(target_need),
+                Some(author_need),
+            ]));
+        }
         if !project::validate_signer_context(
             context,
             &signer_need,
@@ -115,6 +137,7 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
             "reaction",
         )? {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -123,6 +146,7 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
         }
         let Some(target) = context_payload(context, &target_need, "reaction target")? else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -158,6 +182,7 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
             )?;
             return Ok(retract_fact_from_sync(
                 delete_reaction_projection(reaction.workspace_id, fact.id)
+                    .need(signature_need)
                     .need(target_need)
                     .need(target_deletion_need)
                     .purge_self(fact.id),
@@ -168,6 +193,7 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
         }
         let Some(author) = context_payload(context, &author_need, "reaction author")? else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(target_deletion_need),
@@ -178,6 +204,7 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
         let context_have = context_have_from_optional_needs(
             context,
             [
+                Some(&signature_need),
                 Some(&signer_need),
                 Some(&target_need),
                 Some(&target_deletion_need),
@@ -197,6 +224,7 @@ impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProj
         })?;
         Ok(share_fact_with_sync(
             output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(target_deletion_need),

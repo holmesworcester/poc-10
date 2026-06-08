@@ -8,7 +8,7 @@
 //! Current boundary: signature verification and signer-to-author authority live
 //! in the file-deletion projector with auth context witnesses.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;
@@ -23,5 +23,4 @@ pub struct ContentFileDeletionFact {
     pub author_user_id: AuthorId,
     pub signer_id: SignerId,
     pub signer_public_key: Ed25519PublicKey,
-    pub signature: Ed25519Signature,
 }

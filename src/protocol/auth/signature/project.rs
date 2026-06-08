@@ -10,6 +10,7 @@
 //!      workspace.
 
 use crate::core::context::{ContextNeed, ContextOffer};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
@@ -85,7 +86,7 @@ pub fn signature_proof_need(
     owner: FactId,
     scope: FactScope,
     target_fact_id: FactId,
-    signer_public_key: crate::core::crypto::Ed25519PublicKey,
+    signer_public_key: Ed25519PublicKey,
 ) -> Result<ContextNeed, String> {
     ContextNeed::for_key_parts(
         owner,
@@ -102,7 +103,7 @@ pub fn signature_proof_offer(
     owner: FactId,
     scope: FactScope,
     target_fact_id: FactId,
-    signer_public_key: crate::core::crypto::Ed25519PublicKey,
+    signer_public_key: Ed25519PublicKey,
 ) -> Result<ContextOffer, String> {
     ContextOffer::for_key_parts(
         owner,
@@ -113,6 +114,61 @@ pub fn signature_proof_offer(
             crate::core::context::ContextKeyPart::bytes(&signer_public_key),
         ],
     )
+}
+
+pub fn validate_signature_proof_payload(
+    payload: &Fact,
+    need: &ContextNeed,
+    workspace_id: FactId,
+    target_fact_id: FactId,
+    signer_public_key: Ed25519PublicKey,
+    label: &str,
+) -> Result<(), String> {
+    if payload.scope != need.scope {
+        return Err(format!(
+            "{label} signature proof scope does not match target"
+        ));
+    }
+    let proof = crate::protocol::auth::signature::decode_fact_payload(payload.body())
+        .map_err(|_| format!("{label} signature proof is not a signature fact"))?;
+    if proof.workspace_id != workspace_id {
+        return Err(format!(
+            "{label} signature proof workspace does not match target"
+        ));
+    }
+    if proof.target_fact_id != target_fact_id {
+        return Err(format!(
+            "{label} signature proof target does not match target"
+        ));
+    }
+    if proof.signer_public_key != signer_public_key {
+        return Err(format!(
+            "{label} signature proof key does not match target signer key"
+        ));
+    }
+    Ok(())
+}
+
+pub fn signature_proof_ready(
+    context: &ProjectionContext,
+    need: &ContextNeed,
+    workspace_id: FactId,
+    target_fact_id: FactId,
+    signer_public_key: Ed25519PublicKey,
+    label: &str,
+) -> Result<bool, String> {
+    let Some(payload) = context.payload_for(need) else {
+        return Ok(false);
+    };
+    validate_signature_proof_payload(
+        payload,
+        need,
+        workspace_id,
+        target_fact_id,
+        signer_public_key,
+        label,
+    )?;
+    Ok(true)
 }
 
 #[cfg(test)]

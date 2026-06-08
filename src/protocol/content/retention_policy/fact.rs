@@ -14,7 +14,7 @@
 //! - Monotonic floor checks are enforced through the supersedes chain in the
 //!   retention policy projector.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;
@@ -51,5 +51,4 @@ pub struct RetentionPolicyFact {
     pub signer_id: SignerId,
     pub signer_public_key: Ed25519PublicKey,
     pub created_at_ms: u64,
-    pub signature: Ed25519Signature,
 }

@@ -10,7 +10,7 @@
 //! user_invite dependency that originally admitted the signing user, while
 //! endpoint_shared-signed device invites omit it.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 
 pub type WorkspaceId = FactId;
@@ -24,5 +24,4 @@ pub struct DeviceInviteFact {
     pub public_key: Ed25519PublicKey,
     pub signer_id: FactId,
     pub signer_public_key: Ed25519PublicKey,
-    pub signature: Ed25519Signature,
 }

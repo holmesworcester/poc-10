@@ -1,8 +1,9 @@
 //! Pure content-message fact authoring.
 //!
 //! This layer takes an explicit authoring snapshot plus message text, derives
-//! crypto material from canonical bytes, signs/encrypts, encodes bytes,
-//! and returns a fact. Runtime gathering belongs in `commands.rs`.
+//! crypto material from typed inputs, encrypts, encodes bytes, and returns a
+//! target fact. Runtime gathering and signature evidence belong in
+//! `commands.rs`.
 
 use crate::core::command_context::{
     LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
@@ -16,16 +17,10 @@ use crate::protocol::content::message::fact::{
 };
 use crate::protocol::content::retention_policy;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthoredMessageFacts {
-    pub message: Fact,
-    pub signature: Fact,
-}
-
 #[derive(Clone)]
 pub struct MessageAuthoringSnapshot {
     workspace_id: WorkspaceId,
-    signing: LocalSigningCapability,
+    signer_id: FactId,
     encryption: LocalEncryptionCapability,
     signer_public_key: crypto::Ed25519PublicKey,
     author_user_id: FactId,
@@ -52,7 +47,7 @@ impl MessageAuthoringSnapshot {
         Ok(Self {
             workspace_id,
             signer_public_key: crypto::ed25519_public_key(&signing.private_key),
-            signing,
+            signer_id: signing.signer_id,
             encryption,
             author_user_id,
             active_policy,
@@ -60,19 +55,8 @@ impl MessageAuthoringSnapshot {
         })
     }
 
-    pub fn build_message_facts(
-        &self,
-        text: &str,
-        created_at_ms: u64,
-    ) -> Result<AuthoredMessageFacts, String> {
-        let message = self.build_message_fact(text, created_at_ms)?;
-        let signature = crate::protocol::auth::signature::author::create_signature(
-            self.workspace_id,
-            message.id,
-            &self.signing.private_key,
-            created_at_ms,
-        )?;
-        Ok(AuthoredMessageFacts { message, signature })
+    pub fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id
     }
 
     pub fn build_message_fact(&self, text: &str, created_at_ms: u64) -> Result<Fact, String> {
@@ -100,7 +84,7 @@ impl MessageAuthoringSnapshot {
             .map(|policy| policy.policy_id)
             .unwrap_or([0; 32]);
 
-        let nonce = deterministic_nonce(self.workspace_id, self.signing.signer_id, created_at_ms);
+        let nonce = deterministic_nonce(self.workspace_id, self.signer_id, created_at_ms);
         let plaintext = pad_plaintext(text.as_bytes())?;
         let ciphertext = crate::core::perf_profile::measure_result("message_encrypt", || {
             crypto::xchacha20poly1305_encrypt(
@@ -125,7 +109,7 @@ impl MessageAuthoringSnapshot {
             workspace_id: self.workspace_id,
             created_at_ms,
             author_user_id: self.author_user_id,
-            signer_id: self.signing.signer_id,
+            signer_id: self.signer_id,
             signer_public_key: self.signer_public_key,
             frontier_id: self.encryption.frontier_id,
             local_history_node_secret_id: [0; 32],

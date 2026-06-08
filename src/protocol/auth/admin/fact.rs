@@ -6,7 +6,7 @@
 //! grants name a prior admin fact as authority and a user fact as the target
 //! binding.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 
 pub type AdminId = FactId;
@@ -23,5 +23,4 @@ pub struct AdminFact {
     pub user_fact_id: UserId,
     pub signer_id: FactId,
     pub signer_public_key: Ed25519PublicKey,
-    pub signature: Ed25519Signature,
 }

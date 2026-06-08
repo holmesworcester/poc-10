@@ -8,6 +8,7 @@
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
+use crate::protocol::auth;
 
 use super::author;
 
@@ -48,12 +49,18 @@ pub fn create(input: CreateUser) -> Result<CommandOutput<CreateUserReceipt>, Str
 pub fn create_signed(input: CreateSignedUser) -> Result<CommandOutput<CreateUserReceipt>, String> {
     let public_key = crate::core::crypto::ed25519_public_key(&input.signer_private_key);
     let fact = signed_user_fact(&input, public_key)?;
+    let signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &fact,
+        &input.signer_private_key,
+        input.created_at_ms,
+    )?;
     Ok(CommandOutput::new(CreateUserReceipt {
         user_id: fact.id,
         public_key,
         username: input.username,
     })
-    .with_facts(vec![fact]))
+    .with_facts(vec![fact, signature]))
 }
 
 pub fn user_fact(input: &CreateUser) -> Result<Fact, String> {

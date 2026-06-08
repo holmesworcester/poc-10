@@ -1,7 +1,7 @@
 //! Byte decoding for recipient key facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
 use crate::core::wire;
 
@@ -30,7 +30,6 @@ pub fn decode_recipient_key(bytes: &[u8]) -> Result<RecipientKeyFact, String> {
         previous_recipient_key_id: bytes[97..129].try_into().unwrap(),
         created_at_ms: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
         signer_public_key: bytes[137..169].try_into().unwrap(),
-        signature: bytes[169..233].try_into().unwrap(),
     })
 }
 
@@ -41,7 +40,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::auth::recipient_key::encode::{encode_recipient_key, RECIPIENT_KEY_BYTES};
 
     fn sample_fact() -> RecipientKeyFact {
@@ -52,7 +50,6 @@ mod tests {
             previous_recipient_key_id: [4; 32],
             created_at_ms: 123,
             signer_public_key: [5; 32],
-            signature: [6; ED25519_SIGNATURE_BYTES],
         }
     }
 

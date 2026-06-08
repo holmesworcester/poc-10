@@ -1,8 +1,8 @@
 //! Pure workspace fact authoring.
 //!
 //! This layer takes explicit inputs and signing material, builds the typed
-//! source value, signs canonical bytes, encodes bytes, and returns the
-//! fact. Runtime gathering and command orchestration belong in `commands.rs`.
+//! source value, and returns canonical workspace fact bytes. Runtime gathering
+//! and command orchestration belong in `commands.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::core::facts::{Fact, FactScope};
@@ -29,18 +29,7 @@ pub fn create_workspace(
         created_at_ms,
         public_key,
         name: WorkspaceName::new(name).map_err(|err| format!("workspace name: {err}"))?,
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let mut workspace = workspace;
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &private_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            &workspace,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-    );
-    workspace.signature = signature;
     let bytes = super::encode::encode_fact(&workspace)?;
     Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
 }

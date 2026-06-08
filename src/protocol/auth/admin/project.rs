@@ -17,6 +17,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 use crate::protocol::auth::admin::fact::AdminFact;
+use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
 use crate::protocol::auth::user_invite;
 use crate::protocol::auth::workspace;
@@ -78,10 +79,27 @@ impl SemanticProjector<AdminFact> for AdminProjector {
         // admin to a real user from the workspace-signed bootstrap invite.
         // Otherwise the signer must be the named admin authority, and the
         // target user must match the grant.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            crate::protocol::auth::workspace::scope(admin.workspace_id),
+            fact.id,
+            admin.signer_public_key,
+        )?;
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            admin.workspace_id,
+            fact.id,
+            admin.signer_public_key,
+            "admin",
+        )? {
+            return Ok(ProjectionOutput::new().need(signature_need));
+        }
+
         if admin.authority_fact_id == admin.workspace_id {
-            project_bootstrap_admin(fact, &admin, context)
+            project_bootstrap_admin(fact, &admin, context, signature_need)
         } else {
-            project_delegated_admin(fact, &admin, context)
+            project_delegated_admin(fact, &admin, context, signature_need)
         }
     }
 }
@@ -90,8 +108,9 @@ fn project_bootstrap_admin(
     fact: &Fact,
     admin: &AdminFact,
     context: &ProjectionContext,
+    signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = BootstrapAdminNeeds::new(fact.id, admin);
+    let needs = BootstrapAdminNeeds::new(fact.id, admin, signature_need);
     let Some(workspace_fact) = context.payload_for_checked(&needs.workspace, "admin workspace")?
     else {
         return Ok(needs.output());
@@ -129,8 +148,15 @@ fn project_bootstrap_admin(
             "bootstrap user_invite signer key does not match workspace public key".to_string(),
         );
     }
-    let context_have =
-        context_have_from_needs(context, [&needs.workspace, &needs.user, &user_invite_need]);
+    let context_have = context_have_from_needs(
+        context,
+        [
+            &needs.signature,
+            &needs.workspace,
+            &needs.user,
+            &user_invite_need,
+        ],
+    );
 
     // 3. Materialize.
     materialized_output(
@@ -145,8 +171,9 @@ fn project_delegated_admin(
     fact: &Fact,
     admin: &AdminFact,
     context: &ProjectionContext,
+    signature_need: ContextNeed,
 ) -> Result<ProjectionOutput, String> {
-    let needs = DelegatedAdminNeeds::new(fact.id, admin);
+    let needs = DelegatedAdminNeeds::new(fact.id, admin, signature_need);
     let Some(workspace_fact) = context.payload_for(&needs.workspace) else {
         return Ok(needs.output());
     };
@@ -185,21 +212,30 @@ fn project_delegated_admin(
     if user.public_key != admin.public_key {
         return Err("admin public_key does not match user public_key".to_string());
     }
-    let context_have =
-        context_have_from_needs(context, [&needs.workspace, &needs.authority, &needs.user]);
+    let context_have = context_have_from_needs(
+        context,
+        [
+            &needs.signature,
+            &needs.workspace,
+            &needs.authority,
+            &needs.user,
+        ],
+    );
 
     // 3. Materialize.
     materialized_output(fact, admin, needs.output(), context_have)
 }
 
 struct BootstrapAdminNeeds {
+    signature: ContextNeed,
     workspace: ContextNeed,
     user: ContextNeed,
 }
 
 impl BootstrapAdminNeeds {
-    fn new(owner: FactId, admin: &AdminFact) -> Self {
+    fn new(owner: FactId, admin: &AdminFact, signature: ContextNeed) -> Self {
         Self {
+            signature,
             workspace: crate::core::context::ContextNeed::range(
                 owner,
                 "auth_workspace",
@@ -219,20 +255,23 @@ impl BootstrapAdminNeeds {
 
     fn output(&self) -> ProjectionOutput {
         ProjectionOutput::new()
+            .need(self.signature.clone())
             .need(self.workspace.clone())
             .need(self.user.clone())
     }
 }
 
 struct DelegatedAdminNeeds {
+    signature: ContextNeed,
     workspace: ContextNeed,
     authority: ContextNeed,
     user: ContextNeed,
 }
 
 impl DelegatedAdminNeeds {
-    fn new(owner: FactId, admin: &AdminFact) -> Self {
+    fn new(owner: FactId, admin: &AdminFact, signature: ContextNeed) -> Self {
         Self {
+            signature,
             workspace: crate::core::context::ContextNeed::range(
                 owner,
                 "auth_workspace",
@@ -259,6 +298,7 @@ impl DelegatedAdminNeeds {
 
     fn output(&self) -> ProjectionOutput {
         ProjectionOutput::new()
+            .need(self.signature.clone())
             .need(self.workspace.clone())
             .need(self.authority.clone())
             .need(self.user.clone())

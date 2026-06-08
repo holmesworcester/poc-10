@@ -36,7 +36,6 @@ pub fn decode_user_invite_row(key: &[u8], value: &[u8]) -> Result<UserInviteRow,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::auth::user_invite::fact::UserInviteFact;
 
     #[test]
@@ -48,7 +47,6 @@ mod tests {
             authority_fact_id: [3; 32],
             signer_id: [4; 32],
             signer_public_key: [5; 32],
-            signature: [6; ED25519_SIGNATURE_BYTES],
         };
         let row = super::super::user_invite_row([9; 32], &fact).expect("user invite row");
         let decoded = decode_user_invite_row(&row.key, &row.value).expect("decode user invite row");

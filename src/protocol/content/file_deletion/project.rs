@@ -14,6 +14,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
+use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -78,7 +79,13 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
-        // 2. Authority.
+        // 2. Authority and signature evidence.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            deletion.signer_public_key,
+        )?;
         let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
@@ -94,6 +101,21 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
             deletion.author_user_id,
             deletion.author_user_id,
         );
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            deletion.workspace_id,
+            fact.id,
+            deletion.signer_public_key,
+            "file deletion",
+        )? {
+            return Ok(output_with_needs([
+                Some(signature_need),
+                Some(signer_need),
+                Some(target_need),
+                Some(author_need),
+            ]));
+        }
         if !project::validate_signer_context(
             context,
             &signer_need,
@@ -106,6 +128,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
             "file deletion",
         )? {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -114,6 +137,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
         let Some(target_fact) = context_payload(context, &target_need, "file deletion target")?
         else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -131,6 +155,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
             context_payload(context, &parent_need, "file deletion parent message")?
         else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(parent_need),
@@ -141,6 +166,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
         let Some(author_fact) = context_payload(context, &author_need, "file deletion author")?
         else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(parent_need),
@@ -151,6 +177,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
         let context_have = context_have_from_optional_needs(
             context,
             [
+                Some(&signature_need),
                 Some(&signer_need),
                 Some(&target_need),
                 Some(&parent_need),
@@ -168,6 +195,7 @@ impl SemanticProjector<super::fact::ContentFileDeletionFact> for ContentFileDele
         });
         Ok(share_fact_with_sync(
             output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(parent_need),

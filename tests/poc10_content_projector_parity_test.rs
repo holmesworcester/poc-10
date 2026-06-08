@@ -22,10 +22,10 @@ fn raw_content_events_reject_projection() {
         .any(|need| need.role == "signature_proof"));
 
     let file = unsigned_file_fact(WORKSPACE, [31; 32]);
-    assert_must_be_signed(
+    assert_waits_for_signature(
         content::file::project::ContentFileProjector::new()
             .project(&file, &ProjectionContext::default())
-            .expect_err("raw file must reject"),
+            .expect("raw file parks on signature evidence"),
     );
 
     let reaction = content::reaction::fact::ContentReactionFact {
@@ -38,17 +38,16 @@ fn raw_content_events_reject_projection() {
         nonce: [6; content::reaction::fact::REACTION_NONCE_BYTES],
         ciphertext: content::reaction::fact::ReactionCiphertext::new(b"sealed-reaction")
             .expect("reaction ciphertext"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let reaction = Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         reaction.created_at_ms,
         content::reaction::encode::encode_fact(&reaction).expect("encode reaction"),
     );
-    assert_must_be_signed(
+    assert_waits_for_signature(
         content::reaction::project::ContentReactionProjector::new()
             .project(&reaction, &ProjectionContext::default())
-            .expect_err("raw reaction must reject"),
+            .expect("raw reaction parks on signature evidence"),
     );
 
     let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
@@ -60,17 +59,16 @@ fn raw_content_events_reject_projection() {
         author_user_id: [31; 32],
         signer_id: CONTENT_ENDPOINT_ID,
         signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let deletion = Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         deletion.created_at_ms,
         content::message_deletion::encode::encode_fact(&deletion).expect("encode deletion"),
     );
-    assert_must_be_signed(
+    assert_waits_for_signature(
         content::message_deletion::project::ContentMessageDeletionProjector::new()
             .project(&deletion, &ProjectionContext::default())
-            .expect_err("raw message deletion must reject"),
+            .expect("raw message deletion parks on signature evidence"),
     );
 
     let deletion = content::file_deletion::fact::ContentFileDeletionFact {
@@ -80,17 +78,16 @@ fn raw_content_events_reject_projection() {
         author_user_id: [31; 32],
         signer_id: CONTENT_ENDPOINT_ID,
         signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let deletion = Fact::new(
         topo::protocol::auth::workspace::scope(WORKSPACE),
         deletion.created_at_ms,
         content::file_deletion::encode::encode_fact(&deletion).expect("encode file deletion"),
     );
-    assert_must_be_signed(
+    assert_waits_for_signature(
         content::file_deletion::project::ContentFileDeletionProjector::new()
             .project(&deletion, &ProjectionContext::default())
-            .expect_err("raw file deletion must reject"),
+            .expect("raw file deletion parks on signature evidence"),
     );
 }
 
@@ -155,7 +152,6 @@ fn signed_content_file_waits_for_signer_before_parent_or_author_intents() {
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
@@ -200,7 +196,6 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
@@ -212,7 +207,10 @@ fn signed_content_file_rejects_signer_not_authorized_by_author() {
     let err = content::file::project::ContentFileProjector::new()
         .project(
             &fact,
-            &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
+            &ProjectionContext::from_matches(vec![
+                signature_match(&fact),
+                signer_match(&fact, &signer),
+            ]),
         )
         .expect_err("signer for another author must fail");
 
@@ -236,7 +234,6 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
         nonce: [6; content::reaction::fact::REACTION_NONCE_BYTES],
         ciphertext: content::reaction::fact::ReactionCiphertext::new(b"sealed-reaction")
             .expect("reaction ciphertext"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
@@ -248,7 +245,10 @@ fn signed_content_reaction_rejects_signer_not_authorized_by_author() {
     let err = content::reaction::project::ContentReactionProjector::new()
         .project(
             &fact,
-            &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
+            &ProjectionContext::from_matches(vec![
+                signature_match(&fact),
+                signer_match(&fact, &signer),
+            ]),
         )
         .expect_err("signer for another author must fail");
 
@@ -268,7 +268,6 @@ fn signed_message_deletion_does_not_offer_until_signer_is_validated() {
         author_user_id: author.id,
         signer_id: CONTENT_ENDPOINT_ID,
         signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
@@ -313,7 +312,6 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
         author_user_id: deleter.id,
         signer_id: CONTENT_ENDPOINT_ID,
         signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
@@ -325,7 +323,10 @@ fn signed_file_deletion_rejects_signer_not_authorized_by_author() {
     let err = content::file_deletion::project::ContentFileDeletionProjector::new()
         .project(
             &fact,
-            &ProjectionContext::from_matches(vec![signer_match(&fact, &signer)]),
+            &ProjectionContext::from_matches(vec![
+                signature_match(&fact),
+                signer_match(&fact, &signer),
+            ]),
         )
         .expect_err("signer for another author must fail");
 
@@ -337,7 +338,7 @@ fn endpoint_shared_fact(
     user_authority_fact_id: FactId,
     content_signing_key: [u8; 32],
 ) -> Fact {
-    let mut endpoint = auth::endpoint_shared::fact::EndpointSharedFact {
+    let endpoint = auth::endpoint_shared::fact::EndpointSharedFact {
         created_at_ms: 1,
         workspace_id,
         user_authority_fact_id,
@@ -348,41 +349,21 @@ fn endpoint_shared_fact(
             .expect("device name"),
         signer_id: [8; 32],
         signer_public_key: crypto::ed25519_public_key(&ENDPOINT_AUTHORITY_KEY),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    endpoint.signature = crypto::ed25519_sign(
-        &ENDPOINT_AUTHORITY_KEY,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &endpoint,
-            auth::endpoint_shared::encode::encode_fact,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("endpoint signing bytes"),
-    );
     let bytes = auth::endpoint_shared::encode::encode_fact(&endpoint).expect("endpoint_shared");
     Fact::new(FactScope::Global, endpoint.created_at_ms, bytes)
 }
 
 fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact {
     let user_private = [12; 32];
-    let mut user = auth::user::fact::UserFact {
+    let user = auth::user::fact::UserFact {
         created_at_ms: 2,
         workspace_id,
         public_key,
         username: auth::user::fact::Username::new(username).expect("username"),
         signer_id: [13; 32],
         signer_public_key: crypto::ed25519_public_key(&user_private),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    user.signature = crypto::ed25519_sign(
-        &user_private,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &user,
-            auth::user::encode::encode_fact,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("user signing bytes"),
-    );
     Fact::new(
         FactScope::Global,
         user.created_at_ms,
@@ -443,7 +424,7 @@ fn unsigned_message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
 }
 
 fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-    let mut file = content::file::fact::ContentFileFact {
+    let file = content::file::fact::ContentFileFact {
         workspace_id,
         created_at_ms: 70_000,
         message_id: [55; 32],
@@ -457,17 +438,7 @@ fn file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    file.signature = crypto::ed25519_sign(
-        &CONTENT_SIGNING_KEY,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &file,
-            content::file::encode::encode_fact,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("file signing bytes"),
-    );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         file.created_at_ms,
@@ -490,7 +461,6 @@ fn unsigned_file_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         root_hash: [44; content::file::fact::FILE_ROOT_HASH_BYTES],
         sealed_metadata: content::file::fact::SealedMetadata::new(b"sealed")
             .expect("sealed metadata"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
@@ -523,68 +493,63 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
         Some(content::file::TYPE_CONTENT_FILE) => {
             let mut fact = content::file::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
-            fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-            fact.signature = crypto::ed25519_sign(
-                &private_key,
-                &topo::core::wire::encode_with_zeroed_trailing_field(
-                    &fact,
-                    content::file::encode::encode_fact,
-                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
-                )?,
-            );
             content::file::encode::encode_fact(&fact)
         }
         Some(content::reaction::TYPE_CONTENT_REACTION) => {
             let mut fact = content::reaction::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
-            fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-            fact.signature = crypto::ed25519_sign(
-                &private_key,
-                &topo::core::wire::encode_with_zeroed_trailing_field(
-                    &fact,
-                    content::reaction::encode::encode_fact,
-                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
-                )?,
-            );
             content::reaction::encode::encode_fact(&fact)
         }
         Some(content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION) => {
             let mut fact = content::message_deletion::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
-            fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-            fact.signature = crypto::ed25519_sign(
-                &private_key,
-                &topo::core::wire::encode_with_zeroed_trailing_field(
-                    &fact,
-                    content::message_deletion::encode::encode_fact,
-                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
-                )?,
-            );
             content::message_deletion::encode::encode_fact(&fact)
         }
         Some(content::file_deletion::TYPE_CONTENT_FILE_DELETION) => {
             let mut fact = content::file_deletion::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
-            fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-            fact.signature = crypto::ed25519_sign(
-                &private_key,
-                &topo::core::wire::encode_with_zeroed_trailing_field(
-                    &fact,
-                    content::file_deletion::encode::encode_fact,
-                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
-                )?,
-            );
             content::file_deletion::encode::encode_fact(&fact)
         }
         _ => Err("unsupported test payload type".to_string()),
     }
 }
 
-fn assert_must_be_signed(err: String) {
-    assert!(
-        err.contains("must be signed") || err.contains("signature verification failed"),
-        "{err}"
-    );
+fn assert_waits_for_signature(output: topo::core::pipeline::ProjectionOutput) {
+    assert!(output.offers.is_empty());
+    assert!(output.effects.intents.is_empty());
+    assert!(output
+        .needs
+        .iter()
+        .any(|need| need.role.as_str() == "signature_proof"));
+}
+
+fn signature_match(fact: &Fact) -> MatchedContext {
+    let scope = topo::protocol::auth::workspace::scope(WORKSPACE);
+    let signer_public_key = crypto::ed25519_public_key(&CONTENT_SIGNING_KEY);
+    let signature = auth::signature::author::create_signature(
+        WORKSPACE,
+        fact.id,
+        &CONTENT_SIGNING_KEY,
+        fact.timestamp,
+    )
+    .expect("signature evidence");
+    MatchedContext {
+        need: auth::signature::project::signature_proof_need(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            signer_public_key,
+        )
+        .expect("signature need"),
+        offer: auth::signature::project::signature_proof_offer(
+            signature.id,
+            scope,
+            fact.id,
+            signer_public_key,
+        )
+        .expect("signature offer"),
+        payload: signature,
+    }
 }
 
 fn signer_match(owner: &Fact, signer: &Fact) -> MatchedContext {

@@ -17,6 +17,7 @@ use crate::core::pipeline::{
 };
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
+use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::endpoint_shared_row;
@@ -69,16 +70,36 @@ impl SemanticProjector<super::fact::EndpointSharedFact> for EndpointSharedProjec
             return Err("endpoint shared fact must have global scope".to_string());
         }
 
-        // 2. Authority.
+        // 2. Authority and signature evidence.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            crate::protocol::auth::workspace::scope(shared.workspace_id),
+            fact.id,
+            shared.signer_public_key,
+        )?;
         let authority_need = authority_need(fact, &shared, shared.signer_id);
-        if !has_valid_authority(&authority_need, &shared, context)? {
-            return Ok(ProjectionOutput::new().need(authority_need));
+        let waiting = ProjectionOutput::new()
+            .need(signature_need.clone())
+            .need(authority_need.clone());
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            shared.workspace_id,
+            fact.id,
+            shared.signer_public_key,
+            "endpoint_shared",
+        )? {
+            return Ok(waiting);
         }
-        let context_have = context_have_from_needs(context, [&authority_need]);
+        if !has_valid_authority(&authority_need, &shared, context)? {
+            return Ok(waiting);
+        }
+        let context_have = context_have_from_needs(context, [&signature_need, &authority_need]);
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
+                .need(signature_need)
                 .need(authority_need)
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,

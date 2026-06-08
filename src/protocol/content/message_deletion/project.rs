@@ -16,6 +16,7 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
+use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
 use crate::protocol::content::message;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -81,7 +82,13 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
         require_fact_scope(fact, &scope)?;
 
-        // 2. Authority.
+        // 2. Authority and signature evidence.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            deletion.signer_public_key,
+        )?;
         let signer_need = project::signer_need(fact.id, deletion.workspace_id, deletion.signer_id);
         let target_need = crate::core::context::ContextNeed::range(
             fact.id,
@@ -97,6 +104,21 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
             deletion.author_user_id,
             deletion.author_user_id,
         );
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            deletion.workspace_id,
+            fact.id,
+            deletion.signer_public_key,
+            "message deletion",
+        )? {
+            return Ok(output_with_needs([
+                Some(signature_need),
+                Some(signer_need),
+                Some(target_need),
+                Some(author_need),
+            ]));
+        }
         if !project::validate_signer_context(
             context,
             &signer_need,
@@ -109,6 +131,7 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
             "message deletion",
         )? {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -117,6 +140,7 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
         let Some(target_fact) = context_payload(context, &target_need, "message deletion target")?
         else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -125,6 +149,7 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
         let Some(author_fact) = context_payload(context, &author_need, "message deletion author")?
         else {
             return Ok(output_with_needs([
+                Some(signature_need),
                 Some(signer_need),
                 Some(target_need),
                 Some(author_need),
@@ -134,7 +159,12 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
         validate_author_user(&deletion, author_fact)?;
         let context_have = context_have_from_optional_needs(
             context,
-            [Some(&signer_need), Some(&target_need), Some(&author_need)],
+            [
+                Some(&signature_need),
+                Some(&signer_need),
+                Some(&target_need),
+                Some(&author_need),
+            ],
         );
 
         // 3. Materialize.
@@ -146,17 +176,22 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
             author_user_id: deletion.author_user_id,
         });
         Ok(share_fact_with_sync(
-            output_with_needs([Some(signer_need), Some(target_need), Some(author_need)])
-                .offer(crate::core::pipeline::fact_purged_offer(
-                    fact.id,
-                    scope,
-                    project::fact_purged_key(
-                        deletion.target_frontier_id,
-                        deletion.target_minute,
-                        deletion.target_message_id,
-                    ),
-                ))
-                .row_mutation(RowMutation::InsertValues(row)),
+            output_with_needs([
+                Some(signature_need),
+                Some(signer_need),
+                Some(target_need),
+                Some(author_need),
+            ])
+            .offer(crate::core::pipeline::fact_purged_offer(
+                fact.id,
+                scope,
+                project::fact_purged_key(
+                    deletion.target_frontier_id,
+                    deletion.target_minute,
+                    deletion.target_message_id,
+                ),
+            ))
+            .row_mutation(RowMutation::InsertValues(row)),
             deletion.workspace_id,
             fact,
             context_have,
@@ -304,7 +339,7 @@ mod projector_tests {
             )
             .expect("project deletion");
 
-        assert_eq!(output.needs.len(), 3);
+        assert_eq!(output.needs.len(), 4);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "fact_purged");
         assert_eq!(output.effects.intents.len(), 1);
@@ -348,7 +383,11 @@ mod projector_tests {
 
         assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
-        assert_eq!(output.needs.len(), 3);
+        assert_eq!(output.needs.len(), 4);
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "signature_proof"));
         assert!(output
             .needs
             .contains(&crate::core::context::ContextNeed::range(
@@ -390,6 +429,7 @@ mod projector_tests {
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(&fact),
                     signer_match(&fact, &signer_fact),
                     target_match(&fact, &message_fact),
                 ]),
@@ -398,7 +438,7 @@ mod projector_tests {
 
         assert!(output.effects.intents.is_empty());
         assert!(output.offers.is_empty());
-        assert_eq!(output.needs.len(), 3);
+        assert_eq!(output.needs.len(), 4);
         assert!(output
             .needs
             .contains(&crate::core::context::ContextNeed::range(
@@ -470,7 +510,7 @@ mod projector_tests {
         author_user_id: FactId,
         created_at_ms: u64,
     ) -> (ContentMessageDeletionFact, Fact) {
-        let mut deletion = ContentMessageDeletionFact {
+        let deletion = ContentMessageDeletionFact {
             workspace_id,
             created_at_ms,
             target_message_id,
@@ -479,17 +519,7 @@ mod projector_tests {
             author_user_id,
             signer_id: CONTENT_SIGNER_ID,
             signer_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        deletion.signature = crypto::ed25519_sign(
-            &CONTENT_SIGNING_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &deletion,
-                encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("deletion signing bytes"),
-        );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(deletion.workspace_id),
             deletion.created_at_ms,
@@ -525,7 +555,7 @@ mod projector_tests {
     }
 
     fn signer_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-        let mut signer = EndpointSharedFact {
+        let signer = EndpointSharedFact {
             created_at_ms: 7_000,
             workspace_id,
             user_authority_fact_id: author_user_id,
@@ -536,17 +566,7 @@ mod projector_tests {
                 .expect("device name"),
             signer_id: [1; 32],
             signer_public_key: crypto::ed25519_public_key(&ENDPOINT_AUTHORITY_KEY),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        signer.signature = crypto::ed25519_sign(
-            &ENDPOINT_AUTHORITY_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &signer,
-                endpoint_shared_layout::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("endpoint signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             signer.created_at_ms,
@@ -556,24 +576,14 @@ mod projector_tests {
 
     fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact {
         let signing_key = [21; 32];
-        let mut user = UserFact {
+        let user = UserFact {
             created_at_ms: 8_000,
             workspace_id,
             public_key,
             username: auth::user::fact::Username::new(username).expect("username"),
             signer_id: [23; 32],
             signer_public_key: crypto::ed25519_public_key(&signing_key),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        user.signature = crypto::ed25519_sign(
-            &signing_key,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &user,
-                user_layout::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("user signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             user.created_at_ms,
@@ -589,10 +599,40 @@ mod projector_tests {
         let deletion = deletion_from_fact(deletion_fact);
         let signer_fact = signer_fact(deletion.workspace_id, author_fact.id);
         ProjectionContext::from_matches(vec![
+            signature_match(deletion_fact),
             signer_match(deletion_fact, &signer_fact),
             target_match(deletion_fact, target_fact),
             author_match(deletion_fact, author_fact),
         ])
+    }
+
+    fn signature_match(deletion_fact: &Fact) -> MatchedContext {
+        let deletion = deletion_from_fact(deletion_fact);
+        let signature = auth::signature::author::create_signature(
+            deletion.workspace_id,
+            deletion_fact.id,
+            &CONTENT_SIGNING_KEY,
+            deletion.created_at_ms,
+        )
+        .expect("signature evidence");
+        let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
+        MatchedContext {
+            need: auth::signature::project::signature_proof_need(
+                deletion_fact.id,
+                scope.clone(),
+                deletion_fact.id,
+                deletion.signer_public_key,
+            )
+            .expect("signature need"),
+            offer: auth::signature::project::signature_proof_offer(
+                signature.id,
+                scope,
+                deletion_fact.id,
+                deletion.signer_public_key,
+            )
+            .expect("signature offer"),
+            payload: signature,
+        }
     }
 
     fn signer_match(deletion_fact: &Fact, signer_fact: &Fact) -> MatchedContext {

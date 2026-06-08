@@ -13,7 +13,7 @@ use crate::core::intents::RowMutation;
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
-use crate::protocol::auth::user_invite;
+use crate::protocol::auth::{signature, user_invite};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::user_row;
@@ -62,7 +62,13 @@ impl SemanticProjector<super::fact::UserFact> for UserProjector {
             return Err("user fact must have global scope".to_string());
         }
 
-        // 2. Authority.
+        // 2. Authority and signature evidence.
+        let signature_need = signature::project::signature_proof_need(
+            fact.id,
+            crate::protocol::auth::workspace::scope(user.workspace_id),
+            fact.id,
+            user.signer_public_key,
+        )?;
         let invite_need = crate::core::context::ContextNeed::range(
             fact.id,
             "auth_user_invite",
@@ -70,8 +76,21 @@ impl SemanticProjector<super::fact::UserFact> for UserProjector {
             user.signer_id,
             user.signer_id,
         );
+        let waiting = ProjectionOutput::new()
+            .need(signature_need.clone())
+            .need(invite_need.clone());
+        if !signature::project::signature_proof_ready(
+            context,
+            &signature_need,
+            user.workspace_id,
+            fact.id,
+            user.signer_public_key,
+            "user",
+        )? {
+            return Ok(waiting);
+        }
         let Some(invite_fact) = context.payload_for(&invite_need) else {
-            return Ok(ProjectionOutput::new().need(invite_need));
+            return Ok(waiting);
         };
         if invite_fact.id != user.signer_id {
             return Err("user signer context payload id mismatch".to_string());
@@ -85,11 +104,12 @@ impl SemanticProjector<super::fact::UserFact> for UserProjector {
             return Err("signed user signer key does not match user_invite public key".to_string());
         }
         let user_invite_id = invite_fact.id;
-        let context_have = context_have_from_needs(context, [&invite_need]);
+        let context_have = context_have_from_needs(context, [&signature_need, &invite_need]);
 
         // 3. Materialize.
         Ok(share_fact_with_sync(
             ProjectionOutput::new()
+                .need(signature_need)
                 .need(invite_need)
                 .offer(crate::core::context::ContextOffer::range(
                     fact.id,

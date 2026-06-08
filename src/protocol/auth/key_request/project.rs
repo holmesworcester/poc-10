@@ -18,6 +18,7 @@ use crate::protocol::auth::key_wrap::project::{
 };
 use crate::protocol::auth::recipient_key;
 use crate::protocol::auth::removal_frontier;
+use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::KeyRequestFact;
@@ -74,7 +75,13 @@ fn key_request(
     let scope = crate::protocol::auth::workspace::scope(request.workspace_id);
     require_fact_scope(fact, &scope)?;
 
-    // 2. Context: requester signer, recipient, frontier, and wrap-source needs.
+    // 2. Context: signature evidence, requester signer, recipient, frontier, and wrap-source needs.
+    let signature_need = signature::project::signature_proof_need(
+        fact.id,
+        scope.clone(),
+        fact.id,
+        request.signer_public_key,
+    )?;
     let requester_need = ContextNeed::range(
         fact.id,
         "content_signer",
@@ -106,15 +113,27 @@ fn key_request(
     let recipient_fact = matched_payload_fact(projection_context, &recipient_need);
     let frontier_fact = matched_payload_fact(projection_context, &frontier_need);
     let mut output = ProjectionOutput::new()
+        .need(signature_need.clone())
         .need(requester_need.clone())
         .need(recipient_need.clone())
         .need(frontier_need.clone())
         .need(source_need.clone());
+    if !signature::project::signature_proof_ready(
+        projection_context,
+        &signature_need,
+        request.workspace_id,
+        fact.id,
+        request.signer_public_key,
+        "key request",
+    )? {
+        return Ok(output);
+    }
     let Some(requester_fact) = projection_context.payload_for(&requester_need) else {
         return Ok(output);
     };
     validate_requester_signer(requester_fact, &request)?;
-    let mut context_have = context_have_from_needs(projection_context, [&requester_need]);
+    let mut context_have =
+        context_have_from_needs(projection_context, [&signature_need, &requester_need]);
 
     // 3. Materialize: emit create-key-wrap work for eligible sources.
     if let (Some(recipient_fact), Some(frontier_fact)) = (recipient_fact, frontier_fact) {

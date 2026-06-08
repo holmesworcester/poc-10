@@ -63,9 +63,15 @@ impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
         policy: RetentionPolicyFact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // 2. Authority and predecessor context.
+        // 2. Authority, signature evidence, and predecessor context.
         let bootstrap_root =
             policy.supersedes_policy_id.is_none() && policy.author_user_id == policy.workspace_id;
+        let signature_need = auth::signature::project::signature_proof_need(
+            fact.id,
+            auth::workspace::scope(policy.workspace_id),
+            fact.id,
+            policy.signer_public_key,
+        )?;
         let authority_need = if bootstrap_root {
             crate::core::context::ContextNeed::range(
                 fact.id,
@@ -101,7 +107,9 @@ impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
                 previous_id,
             )
         });
-        let mut waiting = ProjectionOutput::new().need(authority_need.clone());
+        let mut waiting = ProjectionOutput::new()
+            .need(signature_need.clone())
+            .need(authority_need.clone());
         if let Some(need) = &signer_need {
             waiting = waiting.need(need.clone());
         }
@@ -109,6 +117,16 @@ impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
             waiting = waiting.need(need.clone());
         }
 
+        if !auth::signature::project::signature_proof_ready(
+            projection_context,
+            &signature_need,
+            policy.workspace_id,
+            fact.id,
+            policy.signer_public_key,
+            "retention policy",
+        )? {
+            return Ok(waiting);
+        }
         let Some(authority_fact) = projection_context.payload_for(&authority_need) else {
             return Ok(waiting);
         };
@@ -133,7 +151,7 @@ impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
         if let Some(signer_fact) = signer_fact {
             validate_signer(signer_fact, &policy)?;
         } else if bootstrap_root {
-            validate_workspace_bootstrap_signature(authority_fact, &policy)?;
+            validate_workspace_bootstrap_signer(authority_fact, &policy)?;
         }
         if let Some(previous) = previous_fact {
             validate_previous(previous, &policy)?;
@@ -141,6 +159,7 @@ impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
         let context_have = context_have_from_optional_needs(
             projection_context,
             [
+                Some(&signature_need),
                 Some(&authority_need),
                 signer_need.as_ref(),
                 previous_need.as_ref(),
@@ -211,7 +230,7 @@ fn validate_signer(signer_fact: &Fact, policy: &RetentionPolicyFact) -> Result<(
     Ok(())
 }
 
-fn validate_workspace_bootstrap_signature(
+fn validate_workspace_bootstrap_signer(
     workspace_fact: &Fact,
     policy: &RetentionPolicyFact,
 ) -> Result<(), String> {
@@ -264,7 +283,7 @@ mod projector_tests {
 
     fn workspace_policy() -> RetentionPolicyFact {
         let private_key = [9; 32];
-        let mut policy = RetentionPolicyFact {
+        RetentionPolicyFact {
             workspace_id: [1; 32],
             supersedes_policy_id: None,
             ttl_minutes: 60,
@@ -275,18 +294,7 @@ mod projector_tests {
             signer_id: [3; 32],
             signer_public_key: crypto::ed25519_public_key(&private_key),
             created_at_ms: 6_000_000,
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
-        };
-        policy.signature = crypto::ed25519_sign(
-            &private_key,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &policy,
-                encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("policy signing bytes"),
-        );
-        policy
+        }
     }
 
     #[test]
@@ -301,12 +309,13 @@ mod projector_tests {
             .project(&fact, &ProjectionContext::default())
             .expect("missing authority waits");
         assert!(waiting.effects.intents.is_empty());
-        assert_eq!(waiting.needs.len(), 2);
+        assert_eq!(waiting.needs.len(), 3);
 
         let projected = projector
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(fact.id, &policy),
                     authority_match(fact.id, &policy, authority),
                     signer_match(fact.id, &policy, signer),
                 ]),
@@ -355,18 +364,20 @@ mod projector_tests {
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(fact.id, &policy),
                     authority_match(fact.id, &policy, authority.clone()),
                     signer_match(fact.id, &policy, signer.clone()),
                 ]),
             )
             .expect("missing previous waits");
         assert!(waiting.effects.intents.is_empty());
-        assert_eq!(waiting.needs.len(), 3);
+        assert_eq!(waiting.needs.len(), 4);
 
         let projected = projector
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(fact.id, &policy),
                     authority_match(fact.id, &policy, authority.clone()),
                     signer_match(fact.id, &policy, signer.clone()),
                     previous_match(fact.id, previous_fact.clone()),
@@ -389,6 +400,7 @@ mod projector_tests {
             .project(
                 &regressing_fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(regressing_fact.id, &regressing),
                     authority_match(regressing_fact.id, &regressing, authority),
                     signer_match(regressing_fact.id, &regressing, signer),
                     previous_match(regressing_fact.id, previous_fact),
@@ -436,16 +448,6 @@ mod projector_tests {
         let private_key = [9; 32];
         let mut policy = policy.clone();
         policy.signer_public_key = crypto::ed25519_public_key(&private_key);
-        policy.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-        policy.signature = crypto::ed25519_sign(
-            &private_key,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &policy,
-                encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("policy signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             policy.created_at_ms,
@@ -455,7 +457,7 @@ mod projector_tests {
 
     fn admin_fact(workspace_id: [u8; 32], user_fact_id: [u8; 32]) -> Fact {
         let private_key = [9; 32];
-        let mut admin = AdminFact {
+        let admin = AdminFact {
             created_at_ms: 1,
             workspace_id,
             public_key: [8; 32],
@@ -463,17 +465,7 @@ mod projector_tests {
             user_fact_id,
             signer_id: workspace_id,
             signer_public_key: crypto::ed25519_public_key(&private_key),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        admin.signature = crypto::ed25519_sign(
-            &private_key,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &admin,
-                admin::encode_fact_payload,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("admin signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             1,
@@ -483,7 +475,7 @@ mod projector_tests {
 
     fn signer_fact(policy: &RetentionPolicyFact) -> Fact {
         let private_key = [9; 32];
-        let mut signer = auth::endpoint_shared::fact::EndpointSharedFact {
+        let signer = auth::endpoint_shared::fact::EndpointSharedFact {
             created_at_ms: 1,
             workspace_id: policy.workspace_id,
             user_authority_fact_id: policy.author_user_id,
@@ -494,17 +486,7 @@ mod projector_tests {
                 .expect("device name"),
             signer_id: [8; 32],
             signer_public_key: crypto::ed25519_public_key(&[8; 32]),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        signer.signature = crypto::ed25519_sign(
-            &[8; 32],
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &signer,
-                auth::endpoint_shared::encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("endpoint signing bytes"),
-        );
         Fact::new(
             FactScope::Global,
             signer.created_at_ms,
@@ -573,6 +555,35 @@ mod projector_tests {
                 previous.id,
             ),
             previous,
+        )
+    }
+
+    fn signature_match(owner: [u8; 32], policy: &RetentionPolicyFact) -> MatchedContext {
+        let private_key = [9; 32];
+        let signature = auth::signature::author::create_signature(
+            policy.workspace_id,
+            owner,
+            &private_key,
+            policy.created_at_ms,
+        )
+        .expect("signature evidence");
+        let scope = auth::workspace::scope(policy.workspace_id);
+        matched(
+            auth::signature::project::signature_proof_need(
+                owner,
+                scope.clone(),
+                owner,
+                policy.signer_public_key,
+            )
+            .expect("signature need"),
+            auth::signature::project::signature_proof_offer(
+                signature.id,
+                scope,
+                owner,
+                policy.signer_public_key,
+            )
+            .expect("signature offer"),
+            signature,
         )
     }
 

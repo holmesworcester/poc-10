@@ -9,6 +9,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::pipeline::authenticate_authored;
 use crate::core::store::Store;
 use crate::protocol::auth;
+use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 use crate::protocol::auth::workspace::author;
 use crate::protocol::content;
 use crate::protocol::content::retention_policy::fact::SCOPE_KIND_WORKSPACE;
@@ -50,6 +51,12 @@ pub fn create_workspace_with_identity(
     let user_public = endpoint.signing_public_key;
     let workspace_private_key = crypto::random_ed25519_private_key();
     let workspace = author::create_workspace(created_at_ms, workspace_private_key, name)?;
+    let workspace_signature = auth::signature::author::sign_fact(
+        workspace.id,
+        &workspace,
+        &workspace_private_key,
+        created_at_ms,
+    )?;
     authenticate_authored::<super::decode::Codec, super::authenticate::WorkspaceAuthenticator>(
         &workspace,
     )?;
@@ -69,7 +76,7 @@ pub fn create_workspace_with_identity(
             bootstrap_endpoint_id: endpoint.endpoint,
             bootstrap_addr: "127.0.0.1:0".parse().expect("static bootstrap addr parses"),
             workspace_id,
-            invite_fact_id: user_invite.id,
+            invite_fact_id: user_invite.fact.id,
             user_authority_fact_id: None,
             endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
             identity_scope: true,
@@ -77,49 +84,56 @@ pub fn create_workspace_with_identity(
     let user = user_fact(
         created_at_ms + 4,
         workspace_id,
-        user_invite.id,
+        user_invite.fact.id,
         endpoint.signing_secret,
         identity.username,
     )?;
     let bootstrap_admin = bootstrap_admin_fact(
         created_at_ms + 5,
         workspace_id,
-        user.id,
+        user.fact.id,
         user_public,
         workspace_private_key,
     )?;
     let device_invite = device_invite_fact(
         created_at_ms + 6,
         workspace_id,
-        user.id,
-        user_invite.id,
+        user.fact.id,
+        user_invite.fact.id,
         user_public,
         endpoint.signing_secret,
     )?;
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
         created_at_ms: created_at_ms + 7,
         workspace_id,
-        user_id: user.id,
+        user_id: user.fact.id,
         signing_public_key: user_public,
         device_name: identity.device_name,
-        signer_id: device_invite.id,
+        signer_id: device_invite.fact.id,
         signer_private_key: endpoint.signing_secret,
         new_endpoint_fact: endpoint_output.effects.facts.first(),
         store: ctx.store(),
     })?;
-    let user_id = user.id;
-    let mut facts = vec![workspace, user_invite];
+    let user_id = user.fact.id;
+    let mut facts = vec![workspace, workspace_signature];
+    facts.extend(user_invite.into_facts());
     facts.extend(accepted.effects.facts);
-    facts.extend([user, bootstrap_admin, device_invite, endpoint_shared]);
+    facts.extend(user.into_facts());
+    facts.extend(bootstrap_admin.into_facts());
+    facts.extend(device_invite.into_facts());
+    facts.extend(endpoint_shared.into_facts());
     if identity.ttl_minutes != Some(0) {
-        facts.push(initial_retention_policy_fact(
-            created_at_ms + 8,
-            workspace_id,
-            user_id,
-            endpoint.endpoint,
-            identity.ttl_minutes.unwrap_or(60),
-            endpoint.signing_secret,
-        )?);
+        facts.extend(
+            initial_retention_policy_fact(
+                created_at_ms + 8,
+                workspace_id,
+                user_id,
+                endpoint.endpoint,
+                identity.ttl_minutes.unwrap_or(60),
+                endpoint.signing_secret,
+            )?
+            .into_facts(),
+        );
     }
     facts.extend(endpoint_output.effects.facts);
     Ok(CommandOutput::new(CreateWorkspaceReceipt {
@@ -141,7 +155,9 @@ struct EndpointSharedFactInput<'a> {
     store: &'a Store,
 }
 
-fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, String> {
+fn endpoint_shared_fact(
+    input: EndpointSharedFactInput<'_>,
+) -> Result<AuthoredFactEvidence, String> {
     let endpoint_id = if let Some(endpoint_fact) = input.new_endpoint_fact {
         auth::endpoint::decode::decode_fact(&endpoint_fact.bytes)?.endpoint
     } else {
@@ -155,7 +171,7 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
             .ok_or_else(|| "local endpoint row is missing".to_string())?;
         id32(&value, "local endpoint")?
     };
-    auth::endpoint_shared::author::signed_endpoint_shared_fact(
+    let fact = auth::endpoint_shared::author::signed_endpoint_shared_fact(
         input.created_at_ms,
         input.workspace_id,
         input.user_id,
@@ -165,7 +181,14 @@ fn endpoint_shared_fact(input: EndpointSharedFactInput<'_>) -> Result<Fact, Stri
         input.device_name,
         input.signer_id,
         input.signer_private_key,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        input.workspace_id,
+        &fact,
+        &input.signer_private_key,
+        input.created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {
@@ -179,15 +202,22 @@ fn user_invite_fact(
     workspace_id: FactId,
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
-) -> Result<Fact, String> {
-    auth::user_invite::author::signed_user_invite_fact(
+) -> Result<AuthoredFactEvidence, String> {
+    let fact = auth::user_invite::author::signed_user_invite_fact(
         created_at_ms,
         public_key,
         workspace_id,
         workspace_id,
         workspace_id,
         signer_private_key,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &signer_private_key,
+        created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn user_fact(
@@ -196,15 +226,22 @@ fn user_fact(
     signer_id: FactId,
     signer_private_key: [u8; 32],
     username: &str,
-) -> Result<Fact, String> {
-    auth::user::author::signed_user_fact(
+) -> Result<AuthoredFactEvidence, String> {
+    let fact = auth::user::author::signed_user_fact(
         created_at_ms,
         workspace_id,
         crypto::ed25519_public_key(&signer_private_key),
         username,
         signer_id,
         signer_private_key,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &signer_private_key,
+        created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn bootstrap_admin_fact(
@@ -213,7 +250,7 @@ fn bootstrap_admin_fact(
     user_fact_id: FactId,
     public_key: Ed25519PublicKey,
     workspace_private_key: [u8; 32],
-) -> Result<Fact, String> {
+) -> Result<AuthoredFactEvidence, String> {
     let payload = auth::admin::fact::AdminFact {
         created_at_ms,
         workspace_id,
@@ -222,14 +259,20 @@ fn bootstrap_admin_fact(
         user_fact_id,
         signer_id: workspace_id,
         signer_public_key: crypto::ed25519_public_key(&workspace_private_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    auth::admin::author::signed_admin_fact(
+    let fact = auth::admin::author::signed_admin_fact(
         created_at_ms,
         workspace_id,
         workspace_private_key,
         payload,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &workspace_private_key,
+        created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn device_invite_fact(
@@ -239,8 +282,8 @@ fn device_invite_fact(
     user_invite_fact_id: FactId,
     public_key: Ed25519PublicKey,
     signer_private_key: [u8; 32],
-) -> Result<Fact, String> {
-    auth::device_invite::author::signed_device_invite_fact(
+) -> Result<AuthoredFactEvidence, String> {
+    let fact = auth::device_invite::author::signed_device_invite_fact(
         created_at_ms,
         workspace_id,
         user_authority_fact_id,
@@ -248,7 +291,14 @@ fn device_invite_fact(
         public_key,
         user_authority_fact_id,
         signer_private_key,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &signer_private_key,
+        created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }
 
 fn initial_retention_policy_fact(
@@ -258,8 +308,8 @@ fn initial_retention_policy_fact(
     signer_endpoint_id: FactId,
     ttl_minutes: u32,
     signer_private_key: [u8; 32],
-) -> Result<Fact, String> {
-    content::retention_policy::author::signed_retention_policy_fact(
+) -> Result<AuthoredFactEvidence, String> {
+    let fact = content::retention_policy::author::signed_retention_policy_fact(
         workspace_id,
         None,
         ttl_minutes,
@@ -270,5 +320,12 @@ fn initial_retention_policy_fact(
         signer_endpoint_id,
         created_at_ms,
         signer_private_key,
-    )
+    )?;
+    let signature = auth::signature::author::sign_fact(
+        workspace_id,
+        &fact,
+        &signer_private_key,
+        created_at_ms,
+    )?;
+    Ok(AuthoredFactEvidence { fact, signature })
 }

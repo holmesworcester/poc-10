@@ -8,12 +8,12 @@ use topo::core::command_context::{
 };
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::auth::workspace::{
-    authenticate as workspace_authenticate, decode as workspace_decode,
-};
 use topo::protocol::auth::{
-    admin, endpoint, invite_accepted, user, user_invite,
+    admin, endpoint, invite_accepted,
+    signature::{authenticate as signature_authenticate, decode as signature_decode},
+    user, user_invite,
     workspace::commands::{create_workspace_with_identity, BootstrapIdentity},
+    workspace::decode as workspace_decode,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -74,7 +74,14 @@ fn create_workspace_emits_decodable_workspace_fact() {
         .find(|fact| fact.id == output.receipt.workspace_fact_id)
         .expect("workspace fact emitted");
     let decoded = workspace_decode::decode_fact(&workspace_fact.bytes).expect("decode fact");
-    workspace_authenticate::verify_signature(&decoded).expect("workspace signature");
+    let signature = output
+        .effects
+        .facts
+        .iter()
+        .filter_map(|fact| signature_decode::decode_fact(&fact.bytes).ok())
+        .find(|signature| signature.target_fact_id == workspace_fact.id)
+        .expect("workspace signature evidence emitted");
+    signature_authenticate::verify_signature(&signature).expect("workspace signature");
     assert_eq!(decoded.name, "Research");
     assert_eq!(decoded.created_at_ms, 60_000);
 }

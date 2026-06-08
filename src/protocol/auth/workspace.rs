@@ -28,10 +28,6 @@ const WORKSPACE_ROW_VALUE_FIELDS: &[crate::core::row_schema::RowField] = &[
     crate::core::row_schema::RowField::u64be("created_at_ms"),
     crate::core::row_schema::RowField::bytes32("public_key"),
     crate::core::row_schema::RowField::bytes("name", fact::WORKSPACE_NAME_BYTES),
-    crate::core::row_schema::RowField::bytes(
-        "signature",
-        crate::core::crypto::ED25519_SIGNATURE_BYTES,
-    ),
 ];
 
 pub const WORKSPACE_ROW_SCHEMA: crate::core::row_schema::RowTableSchema =
@@ -53,7 +49,6 @@ pub(crate) fn workspace_row(
             crate::core::row_schema::RowValue::U64(fact.created_at_ms),
             crate::core::row_schema::RowValue::Bytes(fact.public_key.to_vec()),
             crate::core::row_schema::RowValue::Bytes(fact.name.padded_bytes().to_vec()),
-            crate::core::row_schema::RowValue::Bytes(fact.signature.to_vec()),
         ],
     )
 }

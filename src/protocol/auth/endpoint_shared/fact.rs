@@ -7,7 +7,7 @@
 //! authority, and then publishes signer context for content, admin, connection,
 //! and auth projectors.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 use crate::core::wire::FixedText;
 
@@ -53,5 +53,4 @@ pub struct EndpointSharedFact {
     pub device_name: EndpointDeviceName,
     pub signer_id: FactId,
     pub signer_public_key: Ed25519PublicKey,
-    pub signature: Ed25519Signature,
 }

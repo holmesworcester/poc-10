@@ -34,22 +34,7 @@ impl DecodedAuthenticator<super::decode::Codec> for WorkspaceAuthenticator {
 fn prove_decoded_workspace(fact: &Fact, workspace: WorkspaceFact) -> Result<WorkspaceFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&workspace)?;
     Ok(workspace)
-}
-
-pub fn verify_signature(fact: &WorkspaceFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "workspace",
-    )
 }
 
 #[cfg(test)]
@@ -109,19 +94,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

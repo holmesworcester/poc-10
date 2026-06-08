@@ -644,7 +644,7 @@ fn require_connection_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::{self, ed25519_public_key, ed25519_sign};
+    use crate::core::crypto::{self, ed25519_public_key};
     use crate::protocol::auth::invite::fact::InviteSecretFact;
     use crate::protocol::auth::user::fact::UserFact;
     use crate::protocol::auth::workspace::fact::WorkspaceFact;
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn admitted_message_deletion_uses_payload_created_timestamp() {
         let signing_secret = [9; 32];
-        let mut deletion = content::message_deletion::fact::ContentMessageDeletionFact {
+        let deletion = content::message_deletion::fact::ContentMessageDeletionFact {
             workspace_id: [9; 32],
             created_at_ms: 12_345,
             target_message_id: [10; 32],
@@ -661,17 +661,7 @@ mod tests {
             author_user_id: [11; 32],
             signer_id: [8; 32],
             signer_public_key: ed25519_public_key(&signing_secret),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        deletion.signature = ed25519_sign(
-            &signing_secret,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &deletion,
-                content::message_deletion::encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("signing bytes"),
-        );
         let bytes =
             content::message_deletion::encode::encode_fact(&deletion).expect("encode deletion");
 
@@ -685,21 +675,11 @@ mod tests {
     #[test]
     fn admitted_workspace_uses_payload_created_timestamp() {
         let signing_secret = [7; 32];
-        let mut workspace = WorkspaceFact {
+        let workspace = WorkspaceFact {
             created_at_ms: 55_555,
             public_key: ed25519_public_key(&signing_secret),
             name: auth::workspace::fact::WorkspaceName::new("workspace").expect("name"),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        workspace.signature = ed25519_sign(
-            &signing_secret,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &workspace,
-                auth::workspace::encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("signing bytes"),
-        );
         let bytes = auth::workspace::encode::encode_fact(&workspace).expect("workspace");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit workspace");
@@ -712,24 +692,14 @@ mod tests {
     #[test]
     fn admitted_signed_identity_uses_payload_created_timestamp() {
         let signing_secret = [10; 32];
-        let mut user = UserFact {
+        let user = UserFact {
             created_at_ms: 66_666,
             workspace_id: [8; 32],
             public_key: [9; 32],
             username: auth::user::fact::Username::new("alice").expect("username"),
             signer_id: [11; 32],
             signer_public_key: ed25519_public_key(&signing_secret),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        user.signature = ed25519_sign(
-            &signing_secret,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &user,
-                auth::user::encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("signing bytes"),
-        );
         let bytes = auth::user::encode::encode_fact(&user).expect("user payload");
 
         let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signed user");

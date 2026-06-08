@@ -23,7 +23,7 @@ pub fn signed_endpoint_shared_fact(
     signer_id: FactId,
     signer_private_key: Ed25519PrivateKey,
 ) -> Result<Fact, String> {
-    let mut payload = EndpointSharedFact {
+    let payload = EndpointSharedFact {
         created_at_ms,
         workspace_id,
         user_authority_fact_id,
@@ -34,17 +34,7 @@ pub fn signed_endpoint_shared_fact(
             .map_err(|err| format!("endpoint device name: {err}"))?,
         signer_id,
         signer_public_key: crypto::ed25519_public_key(&signer_private_key),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    let (_, signature) = crypto::ed25519_sign_canonical(
-        &signer_private_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            &payload,
-            encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-    );
-    payload.signature = signature;
     let bytes = encode::encode_fact(&payload)?;
     Ok(Fact::new(FactScope::Global, created_at_ms, bytes))
 }

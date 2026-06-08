@@ -1,9 +1,8 @@
 //! Byte decoding for endpoint-shared facts.
 //!
 //! Decoding proves only the fixed layout: tag, length, and field order. Id and
-//! signature checks live in `authenticate.rs`.
+//! id checks live in `authenticate.rs`.
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 use crate::core::wire::FixedText;
 
@@ -44,9 +43,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<EndpointSharedFact, String> {
     signer_id.copy_from_slice(&bytes[signer_start..signer_start + 32]);
     let mut signer_public_key = [0; 32];
     signer_public_key.copy_from_slice(&bytes[signer_start + 32..signer_start + 64]);
-    let mut signature = [0; ED25519_SIGNATURE_BYTES];
-    signature
-        .copy_from_slice(&bytes[signer_start + 64..signer_start + 64 + ED25519_SIGNATURE_BYTES]);
     Ok(EndpointSharedFact {
         created_at_ms,
         workspace_id,
@@ -57,7 +53,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<EndpointSharedFact, String> {
         device_name,
         signer_id,
         signer_public_key,
-        signature,
     })
 }
 
@@ -88,7 +83,6 @@ mod tests {
             device_name: EndpointDeviceName::new("laptop").expect("device name"),
             signer_id: [6; 32],
             signer_public_key: [7; 32],
-            signature: [8; ED25519_SIGNATURE_BYTES],
         }
     }
 

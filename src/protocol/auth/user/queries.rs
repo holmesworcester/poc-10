@@ -63,7 +63,6 @@ pub fn users_in_workspace(store: &Store, workspace_id: FactId) -> Result<Vec<Use
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::auth::user::fact::UserFact;
 
     #[test]
@@ -75,7 +74,6 @@ mod tests {
             username: Username::new("alice").expect("username"),
             signer_id: [5; 32],
             signer_public_key: [6; 32],
-            signature: [7; ED25519_SIGNATURE_BYTES],
         };
         let row = super::super::user_row([8; 32], [9; 32], &fact).expect("user row");
         let decoded = decode_user_row(&row.key, &row.value).expect("decode user row");

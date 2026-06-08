@@ -16,6 +16,7 @@ use crate::protocol::auth::key_wrap::project::{
     add_signer_needs_for_matching_sources, matched_payload_fact, matching_wrap_sources_with_signer,
     proactive_wrap_source_need, require_fact_scope,
 };
+use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
@@ -72,7 +73,13 @@ fn recipient_key(
     let scope = crate::protocol::auth::workspace::scope(recipient.workspace_id);
     require_fact_scope(fact, &scope)?;
 
-    // 2. Context: signer, supersession, and previous-key validation.
+    // 2. Context: signature evidence, signer, supersession, and previous-key validation.
+    let signature_need = signature::project::signature_proof_need(
+        fact.id,
+        scope.clone(),
+        fact.id,
+        recipient.signer_public_key,
+    )?;
     let signer_need = ContextNeed::range(
         fact.id,
         "content_signer",
@@ -90,8 +97,19 @@ fn recipient_key(
     let mut context_have = context_have_from_needs(projection_context, [&superseded_need]);
     let is_superseded = !context_have.is_empty();
     let mut output = ProjectionOutput::new()
+        .need(signature_need.clone())
         .need(signer_need.clone())
         .need(superseded_need);
+    if !signature::project::signature_proof_ready(
+        projection_context,
+        &signature_need,
+        recipient.workspace_id,
+        fact.id,
+        recipient.signer_public_key,
+        "recipient key",
+    )? {
+        return Ok(output);
+    }
 
     if recipient.previous_recipient_key_id != NO_PREVIOUS_RECIPIENT_KEY {
         let previous_need = ContextNeed::range(
@@ -119,6 +137,10 @@ fn recipient_key(
         return Ok(output);
     };
     validate_recipient_signer(signer_fact, &recipient)?;
+    context_have.extend(context_have_from_needs(
+        projection_context,
+        [&signature_need],
+    ));
     context_have.extend(context_have_from_needs(projection_context, [&signer_need]));
 
     // 3. Materialize: publish recipient context and proactive key-wrap work.

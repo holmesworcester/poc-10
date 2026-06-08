@@ -7,7 +7,7 @@
 //! of this fact body; the reaction carries only the sealed payload envelope
 //! that projectors can authorize and sync idempotently.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature};
+use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 use crate::core::wire::FixedSlot;
 
@@ -29,5 +29,4 @@ pub struct ContentReactionFact {
     pub signer_public_key: Ed25519PublicKey,
     pub nonce: [u8; REACTION_NONCE_BYTES],
     pub ciphertext: ReactionCiphertext,
-    pub signature: Ed25519Signature,
 }
