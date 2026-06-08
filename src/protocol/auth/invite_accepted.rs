@@ -16,8 +16,11 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
+use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
 
 pub(crate) use decode::Codec;
 
@@ -35,8 +38,13 @@ const INVITE_ACCEPTED_ROW_KEY_FIELDS: &[RowField] = &[
 ];
 const INVITE_ACCEPTED_ROW_VALUE_FIELDS: &[RowField] = &[
     RowField::bytes32("invite_accepted_fact_id"),
-    RowField::bytes32("invite_secret_fact_id"),
     RowField::bytes32("bootstrap_hash"),
+    RowField::bytes32("bootstrap_secret"),
+    RowField::bytes32("bootstrap_endpoint_id"),
+    RowField::bytes("bootstrap_addr", ADDR_BLOCK_BYTES),
+    RowField::bytes32("user_authority_fact_id_or_zero"),
+    RowField::u8("endpoint_role"),
+    RowField::u8("identity_scope"),
 ];
 
 pub const INVITE_ACCEPTED_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
@@ -57,10 +65,33 @@ pub fn invite_accepted_row(
         ],
         &[
             RowValue::Bytes(invite_accepted_fact_id.to_vec()),
-            RowValue::Bytes(fact.invite_secret_fact_id.to_vec()),
             RowValue::Bytes(fact.bootstrap_hash.to_vec()),
+            RowValue::Bytes(fact.bootstrap_secret.to_vec()),
+            RowValue::Bytes(fact.bootstrap_endpoint_id.to_vec()),
+            RowValue::Bytes(encode_optional_addr(Some(fact.bootstrap_addr))?.to_vec()),
+            RowValue::Bytes(fact.user_authority_fact_id.unwrap_or([0; 32]).to_vec()),
+            RowValue::U8(fact.endpoint_role.as_u8()),
+            RowValue::U8(u8::from(fact.identity_scope)),
         ],
     )
+}
+
+pub fn derived_invite_secret(fact: &fact::InviteAcceptedFact) -> InviteSecretFact {
+    if fact.identity_scope {
+        InviteSecretFact::scoped(
+            fact.bootstrap_secret,
+            fact.workspace_id,
+            fact.invite_fact_id,
+        )
+    } else {
+        InviteSecretFact::new(fact.bootstrap_secret)
+    }
+}
+
+pub fn derived_invite_secret_fact_id(fact: &fact::InviteAcceptedFact) -> Result<FactId, String> {
+    let secret = derived_invite_secret(fact);
+    let bytes = crate::protocol::auth::invite::encode::encode_fact(&secret)?;
+    Ok(Fact::new(FactScope::Local, 0, bytes).id)
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteAcceptedFact, String> {

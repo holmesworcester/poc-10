@@ -97,6 +97,7 @@ mod projector_tests {
     use super::*;
     use crate::core::context::{ContextNeed, ContextOffer};
     use crate::core::pipeline::MatchedContext;
+    use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
     use crate::protocol::auth::workspace::{author, encode, queries};
     use crate::protocol::auth::{invite, invite_accepted};
     use std::collections::BTreeSet;
@@ -178,21 +179,17 @@ mod projector_tests {
         invite_fact_id: crate::core::facts::FactId,
         created_at_ms: u64,
     ) -> Fact {
-        let (_secret, secret_fact) = invite::author::scoped_secret_fact(
-            [7; 32],
-            workspace_id,
-            invite_fact_id,
-            created_at_ms,
-        )
-        .expect("invite secret");
         let (_accepted, accepted_fact) = invite_accepted::author::accepted_fact(
             workspace_id,
             invite_fact_id,
-            secret_fact.id,
-            invite::decode_fact_payload(secret_fact.body())
-                .expect("decode invite secret")
-                .bootstrap_hash,
+            invite::fact::bootstrap_secret_hash(&[7; 32]),
+            [7; 32],
             [5; 32],
+            [6; 32],
+            "127.0.0.1:41000".parse().unwrap(),
+            None,
+            EndpointRole::Device,
+            true,
             created_at_ms + 1,
         )
         .expect("accepted fact");

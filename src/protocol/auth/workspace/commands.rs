@@ -66,8 +66,13 @@ pub fn create_workspace_with_identity(
             created_at_ms: created_at_ms + 2,
             accepted_endpoint_id: endpoint.endpoint,
             bootstrap_secret: endpoint.signing_secret,
+            bootstrap_endpoint_id: endpoint.endpoint,
+            bootstrap_addr: "127.0.0.1:0".parse().expect("static bootstrap addr parses"),
             workspace_id,
             invite_fact_id: user_invite.id,
+            user_authority_fact_id: None,
+            endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
+            identity_scope: true,
         })?;
     let user = user_fact(
         created_at_ms + 4,

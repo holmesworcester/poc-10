@@ -20,7 +20,10 @@ use crate::protocol::connection::request::{
     decode::decode_optional_addr, encode::ADDR_BLOCK_BYTES,
 };
 
-use super::{CONNECTION_REQUEST_ROWS, CONNECTION_REQUEST_ROW_SCHEMA};
+use super::{
+    BOOTSTRAP_CONNECTION_ATTEMPT_ROWS, BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA,
+    CONNECTION_REQUEST_ROWS, CONNECTION_REQUEST_ROW_SCHEMA,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionRequestRow {
@@ -31,6 +34,12 @@ pub struct ConnectionRequestRow {
     /// must not be re-sent.
     pub peer_addr: Option<SocketAddr>,
     pub sealed_request_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootstrapConnectionAttemptRow {
+    pub invite_accepted_fact_id: FactId,
+    pub request_id: FactId,
 }
 
 pub fn decode_connection_request_row(
@@ -52,6 +61,29 @@ pub fn decode_connection_request_row(
         peer_addr,
         sealed_request_bytes: value_fields[3].as_bytes("sealed_request_bytes")?.to_vec(),
     })
+}
+
+fn decode_bootstrap_connection_attempt_row(
+    key: &[u8],
+    value: &[u8],
+) -> Result<BootstrapConnectionAttemptRow, String> {
+    let key_fields = BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA.decode_key(key)?;
+    let value_fields = BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA.decode_value(value)?;
+    Ok(BootstrapConnectionAttemptRow {
+        invite_accepted_fact_id: key_fields[0].as_bytes32("invite_accepted_fact_id")?,
+        request_id: value_fields[0].as_bytes32("request_id")?,
+    })
+}
+
+pub fn bootstrap_connection_attempt_rows(
+    store: &Store,
+) -> Result<Vec<BootstrapConnectionAttemptRow>, String> {
+    store
+        .table_rows(BOOTSTRAP_CONNECTION_ATTEMPT_ROWS)
+        .map_err(|err| format!("read bootstrap connection attempt rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_bootstrap_connection_attempt_row(&key, &value))
+        .collect()
 }
 
 /// A membership connection we can open to a known endpoint without an invite.
@@ -137,10 +169,6 @@ pub fn pending_connection_requests(store: &Store) -> Result<Vec<PendingConnectio
     Ok(pending)
 }
 
-pub fn pending_membership_requests(store: &Store) -> Result<Vec<PendingConnectionRequest>, String> {
-    pending_connection_requests(store)
-}
-
 pub fn request_by_id(
     store: &Store,
     request_id: &FactId,
@@ -205,5 +233,15 @@ mod tests {
         assert_eq!(decoded.initiator_ephemeral_secret_fact_id, [3; 32]);
         assert_eq!(decoded.peer_addr, Some("127.0.0.1:41000".parse().unwrap()));
         assert_eq!(decoded.sealed_request_bytes, sealed);
+    }
+
+    #[test]
+    fn bootstrap_attempt_row_roundtrips_through_schema() {
+        let row =
+            super::super::bootstrap_connection_attempt_row([1; 32], [2; 32]).expect("attempt row");
+        let decoded = decode_bootstrap_connection_attempt_row(&row.key, &row.value)
+            .expect("decode attempt row");
+        assert_eq!(decoded.invite_accepted_fact_id, [1; 32]);
+        assert_eq!(decoded.request_id, [2; 32]);
     }
 }

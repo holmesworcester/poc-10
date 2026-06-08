@@ -1,15 +1,15 @@
-//! Command constructors for accepting a workspace invite locally.
+//! Command constructors for accepting an invite link locally.
 //!
-//! Invite acceptance produces a local invite secret and a local acceptance fact
-//! that later projection can join with the public invite. This command is
-//! intentionally local: it captures the bootstrap secret and endpoint choice
-//! without publishing authority by itself. Workspace admission happens when the
-//! auth projectors validate the surrounding invite chain.
+//! Invite acceptance produces a single retained local acceptance fact. That
+//! fact carries the invite-link bootstrap context needed to replay workspace
+//! admission and to let live connection maintenance rebuild bootstrap attempts.
 
 use crate::core::command_context::CommandOutput;
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::FactId;
 use crate::protocol::auth;
+use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
+use std::net::SocketAddr;
 
 use super::author;
 
@@ -18,43 +18,50 @@ pub struct AcceptInvite {
     pub created_at_ms: u64,
     pub accepted_endpoint_id: [u8; 32],
     pub bootstrap_secret: Ed25519PrivateKey,
+    pub bootstrap_endpoint_id: [u8; 32],
+    pub bootstrap_addr: SocketAddr,
     pub workspace_id: FactId,
     pub invite_fact_id: FactId,
+    pub user_authority_fact_id: Option<FactId>,
+    pub endpoint_role: EndpointRole,
+    pub identity_scope: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptInviteReceipt {
-    pub invite_secret_fact_id: FactId,
     pub invite_accepted_fact_id: FactId,
     pub bootstrap_hash: FactId,
 }
 
 pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>, String> {
     validate_id("accepted_endpoint_id", &input.accepted_endpoint_id)?;
+    validate_id("bootstrap_endpoint_id", &input.bootstrap_endpoint_id)?;
     validate_id("workspace_id", &input.workspace_id)?;
     validate_id("invite_fact_id", &input.invite_fact_id)?;
+    if input.bootstrap_secret == [0; 32] {
+        return Err("bootstrap_secret cannot be empty".to_string());
+    }
 
-    let (secret, secret_fact) = auth::invite::author::scoped_secret_fact(
-        input.bootstrap_secret,
-        input.workspace_id,
-        input.invite_fact_id,
-        input.created_at_ms,
-    )?;
+    let bootstrap_hash = auth::invite::fact::bootstrap_secret_hash(&input.bootstrap_secret);
     let (_accepted, accepted_fact) = author::accepted_fact(
         input.workspace_id,
         input.invite_fact_id,
-        secret_fact.id,
-        secret.bootstrap_hash,
+        bootstrap_hash,
+        input.bootstrap_secret,
         input.accepted_endpoint_id,
-        input.created_at_ms.saturating_add(1),
+        input.bootstrap_endpoint_id,
+        input.bootstrap_addr,
+        input.user_authority_fact_id,
+        input.endpoint_role,
+        input.identity_scope,
+        input.created_at_ms,
     )?;
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
-        invite_secret_fact_id: secret_fact.id,
         invite_accepted_fact_id: accepted_fact.id,
-        bootstrap_hash: secret.bootstrap_hash,
+        bootstrap_hash,
     })
-    .with_facts(vec![secret_fact, accepted_fact]))
+    .with_facts(vec![accepted_fact]))
 }
 
 fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
@@ -66,34 +73,34 @@ fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::auth::invite::decode as invite_decode;
-
     use super::*;
 
     #[test]
-    fn accept_invite_creates_scoped_secret_and_acceptance_facts() {
+    fn accept_invite_creates_only_acceptance_fact() {
         let output = accept(AcceptInvite {
             created_at_ms: 10,
             accepted_endpoint_id: [5; 32],
             bootstrap_secret: [7; 32],
+            bootstrap_endpoint_id: [8; 32],
+            bootstrap_addr: "127.0.0.1:41000".parse().unwrap(),
             workspace_id: [1; 32],
             invite_fact_id: [2; 32],
+            user_authority_fact_id: None,
+            endpoint_role: EndpointRole::Device,
+            identity_scope: true,
         })
         .expect("accept");
 
-        assert_eq!(output.effects.facts.len(), 2);
-        assert_eq!(
-            output.receipt.invite_secret_fact_id,
-            output.effects.facts[0].id
-        );
+        assert_eq!(output.effects.facts.len(), 1);
         assert_eq!(
             output.receipt.invite_accepted_fact_id,
-            output.effects.facts[1].id
+            output.effects.facts[0].id
         );
-
-        let secret =
-            invite_decode::decode_fact(&output.effects.facts[0].bytes).expect("decode secret");
-        assert_eq!(secret.workspace_id, Some([1; 32]));
-        assert_eq!(secret.invite_fact_id, Some([2; 32]));
+        let accepted = super::super::decode_fact_payload(output.effects.facts[0].body())
+            .expect("decode accepted");
+        assert_eq!(accepted.workspace_id, [1; 32]);
+        assert_eq!(accepted.invite_fact_id, [2; 32]);
+        assert_eq!(accepted.bootstrap_secret, [7; 32]);
+        assert_eq!(accepted.bootstrap_endpoint_id, [8; 32]);
     }
 }

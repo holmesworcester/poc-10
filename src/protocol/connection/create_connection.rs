@@ -127,7 +127,6 @@ use crate::core::intents::{
 };
 use crate::protocol::auth::endpoint::author as local_endpoint;
 use crate::protocol::auth::endpoint_shared;
-use crate::protocol::auth::invite;
 use crate::protocol::connection::connection::author::{
     build_responder_connection, BuildResponderConnection,
 };
@@ -188,7 +187,11 @@ impl IntentHandler for CreateConnectionHandler {
                 if authority_fact.scope != FactScope::Local {
                     return Err("create_connection invite context must be local".into());
                 }
-                let invite = invite::decode_fact_payload(authority_fact.body()).map_err(|_| {
+                let invite = request_auth::invite_secret_from_context_fact(
+                    authority_fact,
+                    request.invite_secret_fact_id,
+                )
+                .map_err(|_| {
                     HandlerError::fatal("create_connection context is not invite secret")
                 })?;
                 request_auth::validate_invite_signature(&request, &invite)?;

@@ -661,7 +661,11 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
 
     assert!(
         !accept_commands.contains("send_network_frame_intent"),
-        "accept/link commands should create request facts, not enqueue bootstrap IO directly"
+        "accept/link commands should create acceptance facts, not enqueue bootstrap IO directly"
+    );
+    assert!(
+        !accept_commands.contains("create_bootstrap"),
+        "accept/link commands should not create bootstrap request facts directly"
     );
     assert!(
         maintenance.contains("send_network_frame_intent"),

@@ -5,8 +5,9 @@
 //!
 //! - creator side: a local invite-secret fact and, for workspace invites, a
 //!   shared user-invite fact;
-//! - acceptor side: a scoped local invite-secret fact, invite-accepted
-//!   provenance, a proposed user fact, and a connection request.
+//! - acceptor side: retained invite-accepted provenance containing the accepted
+//!   link bootstrap context, plus any proposed user/device facts. The live
+//!   `maintain_connections` loop creates bootstrap request attempts later.
 //!
 //! This module does not write rows or run projection. It returns command output
 //! that the runtime admits through the normal projection pipeline.
@@ -19,7 +20,6 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
 use crate::protocol::auth;
-use crate::protocol::connection;
 
 const INVITE_PREFIX: &str = "topo://invite/";
 const INVITE_VERSION: &str = "v6";
@@ -284,7 +284,6 @@ pub struct AcceptInviteReceipt {
     pub user_id: Option<FactId>,
     pub endpoint_shared_id: Option<FactId>,
     pub endpoint_role: Option<InviteEndpointRole>,
-    pub request_id: FactId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,29 +310,10 @@ pub fn accept(
         auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
     if input.invite.identity_scope {
-        if input.from_listen_addr.is_none() {
-            return Err("accept requires a running local daemon for workspace invites".to_string());
-        }
         reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
     }
 
-    let request = connection::request::commands::create_bootstrap(
-        connection::request::commands::CreateBootstrapConnectionRequest {
-            created_at_ms: input.created_at_ms.saturating_add(1),
-            local_endpoint: local,
-            remote_endpoint: input.invite.endpoint,
-            bootstrap_secret: input.invite.bootstrap_secret,
-            workspace_id: input
-                .invite
-                .identity_scope
-                .then_some(input.invite.workspace_id),
-            invite_fact_id: input.invite.invite_fact_id,
-            dialed_addr: input.invite.addr,
-            initiator_addr: input.from_listen_addr,
-        },
-    )?;
     let mut facts = endpoint_output.effects.facts;
-    facts.extend(request.effects.facts);
 
     let mut user_id = None;
     if input.invite.identity_scope {
@@ -380,18 +360,23 @@ pub fn accept(
             signer_id: device_invite.id,
             signer_private_key: input.invite.bootstrap_secret,
         })?);
-
-        let accepted = auth::invite_accepted::commands::accept(
-            auth::invite_accepted::commands::AcceptInvite {
-                created_at_ms: input.created_at_ms.saturating_add(7),
-                accepted_endpoint_id: local.endpoint,
-                bootstrap_secret: input.invite.bootstrap_secret,
-                workspace_id: input.invite.workspace_id,
-                invite_fact_id: input.invite.invite_fact_id,
-            },
-        )?;
-        facts.extend(accepted.effects.facts);
     }
+    let accepted =
+        auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
+            created_at_ms: input
+                .created_at_ms
+                .saturating_add(if input.invite.identity_scope { 7 } else { 1 }),
+            accepted_endpoint_id: local.endpoint,
+            bootstrap_secret: input.invite.bootstrap_secret,
+            bootstrap_endpoint_id: input.invite.endpoint,
+            bootstrap_addr: input.invite.addr,
+            workspace_id: input.invite.workspace_id,
+            invite_fact_id: input.invite.invite_fact_id,
+            user_authority_fact_id: input.invite.user_authority_fact_id,
+            endpoint_role: endpoint_role_for_shared(input.invite.endpoint_role),
+            identity_scope: input.invite.identity_scope,
+        })?;
+    facts.extend(accepted.effects.facts);
 
     Ok(CommandOutput::new(AcceptInviteReceipt {
         connected_addr: input.invite.addr,
@@ -402,7 +387,6 @@ pub fn accept(
         user_id,
         endpoint_shared_id: None,
         endpoint_role: None,
-        request_id: request.receipt.request_id,
     })
     .with_facts(facts))
 }
@@ -425,15 +409,19 @@ fn workspace_accept_device_invite_fact(
     )
 }
 
+fn endpoint_role_for_shared(role: InviteEndpointRole) -> auth::endpoint_shared::fact::EndpointRole {
+    match role {
+        InviteEndpointRole::Device => auth::endpoint_shared::fact::EndpointRole::Device,
+        InviteEndpointRole::InviteServer => auth::endpoint_shared::fact::EndpointRole::InviteServer,
+    }
+}
+
 pub fn accept_device_link(
     ctx: &CommandContext<'_>,
     input: AcceptDeviceLink,
 ) -> Result<CommandOutput<AcceptInviteReceipt>, String> {
     if !input.invite.identity_scope {
         return Err("accept-link requires a workspace-scoped link".to_string());
-    }
-    if input.from_listen_addr.is_none() {
-        return Err("accept-link requires a running local daemon".to_string());
     }
     if input.device_name.trim().is_empty() {
         return Err("device name must not be empty".to_string());
@@ -447,18 +435,6 @@ pub fn accept_device_link(
     let local = endpoint_output.receipt.endpoint;
     reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
 
-    let request = connection::request::commands::create_bootstrap(
-        connection::request::commands::CreateBootstrapConnectionRequest {
-            created_at_ms: input.created_at_ms.saturating_add(1),
-            local_endpoint: local,
-            remote_endpoint: input.invite.endpoint,
-            bootstrap_secret: input.invite.bootstrap_secret,
-            workspace_id: Some(input.invite.workspace_id),
-            invite_fact_id: input.invite.invite_fact_id,
-            dialed_addr: input.invite.addr,
-            initiator_addr: input.from_listen_addr,
-        },
-    )?;
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
         created_at_ms: input.created_at_ms.saturating_add(4),
         workspace_id: input.invite.workspace_id,
@@ -475,11 +451,15 @@ pub fn accept_device_link(
             created_at_ms: input.created_at_ms.saturating_add(5),
             accepted_endpoint_id: local.endpoint,
             bootstrap_secret: input.invite.bootstrap_secret,
+            bootstrap_endpoint_id: input.invite.endpoint,
+            bootstrap_addr: input.invite.addr,
             workspace_id: input.invite.workspace_id,
             invite_fact_id: input.invite.invite_fact_id,
+            user_authority_fact_id: input.invite.user_authority_fact_id,
+            endpoint_role: endpoint_role_for_shared(input.invite.endpoint_role),
+            identity_scope: true,
         })?;
     let mut facts = endpoint_output.effects.facts;
-    facts.extend(request.effects.facts);
     facts.push(endpoint_shared.clone());
     facts.extend(accepted.effects.facts);
 
@@ -489,7 +469,6 @@ pub fn accept_device_link(
         user_id: Some(user_id),
         endpoint_shared_id: Some(endpoint_shared.id),
         endpoint_role: Some(InviteEndpointRole::Device),
-        request_id: request.receipt.request_id,
     })
     .with_facts(facts))
 }
@@ -506,9 +485,6 @@ pub fn accept_invite_server(
     if input.invite.user_authority_fact_id.is_some() {
         return Err("invite-server invite must not carry USER_ID".to_string());
     }
-    if input.from_listen_addr.is_none() {
-        return Err("accept-invite-server requires a running local daemon".to_string());
-    }
     if input.device_name.trim().is_empty() {
         return Err("device name must not be empty".to_string());
     }
@@ -517,18 +493,6 @@ pub fn accept_invite_server(
     let local = endpoint_output.receipt.endpoint;
     reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
 
-    let request = connection::request::commands::create_bootstrap(
-        connection::request::commands::CreateBootstrapConnectionRequest {
-            created_at_ms: input.created_at_ms.saturating_add(1),
-            local_endpoint: local,
-            remote_endpoint: input.invite.endpoint,
-            bootstrap_secret: input.invite.bootstrap_secret,
-            workspace_id: Some(input.invite.workspace_id),
-            invite_fact_id: input.invite.invite_fact_id,
-            dialed_addr: input.invite.addr,
-            initiator_addr: input.from_listen_addr,
-        },
-    )?;
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
         created_at_ms: input.created_at_ms.saturating_add(4),
         workspace_id: input.invite.workspace_id,
@@ -545,11 +509,15 @@ pub fn accept_invite_server(
             created_at_ms: input.created_at_ms.saturating_add(5),
             accepted_endpoint_id: local.endpoint,
             bootstrap_secret: input.invite.bootstrap_secret,
+            bootstrap_endpoint_id: input.invite.endpoint,
+            bootstrap_addr: input.invite.addr,
             workspace_id: input.invite.workspace_id,
             invite_fact_id: input.invite.invite_fact_id,
+            user_authority_fact_id: input.invite.user_authority_fact_id,
+            endpoint_role: endpoint_role_for_shared(input.invite.endpoint_role),
+            identity_scope: true,
         })?;
     let mut facts = endpoint_output.effects.facts;
-    facts.extend(request.effects.facts);
     facts.push(endpoint_shared.clone());
     facts.extend(accepted.effects.facts);
 
@@ -559,7 +527,6 @@ pub fn accept_invite_server(
         user_id: None,
         endpoint_shared_id: Some(endpoint_shared.id),
         endpoint_role: Some(InviteEndpointRole::InviteServer),
-        request_id: request.receipt.request_id,
     })
     .with_facts(facts))
 }

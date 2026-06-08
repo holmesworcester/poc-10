@@ -13,7 +13,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
     verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
-use crate::protocol::auth::{endpoint, invite};
+use crate::protocol::auth::endpoint;
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::request;
 use crate::protocol::connection::request::fact::{REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
@@ -292,10 +292,10 @@ fn validate_material(
             let Some(fact) = context.payload_for(&need) else {
                 return Err("connection bootstrap invite context is missing".to_string());
             };
-            Some(
-                invite::decode_fact_payload(fact.body())
-                    .map_err(|_| "connection invite context is malformed".to_string())?,
-            )
+            Some(request::authenticate::invite_secret_from_context_fact(
+                fact,
+                request.invite_secret_fact_id,
+            )?)
         }
         REQUEST_MODE_MEMBERSHIP => None,
         other => return Err(format!("unknown connection request mode {other}")),

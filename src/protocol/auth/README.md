@@ -297,8 +297,8 @@ shares the fact with sync.
 
 The creator path uses the same fact DAG as later joins: the creation command
 emits the workspace, a workspace-signed first `user_invite`, a local
-`invite_secret`/`invite_accepted` pair for that invite, the first `user`, and a
-single bootstrap `admin` grant signed by the temporary workspace key. After that
+`invite_accepted` fact for that invite, the first `user`, and a single
+bootstrap `admin` grant signed by the temporary workspace key. After that
 grant, admin authority flows only through existing admin facts.
 
 ```text
@@ -432,12 +432,13 @@ invite_server {
 
 ### `invite_secret` (tag 129)
 
-Stores the local bootstrap secret behind an invite link. Projection requires
-local scope, validates the hash/scope pairing, writes `invite_secret_rows`
-keyed by `(bootstrap_hash, workspace_id_or_zero, invite_fact_id_or_zero)`, and
-offers both `auth_invite_secret` and `connection_invite_secret`. Including scope
-in the row key lets one retained local secret back multiple scoped acceptances
-without treating them as conflicting rows.
+Stores the creator-side local bootstrap secret behind an invite link. Projection
+requires local scope, validates the hash/scope pairing, writes
+`invite_secret_rows` keyed by
+`(bootstrap_hash, workspace_id_or_zero, invite_fact_id_or_zero)`, and offers both
+`auth_invite_secret` and `connection_invite_secret`. Accepted-side replay no
+longer creates a second invite-secret fact; the accepted link secret is retained
+inside `invite_accepted`.
 
 ```text
 invite_secret {
@@ -450,17 +451,25 @@ invite_secret {
 
 ### `invite_accepted` (tag 146)
 
-Records local acceptance of an invite link. Projection requires local scope and
-a matching scoped `invite_secret`, then writes `invite_accepted_rows` and offers
-`auth_workspace_accepted` for the accepted workspace.
+Records local acceptance of an invite link. Projection requires local scope,
+validates the retained bootstrap secret/hash at authentication, writes
+`invite_accepted_rows`, offers `connection_invite_secret` under the derived
+invite-secret id, and offers `auth_workspace_accepted` only for identity-scoped
+workspace links. That makes replayed facts sufficient to recover both workspace
+interpretation and the bootstrap peer needed by `maintain_connections`.
 
 ```text
 invite_accepted {
   workspace_id: fact:workspace_acme
   invite_fact_id: fact:user_invite_alice
-  invite_secret_fact_id: fact:scoped_invite_secret
   bootstrap_hash: blake3:bootstrap_secret_hash
+  bootstrap_secret: secret:invite_private_seed
   accepted_endpoint_id: x25519:alice_phone
+  bootstrap_endpoint_id: x25519:alice_laptop
+  bootstrap_addr: "203.0.113.10:41000"
+  user_authority_fact_id: null
+  endpoint_role: "device"
+  identity_scope: true
 }
 ```
 

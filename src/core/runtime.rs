@@ -34,7 +34,7 @@ use crate::core::store::{SchemaSource, Store, TableName};
 use std::path::Path;
 
 pub use crate::core::pipeline::{
-    HandlerRoute, RecurringIntentBuilder, RecurringIntentSpec, WorkStatus,
+    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, RecurringIntentSpec, WorkStatus,
 };
 
 /// Factory for the protocol's projector implementation.
@@ -393,7 +393,14 @@ impl Runtime {
             .find(|route| route.intent_kind == kind && route.recurrence.is_some())
             .and_then(|route| route.recurrence)
             .ok_or_else(|| format!("no recurring intent registered for kind {kind}"))?;
-        let Some(intent) = (spec.build_intent)(&self.store)? else {
+        let Some(intent) = (spec.build_intent)(
+            &self.store,
+            RecurringIntentContext {
+                now_ms: 0,
+                local_addr: None,
+            },
+        )?
+        else {
             return Ok(RecurringRunReport {
                 kind: kind.to_string(),
                 built: false,

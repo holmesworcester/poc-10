@@ -42,9 +42,9 @@ in `src/core` or `src/protocol`.
   send is operational liveness, not durable truth: a projector-emitted request
   send would be a live-only intent that replay suppresses and never re-issues, so
   request sends are driven by the live recurring `maintain_connections` loop,
-  which re-queries unanswered local outbound request rows each tick. Operational
-  repetition belongs in a recurring intent, not a wall-clock time wake or a
-  projector-scheduled retry.
+  which re-queries accepted bootstrap peers and unanswered local outbound
+  request rows each tick. Operational repetition belongs in a recurring intent,
+  not a wall-clock time wake or a projector-scheduled retry.
 - The product-facing binary is `con`. `src/context_app.rs` should stay a thin
   app boundary around the core runtime and protocol registry.
 

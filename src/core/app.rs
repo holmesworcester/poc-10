@@ -135,7 +135,7 @@ fn run_start<C: 'static>(
         &db,
         CliArgs::new(&parsed.command[1..]),
         |listener, limit| {
-            scheduler.fire_due(&mut runtime, daemon::now_ms())?;
+            scheduler.fire_due(&mut runtime, daemon::now_ms(), Some(listener.local_addr()))?;
             daemon::tick(description.daemon, &mut runtime, listener, limit)
         },
     )

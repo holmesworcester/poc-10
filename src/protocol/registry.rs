@@ -441,6 +441,7 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     read_models::FILE_ROWS,
     connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
+    connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
     connection::request::CONNECTION_REQUEST_ROWS,
     connection::connection::CONNECTION_ROWS,
     auth::invite_accepted::INVITE_ACCEPTED_ROWS,
@@ -556,6 +557,7 @@ CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS bootstrap_connection_attempt_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -607,6 +609,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::admin::ADMIN_ROWS,
         connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
         connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
+        connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
         connection::request::CONNECTION_REQUEST_ROWS,
         connection::connection::CONNECTION_ROWS,
         auth::invite_accepted::INVITE_ACCEPTED_ROWS,
@@ -636,6 +639,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::key_wrap::KEY_WRAP_ROW_SCHEMA,
         connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA,
         connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROW_SCHEMA,
+        connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA,
         connection::request::CONNECTION_REQUEST_ROW_SCHEMA,
         connection::connection::CONNECTION_ROW_SCHEMA,
         sync::compare::SYNC_COMPARE_ROW_SCHEMA,
@@ -826,6 +830,7 @@ pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FAC
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
     connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
+    connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
     connection::request::CONNECTION_REQUEST_ROWS,
     connection::connection::CONNECTION_ROWS,
     read_models::FILE_ROWS,

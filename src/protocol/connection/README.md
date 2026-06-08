@@ -44,9 +44,12 @@ which child facts may be emitted from received bytes.
 
 ## Managed Row State
 
-Connection owns rows for retryable requests, live connections, ephemeral
-handshake secrets, and fact receipts. Request rows let `maintain_connections`
-resend unanswered outbound requests. Connection rows let send handlers find the
+Connection owns rows for retryable requests, request-owned bootstrap attempts,
+live connections, ephemeral handshake secrets, and fact receipts.
+`invite_accepted` rows identify accepted bootstrap peers; the
+`bootstrap_connection_attempt_rows` index prevents a maintenance tick from
+forking duplicate requests for the same accepted invite. Request rows let
+`maintain_connections` resend unanswered outbound requests. Connection rows let send handlers find the
 connection secret and the connection-scoped route. Fact-receipt rows answer local
 diagnostics and sync context expansion.
 
@@ -59,8 +62,11 @@ carried inside sealed frames.
 ### Context Interface
 
 Auth supplies `auth_local_endpoint`, `connection_invite_secret`, and
-`endpoint_shared` context. Request projection consumes invite or membership
-authority and emits `create_connection` after matching a local receive receipt.
+`endpoint_shared` context. Accepted invites offer `connection_invite_secret`
+under the same derived invite-secret id that creator-side `invite_secret` facts
+use, so accepted-side bootstrap does not need a separate retained invite-secret
+fact. Request projection consumes invite or membership authority and emits
+`create_connection` after matching a local receive receipt.
 Connection projection consumes request, endpoint or ephemeral-secret, and invite
 context, then offers `connection` and `connection_for_request`. Frame projectors
 consume `connection` and `connection_frame_observation` context before opening

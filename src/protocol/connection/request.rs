@@ -40,6 +40,8 @@ pub(crate) use decode::Codec;
 /// Durable rows for local outbound connection requests, keyed by the request
 /// fact id.
 pub const CONNECTION_REQUEST_ROWS: TableName = TableName::new("connection_request_rows");
+pub const BOOTSTRAP_CONNECTION_ATTEMPT_ROWS: TableName =
+    TableName::new("bootstrap_connection_attempt_rows");
 
 const CONNECTION_REQUEST_ROW_KEY_FIELDS: &[RowField] = &[RowField::bytes32("request_id")];
 const CONNECTION_REQUEST_ROW_VALUE_FIELDS: &[RowField] = &[
@@ -53,6 +55,16 @@ pub const CONNECTION_REQUEST_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
     CONNECTION_REQUEST_ROWS,
     CONNECTION_REQUEST_ROW_KEY_FIELDS,
     CONNECTION_REQUEST_ROW_VALUE_FIELDS,
+);
+
+const BOOTSTRAP_ATTEMPT_ROW_KEY_FIELDS: &[RowField] =
+    &[RowField::bytes32("invite_accepted_fact_id")];
+const BOOTSTRAP_ATTEMPT_ROW_VALUE_FIELDS: &[RowField] = &[RowField::bytes32("request_id")];
+
+pub const BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
+    BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
+    BOOTSTRAP_ATTEMPT_ROW_KEY_FIELDS,
+    BOOTSTRAP_ATTEMPT_ROW_VALUE_FIELDS,
 );
 
 pub fn connection_request_key(request_id: &FactId) -> Vec<u8> {
@@ -77,5 +89,15 @@ pub fn connection_request_row(
             RowValue::Bytes(encode_optional_addr(peer_addr)?.to_vec()),
             RowValue::Bytes(sealed_request_bytes.to_vec()),
         ],
+    )
+}
+
+pub fn bootstrap_connection_attempt_row(
+    invite_accepted_fact_id: FactId,
+    request_id: FactId,
+) -> Result<TableRow, String> {
+    BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA.row(
+        &[RowValue::Bytes(invite_accepted_fact_id.to_vec())],
+        &[RowValue::Bytes(request_id.to_vec())],
     )
 }

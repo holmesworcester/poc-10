@@ -4,17 +4,19 @@
 //! alone:
 //!   1. LAYOUT. The bytes decode to a canonical invite-accepted fact.
 //!   2. ID. The content id equals `hash(bytes)`.
-//!   FIELDS. The workspace, invite, invite-secret, bootstrap-hash, and accepted
-//!      endpoint id fields are non-zero.
+//!   FIELDS. The workspace, invite, bootstrap secret/hash, accepted endpoint,
+//!      and bootstrap endpoint fields are non-zero, and the hash matches the
+//!      retained secret.
 //!
 //! This is a local membership fact, not a signed shared proof, so there is no
-//! fact-boundary signature. Admission scope (`Local`) and the invite-secret
-//! relationship are interpretation the projector owns.
+//! fact-boundary signature. Admission scope (`Local`) is interpretation the
+//! projector owns.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
     verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
+use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
 
 use super::fact::InviteAcceptedFact;
 
@@ -41,11 +43,15 @@ fn prove_decoded_invite_accepted(
     // Non-zero fact id fields.
     if accepted.workspace_id == [0; 32]
         || accepted.invite_fact_id == [0; 32]
-        || accepted.invite_secret_fact_id == [0; 32]
         || accepted.bootstrap_hash == [0; 32]
+        || accepted.bootstrap_secret == [0; 32]
         || accepted.accepted_endpoint_id == [0; 32]
+        || accepted.bootstrap_endpoint_id == [0; 32]
     {
         return Err("invite_accepted fact has empty fact id field".to_string());
+    }
+    if accepted.bootstrap_hash != bootstrap_secret_hash(&accepted.bootstrap_secret) {
+        return Err("invite_accepted bootstrap hash does not match secret".to_string());
     }
     Ok(accepted)
 }
@@ -56,6 +62,8 @@ mod tests {
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
     };
+    use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
+    use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
     use crate::protocol::auth::invite_accepted::encode;
     use crate::protocol::auth::invite_accepted::fact::InviteAcceptedFact;
 
@@ -65,9 +73,14 @@ mod tests {
         let accepted = InviteAcceptedFact {
             workspace_id: [1; 32],
             invite_fact_id: [2; 32],
-            invite_secret_fact_id: [3; 32],
-            bootstrap_hash: [4; 32],
+            bootstrap_hash: bootstrap_secret_hash(&[7; 32]),
+            bootstrap_secret: [7; 32],
             accepted_endpoint_id: [5; 32],
+            bootstrap_endpoint_id: [6; 32],
+            bootstrap_addr: "127.0.0.1:41000".parse().unwrap(),
+            user_authority_fact_id: None,
+            endpoint_role: EndpointRole::Device,
+            identity_scope: true,
         };
         let bytes = encode::encode_fact(&accepted).expect("encode invite_accepted");
         Fact::new(FactScope::Local, 100, bytes)

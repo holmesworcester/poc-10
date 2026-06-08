@@ -68,6 +68,7 @@ use crate::core::schema::{EPHEMERAL_PROJECTION_INPUTS, LOCAL_INTENTS, PENDING_PR
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 
 use commit_effects::IntentAdmissionPolicy;
 use pipeline_one::{load_pending_fact, process_projection_item, ProjectionSource};
@@ -82,7 +83,16 @@ pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
 /// builder reads the store the same way a handler reads its inputs; it must not
 /// depend on persisted scheduler rows, because recurring schedules are
 /// in-memory only and never replayed.
-pub type RecurringIntentBuilder = fn(&Store) -> Result<Option<Intent>, String>;
+pub type RecurringIntentBuilder =
+    fn(&Store, RecurringIntentContext) -> Result<Option<Intent>, String>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecurringIntentContext {
+    /// Wall-clock time captured by the live daemon tick that fired this intent.
+    pub now_ms: u64,
+    /// Current process listen address, when this recurring run came from a daemon.
+    pub local_addr: Option<SocketAddr>,
+}
 
 /// In-memory schedule for a live-only recurring operational intent.
 ///

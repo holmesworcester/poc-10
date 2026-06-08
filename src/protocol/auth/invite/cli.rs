@@ -140,10 +140,6 @@ pub fn accept_output(receipt: &commands::AcceptInviteReceipt) -> CliOutput {
     if let Some(endpoint_role) = receipt.endpoint_role {
         lines.push(format!("endpoint_role: {}", endpoint_role.as_str()));
     }
-    lines.push(format!(
-        "request_id: {}",
-        commands::encode_hex(&receipt.request_id)
-    ));
     CliOutput::lines(lines)
 }
 

@@ -16,7 +16,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
     verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
 };
-use crate::protocol::auth::{endpoint, endpoint_shared, invite};
+use crate::protocol::auth::{endpoint, endpoint_shared, invite, invite_accepted};
 use crate::protocol::connection::ephemeral_secret;
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
@@ -149,8 +149,9 @@ fn authenticate_request_signature(
             if invite_fact.scope != FactScope::Local {
                 return Err("connection request invite context must be local".to_string());
             }
-            let invite = invite::decode_fact_payload(invite_fact.body())
-                .map_err(|_| "connection request invite context is malformed".to_string())?;
+            let invite =
+                invite_secret_from_context_fact(invite_fact, request.invite_secret_fact_id)
+                    .map_err(|_| "connection request invite context is malformed".to_string())?;
             validate_invite_signature(request, &invite)?;
             Ok(None)
         }
@@ -200,6 +201,25 @@ pub(crate) fn validate_invite_signature(
         return Err("connection request invite signature is not authorized".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn invite_secret_from_context_fact(
+    fact: &Fact,
+    expected_invite_secret_id: FactId,
+) -> Result<invite::fact::InviteSecretFact, String> {
+    if let Ok(secret) = invite::decode_fact_payload(fact.body()) {
+        if fact.id != expected_invite_secret_id {
+            return Err("connection invite context id does not match request".to_string());
+        }
+        return Ok(secret);
+    }
+    let accepted = invite_accepted::decode_fact_payload(fact.body())
+        .map_err(|_| "connection invite context is not invite_secret or invite_accepted")?;
+    let derived_id = invite_accepted::derived_invite_secret_fact_id(&accepted)?;
+    if derived_id != expected_invite_secret_id {
+        return Err("connection invite_accepted context does not derive request secret id".into());
+    }
+    Ok(invite_accepted::derived_invite_secret(&accepted))
 }
 
 pub(crate) fn validate_endpoint_signature(

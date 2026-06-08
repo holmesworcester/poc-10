@@ -93,7 +93,7 @@ Initial poc-10 policy:
 | `create_key_wrap` | Runs during replay; it deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
 | `unwrap_key_wrap` | Runs during replay if its handler only creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
 | `create_connection` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
-| connection candidate registration intents | Run during replay; they rebuild connection-maintenance-owned candidate rows from endpoint/auth facts. |
+| accepted bootstrap peer projection | Rebuilt during replay from retained local `invite_accepted` facts; live maintenance consumes those rows after the replay barrier. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
 
@@ -141,37 +141,30 @@ Connection retry should not be owned by historical `request` facts.
 The operational goal is to keep the local endpoint connected to enough peers in
 a potentially large endpoint set.
 
-Add replay-allowed candidate-registration intents plus a live recurring
-`maintain_connections` intent.
+Retained local `invite_accepted` facts are the replay source for accepted
+bootstrap peers. Their projection writes `invite_accepted_rows`, including the
+bootstrap endpoint/address/secret from the accepted link, and offers
+`connection_invite_secret` under the derived invite-secret id. A live recurring
+`maintain_connections` intent consumes those rows plus connection-owned request
+and attempt rows.
 
-Endpoint/auth projectors decide which endpoints are valid connection
-candidates. They should not run the maintenance loop directly. Instead they
-emit replay-allowed registration work such as
-`register_connection_candidate` and, when needed,
-`unregister_connection_candidate`. Those handlers own the
-connection-maintenance candidate index.
+`maintain_connections` must not invent peers by broad-querying endpoint-owned
+membership tables. It reads accepted bootstrap peer rows, unanswered request
+rows, answered connection rows, and request-owned
+`bootstrap_connection_attempt_rows`. It creates connection attempts and request
+facts only as live work after replay has completed, and records one attempt row
+per accepted invite to avoid forking duplicate requests.
 
-`maintain_connections` must not discover peers by broad-querying auth or
-endpoint-owned tables. It reads only connection-maintenance-owned state:
-candidate rows, active connection rows, active attempt rows or facts, recent
-failure/backoff rows, and target connection policy. It then chooses peers
-needed to maintain the target connection count, creates connection attempts and
-request facts, closes excess or stale attempts through protocol-owned
-close/abandon facts or rows, and records backoff or failure state in
-connection-maintenance-owned storage.
+Replay rebuilds accepted bootstrap peer rows by replaying retained
+`invite_accepted` facts. The recurring `maintain_connections` intent is
+live-only and starts after replay, once those rows have been rebuilt.
 
-Replay rebuilds the candidate table by replaying endpoint/auth facts and
-dispatching replay-allowed candidate-registration intents. The recurring
-`maintain_connections` intent is live-only and starts after replay, once the
-candidate index has been rebuilt.
-
-Bootstrap connection attempts are covered by this maintenance loop. A
-successful candidate registration makes an endpoint eligible. A later live
-`maintain_connections` tick chooses that endpoint, creates the local attempt
-and request facts, and queues the local bootstrap send attempt. If that send is
-dropped or fails, the next live maintenance tick re-evaluates the
-connection-maintenance index and retries according to connection-owned target
-count and backoff state. There is no separate durable
+Bootstrap connection attempts are covered by this maintenance loop. A replayed
+`invite_accepted` row makes the accepted invite eligible. A later live
+`maintain_connections` tick creates local ephemeral handshake material plus the
+sealed request fact, and normal request projection materializes the retryable
+request row. If that send is dropped or fails, the next live maintenance tick
+re-queries unanswered request rows and retries. There is no separate durable
 `connection_peer_retry` loop.
 
 Connection request projection should validate and materialize request history.
@@ -240,10 +233,9 @@ an actual upgrade:
   starting the daemon. It builds the registered recurring intent for the given
   time and runs the normal handler path once, with network send handlers still
   excluded unless the test explicitly opts in.
-- `connection-maintenance-status`: print connection-maintenance-owned state:
-  candidate rows, active attempts, active connections, backoff rows, target
-  count, and pending local bootstrap sends. It must not read auth-owned tables
-  directly.
+- `connection-maintenance-status`: print the connection maintenance view:
+  accepted bootstrap peer rows, active attempts, active connections, target
+  count, and pending local bootstrap sends.
 
 These commands should make side effects visible. A replay command that causes
 network rows, live-only local intents, recurring scheduler fires, or
@@ -271,11 +263,12 @@ maintenance attempts before the replay barrier should report an error.
   `maintain_connections` schedule in memory, and no persisted job row exists.
 - Connection test: replay no longer recreates bootstrap retries from old
   `request` history alone.
-- Bootstrap test: replay rebuilds the connection candidate index but creates no
-  bootstrap send before recurring maintenance runs.
+- Bootstrap test: replay rebuilds accepted bootstrap peer rows from
+  `invite_accepted` but creates no bootstrap send before recurring maintenance
+  runs.
 - Bootstrap test: `recurring-run maintain_connections --now MS` creates or
-  retries bootstrap attempts from connection-maintenance-owned candidate rows,
-  not by scanning auth-owned endpoint tables.
+  retries bootstrap attempts from accepted bootstrap peer rows and
+  request-owned attempt rows, not by scanning endpoint membership tables.
 - Recurring-intent test: `recurring-intents` and `intent-registry` show
   `maintain_connections` as live-only recurring work and show no persisted
   recurring job rows.

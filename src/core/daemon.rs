@@ -23,7 +23,9 @@
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::intents::Intent;
 use crate::core::network;
-use crate::core::pipeline::{HandlerRoute, RecurringIntentBuilder, Timeline, WorkStatus};
+use crate::core::pipeline::{
+    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, Timeline, WorkStatus,
+};
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};
@@ -229,13 +231,19 @@ impl RecurringScheduler {
     /// Each due schedule builds its current intent from store state and queues it
     /// as live local work for the same tick's drain to dispatch. The builder may
     /// return `None` to skip a tick. Returns the number of intents queued.
-    pub fn fire_due(&mut self, runtime: &mut Runtime, now_ms: u64) -> Result<usize, String> {
+    pub fn fire_due(
+        &mut self,
+        runtime: &mut Runtime,
+        now_ms: u64,
+        local_addr: Option<SocketAddr>,
+    ) -> Result<usize, String> {
         let mut fired = 0;
         for schedule in &mut self.schedules {
             if now_ms < schedule.next_at_ms {
                 continue;
             }
-            if let Some(intent) = (schedule.build_intent)(runtime.store())? {
+            let builder_context = RecurringIntentContext { now_ms, local_addr };
+            if let Some(intent) = (schedule.build_intent)(runtime.store(), builder_context)? {
                 if intent.kind.as_str() != schedule.kind {
                     return Err(format!(
                         "recurring builder for {} produced intent kind {}",

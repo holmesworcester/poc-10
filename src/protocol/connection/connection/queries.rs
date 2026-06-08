@@ -79,6 +79,25 @@ pub fn connection_by_id(
         .transpose()
 }
 
+pub fn has_connection_between(
+    store: &Store,
+    left_endpoint: FactId,
+    right_endpoint: FactId,
+) -> Result<bool, String> {
+    for (key, value) in store
+        .table_rows(CONNECTION_ROWS)
+        .map_err(|err| format!("read connection rows: {err}"))?
+    {
+        let row = decode_connection_row(&key, &value)?;
+        if (row.from_endpoint == left_endpoint && row.to_endpoint == right_endpoint)
+            || (row.from_endpoint == right_endpoint && row.to_endpoint == left_endpoint)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

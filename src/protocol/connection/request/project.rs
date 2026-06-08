@@ -26,7 +26,7 @@ use crate::core::pipeline::{
     SemanticProjector,
 };
 
-use crate::protocol::auth::{endpoint_shared, invite, workspace};
+use crate::protocol::auth::{endpoint_shared, workspace};
 use crate::protocol::connection::create_connection::{create_connection_intent, CreateConnection};
 use crate::protocol::connection::frame_observation;
 use crate::protocol::connection_frame::{
@@ -155,11 +155,11 @@ fn project_sender_request(
             if invite_fact.scope != FactScope::Local {
                 return Err("connection request invite context must be local".to_string());
             }
-            let _invite = invite::decode_fact_payload(invite_fact.body())
-                .map_err(|_| "connection request invite context is malformed".to_string())?;
-            if invite_fact.id != request.invite_secret_fact_id {
-                return Err("connection request invite context does not bind request".to_string());
-            }
+            authenticate::invite_secret_from_context_fact(
+                invite_fact,
+                request.invite_secret_fact_id,
+            )
+            .map_err(|_| "connection request invite context is malformed".to_string())?;
             output = output.need(invite_need);
         }
         REQUEST_MODE_MEMBERSHIP => {
@@ -220,11 +220,11 @@ fn project_receiver_request(
             if invite_fact.scope != FactScope::Local {
                 return Err("connection request invite context must be local".to_string());
             }
-            let _invite = invite::decode_fact_payload(invite_fact.body())
-                .map_err(|_| "connection request invite context is malformed".to_string())?;
-            if invite_fact.id != request.invite_secret_fact_id {
-                return Err("connection request invite context does not bind request".to_string());
-            }
+            authenticate::invite_secret_from_context_fact(
+                invite_fact,
+                request.invite_secret_fact_id,
+            )
+            .map_err(|_| "connection request invite context is malformed".to_string())?;
             output = output.need(invite_need);
             request.invite_secret_fact_id
         }
