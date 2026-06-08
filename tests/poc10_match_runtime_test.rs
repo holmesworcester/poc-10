@@ -228,7 +228,7 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
         &plaintext,
     )
     .expect("encrypt message");
-    let mut body = content_message::fact::ContentMessageFact {
+    let body = content_message::fact::ContentMessageFact {
         workspace_id: input.workspace_id,
         created_at_ms: input.created_at_ms,
         author_user_id: input.author_user_id,
@@ -241,17 +241,7 @@ fn signed_content_message_fact(input: SignedContentMessageInput<'_>) -> Fact {
         minute,
         nonce,
         ciphertext: content_message::fact::MessageCiphertext::new(&ciphertext).expect("ciphertext"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    body.signature = crypto::ed25519_sign(
-        input.signer_private,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &body,
-            content_message::encode::encode_fact,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("message signing bytes"),
-    );
     let bytes = content_message::encode::encode_fact(&body).expect("encode content message");
     Fact::new(
         workspace_scope(input.workspace_id),

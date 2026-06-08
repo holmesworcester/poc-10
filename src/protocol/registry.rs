@@ -253,6 +253,11 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             content::reaction::Codec,
             content::reaction::authenticate::ContentReactionAuthenticator
         ),
+        auth::signature::encode::TYPE_SIGNATURE => authenticate_admission_arm!(
+            fact,
+            auth::signature::Codec,
+            auth::signature::authenticate::SignatureAuthenticator
+        ),
         auth::recipient_key::encode::TYPE_RECIPIENT_KEY => authenticate_admission_arm!(
             fact,
             auth::recipient_key::Codec,
@@ -919,6 +924,7 @@ projector_routes! {
     project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, content::message::project::PIPELINE;
     project_content_message_deletion => content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector, content::message_deletion::project::PIPELINE;
     project_content_reaction => content::reaction::encode::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector, content::reaction::project::PIPELINE;
+    project_auth_signature => auth::signature::encode::TYPE_SIGNATURE, auth::signature::project::SignatureProjector, auth::signature::project::PIPELINE;
     project_auth_recipient_key => auth::recipient_key::encode::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector, auth::recipient_key::project::PIPELINE;
     project_auth_removal_frontier => auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector, auth::removal_frontier::project::PIPELINE;
     project_auth_local_key_secret => auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector, auth::local_key_secret::project::PIPELINE;

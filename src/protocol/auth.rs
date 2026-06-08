@@ -35,6 +35,7 @@ pub mod local_secret_retirement;
 pub mod local_signer_secret;
 pub mod recipient_key;
 pub mod removal_frontier;
+pub mod signature;
 pub mod user;
 pub mod user_invite;
 pub mod workspace;

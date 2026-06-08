@@ -16,6 +16,12 @@ use crate::protocol::content::message::fact::{
 };
 use crate::protocol::content::retention_policy;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredMessageFacts {
+    pub message: Fact,
+    pub signature: Fact,
+}
+
 #[derive(Clone)]
 pub struct MessageAuthoringSnapshot {
     workspace_id: WorkspaceId,
@@ -52,6 +58,21 @@ impl MessageAuthoringSnapshot {
             active_policy,
             retained_floor_minute,
         })
+    }
+
+    pub fn build_message_facts(
+        &self,
+        text: &str,
+        created_at_ms: u64,
+    ) -> Result<AuthoredMessageFacts, String> {
+        let message = self.build_message_fact(text, created_at_ms)?;
+        let signature = crate::protocol::auth::signature::author::create_signature(
+            self.workspace_id,
+            message.id,
+            &self.signing.private_key,
+            created_at_ms,
+        )?;
+        Ok(AuthoredMessageFacts { message, signature })
     }
 
     pub fn build_message_fact(&self, text: &str, created_at_ms: u64) -> Result<Fact, String> {
@@ -100,7 +121,7 @@ impl MessageAuthoringSnapshot {
             ));
         }
 
-        let mut message = ContentMessageFact {
+        let message = ContentMessageFact {
             workspace_id: self.workspace_id,
             created_at_ms,
             author_user_id: self.author_user_id,
@@ -114,19 +135,7 @@ impl MessageAuthoringSnapshot {
             nonce,
             ciphertext: MessageCiphertext::new(&ciphertext)
                 .map_err(|err| format!("content message ciphertext: {err}"))?,
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        let (_, signature) = crate::core::perf_profile::measure_result("message_sign", || {
-            Ok::<_, String>(crypto::ed25519_sign_canonical(
-                &self.signing.private_key,
-                &crate::core::wire::encode_with_zeroed_trailing_field(
-                    &message,
-                    super::encode::encode_fact,
-                    crate::core::crypto::ED25519_SIGNATURE_BYTES,
-                )?,
-            ))
-        })?;
-        message.signature = signature;
 
         crate::core::perf_profile::measure_result("message_encode", || {
             Ok::<_, String>(Fact::new(

@@ -42,14 +42,14 @@ pub fn send_message(
     text: &str,
 ) -> Result<CommandOutput<SendReceipt>, String> {
     let created_at_ms = ctx.next_timestamp();
-    let fact = build_message_fact(ctx, workspace_id, text, created_at_ms)?;
+    let facts = build_message_facts(ctx, workspace_id, text, created_at_ms)?;
 
     Ok(CommandOutput::new(SendReceipt {
         workspace_id,
-        message_fact_id: fact.id,
+        message_fact_id: facts.message.id,
         created_at_ms,
     })
-    .with_facts(vec![fact]))
+    .with_facts(vec![facts.message, facts.signature]))
 }
 
 pub fn generate_messages(
@@ -74,7 +74,7 @@ pub fn generate_messages(
         prepare_authoring_snapshot(ctx, workspace_id)
     })?;
 
-    let mut facts = Vec::with_capacity(count);
+    let mut facts = Vec::with_capacity(count.saturating_mul(2));
     let mut fact_ids = Vec::with_capacity(count);
     for index in 0..count {
         let timestamp = first_timestamp
@@ -83,15 +83,20 @@ pub fn generate_messages(
         let text = crate::core::perf_profile::measure("generated_text", || {
             deterministic_generated_text(&workspace_id, timestamp, index, message_text_bytes)
         });
-        let fact = crate::core::perf_profile::measure_result("message_fact_build", || {
-            authoring.build_message_fact(&text, timestamp)
+        let authored = crate::core::perf_profile::measure_result("message_fact_build", || {
+            authoring.build_message_facts(&text, timestamp)
         })?;
         authenticate_authored::<
             super::decode::Codec,
             super::authenticate::ContentMessageAuthenticator,
-        >(&fact)?;
-        fact_ids.push(fact.id);
-        facts.push(fact);
+        >(&authored.message)?;
+        authenticate_authored::<
+            auth::signature::Codec,
+            auth::signature::authenticate::SignatureAuthenticator,
+        >(&authored.signature)?;
+        fact_ids.push(authored.message.id);
+        facts.push(authored.message);
+        facts.push(authored.signature);
     }
 
     Ok(CommandOutput::new(GenerateReceipt {
@@ -124,19 +129,23 @@ fn prepare_authoring_snapshot(
     )
 }
 
-fn build_message_fact(
+fn build_message_facts(
     ctx: &CommandContext<'_>,
     workspace_id: WorkspaceId,
     text: &str,
     created_at_ms: u64,
-) -> Result<Fact, String> {
+) -> Result<author::AuthoredMessageFacts, String> {
     author::validate_message_text(text)?;
-    let fact =
-        prepare_authoring_snapshot(ctx, workspace_id)?.build_message_fact(text, created_at_ms)?;
+    let facts =
+        prepare_authoring_snapshot(ctx, workspace_id)?.build_message_facts(text, created_at_ms)?;
     authenticate_authored::<super::decode::Codec, super::authenticate::ContentMessageAuthenticator>(
-        &fact,
+        &facts.message,
     )?;
-    Ok(fact)
+    authenticate_authored::<
+        auth::signature::Codec,
+        auth::signature::authenticate::SignatureAuthenticator,
+    >(&facts.signature)?;
+    Ok(facts)
 }
 
 fn deterministic_generated_text(
@@ -322,7 +331,6 @@ impl RetentionMessageView for MessageRetentionFact {
 
 pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> {
     let message = super::decode::decode_fact(fact.body())?;
-    super::authenticate::verify_signature(&message)?;
     content_message_retention(message)
 }
 
@@ -412,13 +420,21 @@ mod tests {
 
         assert_eq!(vault.signing_calls.get(), 1);
         assert_eq!(vault.encryption_calls.get(), 1);
-        assert_eq!(output.effects.facts.len(), 4);
-        for (index, fact) in output.effects.facts.iter().enumerate() {
-            assert_eq!(fact.timestamp, 10_000 + index as u64);
-            let message = crate::protocol::content::message::decode::decode_fact(fact.body())
-                .expect("decode message");
-            crate::protocol::content::message::authenticate::verify_signature(&message)
-                .expect("valid signature");
+        assert_eq!(output.effects.facts.len(), 8);
+        for (index, facts) in output.effects.facts.chunks_exact(2).enumerate() {
+            let message_fact = &facts[0];
+            let signature_fact = &facts[1];
+            assert_eq!(message_fact.timestamp, 10_000 + index as u64);
+            assert_eq!(signature_fact.timestamp, message_fact.timestamp);
+            let message =
+                crate::protocol::content::message::decode::decode_fact(message_fact.body())
+                    .expect("decode message");
+            let signature =
+                crate::protocol::auth::signature::decode::decode_fact(signature_fact.body())
+                    .expect("decode signature");
+            assert_eq!(signature.target_fact_id, message_fact.id);
+            crate::protocol::auth::signature::authenticate::verify_signature(&signature)
+                .expect("valid signature evidence");
             assert_eq!(message.workspace_id, workspace_id);
             assert_eq!(message.author_user_id, vault.signer_id);
             assert_eq!(message.signer_id, vault.signer_id);

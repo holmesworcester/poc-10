@@ -429,6 +429,14 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 Ok(Admission::global(server.created_at_ms))
             });
         }
+        auth::signature::TYPE_SIGNATURE => {
+            return admit_with_codec::<auth::signature::Codec>(bytes, |signature| {
+                Ok(Admission::workspace(
+                    signature.workspace_id,
+                    signature.created_at_ms,
+                ))
+            });
+        }
         content::retention_policy::TYPE_RETENTION_POLICY => {
             return admit_with_codec::<content::retention_policy::Codec>(bytes, |policy| {
                 Ok(Admission::workspace(
@@ -728,6 +736,21 @@ mod tests {
 
         assert_eq!(admitted.scope, FactScope::Global);
         assert_eq!(admitted.timestamp, user.created_at_ms);
+        assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn admitted_signature_evidence_uses_payload_workspace_and_timestamp() {
+        let workspace_id = [12; 32];
+        let signature =
+            auth::signature::author::create_signature(workspace_id, [13; 32], &[7; 32], 77_777)
+                .expect("signature fact");
+        let bytes = signature.bytes.clone();
+
+        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit signature evidence");
+
+        assert_eq!(admitted.scope, workspace_scope(workspace_id));
+        assert_eq!(admitted.timestamp, 77_777);
         assert_eq!(admitted.bytes, bytes);
     }
 

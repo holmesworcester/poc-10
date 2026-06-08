@@ -1,9 +1,10 @@
 //! Integration tests for the `send_message` command.
 //!
 //! The tests hand-build a `CommandContext` from a vault and a fixed clock,
-//! drive the command, and assert: (1) the happy path produces one fact and a
+//! drive the command, and assert: (1) the happy path produces a message fact
+//! plus signature evidence and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
-//! naturally signed `content_message` fact whose ciphertext decrypts back to
+//! `content_message` fact whose ciphertext decrypts back to
 //! the original plaintext under the workspace key.
 
 use std::cell::Cell;
@@ -15,7 +16,6 @@ use topo::core::command_context::{
 use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
-use topo::protocol::content::message::authenticate::verify_signature;
 use topo::protocol::content::message::commands::send_message;
 use topo::protocol::content::message::decode::{decode_fact, recover_text};
 use topo::protocol::content::message::encode::associated_data;
@@ -105,7 +105,7 @@ fn open_store() -> Store {
 }
 
 #[test]
-fn send_message_happy_path_emits_one_content_message_fact() {
+fn send_message_happy_path_emits_message_and_signature_facts() {
     let store = open_store();
     let workspace_id = [1u8; 32];
     let vault = seeded_vault(workspace_id);
@@ -117,14 +117,24 @@ fn send_message_happy_path_emits_one_content_message_fact() {
 
     assert_eq!(output.receipt.workspace_id, workspace_id);
     assert_eq!(output.receipt.created_at_ms, 60_000);
-    assert_eq!(output.effects.facts.len(), 1, "one fact per send_message");
+    assert_eq!(
+        output.effects.facts.len(),
+        2,
+        "message plus signature proof"
+    );
     assert!(
         output.effects.intents.is_empty(),
         "no intents in the first cut"
     );
 
     let message = decode_fact(&output.effects.facts[0].bytes).expect("decode content message");
-    verify_signature(&message).expect("verify content message signature");
+    let signature =
+        topo::protocol::auth::signature::decode::decode_fact(&output.effects.facts[1].bytes)
+            .expect("decode signature evidence");
+    topo::protocol::auth::signature::authenticate::verify_signature(&signature)
+        .expect("verify signature evidence");
+    assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
+    assert_eq!(signature.signer_public_key, message.signer_public_key);
     assert_eq!(message.workspace_id, workspace_id);
     assert_eq!(message.created_at_ms, 60_000);
     assert_eq!(message.minute, 60_000 / 60_000);
@@ -156,8 +166,16 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     let text = "round-trip me through decode_fact";
     let output = send_message(&ctx, workspace_id, text).expect("send_message");
 
+    assert_eq!(
+        output.effects.facts.len(),
+        2,
+        "message plus signature proof"
+    );
     let message = decode_fact(&output.effects.facts[0].bytes).expect("decode content message");
-    verify_signature(&message).expect("verify content message signature");
+    let signature =
+        topo::protocol::auth::signature::decode::decode_fact(&output.effects.facts[1].bytes)
+            .expect("decode signature evidence");
+    assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
 
     // Recover the plaintext using the same workspace key the vault handed
     // to the command. The test must not be able to read the key from any

@@ -206,17 +206,23 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
         message: super::fact::ContentMessageFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // Authentication (see authenticate.rs) proved canonical bytes and the
-        // author signature. Scope is interpretation, not authentication — it
-        // gates on unsigned admission metadata — so it is checked here, behind
-        // the lens and the single ceiling projector, where the workspace-id
-        // shape and this rule can evolve.
+        // Authentication (see authenticate.rs) proved canonical bytes. Scope is
+        // interpretation, not authentication — it gates on unsigned admission
+        // metadata — so it is checked here, behind the lens and the single
+        // ceiling projector, where the workspace-id shape and this rule can
+        // evolve.
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         if fact.scope != scope {
             return Err("content message fact scope does not match body workspace".to_string());
         }
 
-        // 2. Context and deletion gates.
+        // 2. Context, signature evidence, and deletion gates.
+        let signature_need = crate::protocol::auth::signature::project::signature_proof_need(
+            fact.id,
+            scope.clone(),
+            fact.id,
+            message.signer_public_key,
+        )?;
         let signer_need = crate::core::context::ContextNeed::range(
             fact.id,
             "content_signer",
@@ -246,20 +252,11 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
             fact.id,
         );
 
-        if expiry_minute_reached(context, &message).is_some() {
-            return Ok(expired_output(fact.id, &message));
-        }
-        if let Some(floor) = cover_horizon_reached(context, &message) {
-            return Ok(retired_output(fact.id, &message, floor));
-        }
-        if let Some(floor) = retention_floor_reached(context, &retention_floor_need, &message)? {
-            return Ok(retired_output(fact.id, &message, floor));
-        }
-
         let base_output = base_wait_output(
             fact,
             &message,
             [
+                signature_need.clone(),
                 signer_need.clone(),
                 deletion_need.clone(),
                 retention_floor_need.clone(),
@@ -268,16 +265,37 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
             ],
             Vec::new(),
         );
-        let Some(signer_payload) = context.payload_for(&signer_need) else {
+        let Some(signature_payload) =
+            context_payload(context, &signature_need, "message signature proof")?
+        else {
             return Ok(base_output);
         };
+        validate_signature_proof(signature_payload, &signature_need, fact.id, &message)?;
+        let signature_context_have = context_have_from_needs(context, [&signature_need]);
+        let Some(signer_payload) = context.payload_for(&signer_need) else {
+            return Ok(base_wait_output(
+                fact,
+                &message,
+                [
+                    signature_need.clone(),
+                    signer_need.clone(),
+                    deletion_need.clone(),
+                    retention_floor_need.clone(),
+                    author_need.clone(),
+                    secret_need.clone(),
+                ],
+                signature_context_have,
+            ));
+        };
         validate_message_signer_context(signer_payload, &signer_need, &message)?;
-        let signer_context_have = context_have_from_needs(context, [&signer_need]);
+        let mut signer_context_have = signature_context_have;
+        signer_context_have.extend(context_have_from_needs(context, [&signer_need]));
         let Some(author) = context_payload(context, &author_need, "message author")? else {
             return Ok(base_wait_output(
                 fact,
                 &message,
                 [
+                    signature_need.clone(),
                     signer_need.clone(),
                     deletion_need.clone(),
                     retention_floor_need.clone(),
@@ -288,9 +306,19 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
             ));
         };
         validate_author_user(author, message.workspace_id, message.author_user_id)?;
+        if expiry_minute_reached(context, &message).is_some() {
+            return Ok(expired_output(fact.id, &message));
+        }
+        if let Some(floor) = cover_horizon_reached(context, &message) {
+            return Ok(retired_output(fact.id, &message, floor));
+        }
+        if let Some(floor) = retention_floor_reached(context, &retention_floor_need, &message)? {
+            return Ok(retired_output(fact.id, &message, floor));
+        }
         let context_have = context_have_from_needs(
             context,
             [
+                &signature_need,
                 &signer_need,
                 &deletion_need,
                 &retention_floor_need,
@@ -302,6 +330,7 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
             fact,
             &message,
             [
+                signature_need,
                 signer_need,
                 deletion_need.clone(),
                 retention_floor_need.clone(),
@@ -400,6 +429,31 @@ fn validate_message_signer_context(
         return Err(
             "content message signer context public key does not match message signature key"
                 .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_signature_proof(
+    payload: &Fact,
+    need: &ContextNeed,
+    message_fact_id: FactId,
+    message: &super::fact::ContentMessageFact,
+) -> Result<(), String> {
+    if payload.scope != need.scope {
+        return Err("content message signature proof scope does not match message".to_string());
+    }
+    let proof = auth::signature::decode_fact_payload(payload.body())
+        .map_err(|_| "content message signature proof is not a signature fact".to_string())?;
+    if proof.workspace_id != message.workspace_id {
+        return Err("content message signature proof workspace does not match message".to_string());
+    }
+    if proof.target_fact_id != message_fact_id {
+        return Err("content message signature proof target does not match message".to_string());
+    }
+    if proof.signer_public_key != message.signer_public_key {
+        return Err(
+            "content message signature proof key does not match message signer key".to_string(),
         );
     }
     Ok(())
@@ -810,7 +864,6 @@ mod projector_tests {
             minute: 1,
             nonce: [8; crate::protocol::content::message::fact::NONCE_BYTES],
             ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
 
         let row = super::content_message_row([9; 32], &fact);
@@ -908,11 +961,13 @@ mod projector_tests {
         let (message, fact, key) = message_fact(author_fact.id, "hello from content message");
         let signer_fact = signer_fact(&message);
         let secret_fact = secret_fact(&message, key);
+        let signature_fact = signature_fact(&message, &fact);
 
         let output = project::ContentMessageProjector::new()
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(&fact, &message, &signature_fact),
                     signer_match(&fact, &message, &signer_fact),
                     author_match(&fact, &message, &author_fact),
                     secret_match(&fact, &message, &secret_fact),
@@ -920,7 +975,7 @@ mod projector_tests {
             )
             .expect("project content message");
 
-        assert_eq!(output.needs.len(), 5);
+        assert_eq!(output.needs.len(), 6);
         assert_eq!(output.offers.len(), 2);
         assert!(output
             .offers
@@ -980,7 +1035,7 @@ mod projector_tests {
             .expect("project content message");
 
         assert_eq!(output.offers.len(), 0);
-        assert_eq!(output.needs.len(), 5);
+        assert_eq!(output.needs.len(), 6);
         assert_eq!(output.effects.intents.len(), 1);
         assert_eq!(
             output.effects.intents[0].kind.as_str(),
@@ -988,6 +1043,10 @@ mod projector_tests {
         );
         assert!(put_row!(output, read_models::CONTENT_MESSAGE_ROWS).is_none());
         assert!(output.needs.iter().any(|need| need.role == "auth_user"));
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == "signature_proof"));
         assert!(output
             .needs
             .iter()
@@ -1008,21 +1067,19 @@ mod projector_tests {
         let author_fact = user_fact([9; 32]);
         let (mut message, _fact, _key) = message_fact(author_fact.id, "already expired");
         message.expires_at_minute = message.minute + 1;
-        message.signature = crypto::ed25519_sign(
-            &CONTENT_SIGNING_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &message,
-                encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("message signing bytes"),
-        );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
             encode::encode_fact(&message).expect("encode content message"),
         );
-        let context = ProjectionContext::default().with_time_ranges(vec![TimeRange {
+        let signer_fact = signer_fact(&message);
+        let signature_fact = signature_fact(&message, &fact);
+        let context = ProjectionContext::from_matches(vec![
+            signature_match(&fact, &message, &signature_fact),
+            signer_match(&fact, &message, &signer_fact),
+            author_match(&fact, &message, &author_fact),
+        ])
+        .with_time_ranges(vec![TimeRange {
             timeline: topo::protocol::content::message::expiration_timeline(),
             start_exclusive: None,
             end_inclusive: message.expires_at_minute,
@@ -1051,18 +1108,20 @@ mod projector_tests {
         let author_fact = user_fact([9; 32]);
         let (message, fact, _key) = message_fact(author_fact.id, "hidden until key context");
         let signer_fact = signer_fact(&message);
+        let signature_fact = signature_fact(&message, &fact);
 
         let output = project::ContentMessageProjector::new()
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(&fact, &message, &signature_fact),
                     signer_match(&fact, &message, &signer_fact),
                     author_match(&fact, &message, &author_fact),
                 ]),
             )
             .expect("project content message");
 
-        assert_eq!(output.needs.len(), 5);
+        assert_eq!(output.needs.len(), 6);
         assert_eq!(output.offers.len(), 1);
         assert_eq!(output.offers[0].role, "content_message_meta");
         assert_eq!(output.effects.intents.len(), 1);
@@ -1088,6 +1147,7 @@ mod projector_tests {
         let author_fact = user_fact([9; 32]);
         let (message, fact, _key) = message_fact(author_fact.id, "delete me");
         let signer_fact = signer_fact(&message);
+        let signature_fact = signature_fact(&message, &fact);
         let mut deletion = ContentMessageDeletionFact {
             workspace_id: message.workspace_id,
             created_at_ms: message.created_at_ms + 1,
@@ -1118,6 +1178,7 @@ mod projector_tests {
             .project(
                 &fact,
                 &ProjectionContext::from_matches(vec![
+                    signature_match(&fact, &message, &signature_fact),
                     signer_match(&fact, &message, &signer_fact),
                     author_match(&fact, &message, &author_fact),
                     deletion_match(&fact, &message, &deletion_fact),
@@ -1184,7 +1245,7 @@ mod projector_tests {
             &plaintext,
         )
         .expect("encrypt message text");
-        let mut message = ContentMessageFact {
+        let message = ContentMessageFact {
             workspace_id,
             author_user_id,
             created_at_ms: 180_000,
@@ -1197,23 +1258,23 @@ mod projector_tests {
             minute,
             nonce,
             ciphertext: MessageCiphertext::new(&ciphertext).expect("message ciphertext"),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        message.signature = crypto::ed25519_sign(
-            &CONTENT_SIGNING_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &message,
-                encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("message signing bytes"),
-        );
         let fact = Fact::new(
             crate::protocol::auth::workspace::scope(message.workspace_id),
             message.created_at_ms,
             encode::encode_fact(&message).expect("encode content message"),
         );
         (message, fact, key)
+    }
+
+    fn signature_fact(message: &ContentMessageFact, fact: &Fact) -> Fact {
+        crate::protocol::auth::signature::author::create_signature(
+            message.workspace_id,
+            fact.id,
+            &CONTENT_SIGNING_KEY,
+            message.created_at_ms,
+        )
+        .expect("signature fact")
     }
 
     fn signer_fact(message: &ContentMessageFact) -> Fact {
@@ -1285,6 +1346,31 @@ mod projector_tests {
                 message.signer_id,
             ),
             payload: signer.clone(),
+        }
+    }
+
+    fn signature_match(
+        message_fact: &Fact,
+        message: &ContentMessageFact,
+        signature: &Fact,
+    ) -> MatchedContext {
+        let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
+        MatchedContext {
+            need: crate::protocol::auth::signature::project::signature_proof_need(
+                message_fact.id,
+                scope.clone(),
+                message_fact.id,
+                message.signer_public_key,
+            )
+            .expect("signature need"),
+            offer: crate::protocol::auth::signature::project::signature_proof_offer(
+                signature.id,
+                scope,
+                message_fact.id,
+                message.signer_public_key,
+            )
+            .expect("signature offer"),
+            payload: signature.clone(),
         }
     }
 

@@ -3,7 +3,7 @@
 //! The fact type is public protocol metadata. User-visible message text is an
 //! encrypted field that opens only when matching key context is available.
 
-use crate::core::crypto::{Ed25519PublicKey, Ed25519Signature, XCHACHA20_POLY1305_TAG_BYTES};
+use crate::core::crypto::{Ed25519PublicKey, XCHACHA20_POLY1305_TAG_BYTES};
 use crate::core::facts::FactId;
 use crate::core::wire::FixedSlot;
 
@@ -34,7 +34,6 @@ pub struct ContentMessageFact {
     pub minute: u64,
     pub nonce: [u8; NONCE_BYTES],
     pub ciphertext: MessageCiphertext,
-    pub signature: Ed25519Signature,
 }
 
 /// Convenience: derive the authoring `unix_minute` from `created_at_ms`. The

@@ -18,7 +18,6 @@
 //!   nonce (24)
 //!   ciphertext (fixed slot)
 
-use crate::core::crypto::ED25519_SIGNATURE_BYTES;
 use crate::core::wire;
 
 use crate::core::facts::FactId;
@@ -27,21 +26,8 @@ use super::fact::{ContentMessageFact, CIPHERTEXT_BYTES, NONCE_BYTES};
 
 pub const TYPE_CONTENT_MESSAGE: u8 = 50;
 
-pub const CONTENT_MESSAGE_BYTES: usize = 1
-    + 32
-    + 8
-    + 32
-    + 32
-    + 32
-    + 32
-    + 32
-    + 8
-    + 32
-    + 8
-    + NONCE_BYTES
-    + 4
-    + CIPHERTEXT_BYTES
-    + ED25519_SIGNATURE_BYTES;
+pub const CONTENT_MESSAGE_BYTES: usize =
+    1 + 32 + 8 + 32 + 32 + 32 + 32 + 32 + 8 + 32 + 8 + NONCE_BYTES + 4 + CIPHERTEXT_BYTES;
 pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     let mut out = wire::Writer::with_capacity(CONTENT_MESSAGE_BYTES);
     out.u8(TYPE_CONTENT_MESSAGE);
@@ -57,7 +43,6 @@ pub fn encode_fact(fact: &ContentMessageFact) -> Result<Vec<u8>, String> {
     out.u64be(fact.minute);
     out.fixed(&fact.nonce);
     out.fixed_slot_value(&fact.ciphertext).map_err(wire_err)?;
-    out.fixed(&fact.signature);
     out.finish_exact(CONTENT_MESSAGE_BYTES).map_err(wire_err)
 }
 

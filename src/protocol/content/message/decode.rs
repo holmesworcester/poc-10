@@ -1,7 +1,7 @@
 //! Byte decoding for content-message facts and opened plaintext slots.
 //!
 //! Fact decoding proves only the fixed layout: tag, length, field order, and
-//! bounded ciphertext slot. Id and signature checks live in `authenticate.rs`.
+//! bounded ciphertext slot. Id checks live in `authenticate.rs`.
 //! Plaintext recovery is here because projection decrypts to this fixed slot
 //! and then needs a canonical UTF-8 string.
 
@@ -45,7 +45,6 @@ pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
         ciphertext: reader
             .fixed_slot_value::<CIPHERTEXT_BYTES>()
             .map_err(wire_err)?,
-        signature: reader.array().map_err(wire_err)?,
     };
     reader.finish().map_err(wire_err)?;
     Ok(fact)
@@ -74,7 +73,6 @@ fn wire_err(err: wire::WireError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::crypto::ED25519_SIGNATURE_BYTES;
     use crate::protocol::content::message::fact::{MessageCiphertext, NONCE_BYTES};
 
     fn fact() -> ContentMessageFact {
@@ -91,7 +89,6 @@ mod tests {
             minute: 3,
             nonce: [8; NONCE_BYTES],
             ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
-            signature: [10; ED25519_SIGNATURE_BYTES],
         }
     }
 

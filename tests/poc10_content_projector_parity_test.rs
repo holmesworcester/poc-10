@@ -12,11 +12,14 @@ const CONTENT_ENDPOINT_ID: FactId = [21; 32];
 #[test]
 fn raw_content_events_reject_projection() {
     let message = unsigned_message_fact(WORKSPACE, [31; 32]);
-    assert_must_be_signed(
-        content::message::project::ContentMessageProjector::new()
-            .project(&message, &ProjectionContext::default())
-            .expect_err("raw message must reject"),
-    );
+    let output = content::message::project::ContentMessageProjector::new()
+        .project(&message, &ProjectionContext::default())
+        .expect("message without signature evidence parks");
+    assert!(output.offers.is_empty());
+    assert!(output
+        .needs
+        .iter()
+        .any(|need| need.role == "signature_proof"));
 
     let file = unsigned_file_fact(WORKSPACE, [31; 32]);
     assert_must_be_signed(
@@ -113,7 +116,6 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
             content::message::fact::CIPHERTEXT_BYTES
         ])
         .expect("message ciphertext"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     let fact = signed_content_fact_in_workspace(
         CONTENT_ENDPOINT_ID,
@@ -121,11 +123,15 @@ fn signed_content_message_rejects_signer_not_authorized_by_author() {
         content::message::encode::encode_fact(&message).expect("encode message"),
         message.created_at_ms,
     );
+    let signature = signature_fact(&fact, message.created_at_ms);
 
     let err = content::message::project::ContentMessageProjector::new()
         .project(
             &fact,
-            &ProjectionContext::from_matches(vec![message_signer_match(&fact, &message, &signer)]),
+            &ProjectionContext::from_matches(vec![
+                message_signature_match(&fact, &message, &signature),
+                message_signer_match(&fact, &message, &signer),
+            ]),
         )
         .expect_err("signer for another author must fail");
 
@@ -385,7 +391,7 @@ fn user_fact(workspace_id: FactId, public_key: [u8; 32], username: &str) -> Fact
 }
 
 fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-    let mut message = content::message::fact::ContentMessageFact {
+    let message = content::message::fact::ContentMessageFact {
         workspace_id,
         author_user_id,
         created_at_ms: 60_000,
@@ -402,17 +408,7 @@ fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
             content::message::fact::CIPHERTEXT_BYTES
         ])
         .expect("message ciphertext"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
-    message.signature = crypto::ed25519_sign(
-        &CONTENT_SIGNING_KEY,
-        &topo::core::wire::encode_with_zeroed_trailing_field(
-            &message,
-            content::message::encode::encode_fact,
-            topo::core::crypto::ED25519_SIGNATURE_BYTES,
-        )
-        .expect("message signing bytes"),
-    );
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
         message.created_at_ms,
@@ -438,7 +434,6 @@ fn unsigned_message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
             content::message::fact::CIPHERTEXT_BYTES
         ])
         .expect("message ciphertext"),
-        signature: [0; crypto::ED25519_SIGNATURE_BYTES],
     };
     Fact::new(
         topo::protocol::auth::workspace::scope(workspace_id),
@@ -523,15 +518,6 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
         Some(content::message::TYPE_CONTENT_MESSAGE) => {
             let mut fact = content::message::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
-            fact.signature = [0; crypto::ED25519_SIGNATURE_BYTES];
-            fact.signature = crypto::ed25519_sign(
-                &private_key,
-                &topo::core::wire::encode_with_zeroed_trailing_field(
-                    &fact,
-                    content::message::encode::encode_fact,
-                    topo::core::crypto::ED25519_SIGNATURE_BYTES,
-                )?,
-            );
             content::message::encode::encode_fact(&fact)
         }
         Some(content::file::TYPE_CONTENT_FILE) => {
@@ -642,6 +628,41 @@ fn message_signer_match(
             message.signer_id,
         ),
         payload: signer.clone(),
+    }
+}
+
+fn signature_fact(target: &Fact, created_at_ms: u64) -> Fact {
+    auth::signature::author::create_signature(
+        WORKSPACE,
+        target.id,
+        &CONTENT_SIGNING_KEY,
+        created_at_ms,
+    )
+    .expect("signature fact")
+}
+
+fn message_signature_match(
+    owner: &Fact,
+    message: &content::message::fact::ContentMessageFact,
+    signature: &Fact,
+) -> MatchedContext {
+    let scope = topo::protocol::auth::workspace::scope(message.workspace_id);
+    MatchedContext {
+        need: auth::signature::project::signature_proof_need(
+            owner.id,
+            scope.clone(),
+            owner.id,
+            message.signer_public_key,
+        )
+        .expect("signature need"),
+        offer: auth::signature::project::signature_proof_offer(
+            signature.id,
+            scope,
+            owner.id,
+            message.signer_public_key,
+        )
+        .expect("signature offer"),
+        payload: signature.clone(),
     }
 }
 

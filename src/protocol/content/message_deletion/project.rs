@@ -499,7 +499,7 @@ mod projector_tests {
     }
 
     fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
-        let mut message = ContentMessageFact {
+        let message = ContentMessageFact {
             workspace_id,
             author_user_id,
             created_at_ms: 12_000,
@@ -516,17 +516,7 @@ mod projector_tests {
                 crate::protocol::content::message::fact::CIPHERTEXT_BYTES
             ])
             .expect("message ciphertext"),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        message.signature = crypto::ed25519_sign(
-            &CONTENT_SIGNING_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &message,
-                message_encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("message signing bytes"),
-        );
         Fact::new(
             crate::protocol::auth::workspace::scope(workspace_id),
             message.created_at_ms,

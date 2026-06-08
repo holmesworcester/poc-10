@@ -1,22 +1,19 @@
 //! Content-message authenticator.
 //!
-//! POLICY. Authenticating a `content_message` fact proves, over its signed bytes
-//! alone:
+//! POLICY. Authenticating a `content_message` fact proves, over its bytes alone:
 //!   1. LAYOUT. The bytes decode to a canonical content-message envelope — right
 //!      tag, fixed width, valid fields — through the family codec.
 //!   2. ID. The content id equals `hash(bytes)`.
-//!   3. SIGNATURE. The author signature verifies over the canonical public
-//!      envelope, which covers the ciphertext slot. The verifier key is embedded
-//!      in the fact, so this needs no context.
 //!
 //! It proves nothing else. Admission scope is unsigned local metadata, not part
 //! of these bytes, so the workspace-scope check is interpretation the projector
 //! owns — that keeps the workspace-id format, its type, and the rule itself
 //! behind the lens and the single ceiling projector, free to evolve. Decryption
 //! of the message text likewise stays in the projector: the text key is secret
-//! context and decryption yields read-model meaning. The authenticated payload
-//! is the decoded fact; the projector proves scope, signer, author, deletion,
-//! retention, and secret context and materializes rows.
+//! context and decryption yields read-model meaning. Signature evidence is a
+//! separate fact and context dependency. The authenticated payload is the
+//! decoded fact; the projector proves scope, signature evidence, signer, author,
+//! deletion, retention, and secret context and materializes rows.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
@@ -45,27 +42,11 @@ fn prove_decoded_message(
 ) -> Result<ContentMessageFact, String> {
     // 2. Id.
     verify_fact_id(fact)?;
-    // 3. Signature over the canonical envelope (verifier key is embedded).
-    verify_signature(&message)?;
     Ok(message)
-}
-
-pub fn verify_signature(fact: &ContentMessageFact) -> Result<(), String> {
-    crate::core::crypto::ed25519_verify_canonical(
-        &fact.signer_public_key,
-        &crate::core::wire::encode_with_zeroed_trailing_field(
-            fact,
-            super::encode::encode_fact,
-            crate::core::crypto::ED25519_SIGNATURE_BYTES,
-        )?,
-        &fact.signature,
-        "content message",
-    )
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::core::crypto;
     use crate::core::facts::Fact;
     use crate::core::pipeline::{
         Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
@@ -77,16 +58,15 @@ mod tests {
 
     use super::ContentMessageAuthenticator;
 
-    const PRIVATE_KEY: [u8; 32] = [7; 32];
     const WORKSPACE_ID: [u8; 32] = [1; 32];
 
     fn canonical_fact() -> Fact {
-        let mut message = ContentMessageFact {
+        let message = ContentMessageFact {
             workspace_id: WORKSPACE_ID,
             created_at_ms: 180_000,
             author_user_id: [2; 32],
             signer_id: [3; 32],
-            signer_public_key: crypto::ed25519_public_key(&PRIVATE_KEY),
+            signer_public_key: [7; 32],
             frontier_id: [4; 32],
             local_history_node_secret_id: [5; 32],
             expires_at_minute: u64::MAX,
@@ -94,18 +74,7 @@ mod tests {
             minute: 3,
             nonce: [8; NONCE_BYTES],
             ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
-            signature: [0; crypto::ED25519_SIGNATURE_BYTES],
         };
-        let (_, signature) = crypto::ed25519_sign_canonical(
-            &PRIVATE_KEY,
-            &crate::core::wire::encode_with_zeroed_trailing_field(
-                &message,
-                encode::encode_fact,
-                crate::core::crypto::ED25519_SIGNATURE_BYTES,
-            )
-            .expect("signing bytes"),
-        );
-        message.signature = signature;
         Fact::new(
             crate::protocol::auth::workspace::scope(WORKSPACE_ID),
             message.created_at_ms,
@@ -153,19 +122,6 @@ mod tests {
         let canonical = canonical_fact();
         let mut bytes = canonical.bytes.clone();
         bytes.pop();
-        assert!(is_invalid(&Fact::new(
-            canonical.scope,
-            canonical.timestamp,
-            bytes
-        )));
-    }
-
-    #[test]
-    fn rejects_tampered_signature() {
-        let canonical = canonical_fact();
-        let mut bytes = canonical.bytes.clone();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 0x01;
         assert!(is_invalid(&Fact::new(
             canonical.scope,
             canonical.timestamp,

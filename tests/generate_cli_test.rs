@@ -32,13 +32,13 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
         line_value(&status, "facts")
             .parse::<usize>()
             .expect("facts count after generate"),
-        before_facts + 7
+        before_facts + 14
     );
     assert_eq!(
         line_value(&status, "applied_facts")
             .parse::<usize>()
             .expect("applied facts count after generate"),
-        before_facts + 7
+        before_facts + 14
     );
 }
 
