@@ -18,6 +18,7 @@ use crate::protocol::content::message::author;
 use crate::protocol::content::message::fact::MAX_TEXT_BYTES;
 use crate::protocol::content::message::queries;
 use crate::protocol::content::{message, retention_policy};
+use crate::protocol::{root, sealed_payload};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendReceipt {
@@ -38,7 +39,8 @@ pub struct GenerateReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthoredMessageFacts {
-    message: Fact,
+    root: Fact,
+    payload: Fact,
     signature: Fact,
 }
 
@@ -57,10 +59,10 @@ pub fn send_message(
 
     Ok(CommandOutput::new(SendReceipt {
         workspace_id,
-        message_fact_id: facts.message.id,
+        message_fact_id: facts.root.id,
         created_at_ms,
     })
-    .with_facts(vec![facts.message, facts.signature]))
+    .with_facts(vec![facts.root, facts.payload, facts.signature]))
 }
 
 pub fn generate_messages(
@@ -85,7 +87,7 @@ pub fn generate_messages(
         prepare_authoring(ctx, workspace_id)
     })?;
 
-    let mut facts = Vec::with_capacity(count.saturating_mul(2));
+    let mut facts = Vec::with_capacity(count.saturating_mul(3));
     let mut fact_ids = Vec::with_capacity(count);
     for index in 0..count {
         let timestamp = first_timestamp
@@ -97,16 +99,20 @@ pub fn generate_messages(
         let authored = crate::core::perf_profile::measure_result("message_fact_build", || {
             build_message_facts_from_authoring(&authoring, &text, timestamp)
         })?;
+        authenticate_authored::<root::Codec, root::authenticate::RootAuthenticator>(
+            &authored.root,
+        )?;
         authenticate_authored::<
-            super::decode::Codec,
-            super::authenticate::ContentMessageAuthenticator,
-        >(&authored.message)?;
+            sealed_payload::Codec,
+            sealed_payload::authenticate::SealedPayloadAuthenticator,
+        >(&authored.payload)?;
         authenticate_authored::<
             auth::signature::Codec,
             auth::signature::authenticate::SignatureAuthenticator,
         >(&authored.signature)?;
-        fact_ids.push(authored.message.id);
-        facts.push(authored.message);
+        fact_ids.push(authored.root.id);
+        facts.push(authored.root);
+        facts.push(authored.payload);
         facts.push(authored.signature);
     }
 
@@ -161,21 +167,29 @@ fn build_message_facts_from_authoring(
     text: &str,
     created_at_ms: u64,
 ) -> Result<AuthoredMessageFacts, String> {
-    let message = authoring.snapshot.build_message_fact(text, created_at_ms)?;
+    let authored = authoring
+        .snapshot
+        .build_message_root_payload_facts(text, created_at_ms)?;
     let signature = auth::signature::author::sign_fact(
         authoring.snapshot.workspace_id(),
-        &message,
+        &authored.root,
         &authoring.signer_private_key,
         created_at_ms,
     )?;
-    authenticate_authored::<super::decode::Codec, super::authenticate::ContentMessageAuthenticator>(
-        &message,
-    )?;
+    authenticate_authored::<root::Codec, root::authenticate::RootAuthenticator>(&authored.root)?;
+    authenticate_authored::<
+        sealed_payload::Codec,
+        sealed_payload::authenticate::SealedPayloadAuthenticator,
+    >(&authored.payload)?;
     authenticate_authored::<
         auth::signature::Codec,
         auth::signature::authenticate::SignatureAuthenticator,
     >(&signature)?;
-    Ok(AuthoredMessageFacts { message, signature })
+    Ok(AuthoredMessageFacts {
+        root: authored.root,
+        payload: authored.payload,
+        signature,
+    })
 }
 
 fn deterministic_generated_text(
@@ -450,25 +464,71 @@ mod tests {
 
         assert_eq!(vault.signing_calls.get(), 1);
         assert_eq!(vault.encryption_calls.get(), 1);
-        assert_eq!(output.effects.facts.len(), 8);
-        for (index, facts) in output.effects.facts.chunks_exact(2).enumerate() {
-            let message_fact = &facts[0];
-            let signature_fact = &facts[1];
-            assert_eq!(message_fact.timestamp, 10_000 + index as u64);
-            assert_eq!(signature_fact.timestamp, message_fact.timestamp);
-            let message =
-                crate::protocol::content::message::decode::decode_fact(message_fact.body())
-                    .expect("decode message");
+        assert_eq!(output.effects.facts.len(), 12);
+        for (index, facts) in output.effects.facts.chunks_exact(3).enumerate() {
+            let root_fact = &facts[0];
+            let payload_fact = &facts[1];
+            let signature_fact = &facts[2];
+            assert_eq!(root_fact.timestamp, 10_000 + index as u64);
+            assert_eq!(payload_fact.timestamp, root_fact.timestamp);
+            assert_eq!(signature_fact.timestamp, root_fact.timestamp);
+            let root =
+                crate::protocol::root::decode_fact_payload(root_fact.body()).expect("decode root");
+            let payload = crate::protocol::sealed_payload::decode_fact_payload(payload_fact.body())
+                .expect("decode payload");
             let signature =
                 crate::protocol::auth::signature::decode::decode_fact(signature_fact.body())
                     .expect("decode signature");
-            assert_eq!(signature.target_fact_id, message_fact.id);
+            assert_eq!(signature.target_fact_id, root_fact.id);
             crate::protocol::auth::signature::authenticate::verify_signature(&signature)
                 .expect("valid signature evidence");
-            assert_eq!(message.workspace_id, workspace_id);
-            assert_eq!(message.author_user_id, vault.signer_id);
-            assert_eq!(message.signer_id, vault.signer_id);
-            assert_eq!(message.frontier_id, [3; 32]);
+            assert_eq!(
+                root.family,
+                crate::protocol::content::message::ROOT_FAMILY_CONTENT_MESSAGE
+            );
+            assert_eq!(
+                root.version,
+                crate::protocol::content::message::ROOT_VERSION_CONTENT_MESSAGE
+            );
+            assert_eq!(root.created_at_ms, root_fact.timestamp);
+            assert_eq!(
+                root.ref_by_role_index(crate::protocol::root::roles::WORKSPACE, 0)
+                    .expect("workspace ref")
+                    .target_fact_id,
+                workspace_id
+            );
+            assert_eq!(
+                root.ref_by_role_index(crate::protocol::root::roles::AUTHOR, 0)
+                    .expect("author ref")
+                    .target_fact_id,
+                vault.signer_id
+            );
+            assert_eq!(
+                root.ref_by_role_index(crate::protocol::root::roles::SIGNER, 0)
+                    .expect("signer ref")
+                    .target_fact_id,
+                vault.signer_id
+            );
+            assert_eq!(
+                root.ref_by_role_index(crate::protocol::root::roles::KEY_DOMAIN, 0)
+                    .expect("key domain ref")
+                    .target_fact_id,
+                [3; 32]
+            );
+            assert_eq!(
+                root.ref_by_role_index(crate::protocol::root::roles::CONTENT, 0)
+                    .expect("content ref")
+                    .target_fact_id,
+                payload_fact.id
+            );
+            assert_eq!(
+                payload.format,
+                crate::protocol::content::message::PAYLOAD_FORMAT_MESSAGE_TEXT
+            );
+            assert_eq!(
+                payload.algorithm,
+                crate::protocol::content::message::PAYLOAD_ALGORITHM_XCHACHA20_POLY1305
+            );
         }
     }
 }

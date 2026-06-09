@@ -18,7 +18,6 @@ use crate::core::pipeline::{
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
-use crate::protocol::content::message;
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
@@ -223,13 +222,8 @@ fn validate_target_message(
     if target_fact.id != deletion.target_message_id {
         return Err("message deletion target context payload id mismatch".to_string());
     }
-    let target = project::decode_typed_fact(
-        target_fact,
-        message::TYPE_CONTENT_MESSAGE,
-        "message deletion target",
-        message::decode_fact_payload,
-    )
-    .map_err(|_| "message deletion target context must be a content message".to_string())?;
+    let target = project::message_context_from_fact(target_fact, "message deletion target")
+        .map_err(|_| "message deletion target context must be a content message".to_string())?;
     if target.workspace_id != deletion.workspace_id {
         return Err("message deletion target workspace does not match deletion".to_string());
     }

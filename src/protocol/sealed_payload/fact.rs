@@ -1,7 +1,7 @@
 use crate::core::wire::FixedSlot;
 
 pub const HEADER_BYTES: usize = 64;
-pub const CIPHERTEXT_BYTES: usize = 1024;
+pub const CIPHERTEXT_BYTES: usize = 128;
 
 pub type PayloadHeader = FixedSlot<HEADER_BYTES>;
 pub type PayloadCiphertext = FixedSlot<CIPHERTEXT_BYTES>;

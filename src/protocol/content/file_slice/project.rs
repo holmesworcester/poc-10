@@ -24,7 +24,6 @@ use crate::core::pipeline::{
 use crate::protocol::auth::signature;
 use crate::protocol::content::file;
 use crate::protocol::content::file_deletion;
-use crate::protocol::content::message;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project as message_project;
 use crate::protocol::content::message_deletion;
@@ -161,12 +160,11 @@ impl SemanticProjector<super::fact::ContentFileSliceFact> for ContentFileSlicePr
                 .need(file_need)
                 .need(message_need));
         };
-        let parent_message = message_project::decode_typed_fact(
+        let parent_message = message_project::message_context_from_fact(
             message_payload,
-            message::TYPE_CONTENT_MESSAGE,
             "file slice message parent",
-            message::decode_fact_payload,
-        )?;
+        )
+        .map_err(|_| "file slice message parent context is not a content message".to_string())?;
         if parent_message.workspace_id != slice.workspace_id {
             return Err("file slice message parent workspace does not match slice".to_string());
         }

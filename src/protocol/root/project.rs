@@ -3,6 +3,7 @@ use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
+use crate::protocol::content;
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
 use super::fact::{RootFact, RootRef};
@@ -46,25 +47,22 @@ impl SemanticProjector<RootFact> for RootProjector {
         &self,
         fact: &Fact,
         root: RootFact,
-        _context: &ProjectionContext,
+        context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let mut output = ProjectionOutput::new().offer(root_envelope_offer(
-            fact.id,
-            fact.scope.clone(),
-            fact.id,
-            root.family,
-            root.version,
-        )?);
-
-        for edge in &root.refs {
-            output = output.offer(root_ref_offer(fact.id, fact.scope.clone(), fact.id, *edge)?);
-        }
+        let mut output = root_context_output(fact, &root)?;
 
         if let Some(workspace_id) = root.workspace_id() {
             let workspace_scope = crate::protocol::auth::workspace::scope(workspace_id);
             if fact.scope != workspace_scope {
                 return Err("root fact scope does not match workspace ref".to_string());
             }
+        }
+
+        if root.family == content::message::ROOT_FAMILY_CONTENT_MESSAGE {
+            return content::message::project::project_root_message(fact, &root, context, output);
+        }
+
+        if let Some(workspace_id) = root.workspace_id() {
             let context_have = root
                 .refs
                 .iter()
@@ -75,6 +73,22 @@ impl SemanticProjector<RootFact> for RootProjector {
 
         Ok(output)
     }
+}
+
+fn root_context_output(fact: &Fact, root: &RootFact) -> Result<ProjectionOutput, String> {
+    let mut output = ProjectionOutput::new().offer(root_envelope_offer(
+        fact.id,
+        fact.scope.clone(),
+        fact.id,
+        root.family,
+        root.version,
+    )?);
+
+    for edge in &root.refs {
+        output = output.offer(root_ref_offer(fact.id, fact.scope.clone(), fact.id, *edge)?);
+    }
+
+    Ok(output)
 }
 
 pub fn root_envelope_need(
@@ -144,7 +158,7 @@ mod tests {
     #[test]
     fn root_projects_envelope_and_ref_offers() {
         let root = RootFact {
-            family: 1,
+            family: 99,
             version: 1,
             created_at_ms: 0,
             refs: vec![

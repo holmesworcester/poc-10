@@ -16,9 +16,9 @@ use crate::core::pipeline::{
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
+use crate::protocol::content::file;
 use crate::protocol::content::message::fact::unix_minute_for;
 use crate::protocol::content::message::project::{self, FactSigner};
-use crate::protocol::content::{file, message};
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, share_fact_with_sync,
@@ -266,20 +266,15 @@ fn validate_parent_message(
     target: &file::fact::ContentFileFact,
     parent_fact: &Fact,
     expected_scope: &FactScope,
-) -> Result<message::fact::ContentMessageFact, String> {
+) -> Result<project::MessageContext, String> {
     if parent_fact.id != target.message_id {
         return Err("file deletion parent context payload id mismatch".to_string());
     }
     if &parent_fact.scope != expected_scope {
         return Err("file deletion parent scope does not match deletion".to_string());
     }
-    let parent = project::decode_typed_fact(
-        parent_fact,
-        message::TYPE_CONTENT_MESSAGE,
-        "file deletion parent",
-        message::decode_fact_payload,
-    )
-    .map_err(|_| "file deletion parent context must be a content message".to_string())?;
+    let parent = project::message_context_from_fact(parent_fact, "file deletion parent")
+        .map_err(|_| "file deletion parent context must be a content message".to_string())?;
     if parent.workspace_id != target.workspace_id {
         return Err("file deletion parent workspace does not match file".to_string());
     }

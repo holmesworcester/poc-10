@@ -29,7 +29,7 @@ fn root_payload_signature_compose_without_payload_becoming_content() {
     assert!(payload_output.effects.intents.is_empty());
 
     let root_body = root::fact::RootFact {
-        family: 1,
+        family: 99,
         version: 1,
         created_at_ms: 10,
         refs: vec![

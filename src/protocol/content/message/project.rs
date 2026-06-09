@@ -14,7 +14,7 @@
 
 use crate::core::context::{ContextKey, ContextKeyPart, ContextNeed};
 use crate::core::crypto;
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
@@ -28,8 +28,12 @@ use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_needs, retract_fact_from_sync, share_fact_with_sync,
 };
+use crate::protocol::{root, sealed_payload};
 
-use super::fact::{AuthorId, ContentMessageFact, SignerId, WorkspaceId, UNIX_MINUTE_MS};
+use super::fact::{
+    AuthorId, ContentMessageFact, MessageCiphertext, SignerId, WorkspaceId, CIPHERTEXT_BYTES,
+    NONCE_BYTES, UNIX_MINUTE_MS,
+};
 
 /// Staged read pipeline for the content-message fact.
 pub const PIPELINE: FactPipeline = FactPipeline::Staged {
@@ -395,12 +399,320 @@ impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjec
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootMessageRefs {
+    workspace_id: FactId,
+    author_user_id: FactId,
+    signer_id: FactId,
+    frontier_id: FactId,
+    payload_id: FactId,
+    policy_id: Option<FactId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MessageContext {
+    pub workspace_id: FactId,
+    pub frontier_id: FactId,
+    pub minute: u64,
+    pub author_user_id: FactId,
+}
+
+pub(crate) fn message_context_from_fact(
+    fact: &Fact,
+    label: &str,
+) -> Result<MessageContext, String> {
+    if let Ok(message) = decode_typed_fact(
+        fact,
+        super::TYPE_CONTENT_MESSAGE,
+        label,
+        super::decode_fact_payload,
+    ) {
+        return Ok(MessageContext {
+            workspace_id: message.workspace_id,
+            frontier_id: message.frontier_id,
+            minute: message.minute,
+            author_user_id: message.author_user_id,
+        });
+    }
+
+    let root_fact = root::decode_fact_payload(fact.body())
+        .map_err(|_| format!("{label} context is not a content message"))?;
+    if root_fact.family != super::ROOT_FAMILY_CONTENT_MESSAGE {
+        return Err(format!("{label} context root is not a content message"));
+    }
+    if root_fact.version != super::ROOT_VERSION_CONTENT_MESSAGE {
+        return Err(format!("{label} context root version is unsupported"));
+    }
+    if root_fact.created_at_ms == 0 {
+        return Err(format!("{label} context root created_at_ms cannot be zero"));
+    }
+    let refs = root_message_refs(&root_fact)?;
+    Ok(MessageContext {
+        workspace_id: refs.workspace_id,
+        frontier_id: refs.frontier_id,
+        minute: root_fact.created_at_ms / UNIX_MINUTE_MS,
+        author_user_id: refs.author_user_id,
+    })
+}
+
+/// Project a generic root as the current semantic content-message shape.
+///
+/// Root facts keep encrypted content out of the signed envelope. This reader
+/// reconstructs the newest `ContentMessageFact` semantic record from root refs,
+/// a sealed payload fact, and exact policy/signing context, then delegates the
+/// existing message gates for signature, author, deletion, retention, and local
+/// secret coverage.
+pub(crate) fn project_root_message(
+    fact: &Fact,
+    root_fact: &root::fact::RootFact,
+    context: &ProjectionContext,
+    root_context_output: ProjectionOutput,
+) -> Result<ProjectionOutput, String> {
+    if root_fact.family != super::ROOT_FAMILY_CONTENT_MESSAGE {
+        return Err("root message reader received non-message root family".to_string());
+    }
+    if root_fact.version != super::ROOT_VERSION_CONTENT_MESSAGE {
+        return Err("unsupported content message root version".to_string());
+    }
+    if root_fact.created_at_ms == 0 {
+        return Err("content message root created_at_ms cannot be zero".to_string());
+    }
+
+    let refs = root_message_refs(root_fact)?;
+    let scope = crate::protocol::auth::workspace::scope(refs.workspace_id);
+    if fact.scope != scope {
+        return Err("content message root scope does not match workspace ref".to_string());
+    }
+
+    let payload_need = sealed_payload::project::sealed_payload_need(
+        fact.id,
+        FactScope::Global,
+        refs.payload_id,
+        super::PAYLOAD_FORMAT_MESSAGE_TEXT,
+    )?;
+    let signer_need = signer_need(fact.id, refs.workspace_id, refs.signer_id);
+    let author_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "auth_user",
+        FactScope::Global,
+        refs.author_user_id,
+        refs.author_user_id,
+    );
+    let policy_need = refs.policy_id.map(|policy_id| {
+        crate::core::context::ContextNeed::range(
+            fact.id,
+            "sync_exact_fact",
+            FactScope::Global,
+            policy_id,
+            policy_id,
+        )
+    });
+
+    let mut root_prereq_needs = vec![payload_need.clone(), signer_need.clone(), author_need];
+    if let Some(need) = &policy_need {
+        root_prereq_needs.push(need.clone());
+    }
+
+    let waiting = root_message_wait_output(
+        fact,
+        refs.workspace_id,
+        root_fact,
+        root_context_output.clone(),
+        root_prereq_needs.iter().cloned(),
+    );
+
+    let Some(payload_fact) = context_payload(context, &payload_need, "message sealed payload")?
+    else {
+        return Ok(waiting);
+    };
+    if payload_fact.id != refs.payload_id {
+        return Err("message sealed payload context payload id mismatch".to_string());
+    }
+    let Some(signer_payload) = context_payload(context, &signer_need, "message signer")? else {
+        return Ok(waiting);
+    };
+    let endpoint = endpoint_shared_signer(signer_payload)
+        .ok_or_else(|| "content message root signer context must be endpoint_shared".to_string())?;
+    if endpoint.workspace_id != refs.workspace_id {
+        return Err("content message root signer workspace mismatch".to_string());
+    }
+    if endpoint.endpoint_id != refs.signer_id {
+        return Err("content message root signer endpoint mismatch".to_string());
+    }
+    if endpoint.user_authority_fact_id != refs.author_user_id {
+        return Err("content message root signer author mismatch".to_string());
+    }
+
+    let (expires_at_minute, retention_policy_id) = if let (Some(policy_id), Some(policy_need)) =
+        (refs.policy_id, policy_need.as_ref())
+    {
+        let Some(policy_fact) = context_payload(context, policy_need, "message retention policy")?
+        else {
+            return Ok(waiting);
+        };
+        if policy_fact.id != policy_id {
+            return Err("message retention policy context payload id mismatch".to_string());
+        }
+        let policy = retention_policy::decode_fact_payload(policy_fact.body())
+            .map_err(|_| "message retention policy context is not a policy".to_string())?;
+        if policy.workspace_id != refs.workspace_id {
+            return Err("message retention policy workspace mismatch".to_string());
+        }
+        if policy.scope_kind != retention_policy::fact::SCOPE_KIND_WORKSPACE
+            || policy.scope_id != refs.workspace_id
+        {
+            return Err("message root policy ref must be workspace-scoped".to_string());
+        }
+        (
+            (root_fact.created_at_ms / UNIX_MINUTE_MS)
+                .saturating_add(u64::from(policy.ttl_minutes)),
+            policy_id,
+        )
+    } else {
+        (u64::MAX, [0; 32])
+    };
+
+    let payload = sealed_payload::decode_fact_payload(payload_fact.body())
+        .map_err(|_| "message sealed payload context is not a sealed payload".to_string())?;
+    if payload.format != super::PAYLOAD_FORMAT_MESSAGE_TEXT {
+        return Err("message sealed payload format mismatch".to_string());
+    }
+    if payload.algorithm != super::PAYLOAD_ALGORITHM_XCHACHA20_POLY1305 {
+        return Err("message sealed payload algorithm mismatch".to_string());
+    }
+    if payload.header.len() != NONCE_BYTES {
+        return Err("message sealed payload nonce header length mismatch".to_string());
+    }
+    if payload.ciphertext.len() != CIPHERTEXT_BYTES {
+        return Err("message sealed payload ciphertext length mismatch".to_string());
+    }
+    let nonce: [u8; NONCE_BYTES] = payload
+        .header
+        .bytes()
+        .try_into()
+        .map_err(|_| "message sealed payload nonce header length mismatch".to_string())?;
+    let message = ContentMessageFact {
+        workspace_id: refs.workspace_id,
+        created_at_ms: root_fact.created_at_ms,
+        author_user_id: refs.author_user_id,
+        signer_id: refs.signer_id,
+        signer_public_key: endpoint.signing_public_key,
+        frontier_id: refs.frontier_id,
+        local_history_node_secret_id: [0; 32],
+        expires_at_minute,
+        retention_policy_id,
+        minute: root_fact.created_at_ms / UNIX_MINUTE_MS,
+        nonce,
+        ciphertext: MessageCiphertext::new(payload.ciphertext.bytes())
+            .map_err(|err| format!("message sealed payload ciphertext: {err}"))?,
+    };
+    validate_message_signer_context(signer_payload, &signer_need, &message)?;
+
+    let mut output = ContentMessageProjector::new().project_semantic(fact, message, context)?;
+    output = output.need(payload_need);
+    if let Some(need) = policy_need {
+        output = output.need(need);
+    }
+    Ok(merge_projection_outputs(output, root_context_output))
+}
+
+fn root_message_refs(root_fact: &root::fact::RootFact) -> Result<RootMessageRefs, String> {
+    for edge in &root_fact.refs {
+        match edge.role {
+            root::roles::WORKSPACE
+            | root::roles::AUTHOR
+            | root::roles::SIGNER
+            | root::roles::KEY_DOMAIN
+            | root::roles::CONTENT
+            | root::roles::POLICY => {}
+            _ => return Err("content message root contains unsupported ref role".to_string()),
+        }
+        if edge.index != 0 {
+            return Err("content message root contains unsupported ref index".to_string());
+        }
+    }
+
+    let required = |role, label| {
+        root_fact
+            .ref_by_role_index(role, 0)
+            .map(|edge| edge.target_fact_id)
+            .ok_or_else(|| format!("content message root missing {label} ref"))
+    };
+    let policy_id = root_fact
+        .ref_by_role_index(root::roles::POLICY, 0)
+        .map(|edge| edge.target_fact_id);
+    Ok(RootMessageRefs {
+        workspace_id: required(root::roles::WORKSPACE, "workspace")?,
+        author_user_id: required(root::roles::AUTHOR, "author")?,
+        signer_id: required(root::roles::SIGNER, "signer")?,
+        frontier_id: required(root::roles::KEY_DOMAIN, "key domain")?,
+        payload_id: required(root::roles::CONTENT, "content")?,
+        policy_id,
+    })
+}
+
+fn root_message_wait_output(
+    fact: &Fact,
+    workspace_id: FactId,
+    root_fact: &root::fact::RootFact,
+    root_context_output: ProjectionOutput,
+    needs: impl IntoIterator<Item = ContextNeed>,
+) -> ProjectionOutput {
+    let output = needs
+        .into_iter()
+        .fold(root_context_output, |output, need| output.need(need));
+    share_fact_with_sync(output, workspace_id, fact, root_ref_context_have(root_fact))
+}
+
+fn root_ref_context_have(root_fact: &root::fact::RootFact) -> Vec<FactId> {
+    root_fact
+        .refs
+        .iter()
+        .map(|edge| edge.target_fact_id)
+        .collect()
+}
+
+fn root_ref_context_have_from_fact(fact: &Fact) -> Vec<FactId> {
+    root::decode_fact_payload(fact.body())
+        .map(|root_fact| root_ref_context_have(&root_fact))
+        .unwrap_or_default()
+}
+
+fn merge_projection_outputs(
+    mut output: ProjectionOutput,
+    mut extra: ProjectionOutput,
+) -> ProjectionOutput {
+    output.needs.append(&mut extra.needs);
+    output.offers.append(&mut extra.offers);
+    output.time_wakes.append(&mut extra.time_wakes);
+    output.effects.facts.append(&mut extra.effects.facts);
+    output
+        .effects
+        .ephemeral_facts
+        .append(&mut extra.effects.ephemeral_facts);
+    output
+        .effects
+        .purged_facts
+        .append(&mut extra.effects.purged_facts);
+    output
+        .effects
+        .row_mutations
+        .append(&mut extra.effects.row_mutations);
+    output.effects.intents.append(&mut extra.effects.intents);
+    output
+        .effects
+        .local_intents
+        .append(&mut extra.effects.local_intents);
+    output
+}
+
 fn base_wait_output(
     fact: &Fact,
     message: &super::fact::ContentMessageFact,
     needs: impl IntoIterator<Item = ContextNeed>,
-    context_have: Vec<FactId>,
+    mut context_have: Vec<FactId>,
 ) -> ProjectionOutput {
+    context_have.extend(root_ref_context_have_from_fact(fact));
     share_fact_with_sync(
         with_retention_wakes(
             needs
@@ -783,6 +1095,7 @@ pub fn context_payload<'a>(
 mod projector_tests {
     use crate as topo;
 
+    use topo::core::command_context::{LocalEncryptionCapability, LocalSigningCapability};
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
@@ -800,6 +1113,7 @@ mod projector_tests {
     use topo::protocol::registry::read_models;
 
     use topo::protocol::auth::user::{encode as user_layout, fact::UserFact};
+    use topo::protocol::{root, sealed_payload};
 
     const CONTENT_SIGNING_KEY: [u8; 32] = [7; 32];
     const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [13; 32];
@@ -1006,6 +1320,154 @@ mod projector_tests {
             opened.values[5],
             topo::core::intents::Value::Bytes(b"hello from content message".to_vec())
         );
+    }
+
+    #[test]
+    fn content_message_root_materializes_from_sealed_payload_context() {
+        let author_fact = user_fact([9; 32]);
+        let signer_id = [8; 32];
+        let frontier_id = [3; 32];
+        let key = [42; 32];
+        let created_at_ms = 180_000;
+        let snapshot = author::MessageAuthoringSnapshot::new(
+            [9; 32],
+            LocalSigningCapability {
+                workspace_id: [9; 32],
+                signer_id,
+                public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
+                private_key: CONTENT_SIGNING_KEY,
+            },
+            LocalEncryptionCapability {
+                workspace_id: [9; 32],
+                frontier_id,
+                owner_endpoint_id: signer_id,
+                created_at_ms,
+                key_secret: key,
+            },
+            author_fact.id,
+            None,
+            0,
+        )
+        .expect("message snapshot");
+        let authored = snapshot
+            .build_message_root_payload_facts("hello from content root", created_at_ms)
+            .expect("root payload message");
+        let root_body =
+            root::decode_fact_payload(authored.root.body()).expect("decode root message");
+        let signer_fact = signer_fact_for_root([9; 32], author_fact.id, signer_id, created_at_ms);
+        let secret_fact = secret_fact_for_root([9; 32], frontier_id, signer_id, created_at_ms, key);
+        let signature_fact = crate::protocol::auth::signature::author::create_signature(
+            [9; 32],
+            authored.root.id,
+            &CONTENT_SIGNING_KEY,
+            created_at_ms,
+        )
+        .expect("signature fact");
+
+        let output = root::project::RootProjector::new()
+            .project(
+                &authored.root,
+                &ProjectionContext::from_matches(vec![
+                    sealed_payload_match(&authored.root, &root_body, &authored.payload),
+                    signer_match_for_root(authored.root.id, [9; 32], signer_id, &signer_fact),
+                    signature_match_for_root(
+                        authored.root.id,
+                        [9; 32],
+                        crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
+                        &signature_fact,
+                    ),
+                    author_match_for_root(authored.root.id, author_fact.id, &author_fact),
+                    secret_match_for_root(
+                        authored.root.id,
+                        [9; 32],
+                        frontier_id,
+                        created_at_ms / super::UNIX_MINUTE_MS,
+                        &secret_fact,
+                    ),
+                ]),
+            )
+            .expect("project root message");
+
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role == sealed_payload::project::SEALED_PAYLOAD_ROLE));
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == root::project::ROOT_ENVELOPE_ROLE));
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == "content_message"));
+        let row = put_row!(output, read_models::CONTENT_MESSAGE_ROWS).expect("content row");
+        assert_eq!(
+            row.values[1],
+            topo::core::intents::Value::Bytes(authored.root.id.to_vec())
+        );
+        let opened = put_row!(output, read_models::OPENED_MESSAGE_ROWS).expect("opened row");
+        assert_eq!(
+            opened.values[5],
+            topo::core::intents::Value::Bytes(b"hello from content root".to_vec())
+        );
+        assert_eq!(output.effects.intents.len(), 1);
+        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &output.effects.intents[0],
+        )
+        .expect("decode sync share");
+        assert!(share.context_have.contains(&authored.payload.id));
+        assert!(share.context_have.contains(&author_fact.id));
+        assert!(share.context_have.contains(&signer_id));
+        assert!(share.context_have.contains(&frontier_id));
+    }
+
+    #[test]
+    fn message_context_from_fact_accepts_old_message_and_root_contexts() {
+        let author_fact = user_fact([9; 32]);
+        let (old_message, old_fact, _key) = message_fact(author_fact.id, "old context message");
+
+        let old_context = project::message_context_from_fact(&old_fact, "old message")
+            .expect("old message context");
+
+        assert_eq!(old_context.workspace_id, old_message.workspace_id);
+        assert_eq!(old_context.frontier_id, old_message.frontier_id);
+        assert_eq!(old_context.minute, old_message.minute);
+        assert_eq!(old_context.author_user_id, old_message.author_user_id);
+
+        let signer_id = [8; 32];
+        let frontier_id = [3; 32];
+        let created_at_ms = 240_000;
+        let snapshot = author::MessageAuthoringSnapshot::new(
+            [9; 32],
+            LocalSigningCapability {
+                workspace_id: [9; 32],
+                signer_id,
+                public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
+                private_key: CONTENT_SIGNING_KEY,
+            },
+            LocalEncryptionCapability {
+                workspace_id: [9; 32],
+                frontier_id,
+                owner_endpoint_id: signer_id,
+                created_at_ms,
+                key_secret: [42; 32],
+            },
+            author_fact.id,
+            None,
+            0,
+        )
+        .expect("message snapshot");
+        let authored = snapshot
+            .build_message_root_payload_facts("root context message", created_at_ms)
+            .expect("root payload message");
+
+        let root_context = project::message_context_from_fact(&authored.root, "root message")
+            .expect("root message context");
+
+        assert_eq!(root_context.workspace_id, [9; 32]);
+        assert_eq!(root_context.frontier_id, frontier_id);
+        assert_eq!(root_context.minute, created_at_ms / super::UNIX_MINUTE_MS);
+        assert_eq!(root_context.author_user_id, author_fact.id);
     }
 
     #[test]
@@ -1275,6 +1737,189 @@ mod projector_tests {
             message.created_at_ms,
             auth_layout::encode_local_key_secret(&secret).expect("encode secret"),
         )
+    }
+
+    fn signer_fact_for_root(
+        workspace_id: [u8; 32],
+        author_user_id: [u8; 32],
+        signer_id: [u8; 32],
+        created_at_ms: u64,
+    ) -> Fact {
+        let signer = EndpointSharedFact {
+            created_at_ms,
+            workspace_id,
+            user_authority_fact_id: author_user_id,
+            endpoint_id: signer_id,
+            signing_public_key: crypto::ed25519_public_key(&CONTENT_SIGNING_KEY),
+            endpoint_role: EndpointRole::Device,
+            device_name: topo::protocol::auth::endpoint_shared::fact::EndpointDeviceName::new(
+                "alice-root-device",
+            )
+            .expect("device name"),
+            signer_id: [1; 32],
+            signer_public_key: crypto::ed25519_public_key(&ENDPOINT_AUTHORITY_KEY),
+        };
+        Fact::new(
+            FactScope::Global,
+            created_at_ms,
+            endpoint_shared_layout::encode_fact(&signer).expect("encode endpoint shared"),
+        )
+    }
+
+    fn secret_fact_for_root(
+        workspace_id: [u8; 32],
+        frontier_id: [u8; 32],
+        signer_id: [u8; 32],
+        created_at_ms: u64,
+        key: [u8; 32],
+    ) -> Fact {
+        let secret = LocalKeySecretFact {
+            workspace_id,
+            frontier_id,
+            owner_endpoint_id: signer_id,
+            created_at_ms,
+            key_secret: key,
+        };
+        Fact::new(
+            FactScope::Local,
+            created_at_ms,
+            auth_layout::encode_local_key_secret(&secret).expect("encode secret"),
+        )
+    }
+
+    fn sealed_payload_match(
+        root_fact: &Fact,
+        root_body: &root::fact::RootFact,
+        payload: &Fact,
+    ) -> MatchedContext {
+        let payload_id = root_body
+            .ref_by_role_index(root::roles::CONTENT, 0)
+            .expect("content payload ref")
+            .target_fact_id;
+        MatchedContext {
+            need: sealed_payload::project::sealed_payload_need(
+                root_fact.id,
+                FactScope::Global,
+                payload_id,
+                crate::protocol::content::message::PAYLOAD_FORMAT_MESSAGE_TEXT,
+            )
+            .expect("payload need"),
+            offer: sealed_payload::project::sealed_payload_offer(
+                payload.id,
+                FactScope::Global,
+                payload_id,
+                crate::protocol::content::message::PAYLOAD_FORMAT_MESSAGE_TEXT,
+            )
+            .expect("payload offer"),
+            payload: payload.clone(),
+        }
+    }
+
+    fn signer_match_for_root(
+        root_id: [u8; 32],
+        workspace_id: [u8; 32],
+        signer_id: [u8; 32],
+        signer: &Fact,
+    ) -> MatchedContext {
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        MatchedContext {
+            need: crate::core::context::ContextNeed::range(
+                root_id,
+                "content_signer",
+                scope.clone(),
+                signer_id,
+                signer_id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                signer.id,
+                "content_signer",
+                scope,
+                signer_id,
+                signer_id,
+            ),
+            payload: signer.clone(),
+        }
+    }
+
+    fn signature_match_for_root(
+        root_id: [u8; 32],
+        workspace_id: [u8; 32],
+        signer_public_key: [u8; 32],
+        signature: &Fact,
+    ) -> MatchedContext {
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        MatchedContext {
+            need: crate::protocol::auth::signature::project::signature_proof_need(
+                root_id,
+                scope.clone(),
+                root_id,
+                signer_public_key,
+            )
+            .expect("signature need"),
+            offer: crate::protocol::auth::signature::project::signature_proof_offer(
+                signature.id,
+                scope,
+                root_id,
+                signer_public_key,
+            )
+            .expect("signature offer"),
+            payload: signature.clone(),
+        }
+    }
+
+    fn author_match_for_root(
+        root_id: [u8; 32],
+        author_user_id: [u8; 32],
+        author: &Fact,
+    ) -> MatchedContext {
+        MatchedContext {
+            need: crate::core::context::ContextNeed::range(
+                root_id,
+                "auth_user",
+                crate::core::facts::FactScope::Global,
+                author_user_id,
+                author_user_id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                author.id,
+                "auth_user",
+                crate::core::facts::FactScope::Global,
+                author.id,
+                author.id,
+            ),
+            payload: author.clone(),
+        }
+    }
+
+    fn secret_match_for_root(
+        root_id: [u8; 32],
+        workspace_id: [u8; 32],
+        frontier_id: [u8; 32],
+        minute: u64,
+        secret: &Fact,
+    ) -> MatchedContext {
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        MatchedContext {
+            need: coverage::secret_need(
+                root_id,
+                scope.clone(),
+                workspace_id,
+                frontier_id,
+                minute,
+                root_id,
+            ),
+            offer: coverage::secret_offer(
+                secret.id,
+                scope,
+                workspace_id,
+                frontier_id,
+                0,
+                u64::MAX,
+                0,
+                [0; 32],
+            ),
+            payload: secret.clone(),
+        }
     }
 
     fn signer_match(

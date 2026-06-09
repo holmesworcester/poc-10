@@ -2,9 +2,9 @@
 //!
 //! The tests hand-build a `CommandContext` from a vault and a fixed clock,
 //! drive the command, and assert: (1) the happy path produces a message fact
-//! plus signature evidence and a
+//! root, sealed payload, and signature evidence and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
-//! `content_message` fact whose ciphertext decrypts back to
+//! root whose sealed payload ciphertext decrypts back to
 //! the original plaintext under the workspace key.
 
 use std::cell::Cell;
@@ -17,8 +17,12 @@ use topo::core::crypto;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::content::message::commands::send_message;
-use topo::protocol::content::message::decode::{decode_fact, recover_text};
+use topo::protocol::content::message::decode::recover_text;
 use topo::protocol::content::message::encode::associated_data;
+use topo::protocol::content::message::{
+    PAYLOAD_ALGORITHM_XCHACHA20_POLY1305, PAYLOAD_FORMAT_MESSAGE_TEXT, ROOT_FAMILY_CONTENT_MESSAGE,
+    ROOT_VERSION_CONTENT_MESSAGE,
+};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 struct FixedClock(Cell<u64>);
@@ -119,25 +123,50 @@ fn send_message_happy_path_emits_message_and_signature_facts() {
     assert_eq!(output.receipt.created_at_ms, 60_000);
     assert_eq!(
         output.effects.facts.len(),
-        2,
-        "message plus signature proof"
+        3,
+        "root plus sealed payload plus signature proof"
     );
     assert!(
         output.effects.intents.is_empty(),
         "no intents in the first cut"
     );
 
-    let message = decode_fact(&output.effects.facts[0].bytes).expect("decode content message");
+    let root = topo::protocol::root::decode_fact_payload(output.effects.facts[0].body())
+        .expect("decode root message");
+    let payload =
+        topo::protocol::sealed_payload::decode_fact_payload(output.effects.facts[1].body())
+            .expect("decode sealed payload");
     let signature =
-        topo::protocol::auth::signature::decode::decode_fact(&output.effects.facts[1].bytes)
+        topo::protocol::auth::signature::decode::decode_fact(output.effects.facts[2].body())
             .expect("decode signature evidence");
     topo::protocol::auth::signature::authenticate::verify_signature(&signature)
         .expect("verify signature evidence");
     assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
-    assert_eq!(signature.signer_public_key, message.signer_public_key);
-    assert_eq!(message.workspace_id, workspace_id);
-    assert_eq!(message.created_at_ms, 60_000);
-    assert_eq!(message.minute, 60_000 / 60_000);
+    assert_eq!(
+        signature.signer_public_key,
+        vault
+            .local_signing_capability(workspace_id)
+            .expect("signing capability")
+            .public_key
+    );
+    assert_eq!(output.receipt.message_fact_id, output.effects.facts[0].id);
+    assert_eq!(root.family, ROOT_FAMILY_CONTENT_MESSAGE);
+    assert_eq!(root.version, ROOT_VERSION_CONTENT_MESSAGE);
+    assert_eq!(root.created_at_ms, 60_000);
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::WORKSPACE, 0)
+            .expect("workspace ref")
+            .target_fact_id,
+        workspace_id
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::CONTENT, 0)
+            .expect("content payload ref")
+            .target_fact_id,
+        output.effects.facts[1].id
+    );
+    assert_eq!(payload.format, PAYLOAD_FORMAT_MESSAGE_TEXT);
+    assert_eq!(payload.algorithm, PAYLOAD_ALGORITHM_XCHACHA20_POLY1305);
 }
 
 #[test]
@@ -168,12 +197,16 @@ fn send_message_fact_round_trips_through_decode_content_message() {
 
     assert_eq!(
         output.effects.facts.len(),
-        2,
-        "message plus signature proof"
+        3,
+        "root plus sealed payload plus signature proof"
     );
-    let message = decode_fact(&output.effects.facts[0].bytes).expect("decode content message");
+    let root = topo::protocol::root::decode_fact_payload(output.effects.facts[0].body())
+        .expect("decode root message");
+    let payload =
+        topo::protocol::sealed_payload::decode_fact_payload(output.effects.facts[1].body())
+            .expect("decode sealed payload");
     let signature =
-        topo::protocol::auth::signature::decode::decode_fact(&output.effects.facts[1].bytes)
+        topo::protocol::auth::signature::decode::decode_fact(output.effects.facts[2].body())
             .expect("decode signature evidence");
     assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
 
@@ -183,11 +216,21 @@ fn send_message_fact_round_trips_through_decode_content_message() {
     let encryption = vault
         .local_encryption_capability(workspace_id)
         .expect("vault encryption capability");
+    let frontier_id = root
+        .ref_by_role_index(topo::protocol::root::roles::KEY_DOMAIN, 0)
+        .expect("key domain ref")
+        .target_fact_id;
+    let nonce: [u8; topo::protocol::content::message::fact::NONCE_BYTES] =
+        payload.header.bytes().try_into().expect("nonce header");
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &encryption.key_secret,
-        &associated_data(workspace_id, message.frontier_id, message.minute),
-        &message.nonce,
-        &message.ciphertext,
+        &associated_data(
+            workspace_id,
+            frontier_id,
+            root.created_at_ms / topo::protocol::content::message::fact::UNIX_MINUTE_MS,
+        ),
+        &nonce,
+        payload.ciphertext.bytes(),
     )
     .expect("decrypt sealed ciphertext");
 

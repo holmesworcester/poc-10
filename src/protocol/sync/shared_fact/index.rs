@@ -768,6 +768,42 @@ mod tests {
     }
 
     #[test]
+    fn range_query_expands_to_unindexed_non_local_context() {
+        let store = store();
+        let workspace_id = [9; 32];
+        let connection_id = seed_authorized_connection(&store, workspace_id);
+        let context = Fact::new(FactScope::Global, 10, vec![181, 1]);
+        let owner = fact(workspace_id, 20, 2);
+        store
+            .write_transaction(|tx| {
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &owner)?;
+                Ok(())
+            })
+            .expect("persist facts");
+        record_sync_contribution(
+            &store,
+            &upsert(workspace_id, &owner, vec![context.id]),
+            Some(&owner),
+        )
+        .expect("owner contribution");
+
+        let without = shareable_facts_for_connection_range(&store, connection_id, 20, 20, false)
+            .expect("without deps");
+        let with = shareable_facts_for_connection_range(&store, connection_id, 20, 20, true)
+            .expect("with deps");
+
+        assert_eq!(
+            without.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![owner.id]
+        );
+        assert_eq!(
+            with.iter().map(|fact| fact.id).collect::<Vec<_>>(),
+            vec![context.id, owner.id]
+        );
+    }
+
+    #[test]
     fn received_bootstrap_request_invite_authorizes_responder_connection_sync() {
         let store = store();
         let workspace_id = [9; 32];
@@ -1078,17 +1114,26 @@ pub fn shareable_facts_for_connection_range(
     }
 
     while let Some(fact_id) = pending.pop_front() {
-        let Some(workspace_ids) = workspaces_by_id.get(&fact_id) else {
-            continue;
-        };
-        for dep_id in workspace_ids
-            .iter()
-            .map(|workspace_id| negentropy_context_have_for_leaf(store, *workspace_id, fact_id))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-        {
-            if by_id.contains_key(&dep_id) && selected.insert(dep_id) {
+        let workspace_ids = workspaces_by_id.get(&fact_id).cloned().unwrap_or_default();
+        for workspace_id in workspace_ids {
+            for dep_id in negentropy_context_have_for_leaf(store, workspace_id, fact_id)? {
+                if selected.contains(&dep_id) {
+                    continue;
+                }
+                if let std::collections::btree_map::Entry::Vacant(entry) = by_id.entry(dep_id) {
+                    let Some(dep_fact) = persisted_fact(store, &dep_id)? else {
+                        continue;
+                    };
+                    if dep_fact.scope == FactScope::Local {
+                        continue;
+                    }
+                    entry.insert(dep_fact);
+                }
+                workspaces_by_id
+                    .entry(dep_id)
+                    .or_default()
+                    .insert(workspace_id);
+                selected.insert(dep_id);
                 pending.push_back(dep_id);
             }
         }

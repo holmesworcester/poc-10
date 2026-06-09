@@ -26,7 +26,7 @@ pub(crate) use crate::protocol::connection_frame_wire::{
     seal_connection_send_frame, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
     CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
 };
-use crate::protocol::{auth, connection, content, sync};
+use crate::protocol::{auth, connection, content, root, sealed_payload, sync};
 
 /// Return the bytes that may be packaged into a connection::frame frame.
 ///
@@ -490,6 +490,18 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             });
         }
+        root::encode::TYPE_ROOT => {
+            return admit_with_codec::<root::Codec>(bytes, |root| {
+                let timestamp = root.created_at_ms;
+                Ok(match root.workspace_id() {
+                    Some(workspace_id) => Admission::workspace(workspace_id, timestamp),
+                    None => Admission::global(timestamp),
+                })
+            });
+        }
+        sealed_payload::encode::TYPE_SEALED_PAYLOAD => {
+            return admit_with_codec::<sealed_payload::Codec>(bytes, |_| Ok(Admission::global(0)));
+        }
         auth::recipient_key::encode::TYPE_RECIPIENT_KEY => {
             return admit_with_codec::<auth::recipient_key::Codec>(bytes, |recipient| {
                 Ok(Admission::workspace(
@@ -723,6 +735,105 @@ mod tests {
         assert_eq!(admitted.scope, workspace_scope(workspace_id));
         assert_eq!(admitted.timestamp, 77_777);
         assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn admitted_root_uses_workspace_ref_scope_and_created_timestamp() {
+        let workspace_id = [21; 32];
+        let root_fact = root::fact::RootFact {
+            family: 77,
+            version: 1,
+            created_at_ms: 88_888,
+            refs: vec![
+                root::fact::RootRef::new(root::roles::WORKSPACE, 0, workspace_id)
+                    .expect("workspace ref"),
+            ],
+        };
+        let bytes = root::encode::encode_fact(&root_fact).expect("root");
+
+        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit root");
+
+        assert_eq!(admitted.scope, workspace_scope(workspace_id));
+        assert_eq!(admitted.timestamp, root_fact.created_at_ms);
+        assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn admitted_sealed_payload_uses_global_scope() {
+        let payload = sealed_payload::fact::SealedPayloadFact {
+            format: 7,
+            algorithm: 1,
+            header: sealed_payload::fact::PayloadHeader::new(b"nonce").expect("header"),
+            ciphertext: sealed_payload::fact::PayloadCiphertext::new(b"ciphertext")
+                .expect("ciphertext"),
+        };
+        let bytes = sealed_payload::encode::encode_fact(&payload).expect("sealed payload");
+
+        let admitted = admit_received_fact_bytes(bytes.clone()).expect("admit sealed payload");
+
+        assert_eq!(admitted.scope, FactScope::Global);
+        assert_eq!(admitted.timestamp, 0);
+        assert_eq!(admitted.bytes, bytes);
+    }
+
+    #[test]
+    fn opened_connection_frame_admits_root_and_payload_children() {
+        let workspace_id = [31; 32];
+        let root_fact = root::fact::RootFact {
+            family: 77,
+            version: 1,
+            created_at_ms: 99_999,
+            refs: vec![
+                root::fact::RootRef::new(root::roles::WORKSPACE, 0, workspace_id)
+                    .expect("workspace ref"),
+            ],
+        };
+        let root = Fact::new(
+            workspace_scope(workspace_id),
+            root_fact.created_at_ms,
+            root::encode::encode_fact(&root_fact).expect("root"),
+        );
+        let payload_body = sealed_payload::fact::SealedPayloadFact {
+            format: 7,
+            algorithm: 1,
+            header: sealed_payload::fact::PayloadHeader::new(b"nonce").expect("header"),
+            ciphertext: sealed_payload::fact::PayloadCiphertext::new(b"ciphertext")
+                .expect("ciphertext"),
+        };
+        let payload = Fact::new(
+            FactScope::Global,
+            root_fact.created_at_ms,
+            sealed_payload::encode::encode_fact(&payload_body).expect("sealed payload"),
+        );
+        let connection = ConnectionMaterial {
+            connection_id: [1; 32],
+            from_endpoint: [2; 32],
+            to_endpoint: [3; 32],
+            request_id: [4; 32],
+            connection_secret: [5; 32],
+        };
+        let bundle =
+            ConnectionFrameFactBundle::from_bytes(vec![root.bytes.clone(), payload.bytes.clone()]);
+        let frame = wire::seal_connection_send_frame(
+            connection.connection_id,
+            connection.from_endpoint,
+            connection.to_endpoint,
+            connection.connection_secret,
+            &[root.id, payload.id],
+            bundle,
+        )
+        .expect("sealed frame");
+
+        let opened =
+            open_received_frame_with_material(&frame, connection, b"127.0.0.1:41002", 123_456)
+                .expect("open received frame");
+
+        assert!(opened
+            .iter()
+            .any(|fact| fact.id == root.id && fact.scope == workspace_scope(workspace_id)));
+        assert!(opened
+            .iter()
+            .any(|fact| fact.id == payload.id && fact.scope == FactScope::Global));
     }
 
     #[test]

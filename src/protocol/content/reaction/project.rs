@@ -17,7 +17,7 @@ use crate::core::pipeline::{
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
-use crate::protocol::content::{message, message_deletion};
+use crate::protocol::content::message_deletion;
 use crate::protocol::registry::read_models;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, retract_fact_from_sync, share_fact_with_sync,
@@ -342,30 +342,14 @@ fn validate_message_deletion(
 
 struct TargetMessageContext<'a> {
     _payload: &'a Fact,
-    message: TargetMessage,
+    message: project::MessageContext,
 }
 
-struct TargetMessage {
-    workspace_id: crate::core::facts::FactId,
-    frontier_id: crate::core::facts::FactId,
-    minute: u64,
-    author_user_id: crate::core::facts::FactId,
-}
-
-fn decode_target_message_payload(payload: &Fact, label: &str) -> Result<TargetMessage, String> {
-    let message = project::decode_typed_fact(
-        payload,
-        message::TYPE_CONTENT_MESSAGE,
-        label,
-        message::decode_fact_payload,
-    )
-    .map_err(|_| format!("{label} context is not a content message"))?;
-    Ok(TargetMessage {
-        workspace_id: message.workspace_id,
-        frontier_id: message.frontier_id,
-        minute: message.minute,
-        author_user_id: message.author_user_id,
-    })
+fn decode_target_message_payload(
+    payload: &Fact,
+    label: &str,
+) -> Result<project::MessageContext, String> {
+    project::message_context_from_fact(payload, label)
 }
 
 fn require_fact_scope(fact: &Fact, expected: &crate::core::facts::FactScope) -> Result<(), String> {

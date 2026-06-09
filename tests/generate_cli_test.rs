@@ -28,17 +28,18 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
     assert_eq!(line_value(&content, "message_payload_bytes"), "896");
 
     let status = assert_success(topo(&["--db", &db, "count"]));
+    let generated_wire_facts = 7 * 3;
     assert_eq!(
         line_value(&status, "facts")
             .parse::<usize>()
             .expect("facts count after generate"),
-        before_facts + 14
+        before_facts + generated_wire_facts
     );
     assert_eq!(
         line_value(&status, "applied_facts")
             .parse::<usize>()
             .expect("applied facts count after generate"),
-        before_facts + 14
+        before_facts + generated_wire_facts
     );
 }
 
