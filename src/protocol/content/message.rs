@@ -19,6 +19,10 @@ pub mod project;
 pub mod queries;
 
 pub const TYPE_CONTENT_MESSAGE: u8 = encode::TYPE_CONTENT_MESSAGE;
+pub const ROOT_FAMILY_CONTENT_MESSAGE: u32 = 1;
+pub const ROOT_VERSION_CONTENT_MESSAGE: u32 = 1;
+pub const PAYLOAD_FORMAT_MESSAGE_TEXT: u32 = 1;
+pub const PAYLOAD_ALGORITHM_XCHACHA20_POLY1305: u32 = 1;
 
 pub(crate) use decode::Codec;
 

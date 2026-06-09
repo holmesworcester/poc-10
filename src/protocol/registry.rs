@@ -29,7 +29,9 @@ use crate::core::pipeline::{
 };
 use crate::core::store::{ReplayTables, SchemaSource, TableName};
 use crate::protocol::cli as command;
-use crate::protocol::{auth, connection, content, sync};
+use crate::protocol::{
+    auth, connection, content, local_secret_payload, root, sealed_payload, sync,
+};
 
 pub use crate::protocol::cli::MatchCliContext;
 
@@ -252,6 +254,19 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             fact,
             content::reaction::Codec,
             content::reaction::authenticate::ContentReactionAuthenticator
+        ),
+        root::encode::TYPE_ROOT => {
+            authenticate_admission_arm!(fact, root::Codec, root::authenticate::RootAuthenticator)
+        }
+        sealed_payload::encode::TYPE_SEALED_PAYLOAD => authenticate_admission_arm!(
+            fact,
+            sealed_payload::Codec,
+            sealed_payload::authenticate::SealedPayloadAuthenticator
+        ),
+        local_secret_payload::encode::TYPE_LOCAL_SECRET_PAYLOAD => authenticate_admission_arm!(
+            fact,
+            local_secret_payload::Codec,
+            local_secret_payload::authenticate::LocalSecretPayloadAuthenticator
         ),
         auth::signature::encode::TYPE_SIGNATURE => authenticate_admission_arm!(
             fact,
@@ -924,6 +939,9 @@ projector_routes! {
     project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, content::message::project::PIPELINE;
     project_content_message_deletion => content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector, content::message_deletion::project::PIPELINE;
     project_content_reaction => content::reaction::encode::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector, content::reaction::project::PIPELINE;
+    project_root => root::encode::TYPE_ROOT, root::project::RootProjector, root::project::PIPELINE;
+    project_sealed_payload => sealed_payload::encode::TYPE_SEALED_PAYLOAD, sealed_payload::project::SealedPayloadProjector, sealed_payload::project::PIPELINE;
+    project_local_secret_payload => local_secret_payload::encode::TYPE_LOCAL_SECRET_PAYLOAD, local_secret_payload::project::LocalSecretPayloadProjector, local_secret_payload::project::PIPELINE;
     project_auth_signature => auth::signature::encode::TYPE_SIGNATURE, auth::signature::project::SignatureProjector, auth::signature::project::PIPELINE;
     project_auth_recipient_key => auth::recipient_key::encode::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector, auth::recipient_key::project::PIPELINE;
     project_auth_removal_frontier => auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector, auth::removal_frontier::project::PIPELINE;

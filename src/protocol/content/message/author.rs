@@ -16,6 +16,7 @@ use crate::protocol::content::message::fact::{
     PLAINTEXT_SLOT_BYTES, TEXT_LENGTH_PREFIX_BYTES, UNIX_MINUTE_MS,
 };
 use crate::protocol::content::retention_policy;
+use crate::protocol::{root, sealed_payload};
 
 #[derive(Clone)]
 pub struct MessageAuthoringSnapshot {
@@ -26,6 +27,19 @@ pub struct MessageAuthoringSnapshot {
     author_user_id: FactId,
     active_policy: Option<retention_policy::queries::RetentionPolicyRow>,
     retained_floor_minute: u64,
+}
+
+pub struct RootPayloadMessageFacts {
+    pub root: Fact,
+    pub payload: Fact,
+}
+
+struct EncryptedMessageParts {
+    minute: u64,
+    expires_at_minute: u64,
+    retention_policy_id: FactId,
+    nonce: [u8; NONCE_BYTES],
+    ciphertext: Vec<u8>,
 }
 
 impl MessageAuthoringSnapshot {
@@ -60,6 +74,92 @@ impl MessageAuthoringSnapshot {
     }
 
     pub fn build_message_fact(&self, text: &str, created_at_ms: u64) -> Result<Fact, String> {
+        let encrypted = self.encrypt_message_parts(text, created_at_ms)?;
+
+        let message = ContentMessageFact {
+            workspace_id: self.workspace_id,
+            created_at_ms,
+            author_user_id: self.author_user_id,
+            signer_id: self.signer_id,
+            signer_public_key: self.signer_public_key,
+            frontier_id: self.encryption.frontier_id,
+            local_history_node_secret_id: [0; 32],
+            expires_at_minute: encrypted.expires_at_minute,
+            retention_policy_id: encrypted.retention_policy_id,
+            minute: encrypted.minute,
+            nonce: encrypted.nonce,
+            ciphertext: MessageCiphertext::new(&encrypted.ciphertext)
+                .map_err(|err| format!("content message ciphertext: {err}"))?,
+        };
+
+        crate::core::perf_profile::measure_result("message_encode", || {
+            Ok::<_, String>(Fact::new(
+                FactScope::Scoped {
+                    kind: ScopeKind::new("workspace").expect("valid workspace scope"),
+                    id: self.workspace_id,
+                },
+                created_at_ms,
+                super::encode::encode_fact(&message)?,
+            ))
+        })
+    }
+
+    pub fn build_message_root_payload_facts(
+        &self,
+        text: &str,
+        created_at_ms: u64,
+    ) -> Result<RootPayloadMessageFacts, String> {
+        let encrypted = self.encrypt_message_parts(text, created_at_ms)?;
+        let payload_body = sealed_payload::fact::SealedPayloadFact {
+            format: super::PAYLOAD_FORMAT_MESSAGE_TEXT,
+            algorithm: super::PAYLOAD_ALGORITHM_XCHACHA20_POLY1305,
+            header: sealed_payload::fact::PayloadHeader::new(&encrypted.nonce)
+                .map_err(|err| format!("message payload nonce header: {err}"))?,
+            ciphertext: sealed_payload::fact::PayloadCiphertext::new(&encrypted.ciphertext)
+                .map_err(|err| format!("message payload ciphertext: {err}"))?,
+        };
+        let payload = Fact::new(
+            FactScope::Global,
+            created_at_ms,
+            sealed_payload::encode::encode_fact(&payload_body)?,
+        );
+
+        let mut refs = vec![
+            root::fact::RootRef::new(root::roles::WORKSPACE, 0, self.workspace_id)?,
+            root::fact::RootRef::new(root::roles::AUTHOR, 0, self.author_user_id)?,
+            root::fact::RootRef::new(root::roles::SIGNER, 0, self.signer_id)?,
+            root::fact::RootRef::new(root::roles::KEY_DOMAIN, 0, self.encryption.frontier_id)?,
+            root::fact::RootRef::new(root::roles::CONTENT, 0, payload.id)?,
+        ];
+        if encrypted.retention_policy_id != [0; 32] {
+            refs.push(root::fact::RootRef::new(
+                root::roles::POLICY,
+                0,
+                encrypted.retention_policy_id,
+            )?);
+        }
+        refs.sort_by_key(|edge| (edge.role, edge.index));
+
+        let root_body = root::fact::RootFact {
+            family: super::ROOT_FAMILY_CONTENT_MESSAGE,
+            version: super::ROOT_VERSION_CONTENT_MESSAGE,
+            created_at_ms,
+            refs,
+        };
+        let root = Fact::new(
+            crate::protocol::auth::workspace::scope(self.workspace_id),
+            created_at_ms,
+            root::encode::encode_fact(&root_body)?,
+        );
+
+        Ok(RootPayloadMessageFacts { root, payload })
+    }
+
+    fn encrypt_message_parts(
+        &self,
+        text: &str,
+        created_at_ms: u64,
+    ) -> Result<EncryptedMessageParts, String> {
         validate_message_text(text)?;
 
         let minute = created_at_ms / UNIX_MINUTE_MS;
@@ -104,32 +204,12 @@ impl MessageAuthoringSnapshot {
                 ciphertext.len()
             ));
         }
-
-        let message = ContentMessageFact {
-            workspace_id: self.workspace_id,
-            created_at_ms,
-            author_user_id: self.author_user_id,
-            signer_id: self.signer_id,
-            signer_public_key: self.signer_public_key,
-            frontier_id: self.encryption.frontier_id,
-            local_history_node_secret_id: [0; 32],
+        Ok(EncryptedMessageParts {
+            minute,
             expires_at_minute,
             retention_policy_id,
-            minute,
             nonce,
-            ciphertext: MessageCiphertext::new(&ciphertext)
-                .map_err(|err| format!("content message ciphertext: {err}"))?,
-        };
-
-        crate::core::perf_profile::measure_result("message_encode", || {
-            Ok::<_, String>(Fact::new(
-                FactScope::Scoped {
-                    kind: ScopeKind::new("workspace").expect("valid workspace scope"),
-                    id: self.workspace_id,
-                },
-                created_at_ms,
-                super::encode::encode_fact(&message)?,
-            ))
+            ciphertext,
         })
     }
 }
@@ -173,4 +253,90 @@ pub fn deterministic_nonce(
     let mut nonce = [0u8; NONCE_BYTES];
     nonce.copy_from_slice(&hash[..NONCE_BYTES]);
     nonce
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::command_context::{LocalEncryptionCapability, LocalSigningCapability};
+    use crate::core::crypto;
+    use crate::protocol::content::message::decode::recover_text;
+
+    use super::*;
+
+    fn snapshot() -> MessageAuthoringSnapshot {
+        let workspace_id = [1; 32];
+        MessageAuthoringSnapshot::new(
+            workspace_id,
+            LocalSigningCapability {
+                workspace_id,
+                signer_id: [3; 32],
+                public_key: crypto::ed25519_public_key(&[9; 32]),
+                private_key: [9; 32],
+            },
+            LocalEncryptionCapability {
+                workspace_id,
+                frontier_id: [4; 32],
+                owner_endpoint_id: [3; 32],
+                created_at_ms: 1,
+                key_secret: [7; 32],
+            },
+            [2; 32],
+            None,
+            0,
+        )
+        .expect("snapshot")
+    }
+
+    #[test]
+    fn message_root_payload_authoring_keeps_content_out_of_root() {
+        let snapshot = snapshot();
+        let created_at_ms = 180_000;
+        let authored = snapshot
+            .build_message_root_payload_facts("hello root", created_at_ms)
+            .expect("root payload message");
+
+        let root =
+            crate::protocol::root::decode_fact_payload(authored.root.body()).expect("decode root");
+        assert_eq!(root.family, super::super::ROOT_FAMILY_CONTENT_MESSAGE);
+        assert_eq!(root.version, super::super::ROOT_VERSION_CONTENT_MESSAGE);
+        assert_eq!(root.created_at_ms, created_at_ms);
+        assert_eq!(
+            root.ref_by_role_index(crate::protocol::root::roles::WORKSPACE, 0)
+                .expect("workspace ref")
+                .target_fact_id,
+            [1; 32]
+        );
+        assert_eq!(
+            root.ref_by_role_index(crate::protocol::root::roles::CONTENT, 0)
+                .expect("content ref")
+                .target_fact_id,
+            authored.payload.id
+        );
+
+        let payload = crate::protocol::sealed_payload::decode_fact_payload(authored.payload.body())
+            .expect("decode payload");
+        assert_eq!(payload.format, super::super::PAYLOAD_FORMAT_MESSAGE_TEXT);
+        assert_eq!(
+            payload.algorithm,
+            super::super::PAYLOAD_ALGORITHM_XCHACHA20_POLY1305
+        );
+        assert_eq!(payload.header.len(), NONCE_BYTES);
+
+        let nonce: [u8; NONCE_BYTES] = payload.header.bytes().try_into().expect("nonce header");
+        let plaintext = crypto::xchacha20poly1305_decrypt(
+            &[7; 32],
+            &crate::protocol::content::message::encode::associated_data(
+                [1; 32],
+                [4; 32],
+                created_at_ms / UNIX_MINUTE_MS,
+            ),
+            &nonce,
+            payload.ciphertext.bytes(),
+        )
+        .expect("decrypt payload");
+        assert_eq!(
+            recover_text(&plaintext).expect("recover text"),
+            "hello root"
+        );
+    }
 }

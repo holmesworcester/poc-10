@@ -31,8 +31,11 @@ pub mod app;
 pub(crate) mod cli;
 pub mod connection_frame;
 pub mod connection_frame_wire;
+pub mod local_secret_payload;
 pub mod payload;
 pub mod registry;
+pub mod root;
+pub mod sealed_payload;
 
 pub mod auth;
 pub mod connection;

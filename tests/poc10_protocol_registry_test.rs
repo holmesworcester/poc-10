@@ -60,6 +60,27 @@ fn model_routes_declare_first_class_pipeline_stages() {
         "auth::workspace::adapt::WorkspaceAdapter",
         "auth::workspace::project::WorkspaceProjector",
     );
+    assert_staged_route(
+        topo::protocol::root::TYPE_ROOT,
+        "root::decode::Codec",
+        "root::authenticate::RootAuthenticator",
+        "root::adapt::RootAdapter",
+        "root::project::RootProjector",
+    );
+    assert_staged_route(
+        topo::protocol::sealed_payload::TYPE_SEALED_PAYLOAD,
+        "sealed_payload::decode::Codec",
+        "sealed_payload::authenticate::SealedPayloadAuthenticator",
+        "sealed_payload::adapt::SealedPayloadAdapter",
+        "sealed_payload::project::SealedPayloadProjector",
+    );
+    assert_staged_route(
+        topo::protocol::local_secret_payload::TYPE_LOCAL_SECRET_PAYLOAD,
+        "local_secret_payload::decode::Codec",
+        "local_secret_payload::authenticate::LocalSecretPayloadAuthenticator",
+        "local_secret_payload::adapt::LocalSecretPayloadAdapter",
+        "local_secret_payload::project::LocalSecretPayloadProjector",
+    );
 }
 
 fn assert_staged_route(
