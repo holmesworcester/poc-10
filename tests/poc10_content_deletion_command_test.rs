@@ -12,9 +12,7 @@ use topo::protocol::auth::signature::{
     authenticate as signature_authenticate, decode as signature_decode,
 };
 use topo::protocol::content::file_deletion::commands::delete_file;
-use topo::protocol::content::file_deletion::decode as file_deletion_layout_decode;
 use topo::protocol::content::message_deletion::commands::delete_message;
-use topo::protocol::content::message_deletion::decode as message_deletion_layout_decode;
 
 struct FixedClock(Cell<u64>);
 
@@ -69,18 +67,47 @@ fn delete_message_emits_decodable_target_fact() {
     assert_eq!(output.receipt.created_at_ms, 100);
     assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let decoded = message_deletion_layout_decode::decode_fact(&output.effects.facts[0].bytes)
-        .expect("decode deletion");
+    let root = topo::protocol::root::decode_fact_payload(output.effects.facts[0].body())
+        .expect("decode deletion root");
     let signature =
         signature_decode::decode_fact(&output.effects.facts[1].bytes).expect("decode signature");
     signature_authenticate::verify_signature(&signature).expect("verify signature evidence");
     assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
-    assert_eq!(decoded.workspace_id, [1; 32]);
-    assert_eq!(decoded.created_at_ms, 100);
-    assert_eq!(decoded.target_message_id, [2; 32]);
-    assert_eq!(decoded.target_frontier_id, [7; 32]);
-    assert_eq!(decoded.target_minute, 1);
-    assert_eq!(decoded.author_user_id, [3; 32]);
+    assert_eq!(
+        root.family,
+        topo::protocol::content::message_deletion::ROOT_FAMILY_CONTENT_MESSAGE_DELETION
+    );
+    assert_eq!(
+        root.version,
+        topo::protocol::content::message_deletion::ROOT_VERSION_CONTENT_MESSAGE_DELETION
+    );
+    assert_eq!(root.created_at_ms, 100);
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::WORKSPACE, 0)
+            .expect("workspace ref")
+            .target_fact_id,
+        [1; 32]
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::AUTHOR, 0)
+            .expect("author ref")
+            .target_fact_id,
+        [3; 32]
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::SIGNER, 0)
+            .expect("signer ref")
+            .target_fact_id,
+        [8; 32]
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::TARGET, 0)
+            .expect("target ref")
+            .target_fact_id,
+        [2; 32]
+    );
+    assert_eq!(output.receipt.target_frontier_id, [7; 32]);
+    assert_eq!(output.receipt.target_minute, 1);
 }
 
 #[test]
@@ -97,16 +124,45 @@ fn delete_file_emits_decodable_target_fact() {
     assert_eq!(output.receipt.created_at_ms, 200);
     assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
 
-    let decoded = file_deletion_layout_decode::decode_fact(&output.effects.facts[0].bytes)
-        .expect("decode deletion");
+    let root = topo::protocol::root::decode_fact_payload(output.effects.facts[0].body())
+        .expect("decode deletion root");
     let signature =
         signature_decode::decode_fact(&output.effects.facts[1].bytes).expect("decode signature");
     signature_authenticate::verify_signature(&signature).expect("verify signature evidence");
     assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
-    assert_eq!(decoded.workspace_id, [4; 32]);
-    assert_eq!(decoded.created_at_ms, 200);
-    assert_eq!(decoded.target_file_id, [5; 32]);
-    assert_eq!(decoded.author_user_id, [6; 32]);
+    assert_eq!(
+        root.family,
+        topo::protocol::content::file_deletion::ROOT_FAMILY_CONTENT_FILE_DELETION
+    );
+    assert_eq!(
+        root.version,
+        topo::protocol::content::file_deletion::ROOT_VERSION_CONTENT_FILE_DELETION
+    );
+    assert_eq!(root.created_at_ms, 200);
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::WORKSPACE, 0)
+            .expect("workspace ref")
+            .target_fact_id,
+        [4; 32]
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::AUTHOR, 0)
+            .expect("author ref")
+            .target_fact_id,
+        [6; 32]
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::SIGNER, 0)
+            .expect("signer ref")
+            .target_fact_id,
+        [8; 32]
+    );
+    assert_eq!(
+        root.ref_by_role_index(topo::protocol::root::roles::TARGET, 0)
+            .expect("target ref")
+            .target_fact_id,
+        [5; 32]
+    );
 }
 
 #[test]

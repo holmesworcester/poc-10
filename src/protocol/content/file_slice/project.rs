@@ -324,7 +324,7 @@ fn validate_file_deletion(
     target_file_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = file_deletion::decode_fact_payload(payload.body()).map_err(|_| {
+    let deletion = file_deletion::decode_any_fact(payload).map_err(|_| {
         "file slice parent deletion context is not a content file deletion".to_string()
     })?;
     if deletion.workspace_id != workspace_id {
@@ -349,19 +349,22 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_project::decode_typed_fact(
-        payload,
-        message_deletion::TYPE_CONTENT_MESSAGE_DELETION,
-        "file slice message parent deletion",
-        message_deletion::decode_fact_payload,
-    )?;
+    let deletion = message_deletion::decode_any_fact(payload).map_err(|_| {
+        "file slice message parent deletion context is not a content message deletion".to_string()
+    })?;
     if deletion.workspace_id != workspace_id {
         return Err("file slice message deletion workspace does not match slice".to_string());
     }
-    if deletion.target_frontier_id != target_frontier_id {
+    if deletion
+        .target_frontier_id
+        .is_some_and(|id| id != target_frontier_id)
+    {
         return Err("file slice message deletion frontier does not match parent".to_string());
     }
-    if deletion.target_minute != target_minute {
+    if deletion
+        .target_minute
+        .is_some_and(|minute| minute != target_minute)
+    {
         return Err("file slice message deletion minute does not match parent".to_string());
     }
     if deletion.target_message_id != target_message_id {

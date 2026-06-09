@@ -19,6 +19,8 @@ pub mod queries;
 pub(crate) use decode::Codec;
 
 pub const TYPE_CONTENT_MESSAGE_DELETION: u8 = encode::TYPE_CONTENT_MESSAGE_DELETION;
+pub const ROOT_FAMILY_CONTENT_MESSAGE_DELETION: u32 = 2;
+pub const ROOT_VERSION_CONTENT_MESSAGE_DELETION: u32 = 1;
 
 pub const MESSAGE_DELETION_ROWS: crate::core::store::TableName =
     crate::protocol::registry::read_models::MESSAGE_DELETION_ROWS;
@@ -31,14 +33,35 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageDeletionF
 pub struct MessageDeletionView {
     pub workspace_id: crate::core::facts::FactId,
     pub target_message_id: crate::core::facts::FactId,
-    pub target_frontier_id: crate::core::facts::FactId,
-    pub target_minute: u64,
+    pub target_frontier_id: Option<crate::core::facts::FactId>,
+    pub target_minute: Option<u64>,
     pub author_user_id: crate::core::facts::FactId,
 }
 
 pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<MessageDeletionView, String> {
-    let deletion = decode::decode_fact(fact.body())?;
-    semantic_message_deletion(deletion)
+    if let Ok(deletion) = decode::decode_fact(fact.body()) {
+        return semantic_message_deletion(deletion);
+    }
+
+    let root = crate::protocol::root::decode_fact_payload(fact.body())?;
+    if root.family != ROOT_FAMILY_CONTENT_MESSAGE_DELETION {
+        return Err("root is not a content message deletion".to_string());
+    }
+    if root.version != ROOT_VERSION_CONTENT_MESSAGE_DELETION {
+        return Err("unsupported content message deletion root version".to_string());
+    }
+    let required = |role, label| {
+        root.ref_by_role_index(role, 0)
+            .map(|edge| edge.target_fact_id)
+            .ok_or_else(|| format!("content message deletion root missing {label} ref"))
+    };
+    Ok(MessageDeletionView {
+        workspace_id: required(crate::protocol::root::roles::WORKSPACE, "workspace")?,
+        target_message_id: required(crate::protocol::root::roles::TARGET, "target")?,
+        target_frontier_id: None,
+        target_minute: None,
+        author_user_id: required(crate::protocol::root::roles::AUTHOR, "author")?,
+    })
 }
 
 fn semantic_message_deletion(
@@ -47,8 +70,8 @@ fn semantic_message_deletion(
     Ok(MessageDeletionView {
         workspace_id: deletion.workspace_id,
         target_message_id: deletion.target_message_id,
-        target_frontier_id: deletion.target_frontier_id,
-        target_minute: deletion.target_minute,
+        target_frontier_id: Some(deletion.target_frontier_id),
+        target_minute: Some(deletion.target_minute),
         author_user_id: deletion.author_user_id,
     })
 }

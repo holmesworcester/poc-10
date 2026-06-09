@@ -320,15 +320,21 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    let deletion = message_deletion::decode_fact_payload(payload.body())
+    let deletion = message_deletion::decode_any_fact(payload)
         .map_err(|_| "target deletion context is not a content message deletion".to_string())?;
     if deletion.workspace_id != workspace_id {
         return Err("target deletion workspace does not match reaction".to_string());
     }
-    if deletion.target_frontier_id != target_frontier_id {
+    if deletion
+        .target_frontier_id
+        .is_some_and(|id| id != target_frontier_id)
+    {
         return Err("target deletion frontier does not match reaction parent".to_string());
     }
-    if deletion.target_minute != target_minute {
+    if deletion
+        .target_minute
+        .is_some_and(|minute| minute != target_minute)
+    {
         return Err("target deletion minute does not match reaction parent".to_string());
     }
     if deletion.target_message_id != target_message_id {

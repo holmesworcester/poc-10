@@ -10,16 +10,17 @@
 //!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
 //!      fact_purged offer, and share the deletion fact.
 
-use crate::core::facts::Fact;
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
-use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
+use crate::protocol::auth::{endpoint_shared, signature};
 use crate::protocol::content::message::project::{self, FactSigner};
 use crate::protocol::registry::read_models;
+use crate::protocol::root;
 use crate::protocol::sync::shared_fact::project::{
     context_have_from_optional_needs, share_fact_with_sync,
 };
@@ -33,6 +34,14 @@ pub const PIPELINE: FactPipeline = FactPipeline::Staged {
     adapt: "content::message_deletion::adapt::ContentMessageDeletionAdapter",
     project: "content::message_deletion::project::ContentMessageDeletionProjector",
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootMessageDeletionRefs {
+    workspace_id: FactId,
+    author_user_id: FactId,
+    signer_id: FactId,
+    target_message_id: FactId,
+}
 
 fn message_deletion_row(input: MessageDeletionRow) -> TableInsert {
     read_models::MESSAGE_DELETIONS.insert(vec![
@@ -165,6 +174,8 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
                 Some(&author_need),
             ],
         );
+        let mut context_have = context_have;
+        context_have.extend(root_ref_context_have_from_fact(fact));
 
         // 3. Materialize.
         let row = message_deletion_row(MessageDeletionRow {
@@ -196,6 +207,149 @@ impl SemanticProjector<super::fact::ContentMessageDeletionFact>
             context_have,
         ))
     }
+}
+
+pub(crate) fn project_root_message_deletion(
+    fact: &Fact,
+    root_fact: &root::fact::RootFact,
+    context: &ProjectionContext,
+    root_context_output: ProjectionOutput,
+) -> Result<ProjectionOutput, String> {
+    if root_fact.family != super::ROOT_FAMILY_CONTENT_MESSAGE_DELETION {
+        return Err("root message deletion reader received wrong root family".to_string());
+    }
+    if root_fact.version != super::ROOT_VERSION_CONTENT_MESSAGE_DELETION {
+        return Err("unsupported content message deletion root version".to_string());
+    }
+    if root_fact.created_at_ms == 0 {
+        return Err("content message deletion root created_at_ms cannot be zero".to_string());
+    }
+
+    let refs = root_message_deletion_refs(root_fact)?;
+    let scope = crate::protocol::auth::workspace::scope(refs.workspace_id);
+    if fact.scope != scope {
+        return Err("content message deletion root scope does not match workspace ref".to_string());
+    }
+
+    let signer_need = project::signer_need(fact.id, refs.workspace_id, refs.signer_id);
+    let target_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "content_message_meta",
+        scope.clone(),
+        refs.target_message_id,
+        refs.target_message_id,
+    );
+    let author_need = crate::core::context::ContextNeed::range(
+        fact.id,
+        "auth_user",
+        FactScope::Global,
+        refs.author_user_id,
+        refs.author_user_id,
+    );
+    let waiting = share_fact_with_sync(
+        root_context_output
+            .clone()
+            .need(signer_need.clone())
+            .need(target_need.clone())
+            .need(author_need.clone()),
+        refs.workspace_id,
+        fact,
+        root_ref_context_have(root_fact),
+    );
+
+    let Some(signer_fact) = context_payload(context, &signer_need, "message deletion signer")?
+    else {
+        return Ok(waiting);
+    };
+    let signer = endpoint_shared::decode_fact_payload(signer_fact.body())
+        .map_err(|_| "message deletion signer context is not endpoint_shared".to_string())?;
+    if signer.workspace_id != refs.workspace_id {
+        return Err("message deletion signer workspace mismatch".to_string());
+    }
+    if signer.endpoint_id != refs.signer_id {
+        return Err("message deletion signer endpoint mismatch".to_string());
+    }
+    if signer.user_authority_fact_id != refs.author_user_id {
+        return Err("message deletion signer author mismatch".to_string());
+    }
+    let Some(target_fact) = context_payload(context, &target_need, "message deletion target")?
+    else {
+        return Ok(waiting);
+    };
+    if target_fact.id != refs.target_message_id {
+        return Err("message deletion target context payload id mismatch".to_string());
+    }
+    let target = project::message_context_from_fact(target_fact, "message deletion target")?;
+    if target.workspace_id != refs.workspace_id {
+        return Err("message deletion target workspace mismatch".to_string());
+    }
+    if target.author_user_id != refs.author_user_id {
+        return Err("message deletion author is not the target message author".to_string());
+    }
+
+    let deletion = super::fact::ContentMessageDeletionFact {
+        workspace_id: refs.workspace_id,
+        created_at_ms: root_fact.created_at_ms,
+        target_message_id: refs.target_message_id,
+        target_frontier_id: target.frontier_id,
+        target_minute: target.minute,
+        author_user_id: refs.author_user_id,
+        signer_id: refs.signer_id,
+        signer_public_key: signer.signing_public_key,
+    };
+    let output =
+        ContentMessageDeletionProjector::new().project_semantic(fact, deletion, context)?;
+    Ok(project::merge_projection_outputs(
+        output,
+        root_context_output,
+    ))
+}
+
+fn root_message_deletion_refs(
+    root_fact: &root::fact::RootFact,
+) -> Result<RootMessageDeletionRefs, String> {
+    for edge in &root_fact.refs {
+        match edge.role {
+            root::roles::WORKSPACE
+            | root::roles::AUTHOR
+            | root::roles::SIGNER
+            | root::roles::TARGET => {}
+            _ => {
+                return Err(
+                    "content message deletion root contains unsupported ref role".to_string(),
+                )
+            }
+        }
+        if edge.index != 0 {
+            return Err("content message deletion root contains unsupported ref index".to_string());
+        }
+    }
+    let required = |role, label| {
+        root_fact
+            .ref_by_role_index(role, 0)
+            .map(|edge| edge.target_fact_id)
+            .ok_or_else(|| format!("content message deletion root missing {label} ref"))
+    };
+    Ok(RootMessageDeletionRefs {
+        workspace_id: required(root::roles::WORKSPACE, "workspace")?,
+        author_user_id: required(root::roles::AUTHOR, "author")?,
+        signer_id: required(root::roles::SIGNER, "signer")?,
+        target_message_id: required(root::roles::TARGET, "target")?,
+    })
+}
+
+fn root_ref_context_have(root_fact: &root::fact::RootFact) -> Vec<FactId> {
+    root_fact
+        .refs
+        .iter()
+        .map(|edge| edge.target_fact_id)
+        .collect()
+}
+
+fn root_ref_context_have_from_fact(fact: &Fact) -> Vec<FactId> {
+    root::decode_fact_payload(fact.body())
+        .map(|root_fact| root_ref_context_have(&root_fact))
+        .unwrap_or_default()
 }
 
 fn context_payload<'a>(
@@ -313,6 +467,7 @@ mod projector_tests {
     };
 
     use topo::protocol::auth::user::{encode as user_layout, fact::UserFact};
+    use topo::protocol::root;
 
     const CONTENT_SIGNING_KEY: [u8; 32] = [7; 32];
     const ENDPOINT_AUTHORITY_KEY: [u8; 32] = [13; 32];
@@ -363,6 +518,61 @@ mod projector_tests {
             stored.values[4],
             topo::core::intents::Value::Bytes(deletion.author_user_id.to_vec())
         );
+    }
+
+    #[test]
+    fn root_message_deletion_materializes_authorized_author_delete() {
+        let workspace_id = [9; 32];
+        let author_user_id = user_fact(workspace_id, [22; 32], "alice");
+        let message_fact = message_fact(workspace_id, author_user_id.id);
+        let deletion_fact = root_deletion_fact(workspace_id, message_fact.id, author_user_id.id);
+        let signer_fact = signer_fact(workspace_id, author_user_id.id);
+
+        let output = root::project::RootProjector::new()
+            .project(
+                &deletion_fact,
+                &ProjectionContext::from_matches(vec![
+                    root_signature_match(&deletion_fact, workspace_id),
+                    root_signer_match(&deletion_fact, workspace_id, &signer_fact),
+                    root_target_match(&deletion_fact, workspace_id, &message_fact),
+                    root_author_match(&deletion_fact, &author_user_id),
+                ]),
+            )
+            .expect("project root deletion");
+
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == root::project::ROOT_ENVELOPE_ROLE));
+        assert!(output
+            .offers
+            .iter()
+            .any(|offer| offer.role == "fact_purged"));
+        let RowMutation::InsertValues(stored) = output
+            .effects
+            .row_mutations
+            .iter()
+            .find(|mutation| matches!(mutation, RowMutation::InsertValues(row) if row.table == MESSAGE_DELETION_ROWS))
+            .expect("deletion row")
+        else {
+            panic!("expected insert values mutation");
+        };
+        assert_eq!(
+            stored.values[1],
+            topo::core::intents::Value::Bytes(message_fact.id.to_vec())
+        );
+        assert_eq!(
+            stored.values[2],
+            topo::core::intents::Value::Bytes(deletion_fact.id.to_vec())
+        );
+        assert_eq!(output.effects.intents.len(), 1);
+        let share = topo::protocol::sync::share_fact_with_sync::decode_share_fact_with_sync(
+            &output.effects.intents[0],
+        )
+        .expect("decode sync share");
+        assert!(share.context_have.contains(&message_fact.id));
+        assert!(share.context_have.contains(&author_user_id.id));
+        assert!(share.context_have.contains(&CONTENT_SIGNER_ID));
     }
 
     #[test]
@@ -522,6 +732,35 @@ mod projector_tests {
         (deletion, fact)
     }
 
+    fn root_deletion_fact(
+        workspace_id: FactId,
+        target_message_id: FactId,
+        author_user_id: FactId,
+    ) -> Fact {
+        let root = root::fact::RootFact {
+            family:
+                crate::protocol::content::message_deletion::ROOT_FAMILY_CONTENT_MESSAGE_DELETION,
+            version:
+                crate::protocol::content::message_deletion::ROOT_VERSION_CONTENT_MESSAGE_DELETION,
+            created_at_ms: 12_345,
+            refs: vec![
+                root::fact::RootRef::new(root::roles::WORKSPACE, 0, workspace_id)
+                    .expect("workspace ref"),
+                root::fact::RootRef::new(root::roles::AUTHOR, 0, author_user_id)
+                    .expect("author ref"),
+                root::fact::RootRef::new(root::roles::SIGNER, 0, CONTENT_SIGNER_ID)
+                    .expect("signer ref"),
+                root::fact::RootRef::new(root::roles::TARGET, 0, target_message_id)
+                    .expect("target ref"),
+            ],
+        };
+        Fact::new(
+            crate::protocol::auth::workspace::scope(workspace_id),
+            root.created_at_ms,
+            root::encode::encode_fact(&root).expect("encode root deletion"),
+        )
+    }
+
     fn message_fact(workspace_id: FactId, author_user_id: FactId) -> Fact {
         let message = ContentMessageFact {
             workspace_id,
@@ -629,9 +868,63 @@ mod projector_tests {
         }
     }
 
+    fn root_signature_match(deletion_fact: &Fact, workspace_id: FactId) -> MatchedContext {
+        let signature = auth::signature::author::create_signature(
+            workspace_id,
+            deletion_fact.id,
+            &CONTENT_SIGNING_KEY,
+            deletion_fact.timestamp,
+        )
+        .expect("signature evidence");
+        let signer_public_key = crypto::ed25519_public_key(&CONTENT_SIGNING_KEY);
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        MatchedContext {
+            need: auth::signature::project::signature_proof_need(
+                deletion_fact.id,
+                scope.clone(),
+                deletion_fact.id,
+                signer_public_key,
+            )
+            .expect("signature need"),
+            offer: auth::signature::project::signature_proof_offer(
+                signature.id,
+                scope,
+                deletion_fact.id,
+                signer_public_key,
+            )
+            .expect("signature offer"),
+            payload: signature,
+        }
+    }
+
     fn signer_match(deletion_fact: &Fact, signer_fact: &Fact) -> MatchedContext {
         let deletion = deletion_from_fact(deletion_fact);
         let scope = crate::protocol::auth::workspace::scope(deletion.workspace_id);
+        MatchedContext {
+            need: crate::core::context::ContextNeed::range(
+                deletion_fact.id,
+                "content_signer",
+                scope.clone(),
+                CONTENT_SIGNER_ID,
+                CONTENT_SIGNER_ID,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                signer_fact.id,
+                "content_signer",
+                scope,
+                CONTENT_SIGNER_ID,
+                CONTENT_SIGNER_ID,
+            ),
+            payload: signer_fact.clone(),
+        }
+    }
+
+    fn root_signer_match(
+        deletion_fact: &Fact,
+        workspace_id: FactId,
+        signer_fact: &Fact,
+    ) -> MatchedContext {
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
                 deletion_fact.id,
@@ -673,11 +966,56 @@ mod projector_tests {
         }
     }
 
+    fn root_target_match(
+        deletion_fact: &Fact,
+        workspace_id: FactId,
+        target_fact: &Fact,
+    ) -> MatchedContext {
+        let scope = crate::protocol::auth::workspace::scope(workspace_id);
+        MatchedContext {
+            need: crate::core::context::ContextNeed::range(
+                deletion_fact.id,
+                "content_message_meta",
+                scope.clone(),
+                target_fact.id,
+                target_fact.id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                target_fact.id,
+                "content_message_meta",
+                scope,
+                target_fact.id,
+                target_fact.id,
+            ),
+            payload: target_fact.clone(),
+        }
+    }
+
     fn deletion_from_fact(deletion_fact: &Fact) -> ContentMessageDeletionFact {
         decode::decode_fact(&deletion_fact.bytes).expect("decode deletion")
     }
 
     fn author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
+        MatchedContext {
+            need: crate::core::context::ContextNeed::range(
+                deletion_fact.id,
+                "auth_user",
+                crate::core::facts::FactScope::Global,
+                author_fact.id,
+                author_fact.id,
+            ),
+            offer: crate::core::context::ContextOffer::range(
+                author_fact.id,
+                "auth_user",
+                crate::core::facts::FactScope::Global,
+                author_fact.id,
+                author_fact.id,
+            ),
+            payload: author_fact.clone(),
+        }
+    }
+
+    fn root_author_match(deletion_fact: &Fact, author_fact: &Fact) -> MatchedContext {
         MatchedContext {
             need: crate::core::context::ContextNeed::range(
                 deletion_fact.id,

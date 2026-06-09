@@ -61,6 +61,16 @@ impl SemanticProjector<RootFact> for RootProjector {
         if root.family == content::message::ROOT_FAMILY_CONTENT_MESSAGE {
             return content::message::project::project_root_message(fact, &root, context, output);
         }
+        if root.family == content::message_deletion::ROOT_FAMILY_CONTENT_MESSAGE_DELETION {
+            return content::message_deletion::project::project_root_message_deletion(
+                fact, &root, context, output,
+            );
+        }
+        if root.family == content::file_deletion::ROOT_FAMILY_CONTENT_FILE_DELETION {
+            return content::file_deletion::project::project_root_file_deletion(
+                fact, &root, context, output,
+            );
+        }
 
         if let Some(workspace_id) = root.workspace_id() {
             let context_have = root

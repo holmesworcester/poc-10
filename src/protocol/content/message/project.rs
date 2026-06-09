@@ -678,7 +678,7 @@ fn root_ref_context_have_from_fact(fact: &Fact) -> Vec<FactId> {
         .unwrap_or_default()
 }
 
-fn merge_projection_outputs(
+pub(crate) fn merge_projection_outputs(
     mut output: ProjectionOutput,
     mut extra: ProjectionOutput,
 ) -> ProjectionOutput {
@@ -784,14 +784,20 @@ fn validate_message_deletion(
     target_message_id: crate::core::facts::FactId,
     author_user_id: crate::core::facts::FactId,
 ) -> Result<(), String> {
-    if let Ok(deletion) = message_deletion::decode_fact_payload(payload.body()) {
+    if let Ok(deletion) = message_deletion::decode_any_fact(payload) {
         if deletion.workspace_id != workspace_id {
             return Err("message deletion workspace does not match message".to_string());
         }
-        if deletion.target_frontier_id != target_frontier_id {
+        if deletion
+            .target_frontier_id
+            .is_some_and(|id| id != target_frontier_id)
+        {
             return Err("message deletion frontier does not match message".to_string());
         }
-        if deletion.target_minute != target_minute {
+        if deletion
+            .target_minute
+            .is_some_and(|minute| minute != target_minute)
+        {
             return Err("message deletion minute does not match message".to_string());
         }
         if deletion.target_message_id != target_message_id {

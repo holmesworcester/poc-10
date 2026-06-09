@@ -37,13 +37,12 @@ pub fn delete_message(
         author_user_id,
     )?;
     let signing = ctx.local_signing_capability(workspace_id)?;
-    let fact = author::delete_message(
+    let fact = author::delete_message_root(
         &signing,
         workspace_id,
         created_at_ms,
         target_message_id,
         target_frontier_id,
-        target_minute,
         author_user_id,
     )?;
     let signature = auth::signature::author::sign_fact(

@@ -6,6 +6,7 @@
 use crate::core::command_context::LocalSigningCapability;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
+use crate::protocol::root;
 
 use super::encode;
 use super::fact::{AuthorId, ContentMessageDeletionFact, WorkspaceId};
@@ -44,6 +45,42 @@ pub fn delete_message(
         crate::protocol::auth::workspace::scope(workspace_id),
         created_at_ms,
         encode::encode_fact(&deletion)?,
+    ))
+}
+
+pub fn delete_message_root(
+    signing: &LocalSigningCapability,
+    workspace_id: WorkspaceId,
+    created_at_ms: u64,
+    target_message_id: FactId,
+    target_frontier_id: FactId,
+    author_user_id: AuthorId,
+) -> Result<Fact, String> {
+    validate_delete_message(
+        workspace_id,
+        target_message_id,
+        target_frontier_id,
+        author_user_id,
+    )?;
+    if signing.workspace_id != workspace_id {
+        return Err("delete_message signing capability workspace mismatch".to_string());
+    }
+
+    let root = root::fact::RootFact {
+        family: super::ROOT_FAMILY_CONTENT_MESSAGE_DELETION,
+        version: super::ROOT_VERSION_CONTENT_MESSAGE_DELETION,
+        created_at_ms,
+        refs: vec![
+            root::fact::RootRef::new(root::roles::WORKSPACE, 0, workspace_id)?,
+            root::fact::RootRef::new(root::roles::AUTHOR, 0, author_user_id)?,
+            root::fact::RootRef::new(root::roles::SIGNER, 0, signing.signer_id)?,
+            root::fact::RootRef::new(root::roles::TARGET, 0, target_message_id)?,
+        ],
+    };
+    Ok(Fact::new(
+        crate::protocol::auth::workspace::scope(workspace_id),
+        created_at_ms,
+        root::encode::encode_fact(&root)?,
     ))
 }
 

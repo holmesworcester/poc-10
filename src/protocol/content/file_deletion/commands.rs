@@ -28,7 +28,7 @@ pub fn delete_file(
     let created_at_ms = ctx.next_timestamp();
     author::validate_delete_file(workspace_id, target_file_id, author_user_id)?;
     let signing = ctx.local_signing_capability(workspace_id)?;
-    let fact = author::delete_file(
+    let fact = author::delete_file_root(
         &signing,
         workspace_id,
         created_at_ms,
