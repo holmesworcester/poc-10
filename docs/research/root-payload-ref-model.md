@@ -21,7 +21,7 @@ root fact
   typed signed manifest: family, version, scope, created_at_ms, refs[]
 
 payload fact
-  generic bytes: clear payload or sealed payload
+  generic sealed content bytes; clear payloads are transitional or local-only
 
 signature fact
   proof over root fact id
@@ -75,9 +75,9 @@ signature
   signs content_message_root id
 ```
 
-For simple content, `payload[0]` can hold all typed data. In the privacy-favoring
-target, that payload is sealed and the clear root surface is limited to root
-routing fields and refs.
+For simple content, `content[0]` can hold all typed user/application data. In
+the privacy-favoring target, shared payload facts are sealed and the clear root
+surface is limited to root routing fields, event time when present, and refs.
 
 ## Clear Surface Target
 
@@ -234,8 +234,8 @@ message is valid, opened, deleted, expired, or retained.
 
 ## Payload Facts
 
-Payload facts are generic byte facts. A payload by itself should not create
-user-visible state.
+Payload facts are generic content byte facts. A payload by itself should not
+create user-visible state.
 
 Payload formats:
 
@@ -245,7 +245,7 @@ payload_clear_v1 {
   format
   schema
   bytes
-}
+}  // transitional, local-only, or test-only in the privacy target
 
 payload_sealed_v1 {
   tag
@@ -391,7 +391,7 @@ clear root refs plus witness/control facts
   key-coordinate refs such as frontier/group/epoch facts
   signature facts over roots
 
-clear protocol/control payloads
+clear protocol/control facts
   workspace identity and invites
   endpoint and recipient public keys
   key requests, key wraps, removal frontiers
@@ -403,6 +403,188 @@ The first bucket should converge on sealed payloads. The second bucket should
 mostly be refs and witness context. The third bucket is intentionally public
 protocol state; encrypting it would either make validation impossible or hide
 the very information peers need to establish authority and decryption.
+
+## Generic Package Fit
+
+The maximum useful generic package is:
+
+```text
+root_event
+  family, version, scope, created_at_ms, refs[]
+
+root_record
+  family, version, scope, refs[]
+
+sealed_content_payload
+  format, nonce/header, ciphertext
+
+signature
+  target root id, signer proof
+```
+
+`root_event` is for authored events where time is part of the statement:
+messages, reactions, files, deletions, retention changes, invites, key requests,
+and endpoint/user/admin grants. `root_record` is for deterministic or derived
+records whose identity should be refs and coordinates rather than wall time:
+key-wrap outputs, range summaries, receipts, indexes, and bridge facts.
+
+The root package intentionally has no generic scalar map and no family-owned
+byte body. If a value is application content, put it in
+`sealed_content_payload`. If a value is an exact relationship, put it in
+`refs[]`. If a value is public protocol control material, the family is a
+control fact and should not pretend that value is content payload.
+
+This is the important pushback: a refs-only root fits all facts only if we turn
+public keys, signatures, hashes, ranges, counters, enum flags, addresses, and
+protocol ciphertexts into separate value facts. That would make the graph
+larger and less readable without improving privacy. The package should be
+maximal for content and relationship edges, not universal at the cost of making
+control state awkward.
+
+### Fit Audit
+
+Content families:
+
+```text
+message
+  root_event with refs:
+    author[0], key_domain[0], policy[0] when pinned, content[0]
+  sealed content payload:
+    text and private content metadata
+
+reaction
+  root_event with refs:
+    author[0], target_message[0], key_domain[0], content[0]
+  sealed content payload:
+    reaction object
+
+file descriptor
+  root_event with refs:
+    author[0], parent_message[0], key_domain[0], content[0], blob[0]
+  sealed content payload:
+    filename, mime, caption, private file metadata
+
+file slice / blob chunk
+  root_record or specialized blob fact with refs:
+    file[0] or blob[0]
+  sealed content payload or specialized encrypted blob storage:
+    chunk bytes
+  public control:
+    chunk index and proof may remain specialized if the blob transport needs it
+```
+
+Content control:
+
+```text
+message_deletion
+  root_event with refs:
+    author[0], target[0]
+  no content payload
+
+file_deletion
+  root_event with refs:
+    author[0], target[0]
+  no content payload
+
+retention_policy
+  root_event control fact with refs:
+    author[0], scope target, supersedes[0] when present
+  no content payload
+  public control:
+    ttl, retire floor, and scope mode are policy mechanics, not private content
+```
+
+Auth and identity:
+
+```text
+workspace
+  control root_event or typed control fact
+  refs: none or provider/bootstrap refs
+  public control: root public key
+  optional sealed content payload: private workspace display label
+
+user
+  control root_event with refs:
+    invite/authority[0]
+  public control: user public key and signer proof
+  optional sealed content payload: private username/profile label
+
+user_invite, device_invite, endpoint_shared, invite_server, admin
+  control root_event with refs:
+    workspace[0], authority[0], user[0], endpoint[0] as applicable
+  public control:
+    public keys, endpoint roles, signer keys
+  optional sealed content payload:
+    private device name or display label only if product wants that private
+
+signature
+  signature fact over root id
+  no content payload
+
+recipient_key, key_request, removal_frontier
+  control root_event with refs:
+    workspace[0], endpoint[0], frontier/key_domain[0], recipient[0]
+  public control:
+    recipient public key, request route, frontier owner, signer material
+  no content payload
+
+key_wrap
+  root_record or specialized sealed control fact with refs:
+    workspace[0], signer_endpoint[0], key_domain[0], recipient_key[0],
+    wrapped_secret[0] or source_secret[0] as applicable
+  encrypted control material:
+    wrapped secret ciphertext
+  no content payload
+```
+
+Local-only auth and connection material:
+
+```text
+local_endpoint, local_signer_secret, local_recipient_key
+local_key_secret, local_history_node_secret, invite_secret
+invite_accepted, local_secret_retirement, connection_ephemeral_secret
+```
+
+These are local capability/secret facts. They can use root refs for readability
+where useful, but they are not shared content. Their secret bytes should be
+protected by local storage policy, not by the shared content payload mechanism.
+
+Sync and connection:
+
+```text
+sync range_request, shared_fact, compare, have_id, need_id
+  transport/control roots or typed control facts
+  refs: connection[0], fact[0], workspace[0] where exact ids matter
+  public control: ranges, counts, fingerprints, booleans
+  no content payload
+
+connection request, connection, frame_small, frame_file_slice, frame_bundle
+  sealed control/carrier facts
+  public control: routing/opening header
+  encrypted control/carrier bytes:
+    handshake material or inner fact bundle
+  no content payload
+
+connection close, frame_observation, fact_receipt
+  local/control roots or typed control facts
+  refs: connection[0], request[0], frame[0], received_fact[0]
+  public control: local time, origin, receive path, hashes
+  no content payload
+```
+
+The result is a stricter rule than "every fact has a payload":
+
+```text
+content roots may ref sealed content payloads
+control roots do not have content payloads
+sealed control carriers are not content payloads
+local secrets are not shared payloads
+```
+
+This keeps encrypted payloads focused on private application content. It also
+keeps protocol control facts inspectable enough for projectors to prove refs,
+authority, key coverage, sync state, and transport state before any content is
+opened.
 
 ## Reader And Projector Boundaries
 
@@ -469,15 +651,18 @@ Core may provide byte helpers, but root roles remain protocol semantics.
 
 ### Phase 2 - Generic Payload Facts
 
-Add clear and sealed generic payload facts:
+Add generic payload facts:
 
-- payload readers normalize clear and sealed envelopes;
+- payload readers normalize sealed envelopes;
+- clear payload support, if added, is transitional, local-only, or test-only;
 - payload facts do not offer user-visible domain context by themselves;
 - clear payload opening is request-gated just like sealed payload opening;
 - opened payload is local-only and keyed by `(root_id, role, index, payload_id,
   schema)`.
 
-Start with clear payloads to prove the root/open-request flow without crypto.
+If implementation wants to prove the root/open-request flow before crypto lands,
+start with local/test clear payloads. Do not treat shared clear content payloads
+as the target format.
 
 ### Phase 3 - Signature Facts Over Root Ids
 
@@ -578,7 +763,7 @@ as the root/payload machinery lands.
 ### Payload Opening Tests
 
 - A clear payload fact alone does not create user-visible rows or domain
-  context.
+  context, if clear payloads exist for transition or tests.
 - A sealed payload fact alone does not create user-visible rows or domain
   context.
 - A root edge to a payload creates an open request only after signed-root and
@@ -587,8 +772,8 @@ as the root/payload machinery lands.
   one payload reused by two roots opens as two separately authorized edges.
 - A payload opened under `content[0]` cannot satisfy a need for `metadata[0]`.
 - A payload schema mismatch between root edge and payload envelope is rejected.
-- Clear and sealed payloads with the same plaintext produce the same current
-  typed payload after opening.
+- Transitional clear payloads and sealed payloads with the same plaintext
+  produce the same current typed payload after opening.
 - Opened payload bytes are local-only and can be wiped and re-derived by replay.
 - A shared content family that marks metadata private has no clear metadata
   payload; only root refs and sealed payload envelope bytes are visible.
