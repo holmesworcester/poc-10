@@ -286,12 +286,8 @@ sealed_key_material
   shared or local depending on family; encrypted keys or wraps, not application
   content
 
-sealed_transport_carrier
-  local or connection-scoped; encrypted frame/request/response carrier bytes,
-  not application content
-
-public_control_params
-  clear protocol parameters when a control fact cannot be refs-only
+typed_protocol_control
+  sync, connection, and other protocol facts with clear fixed fields
 ```
 
 Only the first kind is the ordinary shared content payload. The others are
@@ -666,101 +662,63 @@ keeps protocol control facts inspectable enough for projectors to prove refs,
 authority, key coverage, sync state, and transport state before any content is
 opened.
 
-## Protocol Control And Transport Simplifications
+## Protocol Control And Transport Boundary
 
-The content root package should not grow into a schema language for sync and
-connection. Protocol facts have legitimate clear control parameters: timestamp
-ranges, counts, fingerprints, booleans, addresses, public keys, public
-nonces/headers, signatures, and fixed transport size classes. Those values are
-not private application content.
+Do not turn the root package into a schema language for sync and connection.
+The main value is in durable content and local secret material. Ephemeral
+transport and sync process facts can stay typed, fixed-layout, and explicit.
 
-Still, protocol facts can use the same root/ref conventions for exact
-relationships:
+Core should remain the dumb socket/runtime boundary. Facts decide what is
+valid, shareable, opened, and projected. Connection request/response/frame facts
+may carry sealed bytes, but that sealing is still a protocol fact concern, not
+a generic core carrier abstraction.
+
+Protocol facts have legitimate clear control parameters: timestamp ranges,
+counts, fingerprints, booleans, addresses, public keys, nonces/headers,
+signatures, and fixed transport size classes. Those values are not private
+application content.
+
+Keep these families typed unless a future cleanup has a local code-quality
+reason to change them:
 
 ```text
-sync_shared_fact root
-  created_at_ms: 0
-  refs: workspace[0], fact[0]
+sync range_request, compare, have_id, need_id, shared_fact
+  fixed protocol control layouts
+  no content payload
+  no historical adapter requirement
 
-sync_need_id root
-  created_at_ms: 0
-  refs: connection[0], fact[0]
+connection request, connection, frame_small, frame_file_slice, frame_bundle
+  fixed protocol transport layouts
+  no generic content payload
+  no historical adapter requirement
 
-connection_close root
-  created_at_ms: close time
-  refs: connection[0]
+connection close, frame_observation, fact_receipt
+  local observation/control layouts
+  no content payload
+  no historical adapter requirement
+```
 
+This means `frame_small`, `frame_file_slice`, and `frame_bundle` remain separate
+fixed-length typed facts for now. If they are ever simplified, prefer an
+implementation-local helper such as "small fixed frame" and "large fixed frame"
+over a new durable generic payload kind. A large frame can carry a file slice or
+a bundle if that helps batching, but that is a connection implementation detail.
+
+Local secret extraction remains useful for connection/auth secret material:
+
+```text
 local_secret root
   created_at_ms: creation time or 0 if deterministic
   refs: workspace[0], endpoint[0], secret[0], supersedes[0] as needed
+
+local_secret_payload
+  family, version, bytes
 ```
 
-`sync_have_id` is almost refs-only, but its advertised timestamp is a
-negentropy coordinate, not root creation time. Keep it as a public control
-parameter unless the sync index changes to derive the coordinate from the
-referenced fact.
-
-Range-oriented sync facts need public control parameters:
+Key wraps are durable encrypted control material, not content payloads:
 
 ```text
-sync_range_request
-  refs: workspace[0], connection[0]
-  public control params: start, end
-
-sync_compare
-  refs: connection[0]
-  public control params: start, end, count, fingerprint, response_requested
-```
-
-These can remain typed control facts. If the project wants a uniform split, the
-non-ref fields can move into a generic `public_control_params` fact referenced
-as `params[0]`, but that should be chosen for versioning or size reasons, not
-for privacy. A separate params fact for every range compare may make the graph
-harder to read without buying much.
-
-Connection handshakes have the same split:
-
-```text
-connection_request
-  refs:
-    from_endpoint[0], to_endpoint[0], invite[0] or endpoint_shared[0],
-    invite_secret[0] when local, initiator_ephemeral_secret[0]
-  public control params:
-    mode, addresses, nonce, bootstrap hash, public ephemeral key, transcript
-    signatures
-
-connection
-  refs:
-    request[0], from_endpoint[0], to_endpoint[0],
-    initiator_ephemeral_secret[0], responder_ephemeral_secret[0],
-    connection_secret[0]
-  public control params:
-    addresses, responder ephemeral public key, handshake hash
-```
-
-The important simplification is to move private connection keys out of typed
-connection bodies and into local secret payloads referenced by ordinary refs.
-The public handshake transcript can stay typed and clear because projectors must
-inspect it before any frame can be opened.
-
-Established frames are not content payloads. They are sealed transport carriers:
-
-```text
-sealed_transport_carrier
-  public header: version, size_class, connection id or connection ref, nonce
-  ciphertext: encrypted inner fact bundle or file slice
-```
-
-`frame_small`, `frame_file_slice`, and `frame_bundle` can share a generic
-carrier reader/opener that normalizes size class, header, nonce, and ciphertext.
-Opening a carrier emits child facts and local receipts/observations. It should
-not emit `opened_payload` for content projectors; the child facts must still be
-read and validated by their owning families.
-
-Key wraps are also sealed control material, not content payloads:
-
-```text
-sealed_key_material
+key_wrap or sealed_key_material
   refs: workspace[0], key_domain[0], recipient_key[0], source_secret[0] as
   needed
   ciphertext: wrapped key bytes
@@ -772,18 +730,18 @@ payloads. It does not produce application content.
 The resulting payload-like kind list is:
 
 ```text
-sealed_content_payload     private shared application content
-opened_payload             local derived application content
-local_secret_payload       local raw secret bytes
-sealed_key_material        encrypted protocol key material
-sealed_transport_carrier   encrypted connection/request/frame carrier bytes
-public_control_params      clear scalar protocol parameters, optional split
+sealed_content_payload   private shared application content
+opened_payload           local derived application content
+local_secret_payload     local raw secret bytes
+sealed_key_material      encrypted durable key/control material
+typed_protocol_control   sync/connection/control facts that stay typed
 ```
 
-Large blobs do not need a new semantic kind. They can be sealed content payloads
-with a size class, chunk ref scheme, or local opened handle. Signatures and
-public keys also do not need payload kinds; they are public control facts whose
-bytes are the proof material.
+Large content blobs do not need a new semantic kind. They can be sealed content
+payloads with a size class, chunk ref scheme, or local opened handle. Signatures,
+public keys, sync control values, connection frames, and receipts also do not
+need payload kinds; they are public or ephemeral protocol facts whose bytes are
+the protocol material.
 
 ## Reader And Projector Boundaries
 
@@ -798,9 +756,6 @@ payload reader
 
 local secret reader
   bytes -> current LocalSecretEnvelope
-
-transport carrier reader
-  bytes -> current TransportCarrierEnvelope
 
 signature reader
   bytes -> current SignatureEnvelope
@@ -824,9 +779,6 @@ payload opener
 local secret projector
   LocalSecretEnvelope + local root refs -> local secret context
 
-transport opener
-  TransportCarrierEnvelope + connection context -> child facts + receipts
-
 key projector
   KeyEnvelope -> current key_coverage context
 ```
@@ -837,7 +789,6 @@ Avoid old domain projectors. Historical compatibility should look like:
 old root bytes -> current RootEnvelope -> current root projector
 old payload bytes -> current PayloadEnvelope -> current payload opener
 old local secret bytes -> current LocalSecretEnvelope -> current local context
-old transport carrier bytes -> current TransportCarrierEnvelope -> current opener
 old key bytes -> current KeyEnvelope -> current key_coverage offer
 old signature bytes -> current SignatureEnvelope -> current signed_root offer
 ```
@@ -847,7 +798,15 @@ sealed payload cannot map to current key coverage, the payload opener may need a
 legacy key role and old key projectors may offer that legacy role. Keep that
 inside payload/key compatibility, not in domain projectors.
 
+Connection and sync transport facts are intentionally outside this compatibility
+contract. They are ephemeral protocol process facts; stale versions can be
+dropped, recreated, or allowed to fail decode without affecting retained content
+semantics.
+
 ## Transition Plan
+
+Use this as the plan for aligning `main` with the root/ref/payload model while
+leaving ephemeral sync and connection facts alone.
 
 ### Phase 1 - Root Envelope Library
 
@@ -936,20 +895,23 @@ Migrate the remaining content families:
 - file slices should stay optimized for large byte movement, but their parent
   and proof edges should use root refs where practical.
 
-### Phase 8 - Protocol Control And Transport Pass
+### Phase 8 - Preserve Ephemeral Protocol Facts
 
-Audit sync and connection families after the content path exists:
+Keep current sync and connection process facts typed unless a later cleanup has
+a narrow implementation reason:
 
-- migrate refs-only control families, such as `shared_fact`, `need_id`, close
-  markers, and simple local observations, to root-only or root-plus-params
-  shapes where it reduces custom code;
-- keep range/compare scalar parameters clear and typed unless a separate
-  `public_control_params` fact clearly improves versioning;
-- move connection/key private material into local secret payload refs;
-- normalize `frame_small`, `frame_file_slice`, and `frame_bundle` through a
-  shared sealed transport carrier reader/opener;
-- keep opened transport carriers emitting child facts and receipts, not content
-  `opened_payload` context.
+- leave `range_request`, `compare`, `have_id`, `need_id`, and `shared_fact` in
+  their current typed layouts;
+- leave `request`, `connection`, `frame_small`, `frame_file_slice`,
+  `frame_bundle`, `close`, `frame_observation`, and `fact_receipt` in their
+  current typed layouts;
+- do not add a generic transport carrier fact as part of this transition;
+- do not add historical adapter chains for old ephemeral transport/sync facts;
+- keep the core socket/runtime boundary dumb: protocol facts and handlers own
+  validity, sealing, opening, receipts, and sendability.
+
+If connection private material later moves to `local_secret_payload`, treat that
+as part of the local secret migration, not as transport generalization.
 
 ### Phase 9 - Compatibility And Version Harness
 
@@ -958,7 +920,6 @@ Add historical readers/openers intentionally:
 - root v1 -> current root semantics;
 - payload clear/sealed v1 -> current payload envelope;
 - local secret v1 -> current local secret envelope;
-- transport carrier v1 -> current transport carrier envelope;
 - opened payload schema v1 -> current typed payload;
 - key v1 -> current key coverage;
 - signature v1 -> current signed-root context.
@@ -1078,24 +1039,21 @@ as the root/payload machinery lands.
   that PQ migration does not claim retroactive PQ protection without explicit
   re-encryption or rewrap facts.
 
-### Protocol Control And Transport Tests
+### Protocol Boundary Tests
 
-- `shared_fact` can normalize to a refs-only root with `workspace[0]` and
-  `fact[0]`.
-- `need_id` can normalize to a refs-only root with `connection[0]` and
-  `fact[0]`.
-- `have_id` keeps its advertised timestamp as public sync control data unless
-  the timestamp is derivable from the referenced fact.
-- `range_request` and `compare` readers adapt old and new public control
-  parameter encodings to the same current sync semantics.
-- A connection fact refs local secret payloads for private connection material;
-  no connection root/control body carries raw local secret bytes.
-- `frame_small`, `frame_file_slice`, and `frame_bundle` normalize to one
-  transport carrier envelope with distinct size classes.
-- Opening a transport carrier emits child facts plus receipts and never
-  satisfies a content `opened_payload` need directly.
-- Changing transport carrier encryption format does not require content,
-  auth, or sync fact readers to change.
+- Existing sync facts continue to decode and project through their typed
+  layouts after the root/payload model lands.
+- Existing connection request, connection, frame, close, observation, and
+  receipt facts continue to decode and project through their typed layouts.
+- No generic transport-carrier fact is required for the content root/payload
+  migration.
+- No historical adapter chain is required for old sync or connection process
+  facts; stale ephemeral facts can fail decode, be dropped, or be recreated by
+  current sync/connection behavior.
+- Core socket/runtime tests still treat core as a dumb transport boundary:
+  protocol handlers own validity, sealing, opening, receipts, and sendability.
+- Local connection/auth secrets can migrate to local secret payload refs without
+  changing frame, request, response, range, or compare layouts.
 
 ### Content Schema Upgrade Tests
 
