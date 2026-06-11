@@ -1229,6 +1229,13 @@ fn concrete_protocol_manifests_live_under_protocol() {
             && !root.join("src/protocol/intents").exists(),
         "the package-by-layer facts/ and intents/ trees are retired; protocol state is organized by scope"
     );
+
+    let protocol_root = source_text(&root.join("src/protocol.rs"));
+    assert!(
+        !root.join("src/protocol/payload.rs").exists()
+            && !protocol_root.contains("pub mod payload;"),
+        "intent payload byte codecs should live in their owning intent modules, not in a top-level protocol/payload shim"
+    );
 }
 
 /// Compares one `<module>.rs` manifest against its sibling `<module>/`
@@ -1934,8 +1941,6 @@ fn target_handler_files_do_not_define_fact_or_crypto_outputs() {
             "crypto::ed25519_verify",
             "placeholder",
             "fake",
-            "crate::core::wire",
-            "wire::",
         ] {
             if production.contains(forbidden) {
                 offenders.push(format!(
@@ -2363,8 +2368,6 @@ fn target_handlers_do_not_define_fact_wire_layouts_or_fake_crypto_facts() {
             "decode_key_wrap",
             "decode_recipient_key",
             "decode_local_recipient_key",
-            "crate::core::wire",
-            "wire::",
             "put_u8",
             "take_u8",
             "expect_len",

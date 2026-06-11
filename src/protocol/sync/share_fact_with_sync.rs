@@ -13,8 +13,8 @@ use crate::core::{
         HandlerContext, HandlerError, HandlerFactId, HandlerFactId as FactId, HandlerResult,
         Intent, IntentHandler, IntentKind,
     },
+    wire::{Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter},
 };
-use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::sync::{seed_connection, shared_fact};
 
 pub const SHARE_FACT_WITH_SYNC: &str = "share_fact_with_sync";

@@ -14,6 +14,9 @@ use crate::core::intents::{
 };
 use crate::core::pipeline::RecurringIntentContext;
 use crate::core::store::Store;
+use crate::core::wire::{
+    Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
+};
 use crate::protocol::auth::{endpoint, invite_accepted};
 use crate::protocol::connection::connection::queries::answered_request_ids;
 use crate::protocol::connection::request::author::{
@@ -27,7 +30,6 @@ use crate::protocol::connection::request::{self, encode::ADDR_BLOCK_BYTES};
 use crate::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame,
 };
-use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 
 pub const MAINTAIN_CONNECTIONS: &str = "maintain_connections";
 

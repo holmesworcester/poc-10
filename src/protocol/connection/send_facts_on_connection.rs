@@ -15,9 +15,11 @@ use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
+use crate::core::wire::{
+    Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
+};
 use crate::core::{effects::PipelineEffects, facts::Fact};
 use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
-use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 use crate::protocol::{
     auth::endpoint,
     connection::connection,

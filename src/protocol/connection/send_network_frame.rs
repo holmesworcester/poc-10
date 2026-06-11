@@ -13,7 +13,9 @@
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
-use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
+use crate::core::wire::{
+    Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
+};
 
 /// Stable intent kind for outbound network frame sends.
 pub const SEND_NETWORK_FRAME: &str = "send_network_frame";

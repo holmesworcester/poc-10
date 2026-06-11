@@ -14,8 +14,10 @@
 //! stage an established connection frame.
 
 use crate::core::intents::{Intent, IntentKind};
+use crate::core::wire::{
+    Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
+};
 use crate::protocol::connection::fact_receipt::author::normalize_origin_addr_bytes;
-use crate::protocol::payload::{PayloadError, PayloadReader, PayloadWriter};
 
 pub const RECEIVE_NETWORK_FRAME: &str = "receive_network_frame";
 
