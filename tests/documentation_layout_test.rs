@@ -608,6 +608,8 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "`FactAdmissionFn`",
         "poc-10 installs one that routes every fact tag to the same family `Codec` and `DecodedAuthenticator`",
         "record ephemeral projection inputs in `ephemeral_projection_inputs`",
+        "mark facts whose scheduled wake-up time has arrived as pending projection work",
+        "A projector can schedule its own fact on a protocol timeline",
         "`Authentication::NeedsAuthentication` becomes standing context needs",
         "`ProjectionContext::is_replay()`",
         "suppresses follow-up intents unless the matching `HandlerRoute` declares `runs_during_replay`",

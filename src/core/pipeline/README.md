@@ -2,9 +2,10 @@
 
 The pipeline is core's fact lifecycle plus the SQL-backed runtime work loop that
 commits it. It turns durable facts, ephemeral projection inputs, standing
-context, due time wakes, and queued intents into committed runtime state. The
-pipeline does not know protocol semantics; it owns route invocation, context
-fanout, replay mode, retry behavior, and transaction boundaries.
+context, scheduled fact wake-ups whose timestamps have arrived, and queued
+intents into committed runtime state. The pipeline does not know protocol
+semantics; it owns route invocation, context fanout, replay mode, retry
+behavior, and transaction boundaries.
 
 ## Interface To Core And Protocol
 
@@ -17,8 +18,10 @@ it to:
 - record ephemeral projection inputs in `ephemeral_projection_inputs`.
 - submit durable intents to `intents`.
 - submit local intents to `local_intents`.
-- admit due time wakes as pending projection work.
-- enqueue retained facts and due time wakes as replay projection work.
+- mark facts whose scheduled wake-up time has arrived as pending projection
+  work.
+- enqueue retained facts and scheduled replay wake-ups as replay projection
+  work.
 - drain pending projection and ephemeral projection inputs with the registered
   protocol projector.
 - dispatch queued intents with the registered protocol handlers.
@@ -98,17 +101,18 @@ dispatch_queued_intent
   -> delete handled row and commit handler PipelineEffects
 ```
 
-Time wakes use the same projection path. The daemon asks for a due timeline
-range; projection inserts matching owners into `pending_projection`, stores the
-due `TimeRange`, and projection context exposes that range without allowing
-projectors to read the clock.
+Scheduled wake-ups use the same projection path. A projector can schedule its
+own fact on a protocol timeline. When the daemon advances that timeline, core
+marks matching fact owners in `pending_projection`, stores the due `TimeRange`,
+and projection context exposes that range without allowing projectors to read
+the clock.
 
 Replay also uses the same path. Replay queues retained facts and replay due
-time wakes into `pending_projection` with mode `replay`, exposes that mode
-through `ProjectionContext::is_replay()`, and suppresses follow-up intents
-unless the matching `HandlerRoute` declares `runs_during_replay`. Handler route
-recurrence is live-only daemon state: recurring schedules are installed in
-memory after startup and are not replayed.
+wake-ups into `pending_projection` with mode `replay`, exposes that mode through
+`ProjectionContext::is_replay()`, and suppresses follow-up intents unless the
+matching `HandlerRoute` declares `runs_during_replay`. Handler route recurrence
+is live-only daemon state: recurring schedules are installed in memory after
+startup and are not replayed.
 
 ## Invariants
 
@@ -145,8 +149,8 @@ memory after startup and are not replayed.
 ## Module Responsibilities
 
 - `pipeline.rs` owns `WorkStatus`, handler route metadata, handler sets, and
-  `PipelineEngine`, the generic state machine that admits facts and due time
-  wakes, queues replay work, drains pending projection over durable and
+  `PipelineEngine`, the generic state machine that admits facts and scheduled
+  wake-ups, queues replay work, drains pending projection over durable and
   ephemeral inputs, and orders intent dispatch.
 - `route.rs` owns tag route declarations, staged route metadata, and the
   optional protocol-owned fact admission hook type.
