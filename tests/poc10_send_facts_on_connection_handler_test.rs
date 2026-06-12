@@ -10,12 +10,12 @@ use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::connection::connection as connection_rows;
 use topo::protocol::connection::connection::encode as connection_layout;
 use topo::protocol::connection::connection::fact::ConnectionFact;
+use topo::protocol::connection::frame_small::project as frame_small_project;
 use topo::protocol::connection::send_facts_on_connection::SendFactsOnConnectionHandler;
 use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
 use topo::protocol::connection::send_network_frame;
-use topo::protocol::connection_frame_wire as connection_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{encode as shared_fact_layout, fact::SharedFact};
 
@@ -90,15 +90,12 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
         .expect("network send");
     assert_eq!(send.routing_key, connection_fact.id);
     let opened =
-        connection_frame::open_connection_frame(&send.frame, &connection.connection_secret)
+        frame_small_project::open_connection_frame(&send.frame, &connection.connection_secret)
             .expect("open fixed connection::frame frame");
     assert_eq!(opened.connection_id, connection_fact.id);
     assert_eq!(opened.sender_endpoint_id, connection.from_endpoint);
     assert_eq!(opened.receiver_endpoint_id, connection.to_endpoint);
-    assert_eq!(
-        opened.facts.into_iter().collect::<Vec<_>>(),
-        vec![fact.bytes]
-    );
+    assert_eq!(opened.facts, vec![fact.bytes]);
 }
 
 fn store_with_local_endpoint() -> Store {

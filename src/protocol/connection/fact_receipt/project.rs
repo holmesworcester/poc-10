@@ -22,6 +22,28 @@ use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
 
+pub fn connection_fact_receipt_for_path(
+    input: super::fact::ReceiptPathInput<'_>,
+) -> Result<Fact, String> {
+    let fact = super::fact::ConnectionFactReceipt {
+        received_fact_id: input.received_fact_id,
+        origin_addr: super::fact::OriginAddr::new(input.origin_addr)
+            .map_err(|err| format!("connection fact receipt origin addr: {err}"))?,
+        local_endpoint_id: input.local_endpoint_id,
+        sender_endpoint_id: input.sender_endpoint_id,
+        receive_path: input.receive_path,
+        connection_id: input.connection_id,
+        request_id: input.request_id,
+        frame_hash: input.frame_hash,
+        received_at_local_ms: input.received_at_local_ms,
+    };
+    Ok(Fact::new(
+        FactScope::Local,
+        input.received_at_local_ms,
+        super::encode::encode_fact(&fact)?,
+    ))
+}
+
 /// Staged read pipeline for the fact_receipt fact.
 pub const PIPELINE: FactPipeline = FactPipeline::Staged {
     decode: "connection::fact_receipt::Codec",

@@ -28,10 +28,9 @@ use crate::core::pipeline::{
 
 use crate::protocol::auth::{endpoint_shared, workspace};
 use crate::protocol::connection::create_connection::{create_connection_intent, CreateConnection};
+use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
+use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
 use crate::protocol::connection::frame_observation;
-use crate::protocol::connection_frame::{
-    connection_fact_receipt_for_path, ConnectionFactReceiptInput,
-};
 
 use super::authenticate;
 use super::authenticate::AuthenticatedConnectionRequest;
@@ -276,7 +275,7 @@ fn project_receiver_request(
     if observation.frame_fact_id != fact.id {
         return Err("connection request observation targets another fact".to_string());
     }
-    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+    let receipt = connection_fact_receipt_for_path(ReceiptPathInput {
         received_fact_id: fact.id,
         origin_addr: observation.origin_addr.bytes(),
         local_endpoint_id: request.to_endpoint,

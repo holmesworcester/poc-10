@@ -4,7 +4,7 @@
 //! widths, and the canonical origin-addr normalization applied while encoding.
 
 use crate::core::wire::{self, FixedLayout, FixedSlot};
-use crate::protocol::connection::fact_receipt::author::normalize_origin_addr_bytes;
+use crate::protocol::connection::fact_receipt::fact::normalize_origin_addr_bytes;
 use crate::protocol::connection::fact_receipt::fact::{OriginAddr, ORIGIN_ADDR_BYTES};
 
 use super::fact::ConnectionFrameObservationFact;

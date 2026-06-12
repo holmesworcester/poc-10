@@ -9,7 +9,7 @@
 //! Frame facts carry only wire bytes; there is no fact-boundary signature and no
 //! intrinsic field rule. Admission scope, the observation and connection context,
 //! decryption, and child materialization are all interpretation the projector
-//! owns through `connection_frame::project_observed_frame`.
+//! owns through `project.rs`.
 
 use crate::core::facts::Fact;
 use crate::core::pipeline::{
@@ -49,19 +49,15 @@ mod tests {
     };
     use crate::core::wire::FixedBytes;
     use crate::protocol::connection::frame_file_slice::author::fact_from_wire;
+    use crate::protocol::connection::frame_file_slice::encode as frame_encode;
     use crate::protocol::connection::frame_file_slice::fact::ConnectionFrameFileSliceFact;
-    use crate::protocol::connection_frame_wire as wire;
 
     use super::ConnectionFrameFileSliceAuthenticator;
 
     fn canonical_fact() -> Fact {
-        let frame = wire::encode_frame_bytes(
-            wire::CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
-            FixedBytes([1; 32]),
-            FixedBytes([2; 24]),
-            &[3; 32],
-        )
-        .expect("frame bytes");
+        let frame =
+            frame_encode::encode_frame_bytes(FixedBytes([1; 32]), FixedBytes([2; 24]), &[3; 32])
+                .expect("frame bytes");
         fact_from_wire(&frame, 100).expect("connection_frame_file_slice fact")
     }
 

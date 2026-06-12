@@ -11,8 +11,8 @@ use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 
-use super::encode;
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
+use super::{decode, encode};
 
 use std::net::SocketAddr;
 
@@ -118,6 +118,15 @@ pub fn sign_request(
     endpoint: &EndpointFact,
 ) -> Result<(), String> {
     sign_membership_request(request, endpoint)
+}
+
+pub fn fact_from_sealed_wire(bytes: &[u8], local_timestamp_ms: u64) -> Result<Fact, String> {
+    decode::validate_sealed_fact(bytes)?;
+    Ok(Fact::new(
+        FactScope::Global,
+        local_timestamp_ms,
+        bytes.to_vec(),
+    ))
 }
 
 fn validate_id(name: &str, id: &FactId) -> Result<(), String> {

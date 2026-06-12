@@ -26,7 +26,7 @@ pub(crate) use decode::Codec;
 pub const TYPE_SYNC_HAVE_ID: u8 = encode::TYPE_SYNC_HAVE_ID;
 
 /// Sync have-id projection rows, keyed by `connection_id || fact_id` so
-/// connection::frame handlers can scan all advertisements queued for a
+/// connection frame send handlers can scan all advertisements queued for a
 /// connection. The value stores the timestamp and the advertised fact id; the
 /// fact id in the key keeps distinct advertisements distinct even when the same
 /// fact id is re-advertised from a later range compare.

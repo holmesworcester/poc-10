@@ -6,20 +6,33 @@
 
 use topo::core::crypto::{XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES};
 use topo::core::wire::{Ciphertext, FixedBytes, FixedLayout, WireError};
-use topo::protocol::connection_frame_wire::{
-    self as connection_frame, ConnectionFrameFactBundle, SealConnectionFrame,
-};
-use topo::protocol::connection_frame_wire::{
-    decode_frame_parts, peek_frame_header, ConnectionFrameBundleV1, ConnectionFrameFileSliceV1,
-    ConnectionFrameHeader, ConnectionFrameSmallV1, CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES,
+use topo::protocol::connection::frame_bundle::encode::{
+    ConnectionFrameBundleV1, CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES,
     CONNECTION_FRAME_BUNDLE_FACT_SLOTS, CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES,
     CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES, CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
-    CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES, CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES,
-    CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES, CONNECTION_FRAME_HEADER_BYTES,
-    CONNECTION_FRAME_SIZE_CLASS_BUNDLE, CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+    CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
+};
+use topo::protocol::connection::frame_bundle::{
+    author as frame_bundle_author, decode as frame_bundle_decode, project as frame_bundle_project,
+};
+use topo::protocol::connection::frame_file_slice::encode::{
+    ConnectionFrameFileSliceV1, CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES,
+    CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES, CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+    CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
+};
+use topo::protocol::connection::frame_file_slice::{
+    author as frame_file_slice_author, decode as frame_file_slice_decode,
+    project as frame_file_slice_project,
+};
+use topo::protocol::connection::frame_small::decode::ConnectionFrameHeader;
+use topo::protocol::connection::frame_small::encode::{
+    self as frame_small_encode, ConnectionFrameSmallV1, CONNECTION_FRAME_HEADER_BYTES,
     CONNECTION_FRAME_SIZE_CLASS_SMALL, CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
     CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, CONNECTION_FRAME_SMALL_WIRE_BYTES,
     CONNECTION_FRAME_TAG, CONNECTION_FRAME_VERSION,
+};
+use topo::protocol::connection::frame_small::{
+    author as frame_small_author, decode as frame_small_decode, project as frame_small_project,
 };
 use topo::protocol::content::file::encode::CONTENT_FILE_BYTES;
 use topo::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES;
@@ -359,23 +372,25 @@ fn peek_header_recovers_public_connection_id_without_decrypting() {
     let mut buf = vec![0u8; ConnectionFrameSmallV1::LEN];
     small.encode(&mut buf).unwrap();
 
-    let header = peek_frame_header(&buf).unwrap();
+    let header = frame_small_decode::peek_frame_header(&buf).unwrap();
     assert_eq!(
         header,
         ConnectionFrameHeader {
-            size_class: CONNECTION_FRAME_SIZE_CLASS_SMALL,
             connection_id: FixedBytes(CONNECTION),
             nonce: FixedBytes(NONCE),
         }
     );
 
     // Peeking only needs the header bytes.
-    let header_only = peek_frame_header(&buf[..CONNECTION_FRAME_HEADER_BYTES]).unwrap();
-    assert_eq!(header_only.size_class, CONNECTION_FRAME_SIZE_CLASS_SMALL);
+    let header_only =
+        frame_small_decode::peek_frame_header(&buf[..CONNECTION_FRAME_HEADER_BYTES]).unwrap();
+    assert_eq!(header_only.connection_id, FixedBytes(CONNECTION));
+    assert_eq!(header_only.nonce, FixedBytes(NONCE));
 
     // Short buffers are rejected.
     assert!(matches!(
-        peek_frame_header(&buf[..CONNECTION_FRAME_HEADER_BYTES - 1]).unwrap_err(),
+        frame_small_decode::peek_frame_header(&buf[..CONNECTION_FRAME_HEADER_BYTES - 1])
+            .unwrap_err(),
         WireError::WrongLength { .. }
     ));
 }
@@ -403,32 +418,29 @@ fn ciphertext_slot_capacity_accepts_full_plaintext_plus_aead_tag() {
 
 #[test]
 fn sealed_small_connection_frame_fills_fixed_ciphertext_slot() {
-    let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-        connection_id: CONNECTION,
-        sender_endpoint_id: SENDER,
-        receiver_endpoint_id: RECEIVER,
-        connection_secret: SECRET,
-        nonce: NONCE,
-        facts: ConnectionFrameFactBundle::from_bytes([b"alpha".to_vec(), b"beta".to_vec()]),
-    })
+    let frame = frame_small_author::seal_connection_frame(
+        CONNECTION,
+        SENDER,
+        RECEIVER,
+        SECRET,
+        NONCE,
+        &[b"alpha".to_vec(), b"beta".to_vec()],
+    )
     .expect("seal small frame");
 
     assert_eq!(frame.len(), CONNECTION_FRAME_SMALL_WIRE_BYTES);
-    let parts = decode_frame_parts(&frame).expect("decode frame parts");
-    assert_eq!(parts.header.size_class, CONNECTION_FRAME_SIZE_CLASS_SMALL);
+    let parts = frame_small_decode::decode_frame_parts(&frame).expect("decode frame parts");
+    assert_eq!(parts.header.connection_id, FixedBytes(CONNECTION));
     assert_eq!(
         parts.ciphertext.len(),
         CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES
     );
 
-    let opened = connection_frame::open_connection_frame(&frame, &SECRET)
+    let opened = frame_small_project::open_connection_frame(&frame, &SECRET)
         .expect("open small connection::frame frame");
     assert_eq!(opened.sender_endpoint_id, SENDER);
     assert_eq!(opened.receiver_endpoint_id, RECEIVER);
-    assert_eq!(
-        opened.facts.into_iter().collect::<Vec<_>>(),
-        vec![b"alpha".to_vec(), b"beta".to_vec()]
-    );
+    assert_eq!(opened.facts, vec![b"alpha".to_vec(), b"beta".to_vec()]);
 }
 
 #[test]
@@ -436,76 +448,65 @@ fn sealed_bundle_connection_frame_fills_fixed_ciphertext_slot() {
     let facts = (0..7)
         .map(|index| vec![index; CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES])
         .collect::<Vec<_>>();
-    let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-        connection_id: CONNECTION,
-        sender_endpoint_id: SENDER,
-        receiver_endpoint_id: RECEIVER,
-        connection_secret: SECRET,
-        nonce: NONCE,
-        facts: ConnectionFrameFactBundle::from_bytes(facts.clone()),
-    })
+    let frame = frame_bundle_author::seal_connection_frame(
+        CONNECTION, SENDER, RECEIVER, SECRET, NONCE, &facts,
+    )
     .expect("seal bundle frame");
 
     assert_eq!(frame.len(), CONNECTION_FRAME_BUNDLE_WIRE_BYTES);
-    let parts = decode_frame_parts(&frame).expect("decode frame parts");
-    assert_eq!(parts.header.size_class, CONNECTION_FRAME_SIZE_CLASS_BUNDLE);
+    let parts = frame_bundle_decode::decode_frame_parts(&frame).expect("decode frame parts");
+    assert_eq!(parts.header.connection_id, FixedBytes(CONNECTION));
     assert_eq!(
         parts.ciphertext.len(),
         CONNECTION_FRAME_BUNDLE_CIPHERTEXT_BYTES
     );
 
-    let opened = connection_frame::open_connection_frame(&frame, &SECRET)
+    let opened = frame_bundle_project::open_connection_frame(&frame, &SECRET)
         .expect("open bundle connection::frame frame");
-    assert_eq!(opened.facts.into_iter().collect::<Vec<_>>(), facts);
+    assert_eq!(opened.facts, facts);
 }
 
 #[test]
 fn sealed_file_slice_connection_frame_fills_fixed_ciphertext_slot() {
     on_big_stack(|| {
         let file_slice_fact = vec![0x77; CONTENT_FILE_SLICE_BYTES];
-        let frame = connection_frame::seal_connection_frame(SealConnectionFrame {
-            connection_id: CONNECTION,
-            sender_endpoint_id: SENDER,
-            receiver_endpoint_id: RECEIVER,
-            connection_secret: SECRET,
-            nonce: NONCE,
-            facts: ConnectionFrameFactBundle::from_bytes([file_slice_fact.clone()]),
-        })
+        let frame = frame_file_slice_author::seal_connection_frame(
+            CONNECTION,
+            SENDER,
+            RECEIVER,
+            SECRET,
+            NONCE,
+            &[file_slice_fact.clone()],
+        )
         .expect("seal file-slice frame");
 
         assert_eq!(frame.len(), CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES);
-        let parts = decode_frame_parts(&frame).expect("decode frame parts");
-        assert_eq!(
-            parts.header.size_class,
-            CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE
-        );
+        let parts =
+            frame_file_slice_decode::decode_frame_parts(&frame).expect("decode frame parts");
+        assert_eq!(parts.header.connection_id, FixedBytes(CONNECTION));
         assert_eq!(
             parts.ciphertext.len(),
             CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES
         );
 
-        let opened = connection_frame::open_connection_frame(&frame, &SECRET)
+        let opened = frame_file_slice_project::open_connection_frame(&frame, &SECRET)
             .expect("open file-slice connection::frame frame");
         assert_eq!(opened.sender_endpoint_id, SENDER);
         assert_eq!(opened.receiver_endpoint_id, RECEIVER);
-        assert_eq!(
-            opened.facts.into_iter().collect::<Vec<_>>(),
-            vec![file_slice_fact]
-        );
+        assert_eq!(opened.facts, vec![file_slice_fact]);
     });
 }
 
 #[test]
 fn opening_rejects_variable_length_ciphertext_slot() {
-    let frame = topo::protocol::connection_frame_wire::encode_frame_bytes(
-        CONNECTION_FRAME_SIZE_CLASS_SMALL,
+    let frame = frame_small_encode::encode_frame_bytes(
         FixedBytes(CONNECTION),
         FixedBytes(NONCE),
         b"short ciphertext",
     )
     .expect("variable slot frame");
 
-    let err = connection_frame::open_connection_frame(&frame, &SECRET)
+    let err = frame_small_project::open_connection_frame(&frame, &SECRET)
         .expect_err("open rejects unfilled fixed ciphertext slot");
     assert!(err.contains("fixed slot"), "{err}");
 }

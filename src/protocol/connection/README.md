@@ -81,6 +81,13 @@ sync facts can travel inside established frames only if they are non-local and
 not tagged as private/local. Once opened, they are admitted as ordinary child
 facts and validated by their owning projectors.
 
+Established frame logic is deliberately flat inside the concrete fact families.
+`frame_small`, `frame_file_slice`, and `frame_bundle` each own their fixed
+wire layout in `encode.rs` and `decode.rs`, construction and sealing in
+`author.rs`, and receive-side opening/admission in `project.rs`. There is no
+shared `connection/frame.rs` or `connection/frame_wire.rs` layer; duplicated
+byte handling is preferred over hiding the pipeline behind a generic helper.
+
 ## Cross-Scope Row Reads
 
 Sync reads connection rows when it computes connection-specific visibility and
@@ -121,8 +128,9 @@ facts.
 
 `receive_network_frame` is the inbound socket boundary. It has no input facts.
 It normalizes origin metadata and admits sealed `request`, sealed `connection`,
-or established-frame bytes as typed facts plus a local `frame_observation`. It
-does no unsealing itself.
+or established-frame bytes as typed facts. It also emits a durable
+`create_frame_observation` intent for the received fact id, origin, and receive
+time. It does no unsealing itself.
 
 `maintain_connections` drives outbound request sends from retryable request
 rows. The request command creates invite or membership authority, initiator
@@ -208,7 +216,9 @@ connection, or established frame path. Projection offers
 
 Local wire fact for one established small encrypted frame. Projection needs a
 matching local `frame_observation` plus the referenced local `connection`, opens
-the frame, emits durable child facts, and emits one receipt per child.
+the frame, emits durable child facts, and emits one receipt per child. Its
+`encode.rs`/`decode.rs` are the complete canonical byte layout for this size
+class; `author.rs` seals outbound frames; `project.rs` opens inbound frames.
 
 ### `frame_file_slice` (tag 169)
 
@@ -239,7 +249,8 @@ outbound initiator:
 inbound responder transport observation:
   sealed request bytes
     -> receive_network_frame
-    -> request + frame_observation
+    -> request + create_frame_observation
+    -> frame_observation
 
 inbound responder dependency graph:
   request
@@ -260,7 +271,8 @@ connection projector on responder:
 inbound initiator transport observation:
   sealed connection bytes
     -> receive_network_frame
-    -> connection + frame_observation
+    -> connection + create_frame_observation
+    -> frame_observation
 
 connection projector on initiator:
   needs request + initiator ephemeral_secret + frame_observation
@@ -272,6 +284,7 @@ established connection transfer:
     -> send_facts_on_connection
     -> send_network_frame
     -> remote frame_small/frame_bundle/frame_file_slice
+    -> remote create_frame_observation
     -> remote frame_observation
        needs frame_observation + connection
        open to child facts + fact_receipts

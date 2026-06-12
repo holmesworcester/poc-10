@@ -22,14 +22,11 @@
 //! fact inputs, and handler.
 //!
 //! Scopes are: auth authority and key material, content and retention,
-//! connection protocol, and sync convergence. `connection_frame*` holds the
-//! established-connection encrypted byte machinery shared by connection frame
-//! fact families and send/receive intents; it is not itself a fact family.
+//! connection protocol, and sync convergence. Shared helpers stay inside the
+//! scope that owns their protocol concern.
 
 pub mod app;
 pub(crate) mod cli;
-pub mod connection_frame;
-pub mod connection_frame_wire;
 pub mod registry;
 
 pub mod auth;

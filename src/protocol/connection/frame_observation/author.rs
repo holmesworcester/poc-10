@@ -1,8 +1,7 @@
 //! Connection-frame observation construction helpers.
 
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::protocol::connection::fact_receipt::author::normalize_origin_addr_bytes;
-use crate::protocol::connection::fact_receipt::fact::OriginAddr;
+use crate::protocol::connection::fact_receipt::fact::{normalize_origin_addr_bytes, OriginAddr};
 
 use super::encode;
 use super::fact::ConnectionFrameObservationFact;

@@ -87,7 +87,7 @@ impl IntentHandler for SendRequestedFactHandler {
         {
             return Ok(PipelineEffects::new());
         }
-        crate::protocol::connection_frame::require_sendable_fact(&fact)?;
+        crate::protocol::connection::connection::queries::sendable_fact_body(&fact)?;
         Ok(
             PipelineEffects::new().intent(send_facts_on_connection_intent(SendFactsOnConnection {
                 connection_id: need.connection_id,

@@ -8,8 +8,8 @@
 //!
 //! The payload is only `(routing_key, frame bytes)`, and the idempotence key is
 //! deterministic over both fields. Change this file for route lookup, retry
-//! behavior, or outbound network queue interaction. Change connection-frame
-//! protocol helpers for frame byte semantics.
+//! behavior, or outbound network queue interaction. Change the concrete
+//! connection frame fact families for frame byte semantics.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{Intent, IntentKind};
@@ -34,7 +34,7 @@ pub type RoutingKey = [u8; 32];
 pub struct SendNetworkFrame {
     /// Routing key for the destination socket / connection.
     pub routing_key: RoutingKey,
-    /// Opaque outbound frame bytes. Already packaged by connection-frame helpers.
+    /// Opaque outbound frame bytes. Already packaged by a concrete frame family.
     pub frame: Vec<u8>,
 }
 

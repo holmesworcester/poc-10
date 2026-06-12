@@ -4,7 +4,7 @@
 //! origin addr is canonical. Id checks live in `authenticate.rs`.
 
 use crate::core::wire::{self, FixedLayout};
-use crate::protocol::connection::fact_receipt::author::normalize_origin_addr_bytes;
+use crate::protocol::connection::fact_receipt::fact::normalize_origin_addr_bytes;
 use crate::protocol::connection::fact_receipt::fact::OriginAddr;
 
 use super::encode::{

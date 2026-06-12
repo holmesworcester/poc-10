@@ -27,14 +27,13 @@ use crate::protocol::connection::close;
 use crate::protocol::connection::connection::{
     connection_key, connection_row, ConnectionRowFields, CONNECTION_ROWS,
 };
+use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION;
+use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
 use crate::protocol::connection::frame_observation;
 use crate::protocol::connection::request;
 use crate::protocol::connection::send_network_frame::{
     send_network_frame_intent, SendNetworkFrame,
-};
-use crate::protocol::connection_frame::{
-    connection_fact_receipt_for_path, ConnectionFactReceiptInput,
 };
 use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
 
@@ -198,7 +197,7 @@ fn project_initiator_connection(
     if observation.frame_fact_id != fact.id {
         return Err("connection observation targets another fact".to_string());
     }
-    let receipt = connection_fact_receipt_for_path(ConnectionFactReceiptInput {
+    let receipt = connection_fact_receipt_for_path(ReceiptPathInput {
         received_fact_id: fact.id,
         origin_addr: observation.origin_addr.bytes(),
         local_endpoint_id: connection.to_endpoint,

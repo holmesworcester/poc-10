@@ -9,12 +9,35 @@
 //!      by the observed frame fact id.
 
 use crate::core::context::ContextOffer;
+use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::pipeline::{
     project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
 };
+use crate::protocol::connection::create_frame_observation::{
+    create_frame_observation_intent, CreateFrameObservation,
+};
 
 use super::fact::ConnectionFrameObservationFact;
+
+pub fn observed_frame_effect(
+    frame_fact: Fact,
+    origin_addr: &[u8],
+    received_at_local_ms: u64,
+    ephemeral: bool,
+) -> Result<PipelineEffects, String> {
+    let output =
+        PipelineEffects::new().intent(create_frame_observation_intent(CreateFrameObservation {
+            frame_fact_id: frame_fact.id,
+            origin_addr: origin_addr.to_vec(),
+            received_at_local_ms,
+        }));
+    Ok(if ephemeral {
+        output.ephemeral_fact(frame_fact)
+    } else {
+        output.fact(frame_fact)
+    })
+}
 
 /// Staged read pipeline for the frame_observation fact.
 pub const PIPELINE: FactPipeline = FactPipeline::Staged {

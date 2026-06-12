@@ -17,7 +17,7 @@ use crate::core::intents::{Intent, IntentKind};
 use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
 };
-use crate::protocol::connection::fact_receipt::author::normalize_origin_addr_bytes;
+use crate::protocol::connection::fact_receipt::fact::normalize_origin_addr_bytes;
 
 pub const RECEIVE_NETWORK_FRAME: &str = "receive_network_frame";
 
@@ -107,10 +107,10 @@ fn payload_error(err: PayloadError) -> String {
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
+use crate::protocol::connection::frame_observation::project::observed_frame_effect;
 use crate::protocol::connection::{
     connection, frame_bundle, frame_file_slice, frame_small, request,
 };
-use crate::protocol::connection_frame::{self, ConnectionFrameKind};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveNetworkFrameHandler;
@@ -135,37 +135,51 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         // unseals it with the local endpoint secret from `auth_local_endpoint`
         // context — the boundary does no unsealing itself.
         if request::decode::is_sealed_fact(&input.frame) {
-            return Ok(connection_frame::observed_request_fact_effect(
-                input.frame.clone(),
+            let fact =
+                request::author::fact_from_sealed_wire(&input.frame, input.received_at_local_ms)?;
+            return Ok(observed_frame_effect(
+                fact,
                 &input.origin_addr,
                 input.received_at_local_ms,
+                false,
             )?);
         }
         if connection::decode::is_sealed_fact(&input.frame) {
-            return Ok(connection_frame::observed_connection_fact_effect(
-                input.frame.clone(),
+            let fact = connection::author::fact_from_sealed_wire(
+                &input.frame,
+                input.received_at_local_ms,
+            )?;
+            return Ok(observed_frame_effect(
+                fact,
                 &input.origin_addr,
                 input.received_at_local_ms,
+                false,
             )?);
         }
 
-        Ok(match connection_frame::classify_frame(&input.frame) {
-            Some(ConnectionFrameKind::Small) => connection_frame::observed_frame_effect(
+        Ok(if frame_small::decode::is_frame(&input.frame) {
+            observed_frame_effect(
                 frame_small::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
-            )?,
-            Some(ConnectionFrameKind::FileSlice) => connection_frame::observed_frame_effect(
+                true,
+            )?
+        } else if frame_file_slice::decode::is_frame(&input.frame) {
+            observed_frame_effect(
                 frame_file_slice::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
-            )?,
-            Some(ConnectionFrameKind::Bundle) => connection_frame::observed_frame_effect(
+                true,
+            )?
+        } else if frame_bundle::decode::is_frame(&input.frame) {
+            observed_frame_effect(
                 frame_bundle::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
-            )?,
-            None => PipelineEffects::new(),
+                true,
+            )?
+        } else {
+            PipelineEffects::new()
         })
     }
 }

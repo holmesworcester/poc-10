@@ -8,8 +8,8 @@ use crate::protocol::auth::endpoint::fact::EndpointFact;
 use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::request::fact::ConnectionRequestFact;
 
-use super::encode;
 use super::fact::ConnectionFact;
+use super::{decode, encode};
 
 pub struct BuildResponderConnection<'a> {
     pub request_id: [u8; 32],
@@ -64,4 +64,13 @@ pub fn build_responder_connection(
     let bytes = encode::seal_fact(&connection, &input.responder_ephemeral_private_key)?;
     let fact = Fact::new(FactScope::Local, input.created_at_ms, bytes);
     Ok(BuildResponderResult { fact, connection })
+}
+
+pub fn fact_from_sealed_wire(bytes: &[u8], local_timestamp_ms: u64) -> Result<Fact, String> {
+    decode::validate_sealed_fact(bytes)?;
+    Ok(Fact::new(
+        FactScope::Local,
+        local_timestamp_ms,
+        bytes.to_vec(),
+    ))
 }

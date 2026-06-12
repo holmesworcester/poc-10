@@ -7,9 +7,9 @@
 //! `send_network_frame` intents.
 //!
 //! This is not socket IO and it is not sync visibility policy. Sync owns the
-//! shareable index and requested ids, protocol-level connection-frame helpers
-//! own byte-level sendability and sealing, and `send_network_frame` owns the
-//! final opaque socket write.
+//! shareable index and requested ids, this handler owns byte-level sendability
+//! and frame-family selection, each frame fact family owns sealing, and
+//! `send_network_frame` owns the final opaque socket write.
 
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
@@ -19,16 +19,12 @@ use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
 };
 use crate::core::{effects::PipelineEffects, facts::Fact};
+use crate::protocol::auth::endpoint;
+use crate::protocol::connection::connection as connection_fact;
 use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
-use crate::protocol::{
-    auth::endpoint,
-    connection::connection,
-    connection_frame::{
-        self as frame_policy, ConnectionFrameFactBundle, CONNECTION_FRAME_BUNDLE_FACT_SLOTS,
-        CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES, CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES,
-    },
-    sync::shared_fact,
-};
+use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small};
+use crate::protocol::content;
+use crate::protocol::sync::shared_fact;
 
 pub type HandlerId = [u8; 32];
 
@@ -38,7 +34,6 @@ pub const SHAREABLE_BUCKET_TIMESTAMPS: u64 = 4096;
 const EXPLICIT_FACTS_PAYLOAD: u8 = 1;
 const SHAREABLE_RANGE_PAYLOAD: u8 = 2;
 const SHAREABLE_RANGE_WITH_DEPS_PAYLOAD: u8 = 3;
-const INNER_BUNDLE_HEADER_BYTES: usize = 4 + 1 + 4;
 const INNER_FACT_LEN_BYTES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,7 +263,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         let work = decode_send_facts_on_connection_work(intent)?;
         let connection_id = work.connection_id();
         let Some(connection) =
-            connection::queries::connection_by_id(context.store()?, &connection_id).map_err(
+            connection_fact::queries::connection_by_id(context.store()?, &connection_id).map_err(
                 |err| {
                     HandlerError::fatal(format!("send_facts_on_connection connection row: {err}"))
                 },
@@ -295,20 +290,18 @@ impl IntentHandler for SendFactsOnConnectionHandler {
         let mut output = PipelineEffects::new();
         for batch in batches {
             let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
-            let mut bundle = ConnectionFrameFactBundle::new();
-            for fact in &batch {
-                bundle.push(frame_policy::require_sendable_fact(fact)?.to_vec());
-            }
-            let sealed_frame = frame_policy::seal_connection_send_frame(
+            let payloads = batch
+                .iter()
+                .map(|fact| connection_fact::queries::sendable_fact_body(fact).map(Vec::from))
+                .collect::<Result<Vec<_>, _>>()?;
+            let frame = seal_batch(
                 connection_id,
                 sender_endpoint,
                 receiver_endpoint,
                 connection.connection_secret,
                 &fact_ids,
-                bundle,
+                &payloads,
             )?;
-            let frame_fact = frame_policy::frame_fact_from_wire(&sealed_frame, 0)?;
-            let frame = frame_policy::wire_from_frame_fact(&frame_fact)?;
             output = output.local_intent(send_network_frame::send_network_frame_intent(
                 SendNetworkFrame {
                     routing_key: connection_id,
@@ -354,28 +347,30 @@ fn facts_for_work(
 fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
     let mut batches = Vec::new();
     let mut batch = Vec::new();
-    let mut packed_len = INNER_BUNDLE_HEADER_BYTES;
+    let mut packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
     for fact in facts {
-        let fact_len = frame_policy::require_sendable_fact(&fact)?.len();
+        let fact_len = connection_fact::queries::sendable_fact_body(&fact)?.len();
         if fact_len == crate::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES {
             if !batch.is_empty() {
                 batches.push(std::mem::take(&mut batch));
-                packed_len = INNER_BUNDLE_HEADER_BYTES;
+                packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
             }
             batches.push(vec![fact]);
             continue;
         }
-        if fact_len > CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES {
+        if fact_len > frame_bundle::encode::CONNECTION_FRAME_BUNDLE_FACT_SLOT_BYTES {
             return Err(
                 "send_facts_on_connection fact exceeds connection frame bundle slot".into(),
             );
         }
         let item_len = INNER_FACT_LEN_BYTES + fact_len;
-        let would_fit_small = packed_len + item_len <= CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES;
-        let would_fit_bundle = batch.len() < CONNECTION_FRAME_BUNDLE_FACT_SLOTS;
+        let would_fit_small =
+            packed_len + item_len <= frame_small::encode::CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES;
+        let would_fit_bundle =
+            batch.len() < frame_bundle::encode::CONNECTION_FRAME_BUNDLE_FACT_SLOTS;
         if !batch.is_empty() && !would_fit_small && !would_fit_bundle {
             batches.push(std::mem::take(&mut batch));
-            packed_len = INNER_BUNDLE_HEADER_BYTES;
+            packed_len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
         }
         packed_len += item_len;
         batch.push(fact);
@@ -384,6 +379,68 @@ fn fact_batches(facts: Vec<Fact>) -> Result<Vec<Vec<Fact>>, String> {
         batches.push(batch);
     }
     Ok(batches)
+}
+
+fn seal_batch(
+    connection_id: HandlerId,
+    sender_endpoint: HandlerId,
+    receiver_endpoint: HandlerId,
+    connection_secret: [u8; 32],
+    fact_ids: &[HandlerId],
+    payloads: &[Vec<u8>],
+) -> Result<Vec<u8>, String> {
+    if is_file_slice_batch(payloads) {
+        return frame_file_slice::author::seal_connection_send_frame(
+            connection_id,
+            sender_endpoint,
+            receiver_endpoint,
+            connection_secret,
+            fact_ids,
+            payloads,
+        );
+    }
+    if inner_bundle_packed_len(payloads)?
+        <= frame_small::encode::CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES
+    {
+        return frame_small::author::seal_connection_send_frame(
+            connection_id,
+            sender_endpoint,
+            receiver_endpoint,
+            connection_secret,
+            fact_ids,
+            payloads,
+        );
+    }
+    frame_bundle::author::seal_connection_send_frame(
+        connection_id,
+        sender_endpoint,
+        receiver_endpoint,
+        connection_secret,
+        fact_ids,
+        payloads,
+    )
+}
+
+fn is_file_slice_batch(payloads: &[Vec<u8>]) -> bool {
+    payloads.len() == 1
+        && payloads[0].len() == content::file_slice::encode::CONTENT_FILE_SLICE_BYTES
+}
+
+fn inner_bundle_packed_len(payloads: &[Vec<u8>]) -> Result<usize, String> {
+    if payloads.is_empty() {
+        return Err("connection::frame inner bundle must contain at least one fact".to_string());
+    }
+    let mut len = frame_small::author::INNER_BUNDLE_HEADER_BYTES;
+    for payload in payloads {
+        let payload_len = payload.len();
+        u32::try_from(payload_len)
+            .map_err(|_| format!("connection::frame inner length too large: {payload_len}"))?;
+        len = len
+            .checked_add(INNER_FACT_LEN_BYTES)
+            .and_then(|len| len.checked_add(payload_len))
+            .ok_or_else(|| "connection::frame inner bundle length overflow".to_string())?;
+    }
+    Ok(len)
 }
 
 #[cfg(test)]

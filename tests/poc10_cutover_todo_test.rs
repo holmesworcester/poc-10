@@ -437,13 +437,14 @@ fn cutover_projector_output_guardrail_is_real_and_enabled() {
 }
 
 #[test]
-fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots() {
+fn cutover_connection_frame_send_has_no_not_yet_wired_or_shared_frame_policy() {
     let root = root();
     let paths = vec![
         root.join("src/protocol/connection/send_facts_on_connection.rs"),
         root.join("src/protocol/connection/send_network_frame.rs"),
-        root.join("src/protocol/connection_frame.rs"),
-        root.join("src/protocol/connection_frame_wire.rs"),
+        root.join("src/protocol/connection/frame_small/author.rs"),
+        root.join("src/protocol/connection/frame_file_slice/author.rs"),
+        root.join("src/protocol/connection/frame_bundle/author.rs"),
     ];
     let offenders = matching_lines_including_comments(
         &root,
@@ -451,14 +452,14 @@ fn cutover_connection_frame_send_has_no_not_yet_wired_or_variable_payload_slots(
         &[
             "NOT_YET_WIRED",
             "not yet wired",
-            "Vec<Vec<u8>>",
-            "push_vecs",
-            "fn vecs",
+            "frame_policy::",
+            "connection::frame_wire",
+            "protocol::connection::frame_wire",
         ],
     );
     assert!(
         offenders.is_empty(),
-        "connection::frame send still has placeholder packaging or variable payload slots:\n{}",
+        "connection-frame send still has placeholder packaging or a shared frame policy helper:\n{}",
         offenders.join("\n")
     );
 }
@@ -867,7 +868,6 @@ fn cutover_projectors_and_handlers_receive_typed_facts_not_raw_bytes() {
     let root = root();
     let mut paths = project_files(&root);
     paths.extend(intent_handler_files(&root));
-    paths.push(root.join("src/protocol/connection_frame.rs"));
 
     let offenders = matching_production_code_lines(
         &root,

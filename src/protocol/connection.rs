@@ -34,6 +34,7 @@ pub mod request;
 // enough context to answer or when an invite/server bootstrap should send a
 // request over the network.
 pub mod create_connection;
+pub mod create_frame_observation;
 pub mod maintain_connections;
 pub mod send_facts_on_connection;
 pub mod send_network_frame;

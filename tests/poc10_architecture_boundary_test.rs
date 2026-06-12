@@ -802,7 +802,16 @@ fn poc10_sync_paths_use_shareable_index_for_advertised_facts() {
 fn poc10_concrete_protocol_routes_semantic_messages() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let registry = source_text(&root.join("src/protocol/registry.rs"));
-    let receive = source_text(&root.join("src/protocol/connection_frame.rs"));
+    let receive = [
+        "src/protocol/connection/receive_network_frame.rs",
+        "src/protocol/connection/frame_small/project.rs",
+        "src/protocol/connection/frame_file_slice/project.rs",
+        "src/protocol/connection/frame_bundle/project.rs",
+    ]
+    .into_iter()
+    .map(|path| source_text(&root.join(path)))
+    .collect::<Vec<_>>()
+    .join("\n");
 
     for required in [
         "content::message",

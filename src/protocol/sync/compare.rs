@@ -24,7 +24,7 @@ pub(crate) use decode::Codec;
 pub const TYPE_SYNC_COMPARE: u8 = encode::TYPE_SYNC_COMPARE;
 
 /// Sync compare projection rows, keyed by `connection_id || fact_id` so
-/// connection::frame handlers can scan a single connection's outstanding
+/// connection frame send handlers can scan a single connection's outstanding
 /// compare queries. The value stores the timestamp range, the summary (count +
 /// fingerprint), and the response-requested flag.
 pub const SYNC_COMPARE_ROWS: TableName = TableName::new("sync_compare_rows");

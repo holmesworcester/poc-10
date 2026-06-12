@@ -8,7 +8,7 @@
 //!
 //! Connection-frame wrapping is a separate concern: the projector here only owns the
 //! durable row layout. Routing this fact onto a connection happens in a
-//! connection::frame handler.
+//! connection send handler.
 
 use crate::core::facts::FactId;
 

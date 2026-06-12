@@ -7,7 +7,6 @@
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};
 
-use super::author::normalize_origin_addr_bytes;
 use super::encode::{
     CONNECTION_FACT_RECEIPT_BYTES, CONNECTION_ID_OFFSET, FRAME_HASH_OFFSET, HAS_CONNECTION_OFFSET,
     HAS_REQUEST_OFFSET, LOCAL_ENDPOINT_OFFSET, ORIGIN_OFFSET, RECEIVED_AT_OFFSET,
@@ -15,8 +14,8 @@ use super::encode::{
     TYPE_CONNECTION_FACT_RECEIPT,
 };
 use super::fact::{
-    ConnectionFactReceipt, OriginAddr, ORIGIN_ADDR_BYTES, RECEIVE_PATH_CONNECTION,
-    RECEIVE_PATH_CONNECTION_FRAME, RECEIVE_PATH_CONNECTION_REQUEST,
+    normalize_origin_addr_bytes, ConnectionFactReceipt, OriginAddr, ORIGIN_ADDR_BYTES,
+    RECEIVE_PATH_CONNECTION, RECEIVE_PATH_CONNECTION_FRAME, RECEIVE_PATH_CONNECTION_REQUEST,
 };
 
 pub(crate) struct Codec;

@@ -165,6 +165,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             "connection",
             &[
                 "create_connection",
+                "create_frame_observation",
                 "maintain_connections",
                 "receive_network_frame",
                 "send_facts_on_connection",
@@ -1335,6 +1336,10 @@ const FAMILY_FILE_RULE_EXCEPTIONS: [&str; 0] = [];
 /// Scope-local directories that are deliberately not fact families.
 const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 0] = [];
 
+/// Scope-local helper files that are deliberately not intents or fact-family
+/// manifests. These must stay rare and named explicitly.
+const SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS: [&str; 0] = [];
+
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1609,10 +1614,11 @@ fn fact_family_directories_are_noun_named() {
 
 #[test]
 fn scope_directories_contain_only_intents_and_family_manifests() {
-    // Only intents linger outside of facts. Every `.rs` file directly under a
-    // scope directory is either a registered intent handler or a `<family>.rs`
-    // manifest paired with a `<family>/` directory. Every subdirectory is a
-    // fact family paired with its manifest.
+    // Only intents and named helper files linger outside of facts. Every `.rs`
+    // file directly under a scope directory is either a registered intent
+    // handler, an explicitly allowed helper, or a `<family>.rs` manifest paired
+    // with a `<family>/` directory. Every subdirectory is a fact family paired
+    // with its manifest.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let intents = intent_handler_file_set(root);
     let mut offenders = Vec::new();
@@ -1622,9 +1628,17 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
             if intents.contains(&file) {
                 continue;
             }
+            let relative = file
+                .strip_prefix(root.join("src/protocol"))
+                .unwrap()
+                .display()
+                .to_string();
+            if SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS.contains(&relative.as_str()) {
+                continue;
+            }
             if !file.with_extension("").is_dir() {
                 offenders.push(format!(
-                    "{} is neither a registered intent handler nor a `<family>.rs` \
+                    "{} is neither a registered intent handler, an allowed helper, nor a `<family>.rs` \
                      manifest with a matching `<family>/` directory",
                     file.strip_prefix(root).unwrap().display()
                 ));
@@ -1658,8 +1672,8 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
 
     assert!(
         offenders.is_empty(),
-        "directly under a scope, only intent handlers and `<family>.rs` manifests \
-         (each paired with a `<family>/` directory) may appear:\n{}",
+        "directly under a scope, only intent handlers, explicitly allowed helpers, and \
+         `<family>.rs` manifests (each paired with a `<family>/` directory) may appear:\n{}",
         offenders.join("\n")
     );
 }
@@ -1749,62 +1763,75 @@ fn connection_frame_send_and_receive_paths_use_frame_fact_create_helpers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let receive = source_text(&root.join("src/protocol/connection/receive_network_frame.rs"));
     let send = source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
-    let frame_policy = source_text(&root.join("src/protocol/connection_frame.rs"));
     let mut offenders = Vec::new();
 
     for family in ["frame_small", "frame_file_slice", "frame_bundle"] {
         let direct_create = format!("{family}::author::fact_from_wire");
         if !receive.contains(&direct_create) {
             offenders.push(format!(
-                "receive_network_frame.rs does not create {family} through create.rs"
+                "receive_network_frame.rs does not create {family} through author.rs"
             ));
         }
-        let policy_create = format!("connection::{family}::author::fact_from_wire");
-        if !frame_policy.contains(&policy_create) {
+        let direct_seal = format!("{family}::author::seal_connection_send_frame");
+        if !send.contains(&direct_seal) {
             offenders.push(format!(
-                "connection_frame.rs does not route send frame bytes through {family}::create"
+                "send_facts_on_connection.rs does not seal {family} through author.rs"
             ));
         }
     }
-    if !send.contains("frame_policy::frame_fact_from_wire") {
-        offenders.push(
-            "send_facts_on_connection.rs bypasses canonical frame fact construction".to_string(),
-        );
-    }
-    if !send.contains("frame_policy::wire_from_frame_fact") {
-        offenders.push(
-            "send_facts_on_connection.rs does not send bytes extracted from a frame fact"
-                .to_string(),
-        );
+    for forbidden in [
+        "frame_policy::",
+        "connection::frame_wire",
+        "connection::frame::",
+    ] {
+        if receive.contains(forbidden) || send.contains(forbidden) {
+            offenders.push(format!(
+                "connection send/receive still imports shared helper marker {forbidden:?}"
+            ));
+        }
     }
 
     assert!(
         offenders.is_empty(),
-        "send and receive should share frame fact constructors; only receive persists observation context:\n{}",
+        "send and receive should go through concrete frame-family author.rs files; only receive emits observation context intents:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-fn connection_frame_helper_family_does_not_reappear() {
+fn connection_frame_helpers_do_not_reappear() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
     for path in [
+        "src/protocol/connection_frame.rs",
+        "src/protocol/connection_frame_wire.rs",
         "src/protocol/connection/frame.rs",
-        "src/protocol/connection/frame",
+        "src/protocol/connection/frame_wire.rs",
     ] {
         if root.join(path).exists() {
             offenders.push(path);
         }
     }
 
+    let root_manifest = source_text(&root.join("src/protocol.rs"));
+    let connection_manifest = source_text(&root.join("src/protocol/connection.rs"));
+    for (manifest, marker) in [
+        (&root_manifest, "pub mod connection_frame;"),
+        (&root_manifest, "pub mod connection_frame_wire;"),
+        (&connection_manifest, "pub mod frame;"),
+        (&connection_manifest, "pub mod frame_wire;"),
+    ] {
+        if manifest.contains(marker) {
+            offenders.push(marker);
+        }
+    }
+
     assert!(
         offenders.is_empty(),
-        "`connection::frame` must not be a scope-local family/helper namespace; use the concrete frame_small, frame_file_slice, and frame_bundle fact families:\n{}",
+        "connection-frame helpers must not reappear; concrete frame families own their own flat encode/decode/author/project code:\n{}",
         offenders.join("\n")
     );
 }
-
 #[test]
 fn fact_like_family_directories_are_registered_normal_fact_modules() {
     // A directory that owns a fact shape (`fact.rs`) or byte tag/layout

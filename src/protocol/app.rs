@@ -75,7 +75,7 @@ fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, St
     connection::receive_network_frame::receive_network_frame_intent(
         connection::receive_network_frame::ReceiveNetworkFrame {
             frame: input.frame,
-            origin_addr: connection::fact_receipt::author::canonical_origin_addr_bytes(
+            origin_addr: connection::fact_receipt::fact::canonical_origin_addr_bytes(
                 input.origin_addr,
             ),
             received_at_local_ms: input.received_at_local_ms,

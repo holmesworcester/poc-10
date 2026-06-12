@@ -6,11 +6,16 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
-use crate::core::facts::FactId;
+use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
 
+use crate::protocol::auth;
 use crate::protocol::connection::request::{
     decode::decode_optional_addr, encode::ADDR_BLOCK_BYTES,
+};
+use crate::protocol::connection::{
+    close, ephemeral_secret, fact_receipt, frame_bundle, frame_file_slice, frame_observation,
+    frame_small, request,
 };
 
 use super::{connection_key, EndpointId, CONNECTION_ROWS, CONNECTION_ROW_SCHEMA};
@@ -96,6 +101,50 @@ pub fn has_connection_between(
         }
     }
     Ok(false)
+}
+
+pub fn sendable_fact_body(fact: &Fact) -> Result<&[u8], String> {
+    if fact.scope == FactScope::Local {
+        return Err(format!(
+            "connection::frame send refused local fact {:?}",
+            fact.id
+        ));
+    }
+
+    let tag = fact
+        .bytes
+        .first()
+        .copied()
+        .ok_or_else(|| format!("connection::frame send refused empty fact {:?}", fact.id))?;
+    if is_private_local_fact_tag(tag) {
+        return Err(format!(
+            "connection::frame send refused private/local fact tag {tag} for {:?}",
+            fact.id
+        ));
+    }
+
+    Ok(fact.body())
+}
+
+fn is_private_local_fact_tag(tag: u8) -> bool {
+    matches!(
+        tag,
+        close::encode::TYPE_CONNECTION_CLOSE
+            | ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET
+            | request::encode::TYPE_CONNECTION_REQUEST
+            | super::encode::TYPE_CONNECTION
+            | auth::endpoint::encode::TYPE_LOCAL_ENDPOINT
+            | auth::invite::encode::TYPE_INVITE_SECRET
+            | auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET
+            | auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET
+            | auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET
+            | auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY
+            | frame_small::encode::TYPE_CONNECTION_FRAME_SMALL
+            | frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE
+            | frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE
+            | frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION
+            | fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT
+    )
 }
 
 #[cfg(test)]
