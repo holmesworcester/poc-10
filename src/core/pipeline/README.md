@@ -127,8 +127,8 @@ after startup, and replay never fires those recurring runs.
 ## Invariants
 
 - Queue consumption and output commit are atomic. A fact is not removed from
-  pending projection until its replacement context and effects commit. An
-  intent row is not deleted until its handler output commits.
+  pending projection until its replacement needs, append-only offers, and
+  effects commit. An intent row is not deleted until its handler output commits.
 - Retry is represented by keeping work queued. Fatal handler errors and SQL
   commit failures abort the pass. Handler retry errors leave the intent row in
   place; local (ephemeral, not-replayed) retry rows rotate to the tail.
@@ -137,8 +137,11 @@ after startup, and replay never fires those recurring runs.
   in the same transaction.
 - Projection mode is sticky toward replay. If an owner is already queued in
   replay mode, later normal wakes do not downgrade it.
-- Context is replacement by owner. The settled `ProjectionOutput` is the
-  complete standing needs/offers/time-wake set for that fact.
+- Needs are replacement subscriptions. The settled `ProjectionOutput` is the
+  complete standing need set for that fact; emitting no needs marks the fact no
+  longer parked on context.
+- Durable offers are append-only evidence. Once a fact offers context, that
+  offer remains until the fact is purged.
 - Wake fanout is based on newly added context rows from the replacement delta.
   Stable unmet needs do not self-wake forever.
 - Projector output may purge only the fact being projected. Cross-fact purge is
@@ -196,8 +199,8 @@ For a durable fact, one projection commit performs this ordered unit:
 ```text
 delete durable pending row
 clear due time range rows for this owner
-delete old context and time wakes owned by fact
-insert new needs, offers, and time wakes
+delete old needs and time wakes owned by fact
+insert new needs, append new offers, and insert new time wakes
 wake owners whose needs match newly added offers
 apply PipelineEffects through commit_effects
 ```

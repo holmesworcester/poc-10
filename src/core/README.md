@@ -27,10 +27,11 @@ Projection is core's deterministic reaction step. Core drains
 `pending_projection`, loads one fact and its matched context, resolves any
 newly declared needs that already match stored offers, calls the protocol
 projector until the item settles, and commits the output. That commit replaces
-the fact's owned needs, offers, and time wakes; applies allowed row mutations;
-admits emitted facts; queues follow-up intents; and wakes other fact owners
-whose standing needs now overlap newly added offers. Core performs the overlap
-query mechanically, but projectors decide what the matched payload proves.
+the fact's owned needs and time wakes; appends newly emitted offers as durable
+evidence; applies allowed row mutations; admits emitted facts; queues follow-up
+intents; and wakes other fact owners whose standing needs now overlap newly
+added offers. Core performs the overlap query mechanically, but projectors
+decide what the matched payload proves.
 
 Intents are core's bounded stateful work step. A projector or command emits an
 intent when the next action should not happen inside deterministic projection:
@@ -114,7 +115,8 @@ the owning projector decide whether that time proves anything.
 - Fact ids are deterministic BLAKE3 hashes of immutable fact bytes. Scope and
   timestamp are local admission metadata, not part of content identity.
 - Context rows are standing state owned by one fact. A projection output
-  replaces the previous needs, offers, and time wakes for that owner.
+  replaces the previous needs and time wakes for that owner, while newly emitted
+  offers append as durable evidence until the owner fact is purged.
 - Context matching is protocol-blind range overlap over `(role, scope,
   start_key, end_key)`. Projectors must decode and validate matched payloads.
 - Projectors do not query the store, perform IO, call handlers, or mutate
@@ -162,8 +164,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   dispatcher, network socket, or write transaction.
 - `context.rs`: public vocabulary for standing context relationships. It
   defines needs, offers, roles, opaque byte keys, canonical key construction,
-  complete replacement context sets, and the protocol-blind overlap rule that
-  lets core wake facts without understanding their semantics.
+  replacement need subscriptions, append-only offer evidence, and the
+  protocol-blind overlap rule that lets core wake facts without understanding
+  their semantics.
 - `crypto.rs`: reusable primitive facade for hashes, signatures, key exchange,
   authenticated encryption, and checked byte slices. It centralizes low-level
   library calls. Protocol modules still own signing domains, associated data,
@@ -241,16 +244,16 @@ use core syntax and contracts, but core must not import their semantic rules.
   due time ranges, and typed payload helpers visible while one fact is being
   processed.
 - `pipeline/effects.rs`: `ProjectionOutput`, time wakes, and due time ranges.
-  Projection output is the complete context/time-wake replacement plus shared
-  `PipelineEffects` for one fact.
+  Projection output is the complete need/time-wake replacement, new append-only
+  offers, plus shared `PipelineEffects` for one fact.
 - `pipeline/commit_effects.rs`: shared atomic commit path for
   `PipelineEffects`. It validates duplicate or conflicting effects, purges exact
   facts, admits durable and ephemeral facts, applies allowed row mutations, and
   queues follow-up intents inside the caller's transaction.
 - `pipeline/context_store.rs`: SQL implementation of standing context. It stores
   need/offer edges, assembles projection context with matched payload facts,
-  computes replacement deltas by owner, and fans out pending projection rows
-  when new needs and offers overlap.
+  computes replacement-need and append-only-offer deltas by owner, and fans out
+  pending projection rows when new needs and offers overlap.
 - `pipeline/dispatch.rs`: intent queue worker. It claims one durable or local
   intent, loads only the handler-declared fact inputs, calls the registered
   handler, handles retry/fatal outcomes, and commits handler output atomically
@@ -261,7 +264,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   SQL narrow and auditable.
 - `pipeline/pipeline_one.rs`: one queued fact pipeline item. It loads matched
   context and due time ranges, runs staged decode/authenticate/adapt/project
-  routes, replaces the owner's context/time wakes, and commits emitted effects.
+  routes, replaces the owner's needs/time wakes, appends offers, and commits
+  emitted effects.
 - `pipeline.rs`: runtime state machine and pending projection queue drain. It
   admits facts and due time wakes, selects durable and ephemeral projection
   items, applies the one-item pipeline step, and lets

@@ -29,7 +29,9 @@
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::network::{INBOUND_TABLE, OUTBOUND_TABLE};
-use crate::core::pipeline::{FactAdmissionFn, HandlerRoute, HandlerSet, PipelineEngine, Projector};
+use crate::core::pipeline::{
+    FactAdmissionFn, HandlerRoute, HandlerSet, IntentAdmissionPolicy, PipelineEngine, Projector,
+};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
@@ -393,10 +395,10 @@ impl<'a> ReplayDrive<'a> {
         if self.kinds.is_empty() {
             return Ok(false);
         }
-        let progress = self.pipeline.dispatch_intents_filtering(
+        let progress = self.pipeline.dispatch_intents(
             &self.handlers,
             REPLAY_WORK_LIMIT,
-            &self.kinds,
+            IntentAdmissionPolicy::AllowKinds(&self.kinds),
         )?;
         counters.suppressed_live_only_work += progress.suppressed_intents;
         counters.replay_allowed_intents += progress.dispatched;

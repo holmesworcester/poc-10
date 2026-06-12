@@ -39,10 +39,12 @@
 //! is the fact that should be reprojected. For offers, `owner` is also the
 //! payload fact core loads when the offer overlaps a need.
 //!
-//! Projection owns context by replacement, not append. When a fact projects, it
-//! emits the complete current set of needs and offers for that fact. Core diffs
-//! that set against the previous durable set, wakes only genuinely new matches,
-//! and avoids self-waking loops when stable unmet needs are re-emitted.
+//! Needs and offers have different lifecycles. Needs are replacement
+//! subscriptions: when a fact projects, it emits the complete current set of
+//! dependencies it still wants to hear about. Offers are append-only evidence:
+//! once a durable fact offers context, that offer remains until the fact is
+//! purged. Core wakes only genuinely new need/offer matches and avoids
+//! self-waking loops when stable unmet needs are re-emitted.
 
 use crate::core::facts::{FactId, FactScope};
 use crate::core::wire::Writer;

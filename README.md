@@ -171,7 +171,7 @@ command or handler output
   -> facts / intents / row mutations
   -> pending_projection
   -> projector
-  -> context replacement + row mutations + follow-up intents
+  -> replacement needs + append-only offers + row mutations + follow-up intents
   -> durable or ephemeral intent queue
   -> registered handler
   -> committed PipelineEffects
@@ -223,10 +223,10 @@ context, touch external IO, or commit state.
 
 Projectors are the deterministic derivation path from one fact to local state.
 They decode the primary fact, check scope and structure, declare exact context
-needs, validate matched context, and return the complete replacement context
-plus materialization effects. They are separate from handlers because missing
-context parks projection, while IO and retryable stateful work belongs in
-queued intents.
+needs, validate matched context, and return replacement needs, append-only
+offers, and materialization effects. They are separate from handlers because
+missing context parks projection, while IO and retryable stateful work belongs
+in queued intents.
 
 Deletion is target-owned: a target fact keeps the need or time wake that can
 remove it, and when that context appears it deletes only its own rows and may
