@@ -17,7 +17,7 @@ it to:
 - commit `PipelineEffects` from commands, projectors, and handlers.
 - record ephemeral projection inputs in `ephemeral_projection_inputs`.
 - submit durable intents to `intents`.
-- submit local intents to `local_intents`.
+- submit local (ephemeral, not-replayed) intents to `local_intents`.
 - mark facts whose scheduled wake-up time has arrived as pending projection
   work.
 - enqueue retained facts and scheduled replay wake-ups as replay projection
@@ -35,8 +35,8 @@ concrete stage implementations. Projectors decide what facts need or offer,
 what rows they materialize, what facts or ephemeral projection inputs they emit,
 and what follow-up intents to enqueue. Handlers decide what bounded stateful
 work to perform. Handler routes declare whether their intents may run during
-replay and whether a daemon should install a live-only recurring schedule. The
-pipeline decides when those effects become durable.
+replay and whether the daemon should fire a live-only recurring intent for that
+route. The pipeline decides when those effects become durable.
 
 ## Read Projection Path
 
@@ -52,6 +52,16 @@ loads the fact and context, then invokes the registered protocol projector. The
 protocol router selects the tag route, core's staged helper runs
 decode/authenticate/adapt/project, and the settled `ProjectionOutput` hands
 context replacement plus `PipelineEffects` to the same commit boundary.
+
+In this pipeline, `authenticate` means family-owned fact-boundary proof, not
+complete semantic authority. It proves the decoded bytes are admissible as that
+fact family: canonical layout, content id, and any embedded fact-boundary
+signature, sealed envelope, or local cryptographic context needed before the
+payload can be interpreted. Detached signature evidence is itself a fact that
+authenticates independently and then offers context. Facts that depend on that
+evidence check it in `project`, alongside scope, authority, parent/deletion, and
+other semantic relationships.
+
 `Authentication::NeedsAuthentication` becomes standing context needs, so the
 fact can park until the required verifier, key, or envelope context appears.
 `ProjectionContext` also exposes the projection mode and due time ranges without
@@ -107,12 +117,12 @@ marks matching fact owners in `pending_projection`, stores the due `TimeRange`,
 and projection context exposes that range without allowing projectors to read
 the clock.
 
-Replay also uses the same path. Replay queues retained facts and replay due
-wake-ups into `pending_projection` with mode `replay`, exposes that mode through
-`ProjectionContext::is_replay()`, and suppresses follow-up intents unless the
-matching `HandlerRoute` declares `runs_during_replay`. Handler route recurrence
-is live-only daemon state: recurring schedules are installed in memory after
-startup and are not replayed.
+Replay also uses the same path. Replay queues retained facts and scheduled
+replay wake-ups into `pending_projection` with mode `replay`, exposes that mode
+through `ProjectionContext::is_replay()`, and suppresses follow-up intents
+unless the matching `HandlerRoute` declares `runs_during_replay`. Recurring
+intents are live-only daemon work: the daemon installs their cadence in memory
+after startup, and replay never fires those recurring runs.
 
 ## Invariants
 
@@ -121,9 +131,10 @@ startup and are not replayed.
   intent row is not deleted until its handler output commits.
 - Retry is represented by keeping work queued. Fatal handler errors and SQL
   commit failures abort the pass. Handler retry errors leave the intent row in
-  place; local retry rows rotate to the tail.
-- Durable intents win over matching local intents. When a durable intent is
-  handled, the duplicate local row is removed in the same transaction.
+  place; local (ephemeral, not-replayed) retry rows rotate to the tail.
+- Durable intents win over matching local (ephemeral, not-replayed) intents.
+  When a durable intent is handled, the duplicate local intent row is removed
+  in the same transaction.
 - Projection mode is sticky toward replay. If an owner is already queued in
   replay mode, later normal wakes do not downgrade it.
 - Context is replacement by owner. The settled `ProjectionOutput` is the
@@ -207,13 +218,13 @@ One handler commit performs this ordered unit:
 
 ```text
 delete claimed intent row
-delete shadowed local duplicate when the claimed row was durable
+delete shadowed local (ephemeral, not-replayed) duplicate intent when the claimed row was durable
 purge exact facts
 admit emitted facts and mark them pending
 insert emitted ephemeral facts
 apply row mutations
 record durable follow-up intents
-record local follow-up intents
+record local (ephemeral, not-replayed) follow-up intents
 ```
 
 If any step fails, SQLite rolls back the whole unit. This is what makes handler
