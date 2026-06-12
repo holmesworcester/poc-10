@@ -19,7 +19,7 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "docs/RULES.md",
         "docs/todo-add-verus-proofs.md",
         "src/core/README.md",
-        "src/core/pipeline/README.md",
+        "src/core/pipeline.md",
         "src/protocol/auth/README.md",
         "src/protocol/content/README.md",
         "src/protocol/connection/README.md",
@@ -417,7 +417,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "fact-authenticator split",
         "The staged `FactRoute` runner is the active route model for all routed facts",
         "Agent note: Part II contains historical/current-code inventory refs captured while planning",
-        "use `fact-validators.md` and `src/core/pipeline/README.md` as the source of truth",
+        "use `fact-validators.md` and `src/core/pipeline.md` as the source of truth",
         "Do not use `core::projectors`, `project_authenticated`, `layout.rs`, `create.rs`, or fact-family `rows.rs` as target shapes.",
         "Staged routes, then route gating",
         "every routed family now carries an identity adapt slot",
@@ -498,7 +498,7 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
 fn core_readmes_document_runtime_and_pipeline_boundaries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core = source_text(&root.join("src/core/README.md"));
-    let pipeline = source_text(&root.join("src/core/pipeline/README.md"));
+    let pipeline = source_text(&root.join("src/core/pipeline.md"));
     let normalized_core = normalize_whitespace(&core);
     let normalized_pipeline = normalize_whitespace(&pipeline);
     let how_core_works = core
@@ -524,6 +524,7 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "constructs a `Runtime` from the declared projector, handler registry, row allowlist, schema sources, and daemon hooks",
         "A normal command is a serialized runtime turn",
         "Projection is core's deterministic reaction step",
+        "matched context attached to that pending row",
         "That commit replaces the fact's owned needs and time wakes",
         "append-only offer evidence",
         "Intents are core's bounded stateful work step",
@@ -533,7 +534,7 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "## Invariants",
         "## Responsibility Boundary",
         "### Top-Level Files",
-        "### Pipeline Submodules",
+        "### Pipeline Sections",
         "app.rs",
         "generic process runner over a `ProtocolDescription`",
         "cli.rs",
@@ -572,19 +573,19 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "SQLite substrate below runtime policy",
         "wire.rs",
         "fixed-layout byte primitive layer",
-        "pipeline/commit_effects.rs",
+        "### Pipeline Sections",
+        "inline modules inside `pipeline.rs`",
+        "pipeline.rs::commit_effects",
         "shared atomic commit path",
-        "pipeline/context.rs",
+        "pipeline.rs::context",
         "in-memory `ProjectionContext`",
-        "pipeline/context_store.rs",
+        "pipeline.rs::context_store",
         "SQL implementation of standing context",
-        "pipeline/dispatch.rs",
+        "pipeline.rs::dispatch",
         "intent queue worker",
-        "pipeline/insert_select.rs",
-        "checked `INSERT OR IGNORE ... SELECT` helper",
-        "pipeline/pipeline_one.rs",
+        "pipeline.rs::pipeline_one",
         "one queued fact pipeline item",
-        "pipeline.rs",
+        "`pipeline.rs` state machine",
         "pending projection queue drain",
     ] {
         assert!(
@@ -598,7 +599,8 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "## Read Projection Path",
         "## Data Flow",
         "## Invariants",
-        "## Module Responsibilities",
+        "## Inline Sections",
+        "single implementation file for the pipeline",
         "## Projection Commit Boundary",
         "## Handler Commit Boundary",
         "route -> decode -> authenticate -> adapt -> project -> effects -> commit",
@@ -621,22 +623,23 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "Projection mode is sticky toward replay",
         "Needs are replacement subscriptions",
         "Durable offers are append-only evidence",
+        "`pending_projection_matches`",
+        "already carries the context that woke it",
         "Rejected durable projection items do not stall the batch",
         "Ephemeral projection inputs are one-shot temp rows",
         "Typed-table inserts are idempotent only when the existing row matches every supplied column",
-        "pipeline_one.rs",
+        "pipeline_one",
         "drains pending projection over durable and ephemeral inputs",
         "queues replay work",
         "durable/ephemeral source rules",
-        "context.rs",
-        "dispatch.rs",
-        "commit_effects.rs",
+        "`context`",
+        "`dispatch`",
+        "`commit_effects`",
         "ephemeral projection inputs, row mutations",
-        "insert_select.rs",
     ] {
         assert!(
             normalized_pipeline.contains(required),
-            "src/core/pipeline/README.md is missing pipeline detail {required:?}"
+            "src/core/pipeline.md is missing pipeline detail {required:?}"
         );
     }
 }
@@ -647,7 +650,7 @@ fn active_readmes_do_not_refer_to_previous_designs() {
     for readme in [
         "README.md",
         "src/core/README.md",
-        "src/core/pipeline/README.md",
+        "src/core/pipeline.md",
         "src/protocol/auth/README.md",
         "src/protocol/content/README.md",
         "src/protocol/connection/README.md",

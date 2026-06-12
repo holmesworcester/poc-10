@@ -269,6 +269,7 @@ mod commit_effects {
     use rusqlite::{params_from_iter, OptionalExtension};
     use std::collections::BTreeMap;
 
+    use super::context_store::insert_pending_matches_for_stored_needs_in_tx;
     use super::dispatch::record_intent_in_table_in_tx;
     use super::route::FactAdmissionFn;
     use super::ProjectionMode;
@@ -514,6 +515,8 @@ mod commit_effects {
         let mut facts = 0usize;
         for fact in &effects.facts {
             if insert_fact_and_pending_with_mode_in_tx(tx, fact, pending_mode)? {
+                insert_pending_matches_for_stored_needs_in_tx(tx, fact.id, pending_mode)
+                    .map_err(sqlite_string_error)?;
                 facts += 1;
             }
         }
@@ -967,15 +970,13 @@ pub(crate) mod context_store {
     use crate::core::context::{
         scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role,
     };
-    use crate::core::fact_store::persisted_fact;
+    use crate::core::fact_store::{insert_pending_owner_with_mode_in_tx, persisted_fact};
     use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
-    use crate::core::schema::{CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION};
     use crate::core::store::Store;
     use crate::core::wire::{Reader, WireError};
     use rusqlite::params;
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::insert_select;
     use super::{MatchedContext, ProjectionContext, ProjectionMode};
 
     const CONTEXT_NEED_DIRECTION: &str = "need";
@@ -1277,6 +1278,89 @@ pub(crate) mod context_store {
         Ok(ProjectionContext::from_matches(matched))
     }
 
+    /// Load context matches already attached to one pending projection row.
+    ///
+    /// Context fanout records these rows when it queues the owner. Loading a
+    /// pending item therefore does not have to search standing context for the
+    /// owner's old needs before the first projector run.
+    pub(super) fn pending_matching_context_for_owner(
+        store: &Store,
+        owner: &FactId,
+    ) -> Result<ProjectionContext, String> {
+        let mut stmt = store
+            .conn()
+            .prepare(
+                r#"
+                SELECT need_role,
+                       need_scope_key,
+                       need_start_key,
+                       need_end_key,
+                       offer_owner,
+                       offer_start_key,
+                       offer_end_key
+                FROM pending_projection_matches
+                WHERE owner = ?1
+                ORDER BY
+                    need_role,
+                    need_scope_key,
+                    need_start_key,
+                    need_end_key,
+                    offer_owner,
+                    offer_start_key,
+                    offer_end_key
+                "#,
+            )
+            .map_err(|err| format!("load pending projection matches: {err}"))?;
+        let rows = stmt
+            .query_map(params![owner.as_slice()], |row| {
+                selected_pending_projection_match(row, owner)
+            })
+            .map_err(|err| format!("load pending projection matches: {err}"))?;
+        let pairs = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|err| format!("load pending projection matches: {err}"))?;
+
+        let mut matched = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut payloads = BTreeMap::new();
+        for (need, offer) in pairs {
+            push_stored_matched_context(
+                store,
+                &need,
+                offer,
+                &mut seen,
+                &mut payloads,
+                &mut matched,
+            )?;
+        }
+        Ok(ProjectionContext::from_matches(matched))
+    }
+
+    fn selected_pending_projection_match(
+        row: &rusqlite::Row<'_>,
+        owner: &FactId,
+    ) -> rusqlite::Result<(ContextNeed, ContextOffer)> {
+        let role =
+            Role::new(row.get::<_, String>(0)?).map_err(rusqlite::Error::InvalidParameterName)?;
+        let scope = decode_scope_key(&row.get::<_, Vec<u8>>(1)?)
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+        let need = ContextNeed {
+            owner: *owner,
+            role: role.clone(),
+            scope: scope.clone(),
+            start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(2)?),
+            end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(3)?),
+        };
+        let offer = ContextOffer {
+            owner: fact_id_column(row.get::<_, Vec<u8>>(4)?, "offer_owner")?,
+            role,
+            scope,
+            start_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(5)?),
+            end_key: ContextKey::from_bytes(row.get::<_, Vec<u8>>(6)?),
+        };
+        Ok((need, offer))
+    }
+
     /// Add a matched pair and load the offer owner's payload fact.
     ///
     /// A missing payload is a storage invariant failure: context offers are only
@@ -1318,64 +1402,49 @@ pub(crate) mod context_store {
         delta: &ContextSetDelta,
         mode: ProjectionMode,
     ) -> Result<usize, String> {
-        let mut inserted = 0usize;
+        let mut changed = 0usize;
         for need in &delta.added_needs {
-            inserted += insert_pending_projection_from_select_in_tx(
-                store,
-                &overlapping_offers_for_need_select(need, mode),
-                "need",
-            )?;
+            for offer in stored_overlapping_offers_for_need(store, need)? {
+                changed += insert_pending_projection_match_in_tx(store, need, &offer, mode)?;
+            }
         }
         for offer in &delta.added_offers {
-            inserted += insert_pending_projection_from_select_in_tx(
-                store,
-                &overlapping_needs_for_offer_select(offer, mode),
-                "offer",
-            )?;
+            for need in stored_overlapping_needs_for_offer(store, offer)? {
+                changed += insert_pending_projection_match_in_tx(store, &need, offer, mode)?;
+            }
         }
-        Ok(inserted)
+        Ok(changed)
     }
 
-    fn overlapping_offers_for_need_select(
-        need: &ContextNeed,
+    /// Attach current stored matches for an owner that is being queued directly.
+    ///
+    /// Context wake fanout already knows the matching edge that caused the wake.
+    /// Direct queueing paths, such as due time wakes or duplicate fact admission,
+    /// use this helper to attach matches for any standing needs the owner already
+    /// has.
+    pub(super) fn insert_pending_matches_for_stored_needs_in_tx(
+        store: &Store,
+        owner: FactId,
         mode: ProjectionMode,
-    ) -> insert_select::Select {
-        let scope_key = scope_key(&need.scope);
-        insert_select::Select::new(
-            r#"
-        SELECT :need_owner AS owner,
-               :mode AS mode
-        WHERE EXISTS (
-            SELECT 1
-            FROM context_edges
-            WHERE direction = 'offer'
-              AND role = :role
-              AND scope_key = :scope_key
-              AND start_key <= :need_end
-              AND end_key >= :need_start
-        )
-        "#,
-            &[CONTEXT_EDGES],
-            vec![
-                insert_select::Param::bytes(":need_owner", need.owner),
-                insert_select::Param::text(":role", need.role.as_str()),
-                insert_select::Param::bytes(":scope_key", scope_key),
-                insert_select::Param::bytes(":need_start", need.start_key.as_bytes()),
-                insert_select::Param::bytes(":need_end", need.end_key.as_bytes()),
-                insert_select::Param::text(":mode", mode.as_str()),
-            ],
-        )
+    ) -> Result<usize, String> {
+        let mut changed = 0usize;
+        for need in stored_needs_for_owner(store, &owner)? {
+            for offer in stored_overlapping_offers_for_need(store, &need)? {
+                changed += insert_pending_projection_match_in_tx(store, &need, &offer, mode)?;
+            }
+        }
+        Ok(changed)
     }
 
-    fn overlapping_needs_for_offer_select(
+    fn stored_overlapping_needs_for_offer(
+        store: &Store,
         offer: &ContextOffer,
-        mode: ProjectionMode,
-    ) -> insert_select::Select {
+    ) -> Result<Vec<ContextNeed>, String> {
         let scope_key = scope_key(&offer.scope);
-        insert_select::Select::new(
+        select_context_needs(
+            store,
             r#"
-        SELECT n.owner,
-               :mode AS mode
+        SELECT n.owner, n.role, n.scope_key, n.start_key, n.end_key
         FROM context_edges n
         JOIN local_fact_admissions a ON a.fact_id = n.owner
         WHERE n.direction = 'need'
@@ -1383,26 +1452,55 @@ pub(crate) mod context_store {
           AND n.scope_key = :scope_key
           AND n.start_key <= :offer_end
           AND n.end_key >= :offer_start
-        ORDER BY a.received_at, n.owner
+        ORDER BY a.received_at, n.owner, n.start_key, n.end_key
         "#,
-            &[CONTEXT_EDGES, LOCAL_FACT_ADMISSIONS],
-            vec![
-                insert_select::Param::text(":role", offer.role.as_str()),
-                insert_select::Param::bytes(":scope_key", scope_key),
-                insert_select::Param::bytes(":offer_start", offer.start_key.as_bytes()),
-                insert_select::Param::bytes(":offer_end", offer.end_key.as_bytes()),
-                insert_select::Param::text(":mode", mode.as_str()),
+            &[
+                (":role", text(offer.role.as_str())),
+                (":scope_key", bytes(&scope_key)),
+                (":offer_start", bytes(offer.start_key.as_bytes())),
+                (":offer_end", bytes(offer.end_key.as_bytes())),
             ],
         )
     }
 
-    fn insert_pending_projection_from_select_in_tx(
+    fn insert_pending_projection_match_in_tx(
         store: &Store,
-        select: &insert_select::Select,
-        edge_kind: &str,
+        need: &ContextNeed,
+        offer: &ContextOffer,
+        mode: ProjectionMode,
     ) -> Result<usize, String> {
-        insert_select::insert_select_in_tx(store, PENDING_PROJECTION, &["owner", "mode"], select)
-            .map_err(|err| format!("wake {edge_kind} from SELECT: {err}"))
+        if need.role != offer.role || need.scope != offer.scope {
+            return Err("pending projection match role/scope mismatch".to_string());
+        }
+        let pending_changed = insert_pending_owner_with_mode_in_tx(store, need.owner, mode)
+            .map_err(|err| format!("queue pending projection match: {err}"))?;
+        let scope_key = scope_key(&need.scope);
+        let match_changed = store
+            .conn()
+            .execute(
+                "INSERT OR IGNORE INTO pending_projection_matches
+                    (owner,
+                     need_role,
+                     need_scope_key,
+                     need_start_key,
+                     need_end_key,
+                     offer_owner,
+                     offer_start_key,
+                     offer_end_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    need.owner.as_slice(),
+                    need.role.as_str(),
+                    scope_key.as_slice(),
+                    need.start_key.as_bytes(),
+                    need.end_key.as_bytes(),
+                    offer.owner.as_slice(),
+                    offer.start_key.as_bytes(),
+                    offer.end_key.as_bytes(),
+                ],
+            )
+            .map_err(|err| format!("record pending projection match: {err}"))?;
+        Ok(usize::from(pending_changed > 0 || match_changed > 0))
     }
 }
 pub mod decode {
@@ -2036,339 +2134,6 @@ pub mod effects {
         }
     }
 }
-mod insert_select {
-    //! Checked SQL insert-selects for pipeline queue fanout.
-    //!
-    //! A checked insert-select is a narrow adapter from static read-only SQL into a
-    //! queue table. Pipeline workers choose the destination table and columns; this
-    //! helper only describes the bounded source rows, declared source tables, and
-    //! bound parameters.
-    //!
-    //! The mechanism is intentionally smaller than "run arbitrary SQL". The query
-    //! text must be a single comment-free `SELECT`, every `FROM` and `JOIN` table
-    //! must appear in `allowed_tables`, and every supplied value is bound as a
-    //! parameter. This gives context wake fanout a shared
-    //! `INSERT OR IGNORE ... SELECT` path without making core accept free-form SQL
-    //! from protocol modules.
-    //!
-    //! Add capability here only when several pipeline workers need the same checked
-    //! SQL shape. The caller still owns the meaning of the query, the destination
-    //! queue, and any richer validation for its scheduling rule.
-
-    use crate::core::intents::Value;
-    use crate::core::store::{quoted_identifier_list, quoted_table_name};
-    use crate::core::store::{Store, TableName};
-    use rusqlite::types::Value as SqliteValue;
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(super) struct Select {
-        /// Static `SELECT` text that yields the columns expected by the caller.
-        sql: &'static str,
-        /// Tables this select is allowed to read.
-        allowed_tables: &'static [TableName],
-        /// Bound parameters used by `sql`.
-        params: Vec<Param>,
-    }
-
-    impl Select {
-        pub(super) fn new(
-            sql: &'static str,
-            allowed_tables: &'static [TableName],
-            params: Vec<Param>,
-        ) -> Self {
-            Self {
-                sql,
-                allowed_tables,
-                params,
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(super) struct Param {
-        /// SQLite parameter name, including its marker such as `:owner`.
-        name: &'static str,
-        value: Value,
-    }
-
-    impl Param {
-        pub(super) fn bytes(name: &'static str, value: impl Into<Vec<u8>>) -> Self {
-            Self {
-                name,
-                value: Value::Bytes(value.into()),
-            }
-        }
-
-        pub(super) fn text(name: &'static str, value: impl Into<String>) -> Self {
-            Self {
-                name,
-                value: Value::Text(value.into()),
-            }
-        }
-
-        #[cfg(test)]
-        pub(super) fn u64(name: &'static str, value: u64) -> Self {
-            Self {
-                name,
-                value: Value::U64(value),
-            }
-        }
-
-        fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
-            self.value.as_sqlite_value()
-        }
-    }
-
-    pub(super) fn insert_select_in_tx(
-        store: &Store,
-        target_table: TableName,
-        target_columns: &[&str],
-        select: &Select,
-    ) -> rusqlite::Result<usize> {
-        if target_columns.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "insert-select requires at least one target column".to_string(),
-            ));
-        }
-        validate_select_sql(select.sql, select.allowed_tables)?;
-        let table_name = quoted_table_name(target_table)?;
-        let columns = quoted_identifier_list(target_columns.iter().copied())?;
-        let sql = format!(
-            "INSERT OR IGNORE INTO {table_name} ({columns}) {}",
-            select.sql
-        );
-        let mut stmt = store.conn().prepare(&sql)?;
-        for param in &select.params {
-            let index = stmt.parameter_index(param.name)?.ok_or_else(|| {
-                rusqlite::Error::InvalidParameterName(format!(
-                    "insert-select SQL does not bind parameter {}",
-                    param.name
-                ))
-            })?;
-            stmt.raw_bind_parameter(index, param.as_sqlite_value()?)?;
-        }
-        stmt.raw_execute()
-    }
-
-    /// Check the deliberately small SQL surface accepted by `insert_select_in_tx`.
-    fn validate_select_sql(sql: &str, allowed_tables: &[TableName]) -> rusqlite::Result<()> {
-        let trimmed = sql.trim_start();
-        if !trimmed
-            .get(..6)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
-        {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "select SQL must be SELECT-only".to_string(),
-            ));
-        }
-        if sql.contains(';') || sql.contains("--") || sql.contains("/*") {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "select SQL must be one comment-free SELECT statement".to_string(),
-            ));
-        }
-        let allowed = allowed_tables
-            .iter()
-            .map(|table| table.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        for window in sql_identifier_tokens(sql).windows(2) {
-            let keyword = window[0].to_ascii_lowercase();
-            if matches!(keyword.as_str(), "from" | "join") && !allowed.contains(window[1].as_str())
-            {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
-                    "select SQL reads undeclared table {}",
-                    window[1]
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Tokenize enough SQL to find `FROM` and `JOIN` table identifiers.
-    ///
-    /// This is not a SQL parser. It is paired with the single-statement,
-    /// comment-free validation above and exists only to enforce the table allowlist
-    /// for the static selects core accepts.
-    fn sql_identifier_tokens(sql: &str) -> Vec<String> {
-        let mut tokens = Vec::new();
-        let mut current = String::new();
-        for ch in sql.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
-                current.push(ch);
-            } else if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-        }
-        if !current.is_empty() {
-            tokens.push(current);
-        }
-        tokens
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::core::store::{ReplayTables, SchemaSource};
-
-        const SOURCE_TABLE: TableName = TableName::new("source_rows");
-        const TARGET_TABLE: TableName = TableName::new("target_queue");
-        const VALUE_TABLE: TableName = TableName::new("target_values");
-
-        const TEST_SCHEMA: SchemaSource = SchemaSource {
-            ddl: r#"
-CREATE TABLE IF NOT EXISTS source_rows (
-    owner BLOB PRIMARY KEY NOT NULL,
-    role TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS target_queue (
-    owner BLOB PRIMARY KEY NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS target_values (
-    value INTEGER PRIMARY KEY NOT NULL
-);
-"#,
-            row_tables: &[],
-            row_schemas: &[],
-            replay: ReplayTables::EMPTY,
-        };
-
-        fn open_store() -> Store {
-            Store::open_memory_with_schema_sources(&[TEST_SCHEMA]).expect("open test store")
-        }
-
-        #[test]
-        fn insert_select_fans_out_bound_rows_from_declared_tables() {
-            let store = open_store();
-            store
-                .conn()
-                .execute(
-                    "INSERT INTO source_rows (owner, role) VALUES (?1, ?2), (?3, ?4), (?5, ?6)",
-                    (
-                        b"owner-a".as_slice(),
-                        "ready",
-                        b"owner-b".as_slice(),
-                        "waiting",
-                        b"owner-c".as_slice(),
-                        "ready",
-                    ),
-                )
-                .expect("seed source rows");
-
-            let inserted = insert_select_in_tx(
-                &store,
-                TARGET_TABLE,
-                &["owner"],
-                &Select::new(
-                    r#"
-                SELECT owner
-                FROM source_rows
-                WHERE role = :role
-                ORDER BY owner
-                "#,
-                    &[SOURCE_TABLE],
-                    vec![Param::text(":role", "ready")],
-                ),
-            )
-            .expect("insert selected rows");
-
-            assert_eq!(inserted, 2);
-            let owners = selected_target_owners(&store);
-            assert_eq!(owners, vec![b"owner-a".to_vec(), b"owner-c".to_vec()]);
-        }
-
-        #[test]
-        fn insert_select_rejects_reads_from_undeclared_tables() {
-            let store = open_store();
-
-            let err = insert_select_in_tx(
-                &store,
-                TARGET_TABLE,
-                &["owner"],
-                &Select::new("SELECT owner FROM source_rows", &[], Vec::new()),
-            )
-            .expect_err("undeclared table should fail");
-
-            assert!(
-                err.to_string()
-                    .contains("reads undeclared table source_rows"),
-                "{err}"
-            );
-        }
-
-        #[test]
-        fn insert_select_rejects_comment_or_multi_statement_sql() {
-            let err = validate_select_sql(
-                "SELECT owner FROM source_rows; SELECT owner FROM source_rows",
-                &[SOURCE_TABLE],
-            )
-            .expect_err("multi statement should fail");
-
-            assert!(
-                err.to_string()
-                    .contains("one comment-free SELECT statement"),
-                "{err}"
-            );
-        }
-
-        #[test]
-        fn insert_select_rejects_parameters_not_bound_by_sql() {
-            let store = open_store();
-
-            let err = insert_select_in_tx(
-                &store,
-                TARGET_TABLE,
-                &["owner"],
-                &Select::new(
-                    "SELECT owner FROM source_rows WHERE role = :role",
-                    &[SOURCE_TABLE],
-                    vec![Param::text(":unused", "ready")],
-                ),
-            )
-            .expect_err("unused parameter should fail");
-
-            assert!(
-                err.to_string().contains("does not bind parameter :unused"),
-                "{err}"
-            );
-        }
-
-        #[test]
-        fn insert_select_rejects_u64_values_outside_sqlite_integer_range() {
-            let store = open_store();
-
-            let err = insert_select_in_tx(
-                &store,
-                VALUE_TABLE,
-                &["value"],
-                &Select::new(
-                    "SELECT :value AS value",
-                    &[],
-                    vec![Param::u64(":value", i64::MAX as u64 + 1)],
-                ),
-            )
-            .expect_err("oversized integer should fail");
-
-            assert!(
-                err.to_string()
-                    .contains("SQL value exceeds SQLite integer range"),
-                "{err}"
-            );
-        }
-
-        fn selected_target_owners(store: &Store) -> Vec<Vec<u8>> {
-            let mut stmt = store
-                .conn()
-                .prepare("SELECT owner FROM target_queue ORDER BY owner")
-                .expect("prepare target query");
-            let rows = stmt
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                .expect("query target rows");
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .expect("collect target rows")
-        }
-    }
-}
 mod pipeline_one {
     //! One queued fact pipeline item.
     //!
@@ -2388,8 +2153,8 @@ mod pipeline_one {
         validate_pipeline_effects_for_admission, IntentAdmissionPolicy,
     };
     use super::context_store::{
-        insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
-        stored_matching_context, wake_context_matches_in_tx,
+        insert_context_need_in_tx, insert_context_offer_in_tx, pending_matching_context_for_owner,
+        stored_context_for_owner, stored_matching_context, wake_context_matches_in_tx,
     };
     use super::route::FactAdmissionFn;
     use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
@@ -2439,6 +2204,7 @@ mod pipeline_one {
             "DELETE FROM pending_projection WHERE owner = ?1",
             params![fact_id.as_slice()],
         )?;
+        delete_pending_projection_matches_for_owner_in_tx(tx, fact_id)?;
         Ok(())
     }
 
@@ -2707,6 +2473,10 @@ mod pipeline_one {
                     )
                 })?;
                 crate::core::perf_profile::measure_result(
+                    "projection_delete_pending_matches",
+                    || delete_pending_projection_matches_for_owner_in_tx(tx, effects.fact_id),
+                )?;
+                crate::core::perf_profile::measure_result(
                     "projection_delete_pending_time_ranges",
                     || delete_pending_time_ranges_for_owner_in_tx(tx, effects.fact_id),
                 )?;
@@ -2792,6 +2562,16 @@ mod pipeline_one {
     ) -> rusqlite::Result<usize> {
         store.conn().execute(
             "DELETE FROM pending_time_ranges WHERE owner = ?1",
+            params![owner.as_slice()],
+        )
+    }
+
+    fn delete_pending_projection_matches_for_owner_in_tx(
+        store: &Store,
+        owner: FactId,
+    ) -> rusqlite::Result<usize> {
+        store.conn().execute(
+            "DELETE FROM pending_projection_matches WHERE owner = ?1",
             params![owner.as_slice()],
         )
     }
@@ -2915,17 +2695,13 @@ mod pipeline_one {
                     || pending_time_ranges_for_owner(store, &fact_id),
                 )?;
                 crate::core::perf_profile::measure_result(
-                    "projection_initial_context_match",
-                    || stored_matching_context(store, &previous_context),
+                    "projection_load_pending_matches",
+                    || pending_matching_context_for_owner(store, &fact_id),
                 )?
                 .with_time_ranges(time_ranges)
                 .with_mode(mode)
             }
-            ProjectionSource::Ephemeral => crate::core::perf_profile::measure_result(
-                "projection_initial_context_match",
-                || stored_matching_context(store, &previous_context),
-            )?
-            .with_mode(mode),
+            ProjectionSource::Ephemeral => ProjectionContext::default().with_mode(mode),
         };
         Ok(Some(PendingFact {
             source,
@@ -3380,6 +3156,63 @@ mod pipeline_one {
         }
 
         #[test]
+        fn projection_drain_uses_context_attached_to_pending_queue() {
+            let store =
+                Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+                    .expect("open store");
+            let target = Fact::new(FactScope::Global, 1, b"queued-context-target".to_vec());
+            let offered = Fact::new(FactScope::Global, 2, b"queued-context-payload".to_vec());
+            submit_facts_to_store(&store, vec![target.clone(), offered.clone()])
+                .expect("persist facts");
+            for fact in [&target, &offered] {
+                store
+                    .conn()
+                    .execute(
+                        "DELETE FROM pending_projection WHERE owner = ?1",
+                        rusqlite::params![fact.id.as_slice()],
+                    )
+                    .expect("clear initial pending row");
+            }
+
+            let role = Role::new("queued_ctx").unwrap();
+            let key = ContextKey::from_bytes(b"queued-key");
+            let need = need_for(&target, &role, &key);
+            let offer = offer_for(&offered, &role, &key);
+            store
+                .write_transaction(|tx| {
+                    insert_context_need_in_tx(tx, &need)?;
+                    insert_context_offer_in_tx(tx, &offer)?;
+                    wake_context_matches_in_tx(
+                        tx,
+                        &ContextSetDelta {
+                            added_offers: vec![offer.clone()],
+                            ..ContextSetDelta::default()
+                        },
+                        ProjectionMode::Normal,
+                    )
+                    .map_err(sqlite_string_error)?;
+                    tx.conn().execute(
+                        "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'offer'",
+                        rusqlite::params![offered.id.as_slice()],
+                    )?;
+                    Ok(())
+                })
+                .expect("queue match then remove standing offer");
+
+            assert_eq!(pending_projection_match_count(&store, target.id), 1);
+            let projector = need_until_payload(role, key, "queued_context_ready", None);
+            let progress =
+                drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
+
+            assert_eq!(progress.projected, 1);
+            assert_eq!(
+                intent_payload_for(&store, "queued_context_ready", &target.id),
+                offered.id.to_vec()
+            );
+            assert_eq!(pending_projection_match_count(&store, target.id), 0);
+        }
+
+        #[test]
         fn projection_drain_isolates_a_failed_fact_without_rolling_back_previous_items() {
             let store =
                 Store::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
@@ -3809,6 +3642,17 @@ mod pipeline_one {
                     |row| row.get(0),
                 )
                 .expect("count pending projection")
+        }
+
+        fn pending_projection_match_count(store: &Store, owner: FactId) -> i64 {
+            store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM pending_projection_matches WHERE owner = ?1",
+                    rusqlite::params![owner.as_slice()],
+                    |row| row.get(0),
+                )
+                .expect("count pending projection matches")
         }
 
         fn context_edge_count(store: &Store, owner: FactId) -> i64 {
@@ -4887,7 +4731,18 @@ impl<'a> PipelineEngine<'a> {
 /// Insert a fact and mark it pending in the same transaction.
 pub(crate) fn submit_fact_to_store(store: &Store, fact: Fact) -> Result<bool, String> {
     let inserted = store
-        .write_transaction(|tx| insert_fact_and_pending_in_tx(tx, &fact))
+        .write_transaction(|tx| {
+            let inserted = insert_fact_and_pending_in_tx(tx, &fact)?;
+            if inserted {
+                context_store::insert_pending_matches_for_stored_needs_in_tx(
+                    tx,
+                    fact.id,
+                    ProjectionMode::Normal,
+                )
+                .map_err(commit_effects::sqlite_string_error)?;
+            }
+            Ok(inserted)
+        })
         .map_err(|err| format!("submit fact: {err}"))?;
     Ok(inserted)
 }
@@ -4903,6 +4758,12 @@ pub(crate) fn submit_facts_to_store(
             let mut inserted = 0;
             for fact in &facts {
                 if insert_fact_and_pending_in_tx(tx, fact)? {
+                    context_store::insert_pending_matches_for_stored_needs_in_tx(
+                        tx,
+                        fact.id,
+                        ProjectionMode::Normal,
+                    )
+                    .map_err(commit_effects::sqlite_string_error)?;
                     inserted += 1;
                 }
             }
@@ -4989,6 +4850,9 @@ fn enqueue_due_time_wakes_in_tx(
     let mut inserted = 0;
     for owner in owners {
         inserted += insert_pending_owner_with_mode_in_tx(store, owner, mode)?;
+        context_store::insert_pending_matches_for_stored_needs_in_tx(store, owner, mode).map_err(
+            |err| rusqlite::Error::InvalidParameterName(format!("queue time wake matches: {err}")),
+        )?;
         store.conn().execute(
             "INSERT OR IGNORE INTO pending_time_ranges
                 (owner, timeline, has_start, start_exclusive, end_inclusive)

@@ -2,16 +2,17 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, ephemeral projection inputs, intent queues, and the store-local
-//! clock. It exposes one executable `SchemaSource` plus typed `TableName`
-//! constants so the rest of core does not repeat string literals.
+//! projection, pending projection matches, ephemeral projection inputs, intent
+//! queues, and the store-local clock. It exposes one executable `SchemaSource`
+//! plus typed `TableName` constants so the rest of core does not repeat string
+//! literals.
 //!
 //! These tables are the shared substrate behind the pipeline documentation.
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
-//! visibility metadata. `context_edges`, `time_wakes`, and `pending_projection`
-//! drive fact projection. `intents` and `local_intents` drive handler dispatch.
-//! The clock table is store-local runtime state used by command hosts, not a
-//! protocol fact.
+//! visibility metadata. `context_edges`, `time_wakes`, `pending_projection`,
+//! and `pending_projection_matches` drive fact projection. `intents` and
+//! `local_intents` drive handler dispatch. The clock table is store-local
+//! runtime state used by command hosts, not a protocol fact.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
 //! queues and indexes needed to move work; it does not encode protocol policy
@@ -35,6 +36,9 @@ pub(crate) const CONTEXT_EDGES: TableName = TableName::new("context_edges");
 pub(crate) const TIME_WAKES: TableName = TableName::new("time_wakes");
 /// Pending projection queue table.
 pub(crate) const PENDING_PROJECTION: TableName = TableName::new("pending_projection");
+/// Matched context attached to pending projection queue rows.
+pub(crate) const PENDING_PROJECTION_MATCHES: TableName =
+    TableName::new("pending_projection_matches");
 /// Pending projection time-context table.
 pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_ranges");
 /// Durable intent queue table.
@@ -53,6 +57,7 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     CONTEXT_EDGES,
     TIME_WAKES,
     PENDING_PROJECTION,
+    PENDING_PROJECTION_MATCHES,
     PENDING_TIME_RANGES,
     INTENTS,
     LOCAL_INTENTS,
@@ -117,6 +122,29 @@ CREATE TABLE IF NOT EXISTS pending_projection (
     owner BLOB PRIMARY KEY NOT NULL,
     mode TEXT NOT NULL DEFAULT 'normal'
 );
+
+CREATE TABLE IF NOT EXISTS pending_projection_matches (
+    owner BLOB NOT NULL,
+    need_role TEXT NOT NULL,
+    need_scope_key BLOB NOT NULL,
+    need_start_key BLOB NOT NULL,
+    need_end_key BLOB NOT NULL,
+    offer_owner BLOB NOT NULL,
+    offer_start_key BLOB NOT NULL,
+    offer_end_key BLOB NOT NULL,
+    PRIMARY KEY (
+        owner,
+        need_role,
+        need_scope_key,
+        need_start_key,
+        need_end_key,
+        offer_owner,
+        offer_start_key,
+        offer_end_key
+    )
+);
+CREATE INDEX IF NOT EXISTS pending_projection_matches_by_offer
+    ON pending_projection_matches (offer_owner);
 
 CREATE TABLE IF NOT EXISTS pending_time_ranges (
     owner BLOB NOT NULL,

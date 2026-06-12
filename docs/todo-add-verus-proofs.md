@@ -54,7 +54,7 @@ and verb-named handler files; proof layout should follow that shape and keep
 ```text
 src/core/proof.rs
 src/core/context_proof.rs
-src/core/pipeline/proof.rs
+src/core/pipeline_proof.rs
 
 src/protocol/<scope>/<fact_family>/proof.rs
 src/protocol/<scope>/<fact_family>/proof/

@@ -39,7 +39,7 @@ for all routed facts; versioning work builds on that model.
 
 Agent note: Part II contains historical/current-code inventory refs captured
 while planning. When those refs conflict with the current staged pipeline model,
-use `fact-validators.md` and `src/core/pipeline/README.md` as the source of
+use `fact-validators.md` and `src/core/pipeline.md` as the source of
 truth. Do not use `core::projectors`, `project_authenticated`, `layout.rs`,
 `create.rs`, or fact-family `rows.rs` as target shapes.
 
@@ -1340,7 +1340,7 @@ must exhibit and bind each assertion to the real entities it must touch:
 `FACT_ROUTES` / `RouterProjector::project` (`src/core/projectors.rs:448-459`,
 unknown-tag `Err` at line 456), `Runtime::submit_fact` /
 `submit_fact_to_store` (`src/core/runtime.rs:268`,
-`src/core/pipeline/project_pending_facts.rs`), the `con` CLI (`MATCH_COMMANDS`),
+`src/core/pipeline.rs`), the `con` CLI (`MATCH_COMMANDS`),
 and the wipe+replay path. Invariants referenced are the consolidated set:
 (1) VISIBILITY, (2) RENDERING UNIFORMITY, (3) CEILING MONOTONICITY,
 (4) REPLAY DETERMINISM, (5) READERS FOREVER / TRANSPORT IN [floor,head],
@@ -2936,7 +2936,7 @@ Verified grounding from `/home/holmes/poc-10/src`:
 
 ### PROJ-22 — projector path carries no replay-mode branch (replay-blind today) `guardrail`
 - **Setup:** Current binary. The brief claims `HandlerRoute` carries `runs_during_replay`; verified ABSENT in this checkout (`HandlerRoute{name,intent_kind,factory}`, runtime.rs:71).
-- **Action:** Grep `src/protocol/**/project.rs` and `src/core/projectors.rs` / `src/core/pipeline/project_pending_facts.rs` for any `replay`/`is_replay`/`during_replay` conditional reachable from a projector.
+- **Action:** Grep `src/protocol/**/project.rs` and `src/core/projectors.rs` / `src/core/pipeline.rs` for any `replay`/`is_replay`/`during_replay` conditional reachable from a projector.
 - **Expect:** No projector branches on a replay flag — projection output is identical whether the pass is live admission or wipe+replay, because the projector cannot see the mode. (If `runs_during_replay` is later added, it must live on HANDLER routes, NOT bleed into the pure projector path.)
 - **Defends:** "projectors stay replay-blind across versions"; flags absence of the planned field.
 - **Refs:** `HandlerRoute` (runtime.rs:71), `ProjectorFn` (projectors.rs:396).

@@ -380,10 +380,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "missing src/core/pipeline.rs; it must expose protocol-neutral terms for pending projection, context wake fanout, and intent output"
     );
 
-    let mut text = source_text(&pipeline_path);
-    for path in source_files(&root.join("src/core/pipeline")) {
-        text.push_str(&source_text(&path));
-    }
+    let text = source_text(&pipeline_path);
     let required_terms = [
         (
             "pending projection",

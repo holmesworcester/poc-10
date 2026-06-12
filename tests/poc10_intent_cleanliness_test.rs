@@ -649,7 +649,6 @@ fn legacy_custom_context_matcher_api_does_not_reappear() {
         }
         let relative = path.strip_prefix(root).unwrap();
         if relative.starts_with("src/core/pipeline.rs")
-            || relative.starts_with("src/core/pipeline/")
             || relative.starts_with("src/core/fact_store.rs")
         {
             continue;

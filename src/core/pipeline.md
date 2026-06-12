@@ -98,10 +98,10 @@ PipelineEffects.ephemeral_facts
 
 PipelineEngine::drain_projection
   -> load durable pending_projection rows, then ephemeral_projection_inputs
-  -> load fact, standing context, matched payload facts, and due time ranges
+  -> load fact, standing context, queued matched payload facts, and due time ranges
   -> run staged route and resolve already-satisfied declared needs
   -> replace context and time wakes for that owner
-  -> wake newly matched dependents
+  -> wake newly matched dependents with pending_projection_matches
   -> commit purges, admitted durable facts, ephemeral inputs, row mutations, and intents
 
 dispatch_queued_intent
@@ -143,7 +143,9 @@ after startup, and replay never fires those recurring runs.
 - Durable offers are append-only evidence. Once a fact offers context, that
   offer remains until the fact is purged.
 - Wake fanout is based on newly added context rows from the replacement delta.
-  Stable unmet needs do not self-wake forever.
+  Stable unmet needs do not self-wake forever. Matching rows are written to
+  `pending_projection_matches` when an owner is queued, so the pending item
+  already carries the context that woke it.
 - Projector output may purge only the fact being projected. Cross-fact purge is
   rejected before commit.
 - Rejected durable projection items do not stall the batch. Context-free
@@ -157,40 +159,41 @@ after startup, and replay never fires those recurring runs.
 - Typed-table inserts are idempotent only when the existing row matches every
   supplied column; changing typed projection state is expressed as
   `DeleteWhere` followed by `InsertValues`.
-- `insert_select` accepts only static, comment-free `SELECT` statements over
-  declared source tables and bound parameters.
 
-## Module Responsibilities
+## Inline Sections
 
-- `pipeline.rs` owns `WorkStatus`, handler route metadata, handler sets, and
+`src/core/pipeline.rs` is intentionally the single implementation file for the
+pipeline. Its inline modules keep the stage names readable without spreading
+the runtime loop across a directory.
+
+- the top-level of `pipeline.rs` owns `WorkStatus`, handler route metadata,
+  handler sets, and
   `PipelineEngine`, the generic state machine that admits facts and scheduled
   wake-ups, queues replay work, drains pending projection over durable and
   ephemeral inputs, and orders intent dispatch.
-- `route.rs` owns tag route declarations, staged route metadata, and the
+- `route` owns tag route declarations, staged route metadata, and the
   optional protocol-owned fact admission hook type.
-- `decode.rs` owns the decode trait core invokes at the read-stage boundary.
-- `authenticate.rs` owns authentication result types, authentication traits,
+- `decode` owns the decode trait core invokes at the read-stage boundary.
+- `authenticate` owns authentication result types, authentication traits,
   the authored-fact self-check helper, and the fact-id self-check helper.
-- `adapt.rs` owns the adapter trait that converts authenticated source values to
+- `adapt` owns the adapter trait that converts authenticated source values to
   the semantic value projected at the active head version.
-- `project.rs` owns authenticated and semantic projector traits plus the staged
+- `project` owns authenticated and semantic projector traits plus the staged
   helper functions that compose decode/authenticate/adapt/project.
-- `context.rs` owns the in-memory `ProjectionContext` and matched payload
+- `context` owns the in-memory `ProjectionContext` and matched payload
   helpers visible while processing one fact.
-- `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
-- `pipeline_one.rs` owns one queued fact pipeline item: matched-context and due
+- `effects` owns `ProjectionOutput`, time wakes, and due time ranges.
+- `pipeline_one` owns one queued fact pipeline item: matched-context and due
   time-range loading, staged decode/authenticate/adapt/project execution,
   durable/ephemeral source rules, rejection handling, context resolution, and
   the projection commit boundary.
-- `context_store.rs` owns persisted context edges, range-overlap matching,
+- `context_store` owns persisted context edges, range-overlap matching,
   projection context assembly, and wake fanout.
-- `dispatch.rs` owns intent queue claiming, handler input loading, retry
+- `dispatch` owns intent queue claiming, handler input loading, retry
   handling, and handler-output commit.
-- `commit_effects.rs` owns shared effect validation and the ordered SQL commit
+- `commit_effects` owns shared effect validation and the ordered SQL commit
   of purges, admitted durable facts, ephemeral projection inputs, row
   mutations, and follow-up intents, including replay-mode intent suppression.
-- `insert_select.rs` owns the narrow checked `INSERT OR IGNORE ... SELECT`
-  helper used by pipeline fanout operations.
 
 ## Projection Commit Boundary
 
@@ -198,10 +201,11 @@ For a durable fact, one projection commit performs this ordered unit:
 
 ```text
 delete durable pending row
+delete queued pending_projection_matches for this owner
 clear due time range rows for this owner
 delete old needs and time wakes owned by fact
 insert new needs, append new offers, and insert new time wakes
-wake owners whose needs match newly added offers
+wake owners whose needs match newly added offers and record their matched context
 apply PipelineEffects through commit_effects
 ```
 
@@ -210,10 +214,11 @@ or time wakes remain, deletes any old context for that input id, deletes the
 ephemeral input row, and applies `PipelineEffects` through `commit_effects`.
 Ephemeral inputs do not write `facts` or `local_fact_admissions` for themselves.
 
-Before that boundary, projector runs are calculation. The projection loop may
-grow `ProjectionContext` for this one item and rerun the projector when the
-just-declared needs already match stored offers. Only the settled output
-commits.
+Before that boundary, projector runs are calculation. Durable pending items
+start with the matched context already attached to their queue row. The
+projection loop may still grow `ProjectionContext` for this one item and rerun
+the projector when newly declared needs already match stored offers. Only the
+settled output commits.
 
 ## Handler Commit Boundary
 

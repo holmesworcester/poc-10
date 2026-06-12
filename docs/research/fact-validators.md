@@ -514,7 +514,7 @@ Documentation alignment is part of the conversion, not follow-up cleanup:
 
 - `RULES.md` must describe only the final staged target, with any transitional
   allowance removed once the last family is converted.
-- `src/core/README.md` and `src/core/pipeline/README.md` must name
+- `src/core/README.md` and `src/core/pipeline.md` must name
   `core::pipeline` as the source of truth and must not describe
   `core::projectors` as an import path.
 - Scope READMEs and family top-of-file docs must let a reviewer line up each

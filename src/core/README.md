@@ -24,14 +24,15 @@ The command can return human-readable `CliOutput`, but durable protocol state
 must enter through facts, row mutations, or intents.
 
 Projection is core's deterministic reaction step. Core drains
-`pending_projection`, loads one fact and its matched context, resolves any
-newly declared needs that already match stored offers, calls the protocol
-projector until the item settles, and commits the output. That commit replaces
-the fact's owned needs and time wakes; appends newly emitted offers as durable
-evidence; applies allowed row mutations; admits emitted facts; queues follow-up
-intents; and wakes other fact owners whose standing needs now overlap newly
-added offers. Core performs the overlap query mechanically, but projectors
-decide what the matched payload proves.
+`pending_projection`, loads one fact and the matched context attached to that
+pending row, resolves any newly declared needs that already match stored offers,
+calls the protocol projector until the item settles, and commits the output.
+That commit replaces the fact's owned needs and time wakes; appends newly
+emitted offers as durable evidence; applies allowed row mutations; admits
+emitted facts; queues follow-up intents; and wakes other fact owners whose
+standing needs now overlap newly added offers. Core performs the overlap query
+mechanically when it queues the work, but projectors decide what the matched
+payload proves.
 
 Intents are core's bounded stateful work step. A projector or command emits an
 intent when the next action should not happen inside deterministic projection:
@@ -200,8 +201,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   queue workers. It names the route, decode, authenticate, adapt, project,
   effects, and commit stages, and runtime calls it to submit facts and intents,
   admit due time wakes, drain pending projection, dispatch queued intents, and
-  purge exact facts. The concrete stage contracts and worker code live in the
-  pipeline submodules below.
+  purge exact facts. The concrete stage contracts and worker code live as
+  inline sections in this file so the pipeline has one implementation surface.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal command output by default. It is for runtime profiling, not protocol
@@ -215,8 +216,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   handlers, and composes the pipeline pieces into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, ephemeral
-  projection inputs, intent queues, local network tables, and the local clock
-  table. Protocol rows live in protocol schema sources.
+  projection inputs, pending projection matches, intent queues, local network
+  tables, and the local clock table. Protocol rows live in protocol schema
+  sources.
 - `store.rs`: SQLite substrate below runtime policy. It applies schema batches,
   opens transactions, quotes identifiers, validates opaque row-table allowlists,
   and provides generic keyed row helpers. It does not know what a fact, context
@@ -226,47 +228,46 @@ use core syntax and contracts, but core must not import their semantic rules.
   slots, and trailing-byte checks. Owning fact and intent modules layer tags,
   semantic validation, signatures, and test vectors on top.
 
-### Pipeline Submodules
+### Pipeline Sections
 
-- `pipeline/route.rs`: tag route declarations and staged route metadata that
+The following sections are inline modules inside `pipeline.rs`; they are not
+separate files.
+
+- `pipeline.rs::route`: tag route declarations and staged route metadata that
   reviewers use to see each family's first-class pipeline stages.
-- `pipeline/decode.rs`: decode-stage trait. Core owns when decoding happens;
+- `pipeline.rs::decode`: decode-stage trait. Core owns when decoding happens;
   protocol families own how their bytes become typed payloads.
-- `pipeline/authenticate.rs`: authentication-stage contracts and helpers:
+- `pipeline.rs::authenticate`: authentication-stage contracts and helpers:
   `AuthenticatedFact`, `Authentication`, `Authenticator`,
   `DecodedAuthenticator`, `authenticate_authored`, and `verify_fact_id`.
-- `pipeline/adapt.rs`: adapter-stage trait for moving from authenticated source
+- `pipeline.rs::adapt`: adapter-stage trait for moving from authenticated source
   shape to the semantic value projected at the active head version.
-- `pipeline/project.rs`: project-stage contracts and staged runners. It exposes
+- `pipeline.rs::project`: project-stage contracts and staged runners. It exposes
   `SemanticProjector` and `project_staged`, which compose
   decode/authenticate/adapt/project for routed facts.
-- `pipeline/context.rs`: in-memory `ProjectionContext`, matched payload facts,
+- `pipeline.rs::context`: in-memory `ProjectionContext`, matched payload facts,
   due time ranges, and typed payload helpers visible while one fact is being
   processed.
-- `pipeline/effects.rs`: `ProjectionOutput`, time wakes, and due time ranges.
+- `pipeline.rs::effects`: `ProjectionOutput`, time wakes, and due time ranges.
   Projection output is the complete need/time-wake replacement, new append-only
   offers, plus shared `PipelineEffects` for one fact.
-- `pipeline/commit_effects.rs`: shared atomic commit path for
+- `pipeline.rs::commit_effects`: shared atomic commit path for
   `PipelineEffects`. It validates duplicate or conflicting effects, purges exact
   facts, admits durable and ephemeral facts, applies allowed row mutations, and
   queues follow-up intents inside the caller's transaction.
-- `pipeline/context_store.rs`: SQL implementation of standing context. It stores
+- `pipeline.rs::context_store`: SQL implementation of standing context. It stores
   need/offer edges, assembles projection context with matched payload facts,
   computes replacement-need and append-only-offer deltas by owner, and fans out
   pending projection rows when new needs and offers overlap.
-- `pipeline/dispatch.rs`: intent queue worker. It claims one durable or local
+- `pipeline.rs::dispatch`: intent queue worker. It claims one durable or local
   intent, loads only the handler-declared fact inputs, calls the registered
   handler, handles retry/fatal outcomes, and commits handler output atomically
   with queue-row deletion.
-- `pipeline/insert_select.rs`: checked `INSERT OR IGNORE ... SELECT` helper
-  used by queue fanout. It accepts only static comment-free `SELECT` statements
-  over declared source tables and bound parameters, keeping dynamic scheduling
-  SQL narrow and auditable.
-- `pipeline/pipeline_one.rs`: one queued fact pipeline item. It loads matched
+- `pipeline.rs::pipeline_one`: one queued fact pipeline item. It loads matched
   context and due time ranges, runs staged decode/authenticate/adapt/project
   routes, replaces the owner's needs/time wakes, appends offers, and commits
   emitted effects.
-- `pipeline.rs`: runtime state machine and pending projection queue drain. It
+- `pipeline.rs` state machine: pending projection queue drain. It
   admits facts and due time wakes, selects durable and ephemeral projection
   items, applies the one-item pipeline step, and lets
   context wakes or emitted child facts re-enter the queue explicitly.

@@ -1117,10 +1117,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 #[test]
 fn cutover_network_io_intents_are_ephemeral_queue_work() {
     let root = root();
-    let mut pipeline = source_text(&root.join("src/core/pipeline.rs"));
-    for path in rust_files_under(&root.join("src/core/pipeline")) {
-        pipeline.push_str(&source_text(&path));
-    }
+    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
     let core_schema = source_text(&root.join("src/core/schema.rs"));
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
     let send_facts_handler =

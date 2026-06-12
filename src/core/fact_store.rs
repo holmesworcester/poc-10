@@ -19,9 +19,9 @@
 //!
 //! Purge is the reverse boundary. It removes the byte row and every core-owned
 //! row keyed by the fact id: local admission, standing context, time wakes,
-//! pending time ranges, and pending projection. Protocol-owned rows that refer
-//! to the fact are removed by emitted row mutations or protocol handlers, not
-//! by this generic storage module.
+//! pending time ranges, pending projection, and queued projection matches.
+//! Protocol-owned rows that refer to the fact are removed by emitted row
+//! mutations or protocol handlers, not by this generic storage module.
 //!
 //! If the content-addressing rule, admission ordering, or purge fanout changes,
 //! change it here. If a protocol wants to interpret the fact bytes, that logic
@@ -108,10 +108,15 @@ pub(crate) fn insert_ephemeral_fact_in_tx(store: &Store, fact: &Fact) -> rusqlit
 }
 
 pub(crate) fn delete_ephemeral_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
-    Ok(store.conn().execute(
+    let mut changed = store.conn().execute(
         "DELETE FROM ephemeral_projection_inputs WHERE id = ?1",
         params![owner.as_slice()],
-    )? > 0)
+    )? > 0;
+    changed |= store.conn().execute(
+        "DELETE FROM pending_projection_matches WHERE owner = ?1",
+        params![owner.as_slice()],
+    )? > 0;
+    Ok(changed)
 }
 
 /// Remove a fact and every durable row keyed to it.
@@ -129,6 +134,8 @@ pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result
         "DELETE FROM context_edges WHERE owner = ?1",
         "DELETE FROM time_wakes WHERE owner = ?1",
         "DELETE FROM pending_time_ranges WHERE owner = ?1",
+        "DELETE FROM pending_projection_matches WHERE owner = ?1",
+        "DELETE FROM pending_projection_matches WHERE offer_owner = ?1",
     ] {
         changed |= store.conn().execute(sql, params![owner.as_slice()])? > 0;
     }
