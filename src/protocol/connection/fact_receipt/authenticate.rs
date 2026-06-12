@@ -11,24 +11,16 @@
 //! context for the received fact.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ConnectionFactReceipt;
 
-pub(crate) struct ConnectionFactReceiptAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for ConnectionFactReceiptAuthenticator {
-    type Authenticated = ConnectionFactReceipt;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        received: ConnectionFactReceipt,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_fact_receipt(fact, received))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    received: ConnectionFactReceipt,
+    _context: &ProjectionContext,
+) -> Result<ConnectionFactReceipt, String> {
+    prove_decoded_fact_receipt(fact, received)
 }
 
 fn prove_decoded_fact_receipt(
@@ -43,15 +35,11 @@ fn prove_decoded_fact_receipt(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::connection::fact_receipt::encode;
     use crate::protocol::connection::fact_receipt::fact::{
         ConnectionFactReceipt, OriginAddr, RECEIVE_PATH_CONNECTION,
     };
-
-    use super::ConnectionFactReceiptAuthenticator;
 
     fn canonical_fact() -> Fact {
         let receipt = ConnectionFactReceipt {
@@ -72,27 +60,18 @@ mod tests {
         )
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFactReceipt> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ConnectionFactReceiptAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ConnectionFactReceipt, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

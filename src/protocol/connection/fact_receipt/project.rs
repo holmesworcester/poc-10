@@ -18,9 +18,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 pub fn connection_fact_receipt_for_path(
     input: super::fact::ReceiptPathInput<'_>,
@@ -44,13 +42,9 @@ pub fn connection_fact_receipt_for_path(
     ))
 }
 
-/// Staged read pipeline for the fact_receipt fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::fact_receipt::Codec",
-    authenticate: "connection::fact_receipt::authenticate::ConnectionFactReceiptAuthenticator",
-    adapt: "connection::fact_receipt::adapt::ConnectionFactReceiptAdapter",
-    project: "connection::fact_receipt::project::ConnectionFactReceiptProjector",
-};
+/// Projector route metadata for the fact_receipt fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("connection::fact_receipt::project::ConnectionFactReceiptProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFactReceiptProjector;
@@ -67,16 +61,14 @@ impl Projector for ConnectionFactReceiptProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionFactReceiptAuthenticator,
-            super::adapt::ConnectionFactReceiptAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ConnectionFactReceipt> for ConnectionFactReceiptProjector {
+impl ConnectionFactReceiptProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

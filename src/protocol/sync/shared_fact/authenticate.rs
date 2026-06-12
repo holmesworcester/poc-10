@@ -9,24 +9,16 @@
 //! owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::SharedFact;
 
-pub(crate) struct SyncSharedFactAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for SyncSharedFactAuthenticator {
-    type Authenticated = SharedFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        shared: SharedFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_shared_fact(fact, shared))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    shared: SharedFact,
+    _context: &ProjectionContext,
+) -> Result<SharedFact, String> {
+    prove_decoded_shared_fact(fact, shared)
 }
 
 fn prove_decoded_shared_fact(fact: &Fact, shared: SharedFact) -> Result<SharedFact, String> {
@@ -38,13 +30,9 @@ fn prove_decoded_shared_fact(fact: &Fact, shared: SharedFact) -> Result<SharedFa
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::sync::shared_fact::encode;
     use crate::protocol::sync::shared_fact::fact::SharedFact;
-
-    use super::SyncSharedFactAuthenticator;
 
     fn canonical_fact() -> Fact {
         let shared = SharedFact {
@@ -58,27 +46,18 @@ mod tests {
         )
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, SharedFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => SyncSharedFactAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<SharedFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

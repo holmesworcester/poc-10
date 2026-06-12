@@ -11,24 +11,16 @@
 //! observation context for the observed frame fact.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ConnectionFrameObservationFact;
 
-pub(crate) struct ConnectionFrameObservationAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for ConnectionFrameObservationAuthenticator {
-    type Authenticated = ConnectionFrameObservationFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        observed: ConnectionFrameObservationFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_frame_observation(fact, observed))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    observed: ConnectionFrameObservationFact,
+    _context: &ProjectionContext,
+) -> Result<ConnectionFrameObservationFact, String> {
+    prove_decoded_frame_observation(fact, observed)
 }
 
 fn prove_decoded_frame_observation(
@@ -43,40 +35,27 @@ fn prove_decoded_frame_observation(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::connection::frame_observation::author::fact_from_observation;
     use crate::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact;
-
-    use super::ConnectionFrameObservationAuthenticator;
 
     fn canonical_fact() -> Fact {
         fact_from_observation([1; 32], b"127.0.0.1:41001", 100)
             .expect("connection_frame_observation fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFrameObservationFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ConnectionFrameObservationAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ConnectionFrameObservationFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

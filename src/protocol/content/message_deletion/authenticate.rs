@@ -13,24 +13,16 @@
 //! in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ContentMessageDeletionFact;
 
-pub(crate) struct ContentMessageDeletionAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for ContentMessageDeletionAuthenticator {
-    type Authenticated = ContentMessageDeletionFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        deletion: ContentMessageDeletionFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_message_deletion(fact, deletion))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    deletion: ContentMessageDeletionFact,
+    _context: &ProjectionContext,
+) -> Result<ContentMessageDeletionFact, String> {
+    prove_decoded_message_deletion(fact, deletion)
 }
 
 fn prove_decoded_message_deletion(
@@ -47,13 +39,9 @@ mod tests {
     use crate::core::command_context::LocalSigningCapability;
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::content::message_deletion::author::delete_message;
     use crate::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
-
-    use super::ContentMessageDeletionAuthenticator;
 
     const PRIVATE_KEY: [u8; 32] = [7; 32];
     const WORKSPACE_ID: [u8; 32] = [1; 32];
@@ -80,27 +68,18 @@ mod tests {
         .expect("content message deletion fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ContentMessageDeletionFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ContentMessageDeletionAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ContentMessageDeletionFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

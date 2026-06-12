@@ -198,18 +198,15 @@ use core syntax and contracts, but core must not import their semantic rules.
   length-prefixed TCP frame reading/writing, and cleanup. It does not classify
   bootstrap frames, connection frames, auth facts, sync facts, or content facts.
 - `pipeline.rs`: public facade for fact lifecycle contracts and SQL-backed
-  queue workers. It names the route, decode, authenticate, adapt, project,
-  effects, and commit stages, and runtime calls it to submit facts and intents,
-  admit due time wakes, drain pending projection, dispatch queued intents, and
-  purge exact facts. The concrete stage contracts and worker code live as
-  inline sections in this file so the pipeline has one implementation surface.
+  queue workers. Runtime calls it to submit facts and intents, admit due time
+  wakes, drain pending projection, dispatch queued intents, and purge exact
+  facts. Protocol projectors own raw decoding, validation, adaptation, and
+  semantic projection; core owns queueing, matched context, needs/offers,
+  effect commits, and replay mode.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal command output by default. It is for runtime profiling, not protocol
   measurement semantics.
-- `projectors.rs`: transitional re-export facade for the fact-processing
-  pipeline. New code should import from `pipeline`; this file keeps existing
-  protocol modules compiling during fact-by-fact cutover.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command effects, drains
   projection and intent queues, admits due time wakes, filters command-safe
@@ -233,21 +230,10 @@ use core syntax and contracts, but core must not import their semantic rules.
 The following sections are inline modules inside `pipeline.rs`; they are not
 separate files.
 
-- `pipeline.rs::route`: tag route declarations and staged route metadata that
-  reviewers use to see each family's first-class pipeline stages.
-- `pipeline.rs::decode`: decode-stage trait. Core owns when decoding happens;
-  protocol families own how their bytes become typed payloads.
-- `pipeline.rs::authenticate`: authentication-stage contracts and helpers:
-  `AuthenticatedFact`, `Authentication`, `Authenticator`,
-  `DecodedAuthenticator`, `authenticate_authored`, and `verify_fact_id`.
-- `pipeline.rs::adapt`: adapter-stage trait for moving from authenticated source
-  shape to the semantic value projected at the active head version.
-- `pipeline.rs::project`: project-stage contracts and staged runners. It exposes
-  `SemanticProjector` and `project_staged`, which compose
-  decode/authenticate/adapt/project for routed facts.
+- `pipeline.rs::route`: tag route declarations, projector route metadata, and
+  the protocol-owned fact admission hook type.
 - `pipeline.rs::context`: in-memory `ProjectionContext`, matched payload facts,
-  due time ranges, and typed payload helpers visible while one fact is being
-  processed.
+  and due time ranges visible while one fact is being processed.
 - `pipeline.rs::effects`: `ProjectionOutput`, time wakes, and due time ranges.
   Projection output is the complete need/time-wake replacement, new append-only
   offers, plus shared `PipelineEffects` for one fact.
@@ -264,9 +250,8 @@ separate files.
   handler, handles retry/fatal outcomes, and commits handler output atomically
   with queue-row deletion.
 - `pipeline.rs::pipeline_one`: one queued fact pipeline item. It loads matched
-  context and due time ranges, runs staged decode/authenticate/adapt/project
-  routes, replaces the owner's needs/time wakes, appends offers, and commits
-  emitted effects.
+  context and due time ranges, runs the routed projector, replaces the owner's
+  needs/time wakes, appends offers, and commits emitted effects.
 - `pipeline.rs` state machine: pending projection queue drain. It
   admits facts and due time wakes, selects durable and ephemeral projection
   items, applies the one-item pipeline step, and lets

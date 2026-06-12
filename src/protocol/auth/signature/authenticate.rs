@@ -6,24 +6,16 @@
 //! policy through their existing context checks.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::SignatureFact;
 
-pub(crate) struct SignatureAuthenticator;
-
-impl DecodedAuthenticator<super::decode::Codec> for SignatureAuthenticator {
-    type Authenticated = SignatureFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        signature: SignatureFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_signature(fact, signature))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    signature: SignatureFact,
+    _context: &ProjectionContext,
+) -> Result<SignatureFact, String> {
+    prove_decoded_signature(fact, signature)
 }
 
 fn prove_decoded_signature(fact: &Fact, signature: SignatureFact) -> Result<SignatureFact, String> {
@@ -44,11 +36,7 @@ pub fn verify_signature(fact: &SignatureFact) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
-
-    use super::SignatureAuthenticator;
+    use crate::core::pipeline::ProjectionContext;
 
     const PRIVATE_KEY: [u8; 32] = [7; 32];
 
@@ -57,27 +45,18 @@ mod tests {
             .expect("signature fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, super::super::fact::SignatureFact> {
-        match super::super::decode::Codec::decode_fact(fact) {
-            Ok(decoded) => SignatureAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<super::super::fact::SignatureFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_signature_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

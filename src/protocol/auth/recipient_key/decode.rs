@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{RECIPIENT_KEY_BYTES, TYPE_RECIPIENT_KEY};
 use super::fact::RecipientKeyFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = RecipientKeyFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_recipient_key(fact.body())
-    }
-}
-
 pub fn decode_recipient_key(bytes: &[u8]) -> Result<RecipientKeyFact, String> {
     wire::expect_len(bytes, RECIPIENT_KEY_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_RECIPIENT_KEY {

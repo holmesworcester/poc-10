@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{CONTENT_REACTION_BYTES, TYPE_CONTENT_REACTION};
 use super::fact::{ContentReactionFact, REACTION_CIPHERTEXT_BYTES};
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ContentReactionFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentReactionFact, String> {
     let mut reader = wire::Reader::new(bytes);
     reader

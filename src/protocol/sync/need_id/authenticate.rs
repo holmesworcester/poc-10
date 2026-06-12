@@ -9,24 +9,16 @@
 //! projector and its intents own.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::SyncNeedIdFact;
 
-pub(crate) struct SyncNeedIdAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for SyncNeedIdAuthenticator {
-    type Authenticated = SyncNeedIdFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        need: SyncNeedIdFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_need_id(fact, need))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    need: SyncNeedIdFact,
+    _context: &ProjectionContext,
+) -> Result<SyncNeedIdFact, String> {
+    prove_decoded_need_id(fact, need)
 }
 
 fn prove_decoded_need_id(fact: &Fact, need: SyncNeedIdFact) -> Result<SyncNeedIdFact, String> {
@@ -38,13 +30,9 @@ fn prove_decoded_need_id(fact: &Fact, need: SyncNeedIdFact) -> Result<SyncNeedId
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::sync::need_id::author::fact as need_id_fact;
     use crate::protocol::sync::need_id::fact::SyncNeedIdFact;
-
-    use super::SyncNeedIdAuthenticator;
 
     fn canonical_fact() -> Fact {
         need_id_fact(
@@ -57,27 +45,18 @@ mod tests {
         .expect("need-id fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, SyncNeedIdFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => SyncNeedIdAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<SyncNeedIdFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

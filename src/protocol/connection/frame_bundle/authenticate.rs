@@ -11,24 +11,16 @@
 //! owns through `project.rs`.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ConnectionFrameBundleFact;
 
-pub(crate) struct ConnectionFrameBundleAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for ConnectionFrameBundleAuthenticator {
-    type Authenticated = ConnectionFrameBundleFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        input: ConnectionFrameBundleFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_frame_bundle(fact, input))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    input: ConnectionFrameBundleFact,
+    _context: &ProjectionContext,
+) -> Result<ConnectionFrameBundleFact, String> {
+    prove_decoded_frame_bundle(fact, input)
 }
 
 fn prove_decoded_frame_bundle(
@@ -43,15 +35,11 @@ fn prove_decoded_frame_bundle(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::core::wire::FixedBytes;
     use crate::protocol::connection::frame_bundle::author::fact_from_wire;
     use crate::protocol::connection::frame_bundle::encode as frame_encode;
     use crate::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
-
-    use super::ConnectionFrameBundleAuthenticator;
 
     fn canonical_fact() -> Fact {
         let frame =
@@ -60,27 +48,18 @@ mod tests {
         fact_from_wire(&frame, 100).expect("connection_frame_bundle fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionFrameBundleFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ConnectionFrameBundleAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ConnectionFrameBundleFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

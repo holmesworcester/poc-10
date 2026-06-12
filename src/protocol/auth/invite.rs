@@ -19,8 +19,6 @@ pub mod queries;
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 /// Invite-secret projection rows, keyed by
 /// `bootstrap_hash || workspace_id_or_zero || invite_fact_id_or_zero`. A
 /// connection bootstrap proves knowledge of the bootstrap secret by presenting

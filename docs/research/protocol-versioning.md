@@ -7,9 +7,9 @@ Single authoritative note: the model and phased implementation plan (Part I), th
 This is the authoritative, consolidated plan for protocol versioning in poc-10.
 It starts from two landed prerequisites: the replay runtime
 (`poc10-replay-intent-shape.md`) and the **fact-authenticator split**
-(`fact-validators.md`) — the bottom of the `decode → authenticate → adapt →
-project` pipeline, landed before any ceiling/adapter work. Its exhaustive test
-matrix lives in Part II below.
+(`fact-validators.md`) — now expressed as projector-local decode, validation,
+adaptation, and projection helpers. Its exhaustive test matrix lives in Part II
+below.
 
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
@@ -17,8 +17,8 @@ the plan reuses:
 - Tag-routed facts: `FactRoute { tag, projector, pipeline }` and the
   `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
   `core::pipeline::RouterProjector`.
-- Per-family authenticators: each routed family has `authenticate.rs` and routes
-  through the core-managed staged `FactRoute` runner.
+- Per-family authenticators: each routed family has `authenticate.rs`, and its
+  projector calls the family decode/validation/adapt helpers directly.
 - Replay runtime: `replay`, `state-summary`, `replay-check`,
   `intent-registry`, and `recurring-intents` are in `src`.
 - Container frame facts: `connection::{frame_small,frame_bundle,frame_file_slice}`
@@ -34,14 +34,14 @@ What does **not** exist yet: a protocol version / ceiling, any version gating on
 routes, a release manifest, trusted time, scope-owned ceiling adapters,
 `intro_version` on routes/handlers/commands, ceiling-selected context payload
 adaptation, and the pending admission state for wire-admitted bytes that cannot
-yet become active facts. The staged `FactRoute` runner is the active route model
-for all routed facts; versioning work builds on that model.
+yet become active facts. The active route model maps tags to projectors only;
+versioning work builds on that model.
 
 Agent note: Part II contains historical/current-code inventory refs captured
-while planning. When those refs conflict with the current staged pipeline model,
-use `fact-validators.md` and `src/core/pipeline.md` as the source of
-truth. Do not use `core::projectors`, `project_authenticated`, `layout.rs`,
-`create.rs`, or fact-family `rows.rs` as target shapes.
+while planning. When those refs conflict with the current projector-local model,
+use `fact-validators.md` and `src/core/pipeline.md` as the source of truth. Do
+not use the removed projector facade, old authenticated-projector helpers,
+`layout.rs`, `create.rs`, or fact-family `rows.rs` as target shapes.
 
 ## 1. Summary — the model in one breath
 
@@ -284,29 +284,27 @@ outside this is crypto-primitive soundness (the remaining material is
 cryptographically insufficient, not merely absent), which is out of scope —
 trusted to the AEAD/DH primitive, not to poc-10.
 
-### Phase 2 — Staged routes, then route gating
+### Phase 2 — Projector routes, then route gating
 
-The staged `FactRoute` runner has landed and every routed family now carries an
-identity adapt slot. It landed before real version adapters, manifests, trusted
-time, or ceiling filtering. That gives core ownership of the
-`decode -> authenticate -> adapt -> project` pipeline now, so later versioning
-work fills in non-identity adapt edges and ceiling filters instead of moving the
-projector boundary again.
+Every routed family now carries a projector-local identity adapt helper. It
+landed before real version adapters, manifests, trusted time, or ceiling
+filtering. That gives each projector an explicit local decode, validation,
+adapt, and semantic projection flow, so later versioning work fills in
+non-identity adapt edges and ceiling filters without moving the projector
+boundary again.
 
 The model family lessons are in `fact-validators.md`: signed/encrypted content,
-deterministic root auth, sealed request/connection opener authentication, and
-runtime write admission through the same staged authenticators.
+deterministic root auth, sealed request/connection opener validation, and
+runtime write admission through protocol-local checks.
 
-- `FactRoute` becomes the core-owned staged pipeline for one tag: `tag`,
-  `intro_version: u32`, decoder, authenticator, adapt path, author
+- `FactRoute` remains the route for one tag: `tag`, `intro_version: u32`, author
   entry when local creation exists, and projector.
-- Core runs `decode -> authenticate -> adapt -> project` as four labelled stages.
-  `AuthenticationNeed` parks/wakes the authentication stage; projector
-  context/time needs park/wake the projection stage for an already authenticated
-  and adapted fact. A future adapt need would park/wake the adapt stage, but the
-  identity adapt stub has no needs.
+- The projector runs decode, validation, adaptation, and semantic projection as
+  plain protocol-local calls. Context/time needs park and wake projection work
+  for the owning fact. A future adapt need would be modeled as projector-owned
+  context.
 - Core has the write-side admission hook for commands and emitted facts:
-  `cli -> command -> author -> encode -> authenticate self-check -> admit`.
+  `cli -> command -> author -> encode -> protocol self-check -> admit`.
   This is where blocked-mode,
   ceiling-selected author dispatch, local above-ceiling refusal, returned fact
   ids, and the handoff into the read pipeline belong.
@@ -314,10 +312,10 @@ runtime write admission through the same staged authenticators.
   containing only routes with `intro_version <= ceiling`, recomputed when
   trusted time or the manifest changes.
 - The route is typed inside protocol-owned functions and opaque to core. Core can
-  know that tag 50 uses a particular decoder, authenticator, adapt path, author,
-  and projector without importing `ContentMessageFact`; the route-owned stage
-  functions enforce that the decoded type, authenticated type, adapted semantic
-  type, author output, and projector agree.
+  know that tag 50 uses a particular projector without importing
+  `ContentMessageFact`; the projector-owned helper calls enforce that the
+  decoded source type, validated source type, adapted semantic type, author
+  output, and projector agree.
 - `HandlerRoute` gains `intro_version`; `runs_during_replay` is already present.
 - `CliCommand` registration becomes a stable name mapped to a **version-tagged
   list** of run fns: `name -> [(intro 0, run_v1), (intro 7, run_v2)]`. The
@@ -329,8 +327,8 @@ runtime write admission through the same staged authenticators.
 - Carry-over TODO for the model-family pass: split the representative families
   far enough to prove both pipelines. For each model, show command input
   gathering, `author.rs` construction, `encode.rs` transcript/final-encode
-  helpers, the authenticate self-check before admission, and the read-side
-  `decode -> authenticate -> adapt -> project` route.
+  helpers, the protocol self-check before admission, and the read-side
+  projector-local decode/validation/adaptation/projection flow.
 
 ### Phase 3 — Admission, pending, and unsupported input
 
@@ -350,9 +348,9 @@ runtime write admission through the same staged authenticators.
   negentropy by id/bytes so supported peers can avoid download loops during
   ceiling skew. They are still inert locally. When the manifest/ceiling changes,
   verifier/opening context arrives, or the binary updates to know the tag, the
-  pending bytes re-enter the normal `decode -> authenticate -> adapt -> project`
-  admission path. If they then authenticate and are ceiling-active, they become active
-  facts and project normally; if they fail authentication or remain unsupported,
+  pending bytes re-enter normal admission and route to their projector by tag.
+  If they then validate and are ceiling-active, they become active facts and
+  project normally; if they fail validation or remain unsupported,
   they stay pending or are rejected according to the admission result.
 - **Local creation** of an above-ceiling fact is refused at the command/admission
   boundary. Pending is only an ingress state for bytes received from authenticated
@@ -362,21 +360,15 @@ runtime write admission through the same staged authenticators.
   **pending ingress**. Pending ingress is raw admitted bytes waiting to become an active
   authenticated fact; projector-pending is an active fact waiting on ordinary
   context needs.
-- **Known-route authentication.** The staged runner exists in `core::pipeline`
-  and all routed families route through it. Once a tag is registered, core
-  routes raw bytes through that tag's decode, authentication, adapt, and project
-  stages. Ceiling filtering later decides which registered tags can become
-  active. The authenticator returns
-  `Authenticated(AuthenticatedFact<T>)`, invalid bytes, or one or more
-  `NeedsAuthentication` context needs for verifier/opening context. Projectors
-  do not invoke authentication helpers themselves; that composition is
-  route-runner logic around decode, typed authentication, adapt, and projection.
-  Projectors, not authenticators, express semantic context, authority
+- **Known-route validation.** Once a tag is registered, core routes raw bytes to
+  that tag's projector. Ceiling filtering later decides which registered tags
+  can become active. The projector calls its family decode, validation, and
+  adaptation helpers directly, then expresses semantic context, authority
   requirements, parking, purge rules, and reproject needs. A fact version
   chooses whether verifier key material is embedded or referenced; the runtime
-  contract must support `NeedsAuthentication` either way so future versions can
-  trade self-contained verification against public-key size without changing
-  projector semantics.
+  contract must support context-dependent validation either way so future
+  versions can trade self-contained verification against public-key size without
+  changing projector semantics.
 
 ### Context integrity (core-enforced)
 
@@ -393,11 +385,10 @@ threat must be closed:
   so `payload.id == offer.owner` holds by construction. Enforce it once at match
   construction (produce no match if the owner fact does not load) and delete the
   checked/unchecked accessor split, so every projector gets one always-safe
-  payload. After the staged route lands, core derives the matched owner's
-  payload shape through that owner's route-owned `decode -> adapt` path after
-  the all-family cutover. This is a decoder/adapter path, not the authentication
-  gate: the offer exists only because the owner fact already passed its own
-  primary route.
+  payload. The consuming projector derives the matched owner's payload shape
+  through the owning module's typed helper. This is field decoding, not an
+  authority gate: the offer exists only because the owner fact already projected
+  enough to publish that context.
 - **Scope is pinned to the owning fact (core).** `FactScope` is unhashed
   admission metadata the emitter currently sets freely, and the emission gate
   (`enforce_owner_is_self`) pins only `owner`. Extend it to reject any emitted
@@ -428,13 +419,11 @@ threat must be closed:
     authored typed value, including encryption, signing, assembly,
     deterministic nonce use, and policy checks. Names of non-family
     intents/handlers may remain `create_*`.
-  - `authenticate.rs`: always present per version, kept forever, and routed by
-    tag. It calls `decode`, computes/checks the fact id, verifies the
-    fact-boundary cryptographic proof (usually signature/domain, sometimes a
-    container AEAD opening), enforces intrinsic layout rules, and emits a typed
-    authenticated fact. Its result shape is
-    `Authenticated(AuthenticatedFact<T>)`, `NeedsAuthentication(AuthenticationNeed)`,
-    or `Invalid(AuthenticationError)`.
+  - `authenticate.rs`: always present per version, kept forever, and called by
+    the owning projector or admission check. It calls `decode`, computes/checks
+    the fact id, verifies the fact-boundary cryptographic proof (usually
+    signature/domain, sometimes a container AEAD opening), enforces intrinsic
+    layout rules, and emits a typed validated source value or an error.
   - `adapt.rs`: always represented in the route; existing unsuffixed families
     start with an identity adapter. In the linear default, `vN/adapt.rs` converts
     `vN-1::fact` into `vN::fact` or the active semantic value. An adapter never
@@ -508,15 +497,14 @@ rejects according to normal context rules.
 
 Context payloads are adapted too, but they do not re-enter the authentication
 gate. A projector's needs and offers match on stable role/scope/range
-coordinates. For a matched offer, core loads the owner fact and, after the
-all-family cutover, derives the payload through that owner's route-owned
-`decode -> adapt` path. The consuming projector receives context payloads in the
-semantic version it expects at the active ceiling, not the raw historical layout
-that happened to satisfy the offer. This keeps version adaptation out of
-projectors without re-verifying context signatures: a ceiling-v2 content
-projector that needs an auth context sees the auth ceiling-v2 semantic value,
-even if the retained auth fact was
-authored as v0 and reached that value through the auth adapt chain.
+coordinates. For a matched offer, core loads the owner fact and the consuming
+projector reaches fields through the owner module's typed helper. The consuming
+projector receives context payloads in the semantic version it expects, not the
+raw historical layout that happened to satisfy the offer. This keeps version
+adaptation local to fact families without re-running authentication: a
+ceiling-v2 content projector that needs an auth context sees the auth ceiling-v2
+semantic value, even if the retained auth fact was authored as v0 and reached
+that value through the auth adapt chain.
 
 This replaces "keep every old projector forever" with a narrower obligation:
 keep every old decoder/authenticator forever, keep the linear adapter chain for
@@ -545,7 +533,7 @@ as `ProjectionContext::is_replay()`.
   during replay, but whose projectors intentionally no-op live session or
   negotiation materialization when `ProjectionContext::is_replay()` is true.
   Today this covers connection request, connection, sync have-id, and sync
-  need-id. These families still validate bytes through the same staged route;
+  need-id. These families still validate bytes through their owning projectors;
   replay just does not recreate dead connection rows or stale prompts.
 - **Pending / non-protocol input** — raw network bytes before they have become
   a fact, live-only queued work, daemon schedules, and wire-admitted bytes held
@@ -586,8 +574,8 @@ but must no-op those materializations in replay mode.
   the cleartext header (`tag + version + size_class + connection_id + nonce`) is
   the key hint. The carrier authenticator/opener proves and opens the frame
   boundary with connection context; the projector materializes the recovered
-  inner fact bytes and receipts. Those inner facts then re-enter the normal
-  `decode -> authenticate -> adapt -> project` pipeline by their own tags. The
+  inner fact bytes and receipts. Those inner facts then re-enter admission and
+  route to their own projectors by tag. The
   `TRNS` 4-byte magic is a stream recognizer owned by the framing substrate
   (`core/network.rs`), not a fact-version device.
 - **Negotiate up** between capable peers (highest common frame version inside the
@@ -1269,7 +1257,7 @@ additions (two rounds); §20 is the coverage matrix over the cross-product.
 ### TIME-29 — pending above-ceiling input activates on next wipe+replay once the ceiling rises  `replay-cli`
 - **Setup:** (proposed) client previously retained a wire-admitted fact with a future tag as pending; client subsequently leaves blocked mode AND ceiling rises (e.g. blocking release expired) to cover that tag.
 - **Action:** raise ceiling, then wipe+replay.
-- **Expect:** the pending bytes re-enter `decode -> authenticate -> adapt -> project`, route to the tag's kept-forever adapter, and project if authentication and semantic context succeed. No network resend is required for bytes already retained as pending.
+- **Expect:** the pending bytes re-enter admission, route to the tag's kept-forever projector/adapter path, and project if validation and semantic context succeed. No network resend is required for bytes already retained as pending.
 - **Defends:** ADMISSION pending activation after ceiling rise; INVARIANT 4 (replay determinism over retained facts only).
 - **Refs:** ADMISSION model; ceiling-filtered routing by own tag; design rules 4/5.
 
@@ -1589,12 +1577,11 @@ These tests defend the model's admission/pending/routing rules. Today's code has
 two remaining structural gaps these tests are written to drive out and then
 lock: (a) `FactRoute { tag, projector, pipeline }` carries no
 `intro_version`; (b) `RouterProjector` is not ceiling-filtered — it dispatches
-every registered tag unconditionally. The staged route runner exists now for
-converted families, while the all-family conversion in `fact-validators.md`
-removes the remaining projector-composed routes. Versioning adds an admission
-gate ahead of projection: wire-invalid input drops; wire-admitted unknown or
-above-ceiling bytes become pending; and ceiling-active known tags authenticate by
-tag, pass through the route's adapt slot, then project. Tests below that assert
+every registered tag unconditionally. The projector-local route model exists
+now for converted families. Versioning adds an admission gate ahead of
+projection: wire-invalid input drops; wire-admitted unknown or above-ceiling
+bytes become pending; and ceiling-active known tags validate by tag, pass
+through the projector's adapt helper, then project. Tests below that assert
 pending ingress and ceiling-filtering are RED against the current tree and
 define the target behavior; tests that assert global tag uniqueness / registry
 shape are GREEN guardrails that extend `fact_route_tags_are_globally_unique`.
@@ -1864,11 +1851,11 @@ cli args
   and the final serialized fact. Those transcript bytes are not secrets and not
   semantic construction; they are the byte contract that authoring, decoding,
   and authentication share.
-- **Authenticate self-check** runs the same family authenticator over locally
-  authored bytes before the command reports success or returns a fact id.
-  `Authenticated` admits; `Invalid` is a synchronous author/encode bug;
-  `NeedsAuthentication` must resolve through the same auth-need machinery (or
-  fail/park with a clear missing-context result), never silently skip the proof.
+- **Protocol self-check** runs the same family validation over locally authored
+  bytes before the command reports success or returns a fact id. Success admits;
+  invalid bytes are a synchronous author/encode bug; missing local context must
+  fail or park with a clear missing-context result, never silently skip the
+  proof.
   For embedded-key signed facts this deliberately re-verifies the signature just
   produced, catching mismatches between signing bytes, final encoding, decoding,
   and verification before any bad local fact is emitted to peers.
@@ -1893,9 +1880,8 @@ Carry this TODO list forward while the model families are being built:
   deterministic handler-authored family before fan-out.
 - Move crypto transcript helpers into `encode.rs`; keep actual signing,
   encryption, and assembly in `author.rs`.
-- Add a shared self-check helper that runs the family authenticator on authored
-  bytes before durable admission, with explicit handling for
-  `NeedsAuthentication`.
+- Add shared self-check helpers that run family validation on authored bytes
+  before durable admission, with explicit handling for missing local context.
 - Add guardrails that prevent command paths and handlers from bypassing the
   ceiling-selected author/encode/self-check boundary.
 - After the model shape is accepted, migrate remaining `create.rs` and
@@ -5621,7 +5607,7 @@ Scopes are the four real ones: `auth`, `content`, `connection`, `sync`.
 ### GUARD-15 — sibling _vN/ dir has no forbidden schema.rs / codec.rs  `guardrail`
 - **Setup:** the new `_vN/` version bucket dir.
 - **Action:** scan for `schema.rs` and `codec.rs` filenames inside `src/` (excluding the one allowed `src/core/schema.rs`).
-- **Expect:** the new sibling dir contains none; schema stays in `FACTS_SCHEMA_SOURCE` DDL and codecs stay in `layout.rs`/`FactCodec` — matching `poc10_target_has_no_per_module_schema_or_codec_files`.
+- **Expect:** the new sibling dir contains none; schema stays in `FACTS_SCHEMA_SOURCE` DDL and byte helpers stay in family role files — matching `poc10_target_has_no_per_module_schema_or_codec_files`.
 - **Defends:** Mechanism "no forbidden subdirs / files in _vN/".
 - **Refs:** `tests/poc10_architecture_boundary_test.rs::poc10_target_has_no_per_module_schema_or_codec_files` (483-503), `src/core/schema.rs`, `registry.rs` `FACTS_SCHEMA_SOURCE`.
 

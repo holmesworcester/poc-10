@@ -9,19 +9,13 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::{invite_accepted, signature};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-/// Staged read pipeline for the workspace fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::workspace::decode::Codec",
-    authenticate: "auth::workspace::authenticate::WorkspaceAuthenticator",
-    adapt: "auth::workspace::adapt::WorkspaceAdapter",
-    project: "auth::workspace::project::WorkspaceProjector",
-};
+/// Projector route metadata for the workspace fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::workspace::project::WorkspaceProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceProjector;
@@ -38,16 +32,14 @@ impl Projector for WorkspaceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::decode::Codec,
-            super::authenticate::WorkspaceAuthenticator,
-            super::adapt::WorkspaceAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::WorkspaceFact> for WorkspaceProjector {
+impl WorkspaceProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

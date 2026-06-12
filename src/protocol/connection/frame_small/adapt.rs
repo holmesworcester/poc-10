@@ -1,20 +1,11 @@
 //! Small connection-frame semantic adapter.
 //!
 //! The current frame_small wire shape is already the active semantic shape. This
-//! identity adapter keeps the staged route explicit and gives future versioned
-//! facts a dedicated conversion point.
-
-use crate::core::pipeline::Adapter;
+//! identity adapter keeps the protocol-local conversion point available for future versioned
+//! facts.
 
 use super::fact::ConnectionFrameSmallFact;
 
-pub(crate) struct ConnectionFrameSmallAdapter;
-
-impl Adapter for ConnectionFrameSmallAdapter {
-    type Source = ConnectionFrameSmallFact;
-    type Semantic = ConnectionFrameSmallFact;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(source)
-    }
+pub(crate) fn adapt(source: ConnectionFrameSmallFact) -> Result<ConnectionFrameSmallFact, String> {
+    Ok(source)
 }

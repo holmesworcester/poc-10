@@ -15,8 +15,6 @@ pub mod fact;
 pub mod index;
 pub mod project;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_SHARED_FACT: u8 = encode::TYPE_SHARED_FACT;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SharedFact, String> {

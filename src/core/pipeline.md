@@ -28,42 +28,39 @@ it to:
 - purge exact facts and their core-owned derived rows.
 - run command, daemon, and replay work orders through one pipeline engine.
 
-Protocol code participates through `Projector`, `FactCodec`,
-`DecodedAuthenticator`, `Adapter`, `SemanticProjector`, `IntentHandler`,
-`ProjectionOutput`, `PipelineEffects`, and `HandlerRoute`. Fact families own the
-concrete stage implementations. Projectors decide what facts need or offer,
-what rows they materialize, what facts or ephemeral projection inputs they emit,
-and what follow-up intents to enqueue. Handlers decide what bounded stateful
-work to perform. Handler routes declare whether their intents may run during
-replay and whether the daemon should fire a live-only recurring intent for that
-route. The pipeline decides when those effects become durable.
+Protocol code participates through `Projector`, `ProjectionOutput`,
+`PipelineEffects`, `IntentHandler`, and `HandlerRoute`. Fact families own raw
+body decoding, fact-boundary validation, compatibility adaptation, semantic
+projection, and any protocol-local admission checks. The pipeline decides when
+the emitted output becomes durable.
 
 ## Read Projection Path
 
-The direction for routed facts is a first-class staged read path:
+The routed fact path is:
 
 ```text
-route -> decode -> authenticate -> adapt -> project -> effects -> commit
+raw fact -> tag route -> projector -> ProjectionOutput -> commit
 ```
 
-Every routed fact declares those stages in `FactRoute.pipeline` as
-`FactPipeline::Staged`. The core projection worker stays protocol-neutral: it
-loads the fact and context, then invokes the registered protocol projector. The
-protocol router selects the tag route, core's staged helper runs
-decode/authenticate/adapt/project, and the settled `ProjectionOutput` hands
-context replacement plus `PipelineEffects` to the same commit boundary.
+The core projection worker stays protocol-neutral: it loads the fact, matched
+context already attached to pending work, due time ranges, and projection mode,
+then invokes the registered protocol projector. The projector decides what the
+bytes mean. A typical projector locally decodes the raw body, validates the fact
+id and cryptographic/container proof, requests missing context as needs,
+validates matched offers when present, adapts any legacy payload shape, and
+projects rows, context, time wakes, purges, or intents.
 
-In this pipeline, `authenticate` means family-owned fact-boundary proof, not
-complete semantic authority. It proves the decoded bytes are admissible as that
-fact family: canonical layout, content id, and any embedded fact-boundary
-signature, sealed envelope, or local cryptographic context needed before the
-payload can be interpreted. Detached signature evidence is itself a fact that
-authenticates independently and then offers context. Facts that depend on that
-evidence check it in `project`, alongside scope, authority, parent/deletion, and
-other semantic relationships.
+Missing context is normal projection output, not a separate core stage. The
+projector emits standing needs; the pipeline records those replacement needs and
+parks the fact. When a later offer matches a parked need, the pipeline records
+that offer in `pending_projection_matches` for the parked owner and queues the
+owner again. The retried projector reads the matched payload through
+`ProjectionContext` instead of doing a database search.
 
-`Authentication::NeedsAuthentication` becomes standing context needs, so the
-fact can park until the required verifier, key, or envelope context appears.
+Detached signature evidence, key material, deletion markers, receipts, and
+other cross-fact proof are ordinary facts that may publish context offers after
+their own projector accepts them. A consumer projector still validates that the
+matched offer applies to the current fact before treating it as authority.
 `ProjectionContext` also exposes the projection mode and due time ranges without
 giving projectors a storage handle or a clock read.
 
@@ -72,19 +69,17 @@ giving projectors a storage handle or a clock read.
 The write-side shape is:
 
 ```text
-command -> author -> encode -> authenticate self-check -> admit -> read pipeline
+command -> author -> encode -> protocol self-check -> admit -> read pipeline
 ```
 
 Commands own user intent, argument parsing, local capability lookup, receipts,
 and the decision to author a fact. Family `author.rs` owns construction crypto:
 signing, encryption, and typed assembly. Family `encode.rs` owns canonical byte
 encoding only. Before storage, the runtime may call the protocol-owned
-`FactAdmissionFn`; poc-10 installs one that routes every fact tag to the same
-family `Codec` and `DecodedAuthenticator` used by the read path. After
-admission the fact is just queued for projection. The authored-fact self-check
-accepts `NeedsAuthentication` because some valid facts require context that is
-unavailable at authoring time; it rejects `Invalid` because that means
-authoring, encoding, signing, or id construction drifted.
+`FactAdmissionFn`; poc-10 installs one that dispatches by fact tag to
+protocol-local decode and validation helpers. After admission the fact is queued
+for projection like any other durable fact. The self-check rejects byte, id,
+signature, or construction drift before local facts are emitted.
 
 ## Data Flow
 
@@ -98,9 +93,11 @@ PipelineEffects.ephemeral_facts
 
 PipelineEngine::drain_projection
   -> load durable pending_projection rows, then ephemeral_projection_inputs
-  -> load fact, standing context, queued matched payload facts, and due time ranges
-  -> run staged route and resolve already-satisfied declared needs
-  -> replace context and time wakes for that owner
+  -> load fact, queued matched payload facts, standing context, and due ranges
+  -> run the routed projector
+  -> if emitted needs already match stored offers, record matches and rerun locally
+  -> replace needs and time wakes for that owner
+  -> append new offers
   -> wake newly matched dependents with pending_projection_matches
   -> commit purges, admitted durable facts, ephemeral inputs, row mutations, and intents
 
@@ -120,9 +117,9 @@ the clock.
 Replay also uses the same path. Replay queues retained facts and scheduled
 replay wake-ups into `pending_projection` with mode `replay`, exposes that mode
 through `ProjectionContext::is_replay()`, and suppresses follow-up intents
-unless the matching `HandlerRoute` declares `runs_during_replay`. Recurring
-intents are live-only daemon work: the daemon installs their cadence in memory
-after startup, and replay never fires those recurring runs.
+unless the matching `HandlerRoute` declares `runs_during_replay`. Recurring work
+is represented as recurring intents; the live daemon's in-memory cadence is only
+the scheduling mechanism that enqueues due work.
 
 ## Invariants
 
@@ -163,30 +160,22 @@ after startup, and replay never fires those recurring runs.
 ## Inline Sections
 
 `src/core/pipeline.rs` is intentionally the single implementation file for the
-pipeline. Its inline modules keep the stage names readable without spreading
-the runtime loop across a directory.
+pipeline. Its inline modules keep the runtime responsibilities readable without
+spreading the work loop across a directory.
 
 - the top-level of `pipeline.rs` owns `WorkStatus`, handler route metadata,
-  handler sets, and
-  `PipelineEngine`, the generic state machine that admits facts and scheduled
-  wake-ups, queues replay work, drains pending projection over durable and
-  ephemeral inputs, and orders intent dispatch.
-- `route` owns tag route declarations, staged route metadata, and the
+  handler sets, and `PipelineEngine`, the generic state machine that admits
+  facts and scheduled wake-ups, queues replay work, drains pending projection
+  over durable and ephemeral inputs, and orders intent dispatch.
+- `route` owns tag route declarations, projector route metadata, and the
   optional protocol-owned fact admission hook type.
-- `decode` owns the decode trait core invokes at the read-stage boundary.
-- `authenticate` owns authentication result types, authentication traits,
-  the authored-fact self-check helper, and the fact-id self-check helper.
-- `adapt` owns the adapter trait that converts authenticated source values to
-  the semantic value projected at the active head version.
-- `project` owns authenticated and semantic projector traits plus the staged
-  helper functions that compose decode/authenticate/adapt/project.
-- `context` owns the in-memory `ProjectionContext` and matched payload
-  helpers visible while processing one fact.
+- `context` owns the in-memory `ProjectionContext`, matched payload facts, and
+  due time ranges visible while processing one fact.
 - `effects` owns `ProjectionOutput`, time wakes, and due time ranges.
 - `pipeline_one` owns one queued fact pipeline item: matched-context and due
-  time-range loading, staged decode/authenticate/adapt/project execution,
-  durable/ephemeral source rules, rejection handling, context resolution, and
-  the projection commit boundary.
+  time-range loading, routed projector execution, durable/ephemeral source
+  rules, rejection handling, context resolution, and the projection commit
+  boundary.
 - `context_store` owns persisted context edges, range-overlap matching,
   projection context assembly, and wake fanout.
 - `dispatch` owns intent queue claiming, handler input loading, retry
@@ -242,8 +231,8 @@ replay and process restart safe.
 
 Do not add protocol policy, concrete fact layout decoding, context role meaning,
 sync range semantics, connection routes, command formatting, or network frame
-parsing to the pipeline. The pipeline can define when decode/authenticate/adapt/
-project run and what data shape each stage exchanges, but the protocol family
-must own what the bytes, rows, context roles, signatures, or commands mean. If a
+parsing to the pipeline. The pipeline can define when a raw fact is routed to a
+projector and what output shape can be committed, but the protocol family must
+own what the bytes, rows, context roles, signatures, or commands mean. If a
 change needs semantic knowledge, make it in the owning protocol scope and return
 the appropriate core effect.

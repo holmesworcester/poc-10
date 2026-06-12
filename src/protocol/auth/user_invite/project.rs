@@ -12,22 +12,16 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::user_invite::fact::UserInviteFact;
 use crate::protocol::auth::{admin, endpoint_shared, signature, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::user_invite_row;
 
-/// Staged read pipeline for the user_invite fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::user_invite::Codec",
-    authenticate: "auth::user_invite::authenticate::UserInviteAuthenticator",
-    adapt: "auth::user_invite::adapt::UserInviteAdapter",
-    project: "auth::user_invite::project::UserInviteProjector",
-};
+/// Projector route metadata for the user_invite fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::user_invite::project::UserInviteProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct UserInviteProjector;
@@ -44,16 +38,14 @@ impl Projector for UserInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::UserInviteAuthenticator,
-            super::adapt::UserInviteAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<UserInviteFact> for UserInviteProjector {
+impl UserInviteProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

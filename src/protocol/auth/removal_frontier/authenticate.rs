@@ -11,24 +11,16 @@
 //! signer secret) are interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::RemovalFrontierFact;
 
-pub(crate) struct RemovalFrontierAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for RemovalFrontierAuthenticator {
-    type Authenticated = RemovalFrontierFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        frontier: RemovalFrontierFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_removal_frontier(fact, frontier))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    frontier: RemovalFrontierFact,
+    _context: &ProjectionContext,
+) -> Result<RemovalFrontierFact, String> {
+    prove_decoded_removal_frontier(fact, frontier)
 }
 
 fn prove_decoded_removal_frontier(
@@ -43,13 +35,9 @@ fn prove_decoded_removal_frontier(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::removal_frontier::author::authored_removal_frontier_fact;
     use crate::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
-
-    use super::RemovalFrontierAuthenticator;
 
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
@@ -58,27 +46,18 @@ mod tests {
             .expect("signed removal_frontier fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, RemovalFrontierFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => RemovalFrontierAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<RemovalFrontierFact, String> {
+        let decoded = super::super::decode::decode_removal_frontier(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{validate, LOCAL_SIGNER_SECRET_BYTES, TYPE_LOCAL_SIGNER_SECRET};
 use super::fact::LocalSignerSecretFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = LocalSignerSecretFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<LocalSignerSecretFact, String> {
     wire::expect_len(bytes, LOCAL_SIGNER_SECRET_BYTES).map_err(wire_err)?;
     let actual = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;

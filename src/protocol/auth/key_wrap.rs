@@ -24,8 +24,6 @@ pub mod queries;
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_KEY_WRAP: u8 = encode::TYPE_KEY_WRAP;
 
 /// Accepted key-wrap projection rows, keyed by the wrap coordinate (workspace,

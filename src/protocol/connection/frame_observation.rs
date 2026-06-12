@@ -12,5 +12,3 @@ pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
-
-pub(crate) use decode::Codec;

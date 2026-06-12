@@ -21,8 +21,6 @@ use crate::core::facts::FactId;
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_ADMIN: u8 = encode::TYPE_ADMIN;
 
 /// Admin grant projection rows, keyed by `workspace_id || admin_id` so the same

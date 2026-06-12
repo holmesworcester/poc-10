@@ -13,16 +13,6 @@ use super::fact::{
     TEXT_LENGTH_PREFIX_BYTES,
 };
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ContentMessageFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
     let mut reader = wire::Reader::new(bytes);
     reader.expect_len(CONTENT_MESSAGE_BYTES).map_err(wire_err)?;

@@ -6,7 +6,7 @@
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::{self, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
-use crate::core::pipeline::authenticate_authored;
+use crate::core::pipeline::ProjectionContext;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
@@ -57,9 +57,7 @@ pub fn create_workspace_with_identity(
         &workspace_private_key,
         created_at_ms,
     )?;
-    authenticate_authored::<super::decode::Codec, super::authenticate::WorkspaceAuthenticator>(
-        &workspace,
-    )?;
+    authenticate_workspace_fact(&workspace)?;
     let workspace_id = workspace.id;
 
     let user_invite = user_invite_fact(
@@ -141,6 +139,11 @@ pub fn create_workspace_with_identity(
         created_at_ms,
     })
     .with_facts(facts))
+}
+
+fn authenticate_workspace_fact(fact: &Fact) -> Result<(), String> {
+    let decoded = super::decode::decode_fact(fact.body())?;
+    super::authenticate::authenticate(fact, decoded, &ProjectionContext::default()).map(|_| ())
 }
 
 struct EndpointSharedFactInput<'a> {

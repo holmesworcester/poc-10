@@ -25,8 +25,6 @@ pub use project::{
     ephemeral_secret_closed_offer,
 };
 
-pub(crate) use decode::Codec;
-
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionCloseFact, String> {
     decode::decode_fact(bytes)
 }

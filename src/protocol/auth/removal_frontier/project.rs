@@ -7,9 +7,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
 use crate::protocol::auth::signature;
@@ -17,13 +15,9 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 
 use super::fact::RemovalFrontierFact;
 
-/// Staged read pipeline for the removal_frontier fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::removal_frontier::Codec",
-    authenticate: "auth::removal_frontier::authenticate::RemovalFrontierAuthenticator",
-    adapt: "auth::removal_frontier::adapt::RemovalFrontierAdapter",
-    project: "auth::removal_frontier::project::RemovalFrontierProjector",
-};
+/// Projector route metadata for the removal_frontier fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::removal_frontier::project::RemovalFrontierProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct RemovalFrontierProjector;
@@ -40,16 +34,14 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::RemovalFrontierAuthenticator,
-            super::adapt::RemovalFrontierAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_removal_frontier(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<RemovalFrontierFact> for RemovalFrontierProjector {
+impl RemovalFrontierProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

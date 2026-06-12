@@ -21,10 +21,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactCodec, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
-    SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::{endpoint_shared, workspace};
 use crate::protocol::connection::create_connection::{create_connection_intent, CreateConnection};
@@ -80,13 +77,9 @@ pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> Contex
     )
 }
 
-/// Staged read pipeline for the connection-request fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::request::Codec",
-    authenticate: "connection::request::authenticate::ConnectionRequestAuthenticator",
-    adapt: "connection::request::adapt::ConnectionRequestAdapter",
-    project: "connection::request::project::ConnectionRequestProjector",
-};
+/// Projector route metadata for the connection-request fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("connection::request::project::ConnectionRequestProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionRequestProjector;
@@ -103,16 +96,20 @@ impl Projector for ConnectionRequestProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionRequestAuthenticator,
-            super::adapt::ConnectionRequestAdapter,
-            _,
-        >(self, fact, context)
+        super::decode::validate_sealed_fact(fact.body())?;
+        match super::authenticate::authenticate(fact, context)? {
+            authenticate::Authentication::Authenticated(authenticated) => {
+                let semantic = super::adapt::adapt(authenticated)?;
+                self.project_semantic(fact, semantic, context)
+            }
+            authenticate::Authentication::NeedsContext(needs) => Ok(needs
+                .into_iter()
+                .fold(ProjectionOutput::new(), |output, need| output.need(need))),
+        }
     }
 }
 
-impl SemanticProjector<AuthenticatedConnectionRequest> for ConnectionRequestProjector {
+impl ConnectionRequestProjector {
     fn project_semantic(
         &self,
         fact: &Fact,
@@ -270,7 +267,7 @@ fn project_receiver_request(
     if observation_fact.scope != FactScope::Local {
         return Err("connection request observation context must be local".to_string());
     }
-    let observation = frame_observation::Codec::decode_fact(observation_fact)
+    let observation = frame_observation::decode::decode_fact(observation_fact.body())
         .map_err(|_| "connection request observation context is malformed".to_string())?;
     if observation.frame_fact_id != fact.id {
         return Err("connection request observation targets another fact".to_string());

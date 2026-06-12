@@ -11,7 +11,7 @@ use crate::core::command_context::{
     LocalSigningCapability, WorkspaceId,
 };
 use crate::core::facts::{Fact, FactId};
-use crate::core::pipeline::authenticate_authored;
+use crate::core::pipeline::ProjectionContext;
 use crate::core::runtime::Runtime;
 use crate::protocol::auth;
 use crate::protocol::content::message::author;
@@ -97,14 +97,8 @@ pub fn generate_messages(
         let authored = crate::core::perf_profile::measure_result("message_fact_build", || {
             build_message_facts_from_authoring(&authoring, &text, timestamp)
         })?;
-        authenticate_authored::<
-            super::decode::Codec,
-            super::authenticate::ContentMessageAuthenticator,
-        >(&authored.message)?;
-        authenticate_authored::<
-            auth::signature::Codec,
-            auth::signature::authenticate::SignatureAuthenticator,
-        >(&authored.signature)?;
+        authenticate_content_message_fact(&authored.message)?;
+        authenticate_signature_fact(&authored.signature)?;
         fact_ids.push(authored.message.id);
         facts.push(authored.message);
         facts.push(authored.signature);
@@ -168,14 +162,20 @@ fn build_message_facts_from_authoring(
         &authoring.signer_private_key,
         created_at_ms,
     )?;
-    authenticate_authored::<super::decode::Codec, super::authenticate::ContentMessageAuthenticator>(
-        &message,
-    )?;
-    authenticate_authored::<
-        auth::signature::Codec,
-        auth::signature::authenticate::SignatureAuthenticator,
-    >(&signature)?;
+    authenticate_content_message_fact(&message)?;
+    authenticate_signature_fact(&signature)?;
     Ok(AuthoredMessageFacts { message, signature })
+}
+
+fn authenticate_content_message_fact(fact: &Fact) -> Result<(), String> {
+    let decoded = super::decode::decode_fact(fact.body())?;
+    super::authenticate::authenticate(fact, decoded, &ProjectionContext::default()).map(|_| ())
+}
+
+fn authenticate_signature_fact(fact: &Fact) -> Result<(), String> {
+    let decoded = auth::signature::decode::decode_fact(fact.body())?;
+    auth::signature::authenticate::authenticate(fact, decoded, &ProjectionContext::default())
+        .map(|_| ())
 }
 
 fn deterministic_generated_text(

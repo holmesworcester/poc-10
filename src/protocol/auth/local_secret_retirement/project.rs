@@ -10,9 +10,7 @@
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::{local_history_node_secret, local_key_secret};
 
 use super::fact::LocalSecretRetirementFact;
@@ -49,13 +47,10 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
     }
 }
 
-/// Staged read pipeline for the local_secret_retirement fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::local_secret_retirement::Codec",
-    authenticate: "auth::local_secret_retirement::authenticate::LocalSecretRetirementAuthenticator",
-    adapt: "auth::local_secret_retirement::adapt::LocalSecretRetirementAdapter",
-    project: "auth::local_secret_retirement::project::LocalSecretRetirementProjector",
-};
+/// Projector route metadata for the local_secret_retirement fact.
+pub const PIPELINE: FactPipeline = FactPipeline::projector(
+    "auth::local_secret_retirement::project::LocalSecretRetirementProjector",
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalSecretRetirementProjector;
@@ -72,16 +67,14 @@ impl Projector for LocalSecretRetirementProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::LocalSecretRetirementAuthenticator,
-            super::adapt::LocalSecretRetirementAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<LocalSecretRetirementFact> for LocalSecretRetirementProjector {
+impl LocalSecretRetirementProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

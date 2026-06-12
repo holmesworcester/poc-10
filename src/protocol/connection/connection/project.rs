@@ -19,10 +19,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::pipeline::{
-    project_staged, FactCodec, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
-    SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::connection::close;
 use crate::protocol::connection::connection::{
     connection_key, connection_row, ConnectionRowFields, CONNECTION_ROWS,
@@ -62,13 +59,9 @@ pub fn connection_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
     )
 }
 
-/// Staged read pipeline for the connection fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::connection::Codec",
-    authenticate: "connection::connection::authenticate::ConnectionAuthenticator",
-    adapt: "connection::connection::adapt::ConnectionAdapter",
-    project: "connection::connection::project::ConnectionProjector",
-};
+/// Projector route metadata for the connection fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("connection::connection::project::ConnectionProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionProjector;
@@ -85,16 +78,20 @@ impl Projector for ConnectionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionAuthenticator,
-            super::adapt::ConnectionAdapter,
-            _,
-        >(self, fact, context)
+        super::decode::validate_sealed_fact(fact.body())?;
+        match super::authenticate::authenticate(fact, context)? {
+            authenticate::Authentication::Authenticated(authenticated) => {
+                let semantic = super::adapt::adapt(authenticated)?;
+                self.project_semantic(fact, semantic, context)
+            }
+            authenticate::Authentication::NeedsContext(needs) => Ok(needs
+                .into_iter()
+                .fold(ProjectionOutput::new(), |output, need| output.need(need))),
+        }
     }
 }
 
-impl SemanticProjector<AuthenticatedConnection> for ConnectionProjector {
+impl ConnectionProjector {
     fn project_semantic(
         &self,
         fact: &Fact,
@@ -192,7 +189,7 @@ fn project_initiator_connection(
     let Some(observation_fact) = context.payload_for(&observation_need) else {
         return Ok(needs.apply_to(ProjectionOutput::new()));
     };
-    let observation = frame_observation::Codec::decode_fact(observation_fact)
+    let observation = frame_observation::decode::decode_fact(observation_fact.body())
         .map_err(|_| "connection observation context is malformed".to_string())?;
     if observation.frame_fact_id != fact.id {
         return Err("connection observation targets another fact".to_string());

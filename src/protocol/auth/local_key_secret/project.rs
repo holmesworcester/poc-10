@@ -7,9 +7,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
 };
@@ -19,13 +17,9 @@ use crate::protocol::auth::removal_frontier;
 
 use super::fact::LocalKeySecretFact;
 
-/// Staged read pipeline for the local_key_secret fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::local_key_secret::Codec",
-    authenticate: "auth::local_key_secret::authenticate::LocalKeySecretAuthenticator",
-    adapt: "auth::local_key_secret::adapt::LocalKeySecretAdapter",
-    project: "auth::local_key_secret::project::LocalKeySecretProjector",
-};
+/// Projector route metadata for the local_key_secret fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::local_key_secret::project::LocalKeySecretProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalKeySecretProjector;
@@ -42,16 +36,14 @@ impl Projector for LocalKeySecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::LocalKeySecretAuthenticator,
-            super::adapt::LocalKeySecretAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_local_key_secret(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<LocalKeySecretFact> for LocalKeySecretProjector {
+impl LocalKeySecretProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

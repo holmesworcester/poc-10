@@ -11,24 +11,16 @@
 //! owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::KeyWrapFact;
 
-pub(crate) struct KeyWrapAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for KeyWrapAuthenticator {
-    type Authenticated = KeyWrapFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        wrap: KeyWrapFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_key_wrap(fact, wrap))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    wrap: KeyWrapFact,
+    _context: &ProjectionContext,
+) -> Result<KeyWrapFact, String> {
+    prove_decoded_key_wrap(fact, wrap)
 }
 
 fn prove_decoded_key_wrap(fact: &Fact, wrap: KeyWrapFact) -> Result<KeyWrapFact, String> {
@@ -41,16 +33,12 @@ fn prove_decoded_key_wrap(fact: &Fact, wrap: KeyWrapFact) -> Result<KeyWrapFact,
 mod tests {
     use crate::core::crypto::{X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES};
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::key_wrap::author::admit_key_wrap_fact;
     use crate::protocol::auth::key_wrap::encode;
     use crate::protocol::auth::key_wrap::fact::{
         KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
     };
-
-    use super::KeyWrapAuthenticator;
 
     fn canonical_fact() -> Fact {
         let wrap = KeyWrapFact {
@@ -75,27 +63,18 @@ mod tests {
         admit_key_wrap_fact(bytes).expect("admit key wrap fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, KeyWrapFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => KeyWrapAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<KeyWrapFact, String> {
+        let decoded = super::super::decode::decode_key_wrap(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

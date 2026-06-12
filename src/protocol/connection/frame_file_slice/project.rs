@@ -13,24 +13,17 @@
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactCodec, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
-    SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
 use crate::protocol::{auth, connection, content, sync};
 
 use super::fact::ConnectionFrameFileSliceFact;
 
-/// Staged read pipeline for the frame_file_slice fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::frame_file_slice::Codec",
-    authenticate:
-        "connection::frame_file_slice::authenticate::ConnectionFrameFileSliceAuthenticator",
-    adapt: "connection::frame_file_slice::adapt::ConnectionFrameFileSliceAdapter",
-    project: "connection::frame_file_slice::project::ConnectionFrameFileSliceProjector",
-};
+/// Projector route metadata for the frame_file_slice fact.
+pub const PIPELINE: FactPipeline = FactPipeline::projector(
+    "connection::frame_file_slice::project::ConnectionFrameFileSliceProjector",
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFrameFileSliceProjector;
@@ -47,16 +40,14 @@ impl Projector for ConnectionFrameFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionFrameFileSliceAuthenticator,
-            super::adapt::ConnectionFrameFileSliceAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<ConnectionFrameFileSliceFact> for ConnectionFrameFileSliceProjector {
+impl ConnectionFrameFileSliceProjector {
     fn project_semantic(
         &self,
         fact: &Fact,
@@ -95,7 +86,7 @@ pub fn project_observed_frame(
     if observation_fact.scope != FactScope::Local {
         return Err("connection frame observation context must be local".to_string());
     }
-    let observation = connection::frame_observation::Codec::decode_fact(observation_fact)?;
+    let observation = connection::frame_observation::decode::decode_fact(observation_fact.body())?;
     if observation.frame_fact_id != fact.id {
         return Err("connection frame observation does not name frame fact".to_string());
     }
@@ -310,7 +301,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         .ok_or_else(|| "received connection::frame fact bytes are empty".to_string())?;
     match tag {
         auth::workspace::TYPE_WORKSPACE => {
-            admit_with_codec::<auth::workspace::Codec>(bytes, |workspace| {
+            admit_with_decoder(bytes, auth::workspace::decode::decode_fact, |workspace| {
                 Ok(Admission::global(workspace.created_at_ms))
             })
         }
@@ -345,23 +336,25 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             })
         }
         auth::signature::TYPE_SIGNATURE => {
-            admit_with_codec::<auth::signature::Codec>(bytes, |signature| {
+            admit_with_decoder(bytes, auth::signature::decode::decode_fact, |signature| {
                 Ok(Admission::workspace(
                     signature.workspace_id,
                     signature.created_at_ms,
                 ))
             })
         }
-        content::retention_policy::TYPE_RETENTION_POLICY => {
-            admit_with_codec::<content::retention_policy::Codec>(bytes, |policy| {
+        content::retention_policy::TYPE_RETENTION_POLICY => admit_with_decoder(
+            bytes,
+            content::retention_policy::decode::decode_fact,
+            |policy| {
                 Ok(Admission::workspace(
                     policy.workspace_id,
                     policy.created_at_ms,
                 ))
-            })
-        }
+            },
+        ),
         content::reaction::TYPE_CONTENT_REACTION => {
-            admit_with_codec::<content::reaction::Codec>(bytes, |reaction| {
+            admit_with_decoder(bytes, content::reaction::decode::decode_fact, |reaction| {
                 Ok(Admission::workspace(
                     reaction.workspace_id,
                     reaction.created_at_ms,
@@ -369,12 +362,12 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             })
         }
         content::file::TYPE_CONTENT_FILE => {
-            admit_with_codec::<content::file::Codec>(bytes, |file| {
+            admit_with_decoder(bytes, content::file::decode::decode_fact, |file| {
                 Ok(Admission::workspace(file.workspace_id, file.created_at_ms))
             })
         }
         content::file_slice::TYPE_CONTENT_FILE_SLICE => {
-            admit_with_codec::<content::file_slice::Codec>(bytes, |slice| {
+            admit_with_decoder(bytes, content::file_slice::decode::decode_fact, |slice| {
                 Ok(Admission::workspace(
                     slice.workspace_id,
                     slice.created_at_ms,
@@ -382,67 +375,83 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             })
         }
         content::message::TYPE_CONTENT_MESSAGE => {
-            admit_with_codec::<content::message::Codec>(bytes, |message| {
+            admit_with_decoder(bytes, content::message::decode::decode_fact, |message| {
                 Ok(Admission::workspace(
                     message.workspace_id,
                     message.created_at_ms,
                 ))
             })
         }
-        content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => {
-            admit_with_codec::<content::message_deletion::Codec>(bytes, |deletion| {
+        content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => admit_with_decoder(
+            bytes,
+            content::message_deletion::decode::decode_fact,
+            |deletion| {
                 Ok(Admission::workspace(
                     deletion.workspace_id,
                     deletion.created_at_ms,
                 ))
-            })
-        }
-        content::file_deletion::TYPE_CONTENT_FILE_DELETION => {
-            admit_with_codec::<content::file_deletion::Codec>(bytes, |deletion| {
+            },
+        ),
+        content::file_deletion::TYPE_CONTENT_FILE_DELETION => admit_with_decoder(
+            bytes,
+            content::file_deletion::decode::decode_fact,
+            |deletion| {
                 Ok(Admission::workspace(
                     deletion.workspace_id,
                     deletion.created_at_ms,
                 ))
-            })
-        }
-        auth::recipient_key::encode::TYPE_RECIPIENT_KEY => {
-            admit_with_codec::<auth::recipient_key::Codec>(bytes, |recipient| {
+            },
+        ),
+        auth::recipient_key::encode::TYPE_RECIPIENT_KEY => admit_with_decoder(
+            bytes,
+            auth::recipient_key::decode::decode_recipient_key,
+            |recipient| {
                 Ok(Admission::workspace(
                     recipient.workspace_id,
                     recipient.created_at_ms,
                 ))
-            })
-        }
-        auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER => {
-            admit_with_codec::<auth::removal_frontier::Codec>(bytes, |frontier| {
+            },
+        ),
+        auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER => admit_with_decoder(
+            bytes,
+            auth::removal_frontier::decode::decode_removal_frontier,
+            |frontier| {
                 Ok(Admission::workspace(
                     frontier.workspace_id,
                     frontier.created_at_ms,
                 ))
-            })
-        }
-        auth::key_request::encode::TYPE_KEY_REQUEST => {
-            admit_with_codec::<auth::key_request::Codec>(bytes, |request| {
+            },
+        ),
+        auth::key_request::encode::TYPE_KEY_REQUEST => admit_with_decoder(
+            bytes,
+            auth::key_request::decode::decode_key_request,
+            |request| {
                 Ok(Admission::workspace(
                     request.workspace_id,
                     request.created_at_ms,
                 ))
-            })
-        }
+            },
+        ),
         auth::local_history_node_secret::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             Err("received connection::frame payload is local history-node secret".to_string())
         }
         sync::compare::TYPE_SYNC_COMPARE => {
-            admit_with_codec::<sync::compare::Codec>(bytes, |_| Ok(Admission::global(0)))
+            admit_with_decoder(bytes, sync::compare::decode::decode_fact, |_| {
+                Ok(Admission::global(0))
+            })
         }
         sync::have_id::TYPE_SYNC_HAVE_ID => {
-            admit_with_codec::<sync::have_id::Codec>(bytes, |_| Ok(Admission::global(0)))
+            admit_with_decoder(bytes, sync::have_id::decode::decode_fact, |_| {
+                Ok(Admission::global(0))
+            })
         }
         sync::need_id::TYPE_SYNC_NEED_ID => {
-            admit_with_codec::<sync::need_id::Codec>(bytes, |_| Ok(Admission::global(0)))
+            admit_with_decoder(bytes, sync::need_id::decode::decode_fact, |_| {
+                Ok(Admission::global(0))
+            })
         }
         auth::key_wrap::encode::TYPE_KEY_WRAP => {
-            admit_with_codec::<auth::key_wrap::Codec>(bytes, |wrap| {
+            admit_with_decoder(bytes, auth::key_wrap::decode::decode_key_wrap, |wrap| {
                 Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms))
             })
         }
@@ -472,20 +481,6 @@ impl Admission {
             timestamp,
         }
     }
-}
-
-fn admit_with_codec<C: FactCodec>(
-    bytes: Vec<u8>,
-    admit: impl FnOnce(C::Payload) -> Result<Admission, String>,
-) -> Result<Fact, String> {
-    let opened = Fact::new(FactScope::Global, 0, bytes);
-    let payload = C::decode_fact(&opened)?;
-    let admission = admit(payload)?;
-    Ok(Fact::new(
-        admission.scope,
-        admission.timestamp,
-        opened.bytes,
-    ))
 }
 
 fn admit_with_decoder<T>(

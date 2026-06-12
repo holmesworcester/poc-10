@@ -11,9 +11,7 @@
 use crate::core::context::ContextOffer;
 use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::connection::create_frame_observation::{
     create_frame_observation_intent, CreateFrameObservation,
 };
@@ -39,14 +37,10 @@ pub fn observed_frame_effect(
     })
 }
 
-/// Staged read pipeline for the frame_observation fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::frame_observation::Codec",
-    authenticate:
-        "connection::frame_observation::authenticate::ConnectionFrameObservationAuthenticator",
-    adapt: "connection::frame_observation::adapt::ConnectionFrameObservationAdapter",
-    project: "connection::frame_observation::project::ConnectionFrameObservationProjector",
-};
+/// Projector route metadata for the frame_observation fact.
+pub const PIPELINE: FactPipeline = FactPipeline::projector(
+    "connection::frame_observation::project::ConnectionFrameObservationProjector",
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFrameObservationProjector;
@@ -63,16 +57,14 @@ impl Projector for ConnectionFrameObservationProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionFrameObservationAuthenticator,
-            super::adapt::ConnectionFrameObservationAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<ConnectionFrameObservationFact> for ConnectionFrameObservationProjector {
+impl ConnectionFrameObservationProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

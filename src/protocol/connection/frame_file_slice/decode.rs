@@ -15,16 +15,6 @@ use super::encode::{
 };
 use super::fact::ConnectionFrameFileSliceFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ConnectionFrameFileSliceFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 /// Public header view recovered without decrypting the payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionFrameHeader {

@@ -15,8 +15,6 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_CONTENT_FILE_SLICE: u8 = encode::TYPE_CONTENT_FILE_SLICE;
 
 pub const FILE_SLICE_ROWS: crate::core::store::TableName =

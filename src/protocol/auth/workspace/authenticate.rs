@@ -11,24 +11,16 @@
 //! retained invite acceptance context and materialization stays in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::WorkspaceFact;
 
-pub(crate) struct WorkspaceAuthenticator;
-
-impl DecodedAuthenticator<super::decode::Codec> for WorkspaceAuthenticator {
-    type Authenticated = WorkspaceFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        workspace: WorkspaceFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_workspace(fact, workspace))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    workspace: WorkspaceFact,
+    _context: &ProjectionContext,
+) -> Result<WorkspaceFact, String> {
+    prove_decoded_workspace(fact, workspace)
 }
 
 fn prove_decoded_workspace(fact: &Fact, workspace: WorkspaceFact) -> Result<WorkspaceFact, String> {
@@ -40,13 +32,9 @@ fn prove_decoded_workspace(fact: &Fact, workspace: WorkspaceFact) -> Result<Work
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::workspace::author::create_workspace;
     use crate::protocol::auth::workspace::fact::WorkspaceFact;
-
-    use super::WorkspaceAuthenticator;
 
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
@@ -54,27 +42,18 @@ mod tests {
         create_workspace(100, SIGNER_KEY, "acme").expect("workspace fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, WorkspaceFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => WorkspaceAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<WorkspaceFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

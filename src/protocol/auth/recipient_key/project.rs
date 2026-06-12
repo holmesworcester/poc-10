@@ -7,9 +7,7 @@
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
@@ -21,13 +19,9 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 
 use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
 
-/// Staged read pipeline for the recipient_key fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::recipient_key::Codec",
-    authenticate: "auth::recipient_key::authenticate::RecipientKeyAuthenticator",
-    adapt: "auth::recipient_key::adapt::RecipientKeyAdapter",
-    project: "auth::recipient_key::project::RecipientKeyProjector",
-};
+/// Projector route metadata for the recipient_key fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::recipient_key::project::RecipientKeyProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct RecipientKeyProjector;
@@ -44,16 +38,14 @@ impl Projector for RecipientKeyProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::RecipientKeyAuthenticator,
-            super::adapt::RecipientKeyAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_recipient_key(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<RecipientKeyFact> for RecipientKeyProjector {
+impl RecipientKeyProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

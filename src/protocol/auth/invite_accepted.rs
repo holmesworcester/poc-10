@@ -22,8 +22,6 @@ use crate::core::store::{TableName, TableRow};
 use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_INVITE_ACCEPTED: u8 = encode::TYPE_INVITE_ACCEPTED;
 pub const AUTH_WORKSPACE_ACCEPTED_ROLE: &str = "auth_workspace_accepted";
 

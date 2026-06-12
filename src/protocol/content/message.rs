@@ -20,8 +20,6 @@ pub mod queries;
 
 pub const TYPE_CONTENT_MESSAGE: u8 = encode::TYPE_CONTENT_MESSAGE;
 
-pub(crate) use decode::Codec;
-
 pub use project::{
     expiration_timeline, retention_floor_need, retention_floor_offer, COVER_HORIZON_MINUTES,
 };

@@ -22,8 +22,6 @@ use crate::core::store::{TableName, TableRow};
 
 use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
 
-pub(crate) use decode::Codec;
-
 pub type EndpointId = FactId;
 
 /// Durable rows for materialized connections, keyed by the connection fact id.

@@ -21,9 +21,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::{
     connection_ephemeral_secret_key, connection_ephemeral_secret_row,
@@ -31,14 +29,10 @@ use super::{
 };
 use crate::protocol::connection::close;
 
-/// Staged read pipeline for the ephemeral_secret fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::ephemeral_secret::Codec",
-    authenticate:
-        "connection::ephemeral_secret::authenticate::ConnectionEphemeralSecretAuthenticator",
-    adapt: "connection::ephemeral_secret::adapt::ConnectionEphemeralSecretAdapter",
-    project: "connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector",
-};
+/// Projector route metadata for the ephemeral_secret fact.
+pub const PIPELINE: FactPipeline = FactPipeline::projector(
+    "connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector",
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionEphemeralSecretProjector;
@@ -55,18 +49,14 @@ impl Projector for ConnectionEphemeralSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionEphemeralSecretAuthenticator,
-            super::adapt::ConnectionEphemeralSecretAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ConnectionEphemeralSecretFact>
-    for ConnectionEphemeralSecretProjector
-{
+impl ConnectionEphemeralSecretProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

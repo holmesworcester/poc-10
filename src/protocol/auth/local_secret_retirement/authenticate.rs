@@ -11,27 +11,16 @@
 //! projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::LocalSecretRetirementFact;
 
-pub(crate) struct LocalSecretRetirementAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for LocalSecretRetirementAuthenticator {
-    type Authenticated = LocalSecretRetirementFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        retirement: LocalSecretRetirementFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(
-            fact,
-            prove_decoded_local_secret_retirement(fact, retirement),
-        )
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    retirement: LocalSecretRetirementFact,
+    _context: &ProjectionContext,
+) -> Result<LocalSecretRetirementFact, String> {
+    prove_decoded_local_secret_retirement(fact, retirement)
 }
 
 fn prove_decoded_local_secret_retirement(
@@ -46,15 +35,11 @@ fn prove_decoded_local_secret_retirement(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::local_secret_retirement::encode;
     use crate::protocol::auth::local_secret_retirement::fact::{
         LocalSecretRetirementFact, RETIRE_REASON_CHOP,
     };
-
-    use super::LocalSecretRetirementAuthenticator;
 
     fn canonical_fact() -> Fact {
         let retirement = LocalSecretRetirementFact {
@@ -68,27 +53,18 @@ mod tests {
         Fact::new(FactScope::Local, 123, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, LocalSecretRetirementFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => LocalSecretRetirementAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<LocalSecretRetirementFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

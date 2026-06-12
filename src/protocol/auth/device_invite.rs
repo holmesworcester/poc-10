@@ -18,8 +18,6 @@ use crate::core::facts::FactId;
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_DEVICE_INVITE: u8 = encode::TYPE_DEVICE_INVITE;
 
 /// Device invite projection rows, keyed by `workspace_id || device_invite_id`.

@@ -19,8 +19,6 @@ use crate::core::facts::FactId;
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_USER_INVITE: u8 = encode::TYPE_USER_INVITE;
 
 /// User invite projection rows, keyed by `workspace_id || user_invite_id`. The

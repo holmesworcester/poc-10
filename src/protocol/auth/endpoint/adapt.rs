@@ -1,20 +1,11 @@
 //! Local-endpoint semantic adapter.
 //!
 //! The current endpoint wire shape is already the active semantic shape. This
-//! identity adapter keeps the staged route explicit and gives future versioned
-//! facts a dedicated conversion point.
-
-use crate::core::pipeline::Adapter;
+//! identity adapter keeps the protocol-local conversion point available for future versioned
+//! facts.
 
 use super::fact::EndpointFact;
 
-pub(crate) struct EndpointAdapter;
-
-impl Adapter for EndpointAdapter {
-    type Source = EndpointFact;
-    type Semantic = EndpointFact;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(source)
-    }
+pub(crate) fn adapt(source: EndpointFact) -> Result<EndpointFact, String> {
+    Ok(source)
 }

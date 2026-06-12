@@ -12,9 +12,7 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -27,13 +25,9 @@ use crate::protocol::sync::shared_fact::project::{
 
 use super::queries::MessageDeletionRow;
 
-/// Staged read pipeline for the message_deletion fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "content::message_deletion::Codec",
-    authenticate: "content::message_deletion::authenticate::ContentMessageDeletionAuthenticator",
-    adapt: "content::message_deletion::adapt::ContentMessageDeletionAdapter",
-    project: "content::message_deletion::project::ContentMessageDeletionProjector",
-};
+/// Projector route metadata for the message_deletion fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("content::message_deletion::project::ContentMessageDeletionProjector");
 
 fn message_deletion_row(input: MessageDeletionRow) -> TableInsert {
     read_models::MESSAGE_DELETIONS.insert(vec![
@@ -60,18 +54,14 @@ impl Projector for ContentMessageDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ContentMessageDeletionAuthenticator,
-            super::adapt::ContentMessageDeletionAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ContentMessageDeletionFact>
-    for ContentMessageDeletionProjector
-{
+impl ContentMessageDeletionProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

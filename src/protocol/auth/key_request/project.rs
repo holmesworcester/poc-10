@@ -7,9 +7,7 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
@@ -23,13 +21,9 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 
 use super::fact::KeyRequestFact;
 
-/// Staged read pipeline for the key_request fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::key_request::Codec",
-    authenticate: "auth::key_request::authenticate::KeyRequestAuthenticator",
-    adapt: "auth::key_request::adapt::KeyRequestAdapter",
-    project: "auth::key_request::project::KeyRequestProjector",
-};
+/// Projector route metadata for the key_request fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::key_request::project::KeyRequestProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyRequestProjector;
@@ -46,16 +40,14 @@ impl Projector for KeyRequestProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::KeyRequestAuthenticator,
-            super::adapt::KeyRequestAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_key_request(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<KeyRequestFact> for KeyRequestProjector {
+impl KeyRequestProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

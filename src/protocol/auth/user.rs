@@ -23,8 +23,6 @@ use crate::core::store::{TableName, TableRow};
 
 use fact::USERNAME_BYTES;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_USER: u8 = encode::TYPE_USER;
 
 /// User projection rows, keyed by `workspace_id || user_id`. The user id is the

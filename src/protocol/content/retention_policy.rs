@@ -25,8 +25,6 @@ use crate::core::store::{TableName, TableRow};
 use encode::NO_PREVIOUS_POLICY_ID;
 use fact::{PolicyId, RetentionPolicyFact, WorkspaceId};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_RETENTION_POLICY: u8 = encode::TYPE_RETENTION_POLICY;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::RetentionPolicyFact, String> {

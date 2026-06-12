@@ -26,8 +26,6 @@ use crate::core::store::{TableName, TableRow};
 
 use fact::EndpointId;
 
-pub(crate) use decode::Codec;
-
 /// Durable rows for local connection ephemeral secrets, keyed by the secret
 /// fact id. The value stores the owner endpoint, public key, private key, and
 /// creation time so response construction can load the local handshake material

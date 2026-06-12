@@ -12,22 +12,16 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, signature, user, user_invite, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 use super::device_invite_row;
 
-/// Staged read pipeline for the device_invite fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::device_invite::Codec",
-    authenticate: "auth::device_invite::authenticate::DeviceInviteAuthenticator",
-    adapt: "auth::device_invite::adapt::DeviceInviteAdapter",
-    project: "auth::device_invite::project::DeviceInviteProjector",
-};
+/// Projector route metadata for the device_invite fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::device_invite::project::DeviceInviteProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct DeviceInviteProjector;
@@ -44,16 +38,14 @@ impl Projector for DeviceInviteProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::DeviceInviteAuthenticator,
-            super::adapt::DeviceInviteAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<DeviceInviteFact> for DeviceInviteProjector {
+impl DeviceInviteProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

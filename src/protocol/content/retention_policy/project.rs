@@ -12,9 +12,7 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth;
 use crate::protocol::content::message;
 use crate::protocol::sync::shared_fact::project::{
@@ -24,13 +22,9 @@ use crate::protocol::sync::shared_fact::project::{
 use super::fact::RetentionPolicyFact;
 use super::policy_row;
 
-/// Staged read pipeline for the retention_policy fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "content::retention_policy::Codec",
-    authenticate: "content::retention_policy::authenticate::RetentionPolicyAuthenticator",
-    adapt: "content::retention_policy::adapt::RetentionPolicyAdapter",
-    project: "content::retention_policy::project::RetentionPolicyProjector",
-};
+/// Projector route metadata for the retention_policy fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("content::retention_policy::project::RetentionPolicyProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct RetentionPolicyProjector;
@@ -47,16 +41,14 @@ impl Projector for RetentionPolicyProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::RetentionPolicyAuthenticator,
-            super::adapt::RetentionPolicyAdapter,
-            _,
-        >(self, fact, projection_context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, projection_context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, projection_context)
     }
 }
 
-impl SemanticProjector<RetentionPolicyFact> for RetentionPolicyProjector {
+impl RetentionPolicyProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

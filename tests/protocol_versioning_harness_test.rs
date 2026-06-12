@@ -2,22 +2,21 @@
 //!
 //! These tests avoid real protocol fact families so they can run while the
 //! family role-file cutover is in progress. The fixture models the important
-//! behavior: a read-ahead release can decode/authenticate/adapt old and new
-//! fact bytes, while write activation remains fixed by the release profile.
+//! behavior: a read-ahead release can project old and new fact bytes through
+//! protocol-local version adapters, while write activation remains fixed by the
+//! release profile.
 
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{RowMutation, Value};
-use topo::core::pipeline::{
-    project_staged, Adapter, Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    ProjectionOutput, SemanticProjector,
-};
 use topo::core::pipeline::{verify_fact_id, FactRoute};
+use topo::core::pipeline::{ProjectionContext, ProjectionOutput};
 use topo::core::store::TableName;
 use topo::core::versioning::{
     active_from_protocol_for_tag, bundle_for_protocol, classify_received_fact, compute_ceiling,
-    validate_fact_version_manifest, FactVersionManifestEntry, FactVersionRoute, FactVersionStages,
-    FamilyVersion, FamilyWriter, IngressClassification, PendingReason, ProtocolBundle,
-    ProtocolRange, ReleaseManifestEntry, ReleaseProfile, TrustedTime, WriteVersionError,
+    validate_fact_version_manifest, FactVersionManifestEntry, FactVersionProjector,
+    FactVersionRoute, FamilyVersion, FamilyWriter, IngressClassification, PendingReason,
+    ProtocolBundle, ProtocolRange, ReleaseManifestEntry, ReleaseProfile, TrustedTime,
+    WriteVersionError,
 };
 
 const FAMILY: &str = "version_fixture";
@@ -64,32 +63,24 @@ const FIXTURE_BUNDLES: &[ProtocolBundle] = &[
         families: PROTOCOL_2_FAMILIES,
     },
 ];
-const FIXTURE_V1_STAGES: FactVersionStages = FactVersionStages::new(
-    "fixture::v1::decode::Codec",
-    "fixture::v1::authenticate::Authenticator",
-    "fixture::v2::adapt::FromV1",
-    "fixture::v2::project::Projector",
-);
-const FIXTURE_V2_STAGES: FactVersionStages = FactVersionStages::new(
-    "fixture::v2::decode::Codec",
-    "fixture::v2::authenticate::Authenticator",
-    "fixture::v2::adapt::Identity",
-    "fixture::v2::project::Projector",
-);
+const FIXTURE_V1_PROJECTOR: FactVersionProjector =
+    FactVersionProjector::new("fixture::v1::project_fixture_v1");
+const FIXTURE_V2_PROJECTOR: FactVersionProjector =
+    FactVersionProjector::new("fixture::v2::project_fixture_v2");
 const FIXTURE_FACT_VERSIONS: &[FactVersionManifestEntry] = &[
     FactVersionManifestEntry {
         tag: TYPE_FIXTURE_V1,
         family: FAMILY,
         version: 1,
         active_from_protocol: 1,
-        stages: FIXTURE_V1_STAGES,
+        projector: FIXTURE_V1_PROJECTOR,
     },
     FactVersionManifestEntry {
         tag: TYPE_FIXTURE_V2,
         family: FAMILY,
         version: 2,
         active_from_protocol: 2,
-        stages: FIXTURE_V2_STAGES,
+        projector: FIXTURE_V2_PROJECTOR,
     },
 ];
 
@@ -112,99 +103,59 @@ enum FixtureAuthority {
     Granted,
 }
 
-struct FixtureV1Codec;
-struct FixtureV2Codec;
-struct FixtureV1Authenticator;
-struct FixtureV2Authenticator;
-struct FixtureV1ToV2Adapter;
-struct FixtureV2IdentityAdapter;
 struct FixtureProjector;
 
-impl FactCodec for FixtureV1Codec {
-    type Payload = FixtureV1;
-
-    fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
-        if fact.bytes.len() != 10 || fact.bytes[0] != TYPE_FIXTURE_V1 {
-            return Err("fixture v1 bytes must be tag + authority + value".to_string());
-        }
-        Ok(FixtureV1 {
-            has_authority: decode_authority(fact.bytes[1])?,
-            value: u64::from_be_bytes(fact.bytes[2..10].try_into().unwrap()),
-        })
+fn decode_fixture_v1(fact: &Fact) -> Result<FixtureV1, String> {
+    if fact.bytes.len() != 10 || fact.bytes[0] != TYPE_FIXTURE_V1 {
+        return Err("fixture v1 bytes must be tag + authority + value".to_string());
     }
+    Ok(FixtureV1 {
+        has_authority: decode_authority(fact.bytes[1])?,
+        value: u64::from_be_bytes(fact.bytes[2..10].try_into().unwrap()),
+    })
 }
 
-impl FactCodec for FixtureV2Codec {
-    type Payload = FixtureV2;
-
-    fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {
-        if fact.bytes.len() != 18 || fact.bytes[0] != TYPE_FIXTURE_V2 {
-            return Err("fixture v2 bytes must be tag + authority + value + bonus".to_string());
-        }
-        Ok(FixtureV2 {
-            authority: if decode_authority(fact.bytes[1])? {
-                FixtureAuthority::Granted
-            } else {
-                FixtureAuthority::Absent
-            },
-            value: u64::from_be_bytes(fact.bytes[2..10].try_into().unwrap()),
-            bonus: u64::from_be_bytes(fact.bytes[10..18].try_into().unwrap()),
-        })
+fn decode_fixture_v2(fact: &Fact) -> Result<FixtureV2, String> {
+    if fact.bytes.len() != 18 || fact.bytes[0] != TYPE_FIXTURE_V2 {
+        return Err("fixture v2 bytes must be tag + authority + value + bonus".to_string());
     }
+    Ok(FixtureV2 {
+        authority: if decode_authority(fact.bytes[1])? {
+            FixtureAuthority::Granted
+        } else {
+            FixtureAuthority::Absent
+        },
+        value: u64::from_be_bytes(fact.bytes[2..10].try_into().unwrap()),
+        bonus: u64::from_be_bytes(fact.bytes[10..18].try_into().unwrap()),
+    })
 }
 
-impl DecodedAuthenticator<FixtureV1Codec> for FixtureV1Authenticator {
-    type Authenticated = FixtureV1;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        decoded: FixtureV1,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, verify_fact_id(fact).map(|()| decoded))
-    }
+fn authenticate_fixture_v1(fact: &Fact, decoded: FixtureV1) -> Result<FixtureV1, String> {
+    verify_fact_id(fact).map(|()| decoded)
 }
 
-impl DecodedAuthenticator<FixtureV2Codec> for FixtureV2Authenticator {
-    type Authenticated = FixtureV2;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        decoded: FixtureV2,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, verify_fact_id(fact).map(|()| decoded))
-    }
+fn authenticate_fixture_v2(fact: &Fact, decoded: FixtureV2) -> Result<FixtureV2, String> {
+    verify_fact_id(fact).map(|()| decoded)
 }
 
-impl Adapter for FixtureV1ToV2Adapter {
-    type Source = FixtureV1;
-    type Semantic = FixtureV2;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(FixtureV2 {
-            value: source.value,
-            bonus: 0,
-            authority: if source.has_authority {
-                FixtureAuthority::Granted
-            } else {
-                FixtureAuthority::Absent
-            },
-        })
-    }
+fn adapt_fixture_v1_to_v2(source: FixtureV1) -> Result<FixtureV2, String> {
+    Ok(FixtureV2 {
+        value: source.value,
+        bonus: 0,
+        authority: if source.has_authority {
+            FixtureAuthority::Granted
+        } else {
+            FixtureAuthority::Absent
+        },
+    })
 }
 
-impl Adapter for FixtureV2IdentityAdapter {
-    type Source = FixtureV2;
-    type Semantic = FixtureV2;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(source)
-    }
+fn adapt_fixture_v2(source: FixtureV2) -> Result<FixtureV2, String> {
+    Ok(source)
 }
 
-impl SemanticProjector<FixtureV2> for FixtureProjector {
-    fn project_semantic(
+impl FixtureProjector {
+    fn project(
         &self,
         fact: &Fact,
         semantic: FixtureV2,
@@ -301,12 +252,12 @@ fn route_metadata_can_describe_deprecated_and_current_fact_versions() {
         FactRoute {
             tag: TYPE_FIXTURE_V1,
             projector: project_fixture_v1,
-            pipeline: FIXTURE_V1_STAGES.pipeline(),
+            pipeline: FIXTURE_V1_PROJECTOR.pipeline(),
         },
         FactRoute {
             tag: TYPE_FIXTURE_V2,
             projector: project_fixture_v2,
-            pipeline: FIXTURE_V2_STAGES.pipeline(),
+            pipeline: FIXTURE_V2_PROJECTOR.pipeline(),
         },
     ];
     let route_manifest = routes.map(FactVersionRoute::from_fact_route);
@@ -347,22 +298,20 @@ fn project_fixture_v1(
     fact: &Fact,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    project_staged::<FixtureV1Codec, FixtureV1Authenticator, FixtureV1ToV2Adapter, _>(
-        &FixtureProjector,
-        fact,
-        context,
-    )
+    let decoded = decode_fixture_v1(fact)?;
+    let authenticated = authenticate_fixture_v1(fact, decoded)?;
+    let semantic = adapt_fixture_v1_to_v2(authenticated)?;
+    FixtureProjector.project(fact, semantic, context)
 }
 
 fn project_fixture_v2(
     fact: &Fact,
     context: &ProjectionContext,
 ) -> Result<ProjectionOutput, String> {
-    project_staged::<FixtureV2Codec, FixtureV2Authenticator, FixtureV2IdentityAdapter, _>(
-        &FixtureProjector,
-        fact,
-        context,
-    )
+    let decoded = decode_fixture_v2(fact)?;
+    let authenticated = authenticate_fixture_v2(fact, decoded)?;
+    let semantic = adapt_fixture_v2(authenticated)?;
+    FixtureProjector.project(fact, semantic, context)
 }
 
 fn fixture_v1_fact(value: u64, has_authority: bool) -> Fact {

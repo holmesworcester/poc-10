@@ -11,9 +11,7 @@
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -45,13 +43,9 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableInsert, String> {
     ]))
 }
 
-/// Staged read pipeline for the reaction fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "content::reaction::Codec",
-    authenticate: "content::reaction::authenticate::ContentReactionAuthenticator",
-    adapt: "content::reaction::adapt::ContentReactionAdapter",
-    project: "content::reaction::project::ContentReactionProjector",
-};
+/// Projector route metadata for the reaction fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("content::reaction::project::ContentReactionProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentReactionProjector;
@@ -68,16 +62,14 @@ impl Projector for ContentReactionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ContentReactionAuthenticator,
-            super::adapt::ContentReactionAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ContentReactionFact> for ContentReactionProjector {
+impl ContentReactionProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

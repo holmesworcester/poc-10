@@ -17,8 +17,6 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_CONTENT_FILE_DELETION: u8 = encode::TYPE_CONTENT_FILE_DELETION;
 
 pub const FILE_DELETION_ROWS: crate::core::store::TableName =

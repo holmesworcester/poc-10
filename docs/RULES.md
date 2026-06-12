@@ -113,12 +113,11 @@ explicitly archived or the user asks for history.
 
 ## Projectors
 
-- Projectors interpret an already-authenticated, adapted semantic fact in
-  context; they do not authenticate and do not do IO. Primary decode, the
-  fact-id check, the fact-boundary signature, and intrinsic single-fact field
-  rules belong to the family `authenticate.rs`. Converted routes run
-  `decode -> authenticate -> adapt -> project`, so a projector receives typed
-  fact data and never parses raw primary bytes.
+- Projectors own the local fact flow in context: decode the primary bytes,
+  validate the fact boundary, adapt if needed, then project semantic meaning.
+  They still do not do IO. Primary decode, the fact-id check, the fact-boundary
+  signature, and intrinsic single-fact field rules belong to the owning
+  `decode.rs` and `authenticate.rs` helpers, called directly by the projector.
 - Projectors do not verify signatures. The primary fact's signature is proven by
   its authenticator, and any fact reached through context was authenticated
   before it could offer that context, so its authenticity is guaranteed. A
@@ -148,25 +147,24 @@ explicitly archived or the user asks for history.
 
 Non-trivial projectors should make their proof shape obvious to a reviewer:
 
-1. Authenticate in `authenticate.rs`: a reviewable policy (decoded bytes, fact
-   id, signature/container proof, intrinsic field rules, and narrow
-   authentication needs) that returns an `AuthenticatedFact` or parks on
-   `NeedsAuthentication`. It owns no authority, rows, or materialization.
-2. Fact families implement `Projector::project()` as a small call through
-   `core::pipeline::project_staged::<ModuleCodec, ModuleAuthenticator, ModuleAdapter, _>()`
-   and set the route's `FactPipeline::Staged` metadata. The staged runner owns
-   `decode -> authenticate -> adapt -> project`; projector files keep only the
-   typed semantic projector body.
-3. Put semantic proof in
-   `SemanticProjector<SemanticFact>::project_semantic()`. Body comments should
-   explain the block they guard; do not require numbered references back to the
-   module policy. The top-of-file policy still names the projector's proof
-   shape, while structural/authentication proof lives in `authenticate.rs`.
-4. Name every security-sensitive context need in a small struct or local
+1. Keep byte parsing in `decode.rs`: it should reject wrong tags, lengths,
+   padding, enum values, and non-canonical field shapes.
+2. Keep fact-boundary validation in `authenticate.rs`: it should check the fact
+   id, signature or container proof, intrinsic field rules, and any
+   context-dependent proof helper. Missing context is represented as projector
+   needs, not as a core auth stage.
+3. Implement `Projector::project()` as the readable local flow for that fact:
+   decode the raw body, validate/authenticate, adapt if needed, then call the
+   typed semantic body. The route metadata names only the projector.
+4. Put semantic proof in a local `project_semantic` function. Body comments
+   should explain the block they guard; do not require numbered references back
+   to the module policy. The top-of-file policy still names the projector's
+   proof shape, while structural validation lives in `authenticate.rs`.
+5. Name every security-sensitive context need in a small struct or local
    binding. Avoid positional `needs[0]` contracts.
-5. Split real authority branches into path-specific functions whose names say
+6. Split real authority branches into path-specific functions whose names say
    what authority path they prove.
-6. Emit row mutations through module-owned row helpers and schema-owned tables.
+7. Emit row mutations through module-owned row helpers and schema-owned tables.
 
 ### Deletion Pattern
 
@@ -202,11 +200,10 @@ through the `ProjectionContext` helper anchored to the need they emitted.
 ### Typed Facts And Foreign Context
 
 Core persists facts as opaque bytes. The owning fact module supplies a small
-`decode.rs`/`FactCodec`; its `authenticate.rs` checks the id and signature,
-enforces intrinsic rules, and produces an `AuthenticatedFact`. Converted routes
-then run `adapt.rs` before the typed projector body. Do not call a raw decoder
-on the primary fact outside the module codec, and do not decode or authenticate
-the primary fact in the projector.
+`decode.rs`; its `authenticate.rs` checks the id and signature and enforces
+intrinsic rules. The projector calls those helpers directly, runs `adapt.rs`
+when a compatibility step exists, and then enters the typed semantic body. Do
+not parse the primary fact with another module's raw layout helper.
 
 Foreign context fact bytes are different. A projector should not import another
 fact module's raw layout codec. It should call a module-owned typed helper that

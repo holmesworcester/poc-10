@@ -17,8 +17,7 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector,
-    SemanticProjector, TimeWake,
+    FactPipeline, ProjectionContext, ProjectionOutput, Projector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -31,13 +30,9 @@ use crate::protocol::sync::shared_fact::project::{
 
 use super::fact::{AuthorId, ContentMessageFact, SignerId, WorkspaceId, UNIX_MINUTE_MS};
 
-/// Staged read pipeline for the content-message fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "content::message::decode::Codec",
-    authenticate: "content::message::authenticate::ContentMessageAuthenticator",
-    adapt: "content::message::adapt::ContentMessageAdapter",
-    project: "content::message::project::ContentMessageProjector",
-};
+/// Projector route metadata for the content-message fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("content::message::project::ContentMessageProjector");
 
 /// Content's key shape for the generic core `fact_purged` context role.
 ///
@@ -191,16 +186,14 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::decode::Codec,
-            super::authenticate::ContentMessageAuthenticator,
-            super::adapt::ContentMessageAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ContentMessageFact> for ContentMessageProjector {
+impl ContentMessageProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

@@ -4,17 +4,10 @@
 //! semantic shape. This identity adapter keeps the staged route explicit and
 //! gives future versioned facts a dedicated conversion point.
 
-use crate::core::pipeline::Adapter;
-
 use super::fact::LocalSecretRetirementFact;
 
-pub(crate) struct LocalSecretRetirementAdapter;
-
-impl Adapter for LocalSecretRetirementAdapter {
-    type Source = LocalSecretRetirementFact;
-    type Semantic = LocalSecretRetirementFact;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(source)
-    }
+pub(crate) fn adapt(
+    source: LocalSecretRetirementFact,
+) -> Result<LocalSecretRetirementFact, String> {
+    Ok(source)
 }

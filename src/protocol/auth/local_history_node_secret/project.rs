@@ -12,9 +12,7 @@
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
 };
@@ -212,14 +210,10 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 // Local history-node secret projector.
 // ---------------------------------------------------------------------------
 
-/// Staged read pipeline for the local_history_node_secret fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::local_history_node_secret::Codec",
-    authenticate:
-        "auth::local_history_node_secret::authenticate::LocalHistoryNodeSecretAuthenticator",
-    adapt: "auth::local_history_node_secret::adapt::LocalHistoryNodeSecretAdapter",
-    project: "auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector",
-};
+/// Projector route metadata for the local_history_node_secret fact.
+pub const PIPELINE: FactPipeline = FactPipeline::projector(
+    "auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector",
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalHistoryNodeSecretProjector;
@@ -236,16 +230,14 @@ impl Projector for LocalHistoryNodeSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::LocalHistoryNodeSecretAuthenticator,
-            super::adapt::LocalHistoryNodeSecretAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_local_history_node_secret(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<LocalHistoryNodeSecretFact> for LocalHistoryNodeSecretProjector {
+impl LocalHistoryNodeSecretProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

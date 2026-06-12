@@ -12,9 +12,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
 use crate::protocol::auth::signature;
@@ -23,13 +21,9 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 use super::endpoint_shared_row;
 use super::fact::EndpointRole;
 
-/// Staged read pipeline for the endpoint_shared fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::endpoint_shared::Codec",
-    authenticate: "auth::endpoint_shared::authenticate::EndpointSharedAuthenticator",
-    adapt: "auth::endpoint_shared::adapt::EndpointSharedAdapter",
-    project: "auth::endpoint_shared::project::EndpointSharedProjector",
-};
+/// Projector route metadata for the endpoint_shared fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::endpoint_shared::project::EndpointSharedProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct EndpointSharedProjector;
@@ -46,16 +40,14 @@ impl Projector for EndpointSharedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::EndpointSharedAuthenticator,
-            super::adapt::EndpointSharedAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::EndpointSharedFact> for EndpointSharedProjector {
+impl EndpointSharedProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

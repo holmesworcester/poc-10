@@ -18,16 +18,6 @@ use super::fact::{
     RECEIVE_PATH_CONNECTION, RECEIVE_PATH_CONNECTION_FRAME, RECEIVE_PATH_CONNECTION_REQUEST,
 };
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ConnectionFactReceipt;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionFactReceipt, String> {
     wire::expect_len(bytes, CONNECTION_FACT_RECEIPT_BYTES).map_err(wire_err)?;
     let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;

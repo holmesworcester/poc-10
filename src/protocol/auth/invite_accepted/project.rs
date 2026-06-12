@@ -12,19 +12,13 @@
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::{derived_invite_secret_fact_id, invite_accepted_row};
 
-/// Staged read pipeline for the invite_accepted fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::invite_accepted::Codec",
-    authenticate: "auth::invite_accepted::authenticate::InviteAcceptedAuthenticator",
-    adapt: "auth::invite_accepted::adapt::InviteAcceptedAdapter",
-    project: "auth::invite_accepted::project::InviteAcceptedProjector",
-};
+/// Projector route metadata for the invite_accepted fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::invite_accepted::project::InviteAcceptedProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct InviteAcceptedProjector;
@@ -41,16 +35,14 @@ impl Projector for InviteAcceptedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::InviteAcceptedAuthenticator,
-            super::adapt::InviteAcceptedAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::InviteAcceptedFact> for InviteAcceptedProjector {
+impl InviteAcceptedProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

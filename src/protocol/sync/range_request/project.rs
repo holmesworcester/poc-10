@@ -7,17 +7,11 @@
 //!      progressive send own transfer for this protocol slice.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
-/// Staged read pipeline for the range_request fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "sync::range_request::Codec",
-    authenticate: "sync::range_request::authenticate::SyncRangeRequestAuthenticator",
-    adapt: "sync::range_request::adapt::SyncRangeRequestAdapter",
-    project: "sync::range_request::project::SyncRangeRequestProjector",
-};
+/// Projector route metadata for the range_request fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("sync::range_request::project::SyncRangeRequestProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncRangeRequestProjector;
@@ -34,16 +28,14 @@ impl Projector for SyncRangeRequestProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::SyncRangeRequestAuthenticator,
-            super::adapt::SyncRangeRequestAdapter,
-            _,
-        >(self, fact, projection_context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, projection_context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, projection_context)
     }
 }
 
-impl SemanticProjector<super::fact::SyncRangeRequestFact> for SyncRangeRequestProjector {
+impl SyncRangeRequestProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

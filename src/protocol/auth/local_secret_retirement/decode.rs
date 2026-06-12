@@ -9,16 +9,6 @@ use crate::core::wire;
 use super::encode::{validate_fact, LOCAL_SECRET_RETIREMENT_BYTES, TYPE_LOCAL_SECRET_RETIREMENT};
 use super::fact::LocalSecretRetirementFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = LocalSecretRetirementFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<LocalSecretRetirementFact, String> {
     wire::expect_len(bytes, LOCAL_SECRET_RETIREMENT_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_LOCAL_SECRET_RETIREMENT {

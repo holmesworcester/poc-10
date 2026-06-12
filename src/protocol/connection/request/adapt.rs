@@ -1,20 +1,13 @@
 //! Connection-request semantic adapter.
 //!
 //! The authenticated opened request is already the active semantic shape. This
-//! identity adapter keeps the staged route explicit and gives future versioned
-//! facts a dedicated conversion point.
-
-use crate::core::pipeline::Adapter;
+//! identity adapter keeps the protocol-local conversion point available for future versioned
+//! facts.
 
 use super::authenticate::AuthenticatedConnectionRequest;
 
-pub(crate) struct ConnectionRequestAdapter;
-
-impl Adapter for ConnectionRequestAdapter {
-    type Source = AuthenticatedConnectionRequest;
-    type Semantic = AuthenticatedConnectionRequest;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(source)
-    }
+pub(crate) fn adapt(
+    source: AuthenticatedConnectionRequest,
+) -> Result<AuthenticatedConnectionRequest, String> {
+    Ok(source)
 }

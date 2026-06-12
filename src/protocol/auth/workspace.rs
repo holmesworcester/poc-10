@@ -53,8 +53,6 @@ pub(crate) fn workspace_row(
     )
 }
 
-pub(crate) use decode::Codec;
-
 pub fn scope(workspace_id: crate::core::facts::FactId) -> crate::core::facts::FactScope {
     crate::core::facts::FactScope::Scoped {
         kind: crate::core::facts::ScopeKind::new("workspace").expect("valid workspace scope"),

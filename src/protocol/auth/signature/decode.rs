@@ -5,16 +5,6 @@ use crate::core::wire;
 use super::encode::{SIGNATURE_FACT_BYTES, TYPE_SIGNATURE};
 use super::fact::SignatureFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = SignatureFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<SignatureFact, String> {
     let mut reader = wire::Reader::new(bytes);
     reader.expect_len(SIGNATURE_FACT_BYTES).map_err(wire_err)?;

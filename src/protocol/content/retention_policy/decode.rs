@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{FACT_BYTES, NO_PREVIOUS_POLICY_ID, TYPE_RETENTION_POLICY};
 use super::fact::RetentionPolicyFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = RetentionPolicyFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<RetentionPolicyFact, String> {
     wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
     let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;

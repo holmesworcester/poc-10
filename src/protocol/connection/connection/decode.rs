@@ -24,16 +24,6 @@ use super::fact::ConnectionFact;
 /// Decoding a connection fact proves only the canonical sealed layout. The id
 /// check, opening decision, and handshake material proof are `authenticate.rs`
 /// work, so the decoded payload is the unit envelope.
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ();
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        validate_sealed_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionFact, String> {
     decode_plaintext(bytes)
 }

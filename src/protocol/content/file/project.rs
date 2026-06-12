@@ -12,9 +12,7 @@
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -27,13 +25,9 @@ use crate::protocol::sync::shared_fact::project::{
 use super::fact::ContentFileFact;
 use super::{FILE_KEY_COLUMNS, FILE_ROWS};
 
-/// Staged read pipeline for the file fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "content::file::Codec",
-    authenticate: "content::file::authenticate::ContentFileAuthenticator",
-    adapt: "content::file::adapt::ContentFileAdapter",
-    project: "content::file::project::ContentFileProjector",
-};
+/// Projector route metadata for the file fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("content::file::project::ContentFileProjector");
 
 fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableInsert {
     read_models::CONTENT_FILES.insert(vec![
@@ -67,16 +61,14 @@ impl Projector for ContentFileProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ContentFileAuthenticator,
-            super::adapt::ContentFileAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ContentFileFact> for ContentFileProjector {
+impl ContentFileProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

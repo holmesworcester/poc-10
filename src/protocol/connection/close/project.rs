@@ -12,9 +12,7 @@
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::connection::connection;
 
@@ -59,13 +57,9 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
     }
 }
 
-/// Staged read pipeline for the close fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "connection::close::Codec",
-    authenticate: "connection::close::authenticate::ConnectionCloseAuthenticator",
-    adapt: "connection::close::adapt::ConnectionCloseAdapter",
-    project: "connection::close::project::ConnectionCloseProjector",
-};
+/// Projector route metadata for the close fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("connection::close::project::ConnectionCloseProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionCloseProjector;
@@ -82,16 +76,14 @@ impl Projector for ConnectionCloseProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::ConnectionCloseAuthenticator,
-            super::adapt::ConnectionCloseAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::ConnectionCloseFact> for ConnectionCloseProjector {
+impl ConnectionCloseProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

@@ -17,8 +17,6 @@ pub mod queries;
 
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_LOCAL_ENDPOINT: u8 = encode::TYPE_LOCAL_ENDPOINT;
 
 pub use project::{daemon_endpoint_need, daemon_endpoint_offer};

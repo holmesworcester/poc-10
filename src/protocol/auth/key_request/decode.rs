@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{KEY_REQUEST_BYTES, TYPE_KEY_REQUEST};
 use super::fact::KeyRequestFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = KeyRequestFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_key_request(fact.body())
-    }
-}
-
 pub fn decode_key_request(bytes: &[u8]) -> Result<KeyRequestFact, String> {
     wire::expect_len(bytes, KEY_REQUEST_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_KEY_REQUEST {

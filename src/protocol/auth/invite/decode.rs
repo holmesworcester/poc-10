@@ -9,16 +9,6 @@ use crate::core::wire;
 use super::encode::{FACT_BYTES, TYPE_INVITE_SECRET};
 use super::fact::InviteSecretFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = InviteSecretFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<InviteSecretFact, String> {
     wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
     let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;

@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use topo::core::pipeline::FactPipeline;
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
@@ -45,49 +44,25 @@ fn executable_protocol_tables_name_the_target_surfaces() {
 }
 
 #[test]
-fn model_routes_declare_first_class_pipeline_stages() {
-    assert_staged_route(
+fn model_routes_declare_projector_routes() {
+    assert_projector_route(
         topo::protocol::content::message::TYPE_CONTENT_MESSAGE,
-        "content::message::decode::Codec",
-        "content::message::authenticate::ContentMessageAuthenticator",
-        "content::message::adapt::ContentMessageAdapter",
         "content::message::project::ContentMessageProjector",
     );
-    assert_staged_route(
+    assert_projector_route(
         topo::protocol::auth::workspace::TYPE_WORKSPACE,
-        "auth::workspace::decode::Codec",
-        "auth::workspace::authenticate::WorkspaceAuthenticator",
-        "auth::workspace::adapt::WorkspaceAdapter",
         "auth::workspace::project::WorkspaceProjector",
     );
 }
 
-fn assert_staged_route(
-    tag: u8,
-    expected_decode: &str,
-    expected_authenticate: &str,
-    expected_adapt: &str,
-    expected_project: &str,
-) {
+fn assert_projector_route(tag: u8, expected_project: &str) {
     let route = MATCH_RUNTIME
         .fact_routes
         .iter()
         .find(|route| route.tag == tag)
         .expect("model route");
 
-    // Every route is staged now that the composed model is removed, so this
-    // destructure is irrefutable; it still pins the role-file labels.
-    let FactPipeline::Staged {
-        decode,
-        authenticate,
-        adapt,
-        project,
-    } = route.pipeline;
-
-    assert_eq!(decode, expected_decode);
-    assert_eq!(authenticate, expected_authenticate);
-    assert_eq!(adapt, expected_adapt);
-    assert_eq!(project, expected_project);
+    assert_eq!(route.pipeline.project, expected_project);
 }
 
 #[test]

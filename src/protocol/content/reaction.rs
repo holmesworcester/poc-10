@@ -14,8 +14,6 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-pub(crate) use decode::Codec;
-
 use crate::core::store::TableName;
 
 pub const REACTION_ROWS: TableName = crate::protocol::registry::read_models::REACTION_ROWS;

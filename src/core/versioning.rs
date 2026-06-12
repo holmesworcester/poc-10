@@ -107,57 +107,28 @@ impl ProtocolBundle {
     }
 }
 
-/// Staged route labels for one fact-family version.
+/// Projector route label for one fact-family version.
 ///
-/// These labels are reviewer-facing coordinates into the kept-forever
-/// decode/authenticate path, the adapter edge toward the ceiling semantic type,
-/// and the projector that materializes the read model.
+/// This label is a reviewer-facing coordinate into the projector that owns
+/// local decode, validation, adaptation, and semantic projection for the tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FactVersionStages {
-    pub decode: &'static str,
-    pub authenticate: &'static str,
-    pub adapt: &'static str,
+pub struct FactVersionProjector {
     pub project: &'static str,
 }
 
-impl FactVersionStages {
-    pub const fn new(
-        decode: &'static str,
-        authenticate: &'static str,
-        adapt: &'static str,
-        project: &'static str,
-    ) -> Self {
-        Self {
-            decode,
-            authenticate,
-            adapt,
-            project,
-        }
+impl FactVersionProjector {
+    pub const fn new(project: &'static str) -> Self {
+        Self { project }
     }
 
     pub const fn from_pipeline(pipeline: FactPipeline) -> Self {
-        match pipeline {
-            FactPipeline::Staged {
-                decode,
-                authenticate,
-                adapt,
-                project,
-            } => Self {
-                decode,
-                authenticate,
-                adapt,
-                project,
-            },
+        Self {
+            project: pipeline.project,
         }
     }
 
     pub const fn pipeline(self) -> FactPipeline {
-        FactPipeline::Staged {
-            decode: self.decode,
-            authenticate: self.authenticate,
-            adapt: self.adapt,
-            project: self.project,
-        }
+        FactPipeline::projector(self.project)
     }
 }
 
@@ -165,22 +136,22 @@ impl FactVersionStages {
 ///
 /// Core routes also carry a projector function pointer. Versioning validation
 /// deliberately ignores that executable pointer and checks only the durable
-/// manifest coordinates that release reviewers need: tag and stage labels.
+/// manifest coordinates that release reviewers need: tag and projector label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FactVersionRoute {
     pub tag: u8,
-    pub stages: FactVersionStages,
+    pub projector: FactVersionProjector,
 }
 
 impl FactVersionRoute {
-    pub const fn new(tag: u8, stages: FactVersionStages) -> Self {
-        Self { tag, stages }
+    pub const fn new(tag: u8, projector: FactVersionProjector) -> Self {
+        Self { tag, projector }
     }
 
     pub const fn from_fact_route(route: FactRoute) -> Self {
         Self {
             tag: route.tag,
-            stages: FactVersionStages::from_pipeline(route.pipeline),
+            projector: FactVersionProjector::from_pipeline(route.pipeline),
         }
     }
 }
@@ -188,15 +159,15 @@ impl FactVersionRoute {
 /// Manifest entry for one durable fact-family version.
 ///
 /// The protocol bundle table says when a family version is active. This entry
-/// ties that family version to the one durable fact tag and the route stages
-/// that know how to decode, authenticate, adapt, and project it.
+/// ties that family version to the one durable fact tag and the projector
+/// that owns how to decode, validate, adapt, and project it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FactVersionManifestEntry {
     pub tag: u8,
     pub family: &'static str,
     pub version: FactFamilyVersion,
     pub active_from_protocol: ProtocolVersion,
-    pub stages: FactVersionStages,
+    pub projector: FactVersionProjector,
 }
 
 impl FactVersionManifestEntry {
@@ -368,10 +339,10 @@ pub enum FactVersionManifestError {
     UnmanifestedRoute {
         tag: u8,
     },
-    RouteStagesMismatch {
+    RouteProjectorMismatch {
         tag: u8,
-        expected: FactVersionStages,
-        actual: FactVersionStages,
+        expected: FactVersionProjector,
+        actual: FactVersionProjector,
     },
 }
 
@@ -396,7 +367,7 @@ pub fn active_from_protocol_for_tag(
 /// This is the static guardrail behind the release manifest plan. A tag must
 /// name exactly one family version, that family version's declared
 /// `active_from_protocol` must match the first protocol bundle that contains it, and
-/// the route table must expose the same decode/authenticate/adapt/project labels.
+/// the route table must expose the same projector label.
 pub fn validate_fact_version_manifest(
     manifest: &[FactVersionManifestEntry],
     bundles: &[ProtocolBundle],
@@ -455,11 +426,11 @@ pub fn validate_fact_version_manifest(
         let Some(route) = routes_by_tag.get(&entry.tag).copied() else {
             return Err(FactVersionManifestError::MissingRoute { tag: entry.tag });
         };
-        if entry.stages != route.stages {
-            return Err(FactVersionManifestError::RouteStagesMismatch {
+        if entry.projector != route.projector {
+            return Err(FactVersionManifestError::RouteProjectorMismatch {
                 tag: entry.tag,
-                expected: entry.stages,
-                actual: route.stages,
+                expected: entry.projector,
+                actual: route.projector,
             });
         }
     }
@@ -769,79 +740,59 @@ mod tests {
             families: PROTOCOL_3_FAMILIES,
         },
     ];
-    const MESSAGE_V1_STAGES: FactVersionStages = FactVersionStages::new(
-        "content::message_v1::decode::Codec",
-        "content::message_v1::authenticate::Authenticator",
-        "content::message::adapt::FromV1",
-        "content::message::project::Projector",
-    );
-    const MESSAGE_V2_STAGES: FactVersionStages = FactVersionStages::new(
-        "content::message_v2::decode::Codec",
-        "content::message_v2::authenticate::Authenticator",
-        "content::message::adapt::Identity",
-        "content::message::project::Projector",
-    );
-    const FILE_V1_STAGES: FactVersionStages = FactVersionStages::new(
-        "content::file_v1::decode::Codec",
-        "content::file_v1::authenticate::Authenticator",
-        "content::file::adapt::FromV1",
-        "content::file::project::Projector",
-    );
-    const FILE_V2_STAGES: FactVersionStages = FactVersionStages::new(
-        "content::file_v2::decode::Codec",
-        "content::file_v2::authenticate::Authenticator",
-        "content::file::adapt::Identity",
-        "content::file::project::Projector",
-    );
-    const ADMIN_V1_STAGES: FactVersionStages = FactVersionStages::new(
-        "auth::admin_v1::decode::Codec",
-        "auth::admin_v1::authenticate::Authenticator",
-        "auth::admin::adapt::FromV1",
-        "auth::admin::project::Projector",
-    );
+    const MESSAGE_V1_PROJECTOR: FactVersionProjector =
+        FactVersionProjector::new("content::message::project::Projector");
+    const MESSAGE_V2_PROJECTOR: FactVersionProjector =
+        FactVersionProjector::new("content::message::project::Projector");
+    const FILE_V1_PROJECTOR: FactVersionProjector =
+        FactVersionProjector::new("content::file::project::Projector");
+    const FILE_V2_PROJECTOR: FactVersionProjector =
+        FactVersionProjector::new("content::file::project::Projector");
+    const ADMIN_V1_PROJECTOR: FactVersionProjector =
+        FactVersionProjector::new("auth::admin::project::Projector");
     const FACT_VERSION_MANIFEST: &[FactVersionManifestEntry] = &[
         FactVersionManifestEntry {
             tag: 50,
             family: MESSAGE,
             version: 1,
             active_from_protocol: 1,
-            stages: MESSAGE_V1_STAGES,
+            projector: MESSAGE_V1_PROJECTOR,
         },
         FactVersionManifestEntry {
             tag: 51,
             family: MESSAGE,
             version: 2,
             active_from_protocol: 2,
-            stages: MESSAGE_V2_STAGES,
+            projector: MESSAGE_V2_PROJECTOR,
         },
         FactVersionManifestEntry {
             tag: 52,
             family: FILE,
             version: 1,
             active_from_protocol: 1,
-            stages: FILE_V1_STAGES,
+            projector: FILE_V1_PROJECTOR,
         },
         FactVersionManifestEntry {
             tag: 53,
             family: FILE,
             version: 2,
             active_from_protocol: 3,
-            stages: FILE_V2_STAGES,
+            projector: FILE_V2_PROJECTOR,
         },
         FactVersionManifestEntry {
             tag: 54,
             family: ADMIN,
             version: 1,
             active_from_protocol: 1,
-            stages: ADMIN_V1_STAGES,
+            projector: ADMIN_V1_PROJECTOR,
         },
     ];
     const FACT_VERSION_ROUTES: &[FactVersionRoute] = &[
-        FactVersionRoute::new(50, MESSAGE_V1_STAGES),
-        FactVersionRoute::new(51, MESSAGE_V2_STAGES),
-        FactVersionRoute::new(52, FILE_V1_STAGES),
-        FactVersionRoute::new(53, FILE_V2_STAGES),
-        FactVersionRoute::new(54, ADMIN_V1_STAGES),
+        FactVersionRoute::new(50, MESSAGE_V1_PROJECTOR),
+        FactVersionRoute::new(51, MESSAGE_V2_PROJECTOR),
+        FactVersionRoute::new(52, FILE_V1_PROJECTOR),
+        FactVersionRoute::new(53, FILE_V2_PROJECTOR),
+        FactVersionRoute::new(54, ADMIN_V1_PROJECTOR),
     ];
 
     #[test]
@@ -1097,18 +1048,18 @@ mod tests {
             })
         );
 
-        let mut route_stage_mismatch = FACT_VERSION_ROUTES.to_vec();
-        route_stage_mismatch[0].stages = MESSAGE_V2_STAGES;
+        let mut route_projector_mismatch = FACT_VERSION_ROUTES.to_vec();
+        route_projector_mismatch[0].projector = FILE_V1_PROJECTOR;
         assert_eq!(
             validate_fact_version_manifest(
                 FACT_VERSION_MANIFEST,
                 PROTOCOL_BUNDLES,
-                &route_stage_mismatch,
+                &route_projector_mismatch,
             ),
-            Err(FactVersionManifestError::RouteStagesMismatch {
+            Err(FactVersionManifestError::RouteProjectorMismatch {
                 tag: 50,
-                expected: MESSAGE_V1_STAGES,
-                actual: MESSAGE_V2_STAGES,
+                expected: MESSAGE_V1_PROJECTOR,
+                actual: FILE_V1_PROJECTOR,
             })
         );
 
@@ -1119,7 +1070,7 @@ mod tests {
         );
 
         let mut unmanifested_route = FACT_VERSION_ROUTES.to_vec();
-        unmanifested_route.push(FactVersionRoute::new(99, MESSAGE_V1_STAGES));
+        unmanifested_route.push(FactVersionRoute::new(99, MESSAGE_V1_PROJECTOR));
         assert_eq!(
             validate_fact_version_manifest(
                 FACT_VERSION_MANIFEST,

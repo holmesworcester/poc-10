@@ -9,22 +9,16 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::sync::send_compare_response::{
     send_sync_compare_response_intent, SendSyncCompareResponse,
 };
 
 use super::sync_compare_row;
 
-/// Staged read pipeline for the compare fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "sync::compare::Codec",
-    authenticate: "sync::compare::authenticate::SyncCompareAuthenticator",
-    adapt: "sync::compare::adapt::SyncCompareAdapter",
-    project: "sync::compare::project::SyncCompareProjector",
-};
+/// Projector route metadata for the compare fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("sync::compare::project::SyncCompareProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncCompareProjector;
@@ -41,16 +35,14 @@ impl Projector for SyncCompareProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::SyncCompareAuthenticator,
-            super::adapt::SyncCompareAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::SyncCompareFact> for SyncCompareProjector {
+impl SyncCompareProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

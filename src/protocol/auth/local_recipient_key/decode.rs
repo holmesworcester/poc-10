@@ -10,16 +10,6 @@ use super::encode::{
 };
 use super::fact::LocalRecipientKeyFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = LocalRecipientKeyFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_local_recipient_key(fact.body())
-    }
-}
-
 pub fn decode_local_recipient_key(bytes: &[u8]) -> Result<LocalRecipientKeyFact, String> {
     wire::expect_len(bytes, LOCAL_RECIPIENT_KEY_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_LOCAL_RECIPIENT_KEY {

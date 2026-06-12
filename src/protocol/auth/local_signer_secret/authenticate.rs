@@ -10,24 +10,16 @@
 //! and publishing local signer context are interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::LocalSignerSecretFact;
 
-pub(crate) struct LocalSignerSecretAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for LocalSignerSecretAuthenticator {
-    type Authenticated = LocalSignerSecretFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        secret: LocalSignerSecretFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_local_signer_secret(fact, secret))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    secret: LocalSignerSecretFact,
+    _context: &ProjectionContext,
+) -> Result<LocalSignerSecretFact, String> {
+    prove_decoded_local_signer_secret(fact, secret)
 }
 
 fn prove_decoded_local_signer_secret(
@@ -43,13 +35,9 @@ fn prove_decoded_local_signer_secret(
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::local_signer_secret::encode;
     use crate::protocol::auth::local_signer_secret::fact::LocalSignerSecretFact;
-
-    use super::LocalSignerSecretAuthenticator;
 
     fn canonical_fact() -> Fact {
         let private_key = [9; 32];
@@ -64,27 +52,18 @@ mod tests {
         Fact::new(FactScope::Local, 123, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, LocalSignerSecretFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => LocalSignerSecretAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<LocalSignerSecretFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

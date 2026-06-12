@@ -12,8 +12,6 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_LOCAL_KEY_SECRET: u8 = encode::TYPE_LOCAL_KEY_SECRET;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalKeySecretFact, String> {

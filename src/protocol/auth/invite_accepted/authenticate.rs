@@ -13,25 +13,17 @@
 //! projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
 
 use super::fact::InviteAcceptedFact;
 
-pub(crate) struct InviteAcceptedAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for InviteAcceptedAuthenticator {
-    type Authenticated = InviteAcceptedFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        accepted: InviteAcceptedFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_invite_accepted(fact, accepted))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    accepted: InviteAcceptedFact,
+    _context: &ProjectionContext,
+) -> Result<InviteAcceptedFact, String> {
+    prove_decoded_invite_accepted(fact, accepted)
 }
 
 fn prove_decoded_invite_accepted(
@@ -59,15 +51,11 @@ fn prove_decoded_invite_accepted(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
     use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
     use crate::protocol::auth::invite_accepted::encode;
     use crate::protocol::auth::invite_accepted::fact::InviteAcceptedFact;
-
-    use super::InviteAcceptedAuthenticator;
 
     fn canonical_fact() -> Fact {
         let accepted = InviteAcceptedFact {
@@ -86,27 +74,18 @@ mod tests {
         Fact::new(FactScope::Local, 100, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, InviteAcceptedFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => InviteAcceptedAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<InviteAcceptedFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

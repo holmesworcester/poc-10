@@ -25,8 +25,6 @@ use crate::core::store::{TableName, TableRow};
 
 pub use queries::origin_connection_ids_for_fact;
 
-pub(crate) use decode::Codec;
-
 /// Durable receipt-origin rows, keyed by `received_fact_id || receipt_fact_id`.
 /// They are a narrow efficiency hint for sync live-tail egress: they say which
 /// established connection delivered a fact when that is known; they do not

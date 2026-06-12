@@ -15,8 +15,6 @@ pub mod project;
 
 pub use fact::*;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_LOCAL_SIGNER_SECRET: u8 = encode::TYPE_LOCAL_SIGNER_SECRET;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalSignerSecretFact, String> {

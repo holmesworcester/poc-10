@@ -1,20 +1,11 @@
 //! Local recipient key semantic adapter.
 //!
 //! The current local_recipient_key wire shape is already the active semantic
-//! shape. This identity adapter keeps the staged route explicit and gives future
-//! versioned facts a dedicated conversion point.
-
-use crate::core::pipeline::Adapter;
+//! shape. This identity adapter keeps the protocol-local conversion point available for
+//! future versioned facts.
 
 use super::fact::LocalRecipientKeyFact;
 
-pub(crate) struct LocalRecipientKeyAdapter;
-
-impl Adapter for LocalRecipientKeyAdapter {
-    type Source = LocalRecipientKeyFact;
-    type Semantic = LocalRecipientKeyFact;
-
-    fn adapt(source: Self::Source) -> Result<Self::Semantic, String> {
-        Ok(source)
-    }
+pub(crate) fn adapt(source: LocalRecipientKeyFact) -> Result<LocalRecipientKeyFact, String> {
+    Ok(source)
 }

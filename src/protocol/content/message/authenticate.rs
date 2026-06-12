@@ -16,24 +16,16 @@
 //! deletion, retention, and secret context and materializes rows.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ContentMessageFact;
 
-pub(crate) struct ContentMessageAuthenticator;
-
-impl DecodedAuthenticator<super::decode::Codec> for ContentMessageAuthenticator {
-    type Authenticated = ContentMessageFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        message: ContentMessageFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_message(fact, message))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    message: ContentMessageFact,
+    _context: &ProjectionContext,
+) -> Result<ContentMessageFact, String> {
+    prove_decoded_message(fact, message)
 }
 
 fn prove_decoded_message(
@@ -48,15 +40,11 @@ fn prove_decoded_message(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::content::message::encode;
     use crate::protocol::content::message::fact::{
         ContentMessageFact, MessageCiphertext, NONCE_BYTES,
     };
-
-    use super::ContentMessageAuthenticator;
 
     const WORKSPACE_ID: [u8; 32] = [1; 32];
 
@@ -82,27 +70,18 @@ mod tests {
         )
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ContentMessageFact> {
-        match super::super::decode::Codec::decode_fact(fact) {
-            Ok(decoded) => ContentMessageAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ContentMessageFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

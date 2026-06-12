@@ -35,8 +35,6 @@ pub use project::{
     connection_request_offer,
 };
 
-pub(crate) use decode::Codec;
-
 /// Durable rows for local outbound connection requests, keyed by the request
 /// fact id.
 pub const CONNECTION_REQUEST_ROWS: TableName = TableName::new("connection_request_rows");

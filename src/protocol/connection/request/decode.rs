@@ -24,16 +24,6 @@ use super::fact::ConnectionRequestFact;
 /// length, header fields). The id check, opening decision, and request
 /// signature proof are `authenticate.rs` work, so the decoded payload is the
 /// unit envelope.
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ();
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        validate_sealed_fact(fact.body())
-    }
-}
-
 pub fn decode_optional_addr(bytes: &[u8; ADDR_BLOCK_BYTES]) -> Result<Option<SocketAddr>, String> {
     let family = bytes[0];
     let raw = &bytes[1..17];

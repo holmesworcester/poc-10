@@ -12,21 +12,15 @@
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
 use super::fact::SignatureFact;
 
 pub const SIGNATURE_PROOF_ROLE: &str = "signature_proof";
 
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::signature::Codec",
-    authenticate: "auth::signature::authenticate::SignatureAuthenticator",
-    adapt: "auth::signature::adapt::SignatureAdapter",
-    project: "auth::signature::project::SignatureProjector",
-};
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::signature::project::SignatureProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SignatureProjector;
@@ -43,16 +37,14 @@ impl Projector for SignatureProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::SignatureAuthenticator,
-            super::adapt::SignatureAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<SignatureFact> for SignatureProjector {
+impl SignatureProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

@@ -11,24 +11,16 @@
 //! interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::LocalHistoryNodeSecretFact;
 
-pub(crate) struct LocalHistoryNodeSecretAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for LocalHistoryNodeSecretAuthenticator {
-    type Authenticated = LocalHistoryNodeSecretFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        node: LocalHistoryNodeSecretFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_local_history_node_secret(fact, node))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    node: LocalHistoryNodeSecretFact,
+    _context: &ProjectionContext,
+) -> Result<LocalHistoryNodeSecretFact, String> {
+    prove_decoded_local_history_node_secret(fact, node)
 }
 
 fn prove_decoded_local_history_node_secret(
@@ -44,13 +36,9 @@ fn prove_decoded_local_history_node_secret(
 mod tests {
     use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::local_history_node_secret::encode;
     use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
-
-    use super::LocalHistoryNodeSecretAuthenticator;
 
     fn canonical_fact() -> Fact {
         let node = LocalHistoryNodeSecretFact {
@@ -70,27 +58,18 @@ mod tests {
         Fact::new(FactScope::Local, 123, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, LocalHistoryNodeSecretFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => LocalHistoryNodeSecretAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<LocalHistoryNodeSecretFact, String> {
+        let decoded = super::super::decode::decode_local_history_node_secret(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

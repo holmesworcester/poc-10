@@ -12,16 +12,6 @@ use super::encode::{
 };
 use super::fact::LocalHistoryNodeSecretFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = LocalHistoryNodeSecretFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_local_history_node_secret(fact.body())
-    }
-}
-
 pub fn decode_local_history_node_secret(
     bytes: &[u8],
 ) -> Result<LocalHistoryNodeSecretFact, String> {

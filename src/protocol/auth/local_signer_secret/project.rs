@@ -8,19 +8,13 @@
 //!      scope and emits no rows, facts, intents, or shareable context.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::fact::LocalSignerSecretFact;
 
-/// Staged read pipeline for the local_signer_secret fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::local_signer_secret::Codec",
-    authenticate: "auth::local_signer_secret::authenticate::LocalSignerSecretAuthenticator",
-    adapt: "auth::local_signer_secret::adapt::LocalSignerSecretAdapter",
-    project: "auth::local_signer_secret::project::LocalSignerSecretProjector",
-};
+/// Projector route metadata for the local_signer_secret fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("auth::local_signer_secret::project::LocalSignerSecretProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalSignerSecretProjector;
@@ -37,16 +31,14 @@ impl Projector for LocalSignerSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::LocalSignerSecretAuthenticator,
-            super::adapt::LocalSignerSecretAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<LocalSignerSecretFact> for LocalSignerSecretProjector {
+impl LocalSignerSecretProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

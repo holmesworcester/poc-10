@@ -11,24 +11,16 @@
 //! owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::LocalKeySecretFact;
 
-pub(crate) struct LocalKeySecretAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for LocalKeySecretAuthenticator {
-    type Authenticated = LocalKeySecretFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        secret: LocalKeySecretFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_local_key_secret(fact, secret))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    secret: LocalKeySecretFact,
+    _context: &ProjectionContext,
+) -> Result<LocalKeySecretFact, String> {
+    prove_decoded_local_key_secret(fact, secret)
 }
 
 fn prove_decoded_local_key_secret(
@@ -43,13 +35,9 @@ fn prove_decoded_local_key_secret(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::local_key_secret::encode;
     use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-
-    use super::LocalKeySecretAuthenticator;
 
     fn canonical_fact() -> Fact {
         let secret = LocalKeySecretFact {
@@ -63,27 +51,18 @@ mod tests {
         Fact::new(FactScope::Local, 123, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, LocalKeySecretFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => LocalKeySecretAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<LocalKeySecretFact, String> {
+        let decoded = super::super::decode::decode_local_key_secret(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

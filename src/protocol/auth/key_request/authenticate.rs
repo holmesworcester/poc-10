@@ -11,24 +11,16 @@
 //! the projector.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::KeyRequestFact;
 
-pub(crate) struct KeyRequestAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for KeyRequestAuthenticator {
-    type Authenticated = KeyRequestFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        request: KeyRequestFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_key_request(fact, request))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    request: KeyRequestFact,
+    _context: &ProjectionContext,
+) -> Result<KeyRequestFact, String> {
+    prove_decoded_key_request(fact, request)
 }
 
 fn prove_decoded_key_request(
@@ -44,14 +36,10 @@ fn prove_decoded_key_request(
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::auth::key_request::encode;
     use crate::protocol::auth::key_request::fact::KeyRequestFact;
     use crate::protocol::auth::workspace;
-
-    use super::KeyRequestAuthenticator;
 
     const SIGNER_KEY: [u8; 32] = [7; 32];
 
@@ -71,27 +59,18 @@ mod tests {
         Fact::new(workspace::scope(workspace_id), request.created_at_ms, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, KeyRequestFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => KeyRequestAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<KeyRequestFact, String> {
+        let decoded = super::super::decode::decode_key_request(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

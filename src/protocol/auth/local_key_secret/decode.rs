@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{encode_local_key_secret, LOCAL_KEY_SECRET_BYTES, TYPE_LOCAL_KEY_SECRET};
 use super::fact::LocalKeySecretFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = LocalKeySecretFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_local_key_secret(fact.body())
-    }
-}
-
 pub fn decode_local_key_secret(bytes: &[u8]) -> Result<LocalKeySecretFact, String> {
     wire::expect_len(bytes, LOCAL_KEY_SECRET_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_LOCAL_KEY_SECRET {

@@ -10,20 +10,14 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use std::collections::BTreeSet;
 
 use crate::protocol::sync::share_fact_with_sync as share_sync;
 
-/// Staged read pipeline for the shared_fact fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "sync::shared_fact::Codec",
-    authenticate: "sync::shared_fact::authenticate::SyncSharedFactAuthenticator",
-    adapt: "sync::shared_fact::adapt::SyncSharedFactAdapter",
-    project: "sync::shared_fact::project::SyncSharedFactProjector",
-};
+/// Projector route metadata for the shared_fact fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("sync::shared_fact::project::SyncSharedFactProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;
@@ -40,16 +34,14 @@ impl Projector for SyncSharedFactProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::SyncSharedFactAuthenticator,
-            super::adapt::SyncSharedFactAdapter,
-            _,
-        >(self, fact, projection_context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, projection_context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, projection_context)
     }
 }
 
-impl SemanticProjector<super::fact::SharedFact> for SyncSharedFactProjector {
+impl SyncSharedFactProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

@@ -440,7 +440,7 @@ fn target_projectors_document_policy_narratives() {
 }
 
 #[test]
-fn target_projectors_authenticate_primary_through_core_before_projecting() {
+fn target_projectors_decode_validate_and_adapt_before_projecting() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut missing_delegation = Vec::new();
     let mut missing_module = Vec::new();
@@ -458,20 +458,20 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
             continue;
         }
 
-        // Primary decode + authentication belong to the family authenticator.
-        // Every family delegates `Projector::project` to
-        // `project_staged::<Codec, Authenticator, Adapter, _>` and implements
-        // `SemanticProjector`; the composed model has been removed.
-        let delegates_staged = production.contains("project_staged::<")
-            && production.contains("super::authenticate::")
-            && production.contains("super::adapt::")
-            && production.contains("impl SemanticProjector<");
-        if !delegates_staged {
+        let decodes_or_validates = production.contains("super::decode::")
+            && (production.contains("decode_") || production.contains("validate_sealed_fact"));
+        let validates = production.contains("super::authenticate::authenticate(");
+        let adapts = production.contains("super::adapt::adapt(");
+        if !(decodes_or_validates && validates && adapts) {
             missing_delegation.push(relative.clone());
         }
 
-        // The removed composed-model surface must not reappear.
+        // The removed staged/composed-model surfaces must not reappear.
         for legacy in [
+            concat!("project_", "staged"),
+            concat!("Semantic", "Projector"),
+            concat!("Fact", "Codec"),
+            concat!("Decoded", "Authenticator"),
             "project_authenticated",
             "AuthenticatedProjector",
             "ProjectorComposed",
@@ -489,15 +489,14 @@ fn target_projectors_authenticate_primary_through_core_before_projecting() {
 
     assert!(
         missing_delegation.is_empty(),
-        "every fact-module projector must delegate Projector::project to \
-         project_staged::<Codec, Authenticator, Adapter, _> and implement SemanticProjector, \
-         so primary bytes are decoded/authenticated before projector policy runs:\n{}",
+        "every fact-module Projector::project must call its local decode/validate, \
+         authenticate, and adapt helpers before projector policy runs:\n{}",
         missing_delegation.join("\n")
     );
     assert!(
         legacy_surface.is_empty(),
-        "the composed model is removed; no project.rs may reference project_authenticated, \
-         AuthenticatedProjector, or ProjectorComposed:\n{}",
+        "the staged/composed model is removed; no project.rs may reference old staged \
+         or composed projector surfaces:\n{}",
         legacy_surface.join("\n")
     );
     assert!(
@@ -577,7 +576,7 @@ fn target_authors_do_not_own_projection_stage_output() {
             "ProjectionContext",
             "ProjectionOutput",
             "impl Projector",
-            "impl SemanticProjector",
+            "project_semantic",
             "project_observed_frame",
         ] {
             if production.contains(marker) {
@@ -603,12 +602,7 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
         let production = strip_line_comments(production_text_before_unit_tests(&text));
-        for marker in [
-            "::decode::decode_fact",
-            "layout as ",
-            "_layout::decode_fact",
-            "_layout::decode_",
-        ] {
+        for marker in ["layout as ", "_layout::decode_fact", "_layout::decode_"] {
             if production.contains(marker) {
                 offenders.push(format!("{relative} contains {marker:?}"));
             }
@@ -617,7 +611,9 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
 
     assert!(
         offenders.is_empty(),
-        "projectors should reason over typed fact helpers from the owning module, not foreign layout codecs. The owning fact module may decode bytes; cross-module projector policy should call named typed helpers/witnesses:\n{}",
+        "projectors should reason over typed fact helpers, not foreign layout codecs. \
+         The owning fact module may decode primary bytes; cross-module projector \
+         policy should call named typed helpers/witnesses:\n{}",
         offenders.join("\n")
     );
 }

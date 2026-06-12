@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{CONTENT_FILE_DELETION_BYTES, TYPE_CONTENT_FILE_DELETION};
 use super::fact::ContentFileDeletionFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ContentFileDeletionFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileDeletionFact, String> {
     let mut reader = wire::Reader::new(bytes);
     reader

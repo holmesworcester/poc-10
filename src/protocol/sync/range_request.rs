@@ -12,8 +12,6 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_SYNC_RANGE_REQUEST: u8 = encode::TYPE_SYNC_RANGE_REQUEST;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncRangeRequestFact, String> {

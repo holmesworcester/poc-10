@@ -11,20 +11,14 @@
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::sync::send_needed_fact_id::{send_needed_fact_id_intent, SendNeededFactId};
 
 use super::sync_have_id_row;
 
-/// Staged read pipeline for the have_id fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "sync::have_id::Codec",
-    authenticate: "sync::have_id::authenticate::SyncHaveIdAuthenticator",
-    adapt: "sync::have_id::adapt::SyncHaveIdAdapter",
-    project: "sync::have_id::project::SyncHaveIdProjector",
-};
+/// Projector route metadata for the have_id fact.
+pub const PIPELINE: FactPipeline =
+    FactPipeline::projector("sync::have_id::project::SyncHaveIdProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncHaveIdProjector;
@@ -41,16 +35,14 @@ impl Projector for SyncHaveIdProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::SyncHaveIdAuthenticator,
-            super::adapt::SyncHaveIdAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<super::fact::SyncHaveIdFact> for SyncHaveIdProjector {
+impl SyncHaveIdProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

@@ -13,9 +13,7 @@
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{
-    project_staged, FactPipeline, ProjectionContext, ProjectionOutput, Projector, SemanticProjector,
-};
+use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -26,13 +24,8 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 
 use super::admin_row;
 
-/// Staged read pipeline for the admin-grant fact.
-pub const PIPELINE: FactPipeline = FactPipeline::Staged {
-    decode: "auth::admin::Codec",
-    authenticate: "auth::admin::authenticate::AdminAuthenticator",
-    adapt: "auth::admin::adapt::AdminAdapter",
-    project: "auth::admin::project::AdminProjector",
-};
+/// Projector route metadata for the admin-grant fact.
+pub const PIPELINE: FactPipeline = FactPipeline::projector("auth::admin::project::AdminProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct AdminProjector;
@@ -49,16 +42,14 @@ impl Projector for AdminProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        project_staged::<
-            super::Codec,
-            super::authenticate::AdminAuthenticator,
-            super::adapt::AdminAdapter,
-            _,
-        >(self, fact, context)
+        let decoded = super::decode::decode_fact(fact.body())?;
+        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
+        let semantic = super::adapt::adapt(authenticated)?;
+        self.project_semantic(fact, semantic, context)
     }
 }
 
-impl SemanticProjector<AdminFact> for AdminProjector {
+impl AdminProjector {
     fn project_semantic(
         &self,
         fact: &Fact,

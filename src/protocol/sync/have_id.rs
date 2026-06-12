@@ -21,8 +21,6 @@ use crate::core::facts::FactId;
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
 
-pub(crate) use decode::Codec;
-
 pub const TYPE_SYNC_HAVE_ID: u8 = encode::TYPE_SYNC_HAVE_ID;
 
 /// Sync have-id projection rows, keyed by `connection_id || fact_id` so

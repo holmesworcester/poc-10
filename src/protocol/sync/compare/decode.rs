@@ -9,16 +9,6 @@ use crate::core::wire;
 use super::encode::{ENCODED_BYTES, TYPE_SYNC_COMPARE};
 use super::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = SyncCompareFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<SyncCompareFact, String> {
     wire::expect_len(bytes, ENCODED_BYTES).map_err(wire_err)?;
     let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;

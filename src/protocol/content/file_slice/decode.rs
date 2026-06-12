@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{CONTENT_FILE_SLICE_BYTES, TYPE_CONTENT_FILE_SLICE};
 use super::fact::{ContentFileSliceFact, FILE_SLICE_BAO_PROOF_BYTES};
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = ContentFileSliceFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_fact(fact.body())
-    }
-}
-
 pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileSliceFact, String> {
     let mut reader = wire::Reader::new(bytes);
     reader

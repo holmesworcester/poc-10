@@ -10,9 +10,7 @@
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 use crate::protocol::auth::endpoint;
 use crate::protocol::connection::ephemeral_secret;
 use crate::protocol::connection::request;
@@ -20,8 +18,6 @@ use crate::protocol::connection::request::fact::{REQUEST_MODE_BOOTSTRAP, REQUEST
 
 use super::fact::ConnectionFact;
 use super::{decode, encode};
-
-pub(crate) struct ConnectionAuthenticator;
 
 #[derive(Debug, Clone)]
 pub(crate) enum AuthenticatedConnection {
@@ -48,170 +44,161 @@ struct OpenedRequest {
     opener_need: ContextNeed,
 }
 
-impl DecodedAuthenticator<super::Codec> for ConnectionAuthenticator {
-    type Authenticated = AuthenticatedConnection;
+pub(crate) enum Authentication {
+    Authenticated(AuthenticatedConnection),
+    NeedsContext(Vec<ContextNeed>),
+}
 
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        _decoded: (),
-        context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        if let Err(error) = verify_fact_id(fact) {
-            return Authentication::Invalid(error);
+pub(crate) fn authenticate(
+    fact: &Fact,
+    context: &ProjectionContext,
+) -> Result<Authentication, String> {
+    if let Err(error) = verify_fact_id(fact) {
+        return Err(error);
+    }
+
+    let request_id = match decode::connection_header_request_id(fact.body()) {
+        Ok(request_id) => request_id,
+        Err(error) => return Err(error),
+    };
+    let request_need = request::project::connection_request_need(fact.id, request_id);
+    let Some(request_fact) = context.payload_for(&request_need) else {
+        return Ok(Authentication::NeedsContext(vec![request_need]));
+    };
+    let opened_request = match open_request_from_context(request_fact, context, fact.id) {
+        Ok(opened_request) => opened_request,
+        Err(_) => {
+            return Ok(Authentication::NeedsContext(vec![
+                request_need,
+                all_local_endpoint_need(fact.id),
+                all_ephemeral_secret_need(fact.id),
+            ]));
         }
+    };
+    let request = opened_request.request;
+    let request_opener_need = opened_request.opener_need;
 
-        let request_id = match decode::connection_header_request_id(fact.body()) {
-            Ok(request_id) => request_id,
-            Err(error) => return Authentication::Invalid(error),
-        };
-        let request_need = request::project::connection_request_need(fact.id, request_id);
-        let Some(request_fact) = context.payload_for(&request_need) else {
-            return Authentication::need(request_need);
-        };
-        let opened_request = match open_request_from_context(request_fact, context, fact.id) {
-            Ok(opened_request) => opened_request,
-            Err(_) => {
-                return Authentication::needs([
-                    request_need,
-                    all_local_endpoint_need(fact.id),
-                    all_ephemeral_secret_need(fact.id),
-                ]);
-            }
-        };
-        let request = opened_request.request;
-        let request_opener_need = opened_request.opener_need;
-
-        let responder_secret_need = all_ephemeral_secret_need(fact.id);
-        for (_, secret_fact) in context.matched_payloads_for(&responder_secret_need) {
-            if secret_fact.scope != FactScope::Local {
-                return Authentication::Invalid(
-                    "connection responder secret context must be local".to_string(),
-                );
-            }
-            let secret = match ephemeral_secret::decode_fact_payload(secret_fact.body())
-                .map_err(|_| "connection responder context is not an ephemeral secret".to_string())
-            {
-                Ok(secret) => secret,
-                Err(error) => return Authentication::Invalid(error),
-            };
-            let Ok(connection) = decode::open_fact_as_responder(fact.body(), &secret) else {
-                continue;
-            };
-            if let Err(error) = validate_connection(fact.id, &connection, &request) {
-                return Authentication::Invalid(error);
-            }
-            if connection.responder_ephemeral_secret_fact_id != secret_fact.id {
-                return Authentication::Invalid(
-                    "connection responder secret id does not match".to_string(),
-                );
-            }
-            let invite_need = bootstrap_invite_need(fact.id, &request);
-            if let Some(invite_need) = &invite_need {
-                if context.payload_for(invite_need).is_none() {
-                    return Authentication::needs([
-                        request_need.clone(),
-                        request_opener_need.clone(),
-                        responder_secret_need.clone(),
-                        invite_need.clone(),
-                    ]);
-                }
-            }
-            if let Err(error) = validate_material(&connection, &request, context, fact.id, None) {
-                return Authentication::Invalid(error);
-            }
-            return Authentication::Authenticated(crate::core::pipeline::AuthenticatedFact::new(
-                fact,
-                AuthenticatedConnection::Responder {
-                    connection,
-                    request_need: request_need.clone(),
-                    request_opener_need: request_opener_need.clone(),
-                    responder_secret_need: responder_secret_need.clone(),
-                    invite_need,
-                },
-            ));
+    let responder_secret_need = all_ephemeral_secret_need(fact.id);
+    for (_, secret_fact) in context.matched_payloads_for(&responder_secret_need) {
+        if secret_fact.scope != FactScope::Local {
+            return Err("connection responder secret context must be local".to_string());
         }
+        let secret = match ephemeral_secret::decode_fact_payload(secret_fact.body())
+            .map_err(|_| "connection responder context is not an ephemeral secret".to_string())
+        {
+            Ok(secret) => secret,
+            Err(error) => return Err(error),
+        };
+        let Ok(connection) = decode::open_fact_as_responder(fact.body(), &secret) else {
+            continue;
+        };
+        if let Err(error) = validate_connection(fact.id, &connection, &request) {
+            return Err(error);
+        }
+        if connection.responder_ephemeral_secret_fact_id != secret_fact.id {
+            return Err("connection responder secret id does not match".to_string());
+        }
+        let invite_need = bootstrap_invite_need(fact.id, &request);
+        if let Some(invite_need) = &invite_need {
+            if context.payload_for(invite_need).is_none() {
+                return Ok(Authentication::NeedsContext(vec![
+                    request_need.clone(),
+                    request_opener_need.clone(),
+                    responder_secret_need.clone(),
+                    invite_need.clone(),
+                ]));
+            }
+        }
+        if let Err(error) = validate_material(&connection, &request, context, fact.id, None) {
+            return Err(error);
+        }
+        return Ok(Authentication::Authenticated(
+            AuthenticatedConnection::Responder {
+                connection,
+                request_need: request_need.clone(),
+                request_opener_need: request_opener_need.clone(),
+                responder_secret_need: responder_secret_need.clone(),
+                invite_need,
+            },
+        ));
+    }
 
-        let endpoint_need = all_local_endpoint_need(fact.id);
-        for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
-            if endpoint_fact.scope != FactScope::Local {
-                return Authentication::Invalid(
-                    "connection endpoint context must be local".to_string(),
-                );
-            }
-            let local_endpoint = match endpoint::decode_fact_payload(endpoint_fact.body())
-                .map_err(|_| "connection endpoint context is malformed".to_string())
-            {
-                Ok(endpoint) => endpoint,
-                Err(error) => return Authentication::Invalid(error),
-            };
-            let Ok(connection) = decode::open_fact(fact.body(), &local_endpoint) else {
-                continue;
-            };
-            if let Err(error) = validate_connection(fact.id, &connection, &request) {
-                return Authentication::Invalid(error);
-            }
-            let initiator_need = exact_need(
-                fact.id,
-                "connection_ephemeral_secret",
-                FactScope::Local,
-                connection.initiator_ephemeral_secret_fact_id,
-            );
-            let Some(initiator_fact) = context.payload_for(&initiator_need) else {
-                return Authentication::needs([
+    let endpoint_need = all_local_endpoint_need(fact.id);
+    for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
+        if endpoint_fact.scope != FactScope::Local {
+            return Err("connection endpoint context must be local".to_string());
+        }
+        let local_endpoint = match endpoint::decode_fact_payload(endpoint_fact.body())
+            .map_err(|_| "connection endpoint context is malformed".to_string())
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => return Err(error),
+        };
+        let Ok(connection) = decode::open_fact(fact.body(), &local_endpoint) else {
+            continue;
+        };
+        if let Err(error) = validate_connection(fact.id, &connection, &request) {
+            return Err(error);
+        }
+        let initiator_need = exact_need(
+            fact.id,
+            "connection_ephemeral_secret",
+            FactScope::Local,
+            connection.initiator_ephemeral_secret_fact_id,
+        );
+        let Some(initiator_fact) = context.payload_for(&initiator_need) else {
+            return Ok(Authentication::NeedsContext(vec![
+                request_need.clone(),
+                request_opener_need.clone(),
+                endpoint_need.clone(),
+                initiator_need,
+            ]));
+        };
+        let initiator_secret = match ephemeral_secret::decode_fact_payload(initiator_fact.body())
+            .map_err(|_| "connection initiator context is not an ephemeral secret".to_string())
+        {
+            Ok(secret) => secret,
+            Err(error) => return Err(error),
+        };
+        let invite_need = bootstrap_invite_need(fact.id, &request);
+        if let Some(invite_need) = &invite_need {
+            if context.payload_for(invite_need).is_none() {
+                return Ok(Authentication::NeedsContext(vec![
                     request_need.clone(),
                     request_opener_need.clone(),
                     endpoint_need.clone(),
                     initiator_need,
-                ]);
-            };
-            let initiator_secret =
-                match ephemeral_secret::decode_fact_payload(initiator_fact.body()).map_err(|_| {
-                    "connection initiator context is not an ephemeral secret".to_string()
-                }) {
-                    Ok(secret) => secret,
-                    Err(error) => return Authentication::Invalid(error),
-                };
-            let invite_need = bootstrap_invite_need(fact.id, &request);
-            if let Some(invite_need) = &invite_need {
-                if context.payload_for(invite_need).is_none() {
-                    return Authentication::needs([
-                        request_need.clone(),
-                        request_opener_need.clone(),
-                        endpoint_need.clone(),
-                        initiator_need,
-                        invite_need.clone(),
-                    ]);
-                }
+                    invite_need.clone(),
+                ]));
             }
-            if let Err(error) = validate_material(
-                &connection,
-                &request,
-                context,
-                fact.id,
-                Some(&initiator_secret),
-            ) {
-                return Authentication::Invalid(error);
-            }
-            return Authentication::Authenticated(crate::core::pipeline::AuthenticatedFact::new(
-                fact,
-                AuthenticatedConnection::Initiator {
-                    connection,
-                    request_need: request_need.clone(),
-                    request_opener_need: request_opener_need.clone(),
-                    endpoint_need: endpoint_need.clone(),
-                    initiator_need,
-                    invite_need,
-                },
-            ));
         }
-
-        Authentication::needs([
-            request_need,
-            request_opener_need,
-            responder_secret_need,
-            endpoint_need,
-        ])
+        if let Err(error) = validate_material(
+            &connection,
+            &request,
+            context,
+            fact.id,
+            Some(&initiator_secret),
+        ) {
+            return Err(error);
+        }
+        return Ok(Authentication::Authenticated(
+            AuthenticatedConnection::Initiator {
+                connection,
+                request_need: request_need.clone(),
+                request_opener_need: request_opener_need.clone(),
+                endpoint_need: endpoint_need.clone(),
+                initiator_need,
+                invite_need,
+            },
+        ));
     }
+
+    Ok(Authentication::NeedsContext(vec![
+        request_need,
+        request_opener_need,
+        responder_secret_need,
+        endpoint_need,
+    ]))
 }
 
 fn open_request_from_context(
@@ -375,13 +362,9 @@ fn bootstrap_invite_need(
 mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::connection::connection::encode;
     use crate::protocol::connection::connection::fact::ConnectionFact;
-
-    use super::ConnectionAuthenticator;
 
     fn canonical_fact() -> Fact {
         let initiator_secret = [9; 32];
@@ -405,19 +388,13 @@ mod tests {
         Fact::new(FactScope::Local, 100, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, super::AuthenticatedConnection> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ConnectionAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<super::Authentication, String> {
+        super::super::decode::validate_sealed_fact(fact.body())?;
+        super::authenticate(fact, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]

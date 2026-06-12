@@ -10,24 +10,16 @@
 //! context proof are interpretation the projector owns.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ConnectionCloseFact;
 
-pub(crate) struct ConnectionCloseAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for ConnectionCloseAuthenticator {
-    type Authenticated = ConnectionCloseFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        close: ConnectionCloseFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_close(fact, close))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    close: ConnectionCloseFact,
+    _context: &ProjectionContext,
+) -> Result<ConnectionCloseFact, String> {
+    prove_decoded_close(fact, close)
 }
 
 fn prove_decoded_close(
@@ -46,13 +38,9 @@ fn prove_decoded_close(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::connection::close::encode;
     use crate::protocol::connection::close::fact::ConnectionCloseFact;
-
-    use super::ConnectionCloseAuthenticator;
 
     fn canonical_fact() -> Fact {
         let close = ConnectionCloseFact {
@@ -63,27 +51,18 @@ mod tests {
         Fact::new(FactScope::Local, 100, bytes)
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ConnectionCloseFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ConnectionCloseAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ConnectionCloseFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]

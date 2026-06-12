@@ -147,13 +147,14 @@ that matched that one need.
 
 ## Typed Facts
 
-Core persists facts as opaque bytes, but primary projector input is decoded
-through core's typed adapter. The owning fact module supplies a small codec:
+Core persists facts as opaque bytes, but primary projector input was decoded
+through core's typed adapter in this archived design. The owning fact module
+supplied a small codec:
 
 ```rust
 pub(crate) struct Codec;
 
-impl crate::core::projectors::FactCodec for Codec {
+impl crate::core::projectors::ArchivedCodecTrait for Codec {
     type Payload = fact::DeviceInviteFact;
 
     fn decode_fact(fact: &Fact) -> Result<Self::Payload, String> {

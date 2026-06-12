@@ -8,16 +8,6 @@ use crate::core::wire;
 use super::encode::{REMOVAL_FRONTIER_BYTES, TYPE_REMOVAL_FRONTIER};
 use super::fact::RemovalFrontierFact;
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = RemovalFrontierFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_removal_frontier(fact.body())
-    }
-}
-
 pub fn decode_removal_frontier(bytes: &[u8]) -> Result<RemovalFrontierFact, String> {
     wire::expect_len(bytes, REMOVAL_FRONTIER_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_REMOVAL_FRONTIER {

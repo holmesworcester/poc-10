@@ -9,16 +9,6 @@ use crate::core::wire;
 use super::encode::{validate_key_wrap, KEY_WRAP_BYTES, TYPE_KEY_WRAP};
 use super::fact::{KeyWrapFact, WrappedSecretKind};
 
-pub(crate) struct Codec;
-
-impl crate::core::pipeline::FactCodec for Codec {
-    type Payload = KeyWrapFact;
-
-    fn decode_fact(fact: &crate::core::facts::Fact) -> Result<Self::Payload, String> {
-        decode_key_wrap(fact.body())
-    }
-}
-
 pub fn decode_key_wrap(bytes: &[u8]) -> Result<KeyWrapFact, String> {
     wire::expect_len(bytes, KEY_WRAP_BYTES).map_err(wire_err)?;
     if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_KEY_WRAP {

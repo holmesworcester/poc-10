@@ -13,24 +13,16 @@
 //! facts, also in the projector.
 
 use crate::core::facts::Fact;
-use crate::core::pipeline::{
-    verify_fact_id, Authentication, DecodedAuthenticator, ProjectionContext,
-};
+use crate::core::pipeline::{verify_fact_id, ProjectionContext};
 
 use super::fact::ContentReactionFact;
 
-pub(crate) struct ContentReactionAuthenticator;
-
-impl DecodedAuthenticator<super::Codec> for ContentReactionAuthenticator {
-    type Authenticated = ContentReactionFact;
-
-    fn authenticate_decoded<'a>(
-        fact: &'a Fact,
-        reaction: ContentReactionFact,
-        _context: &ProjectionContext,
-    ) -> Authentication<'a, Self::Authenticated> {
-        Authentication::from_result(fact, prove_decoded_reaction(fact, reaction))
-    }
+pub(crate) fn authenticate(
+    fact: &Fact,
+    reaction: ContentReactionFact,
+    _context: &ProjectionContext,
+) -> Result<ContentReactionFact, String> {
+    prove_decoded_reaction(fact, reaction)
 }
 
 fn prove_decoded_reaction(
@@ -45,15 +37,11 @@ fn prove_decoded_reaction(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{
-        Authentication, DecodedAuthenticator, FactCodec, ProjectionContext,
-    };
+    use crate::core::pipeline::ProjectionContext;
     use crate::protocol::content::reaction::author::authored_reaction_fact;
     use crate::protocol::content::reaction::fact::{
         ContentReactionFact, ReactionCiphertext, REACTION_NONCE_BYTES,
     };
-
-    use super::ContentReactionAuthenticator;
 
     const PRIVATE_KEY: [u8; 32] = [7; 32];
 
@@ -71,27 +59,18 @@ mod tests {
         .expect("authored content reaction fact")
     }
 
-    fn authenticate(fact: &Fact) -> Authentication<'_, ContentReactionFact> {
-        match super::super::Codec::decode_fact(fact) {
-            Ok(decoded) => ContentReactionAuthenticator::authenticate_decoded(
-                fact,
-                decoded,
-                &ProjectionContext::default(),
-            ),
-            Err(error) => Authentication::Invalid(error),
-        }
+    fn authenticate(fact: &Fact) -> Result<ContentReactionFact, String> {
+        let decoded = super::super::decode::decode_fact(fact.body())?;
+        super::authenticate(fact, decoded, &ProjectionContext::default())
     }
 
     fn is_invalid(fact: &Fact) -> bool {
-        matches!(authenticate(fact), Authentication::Invalid(_))
+        authenticate(fact).is_err()
     }
 
     #[test]
     fn authenticates_canonical_fact() {
-        assert!(matches!(
-            authenticate(&canonical_fact()),
-            Authentication::Authenticated(_)
-        ));
+        assert!(authenticate(&canonical_fact()).is_ok());
     }
 
     #[test]
