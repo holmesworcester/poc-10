@@ -1,32 +1,39 @@
 # Core Pipeline
 
 The pipeline is core's fact lifecycle plus the SQL-backed runtime work loop that
-commits it. It turns admitted facts, standing context, due time wakes, and
-queued intents into committed runtime state. The pipeline does not know protocol
-semantics; it owns route invocation, context fanout, retry behavior, and
-transaction boundaries.
+commits it. It turns durable facts, ephemeral projection inputs, standing
+context, due time wakes, and queued intents into committed runtime state. The
+pipeline does not know protocol semantics; it owns route invocation, context
+fanout, replay mode, retry behavior, and transaction boundaries.
 
 ## Interface To Core And Protocol
 
 The public facade and work driver is `src/core/pipeline.rs`. Runtime code calls
 it to:
 
-- submit facts to `facts` and `pending_projection`.
+- submit durable facts to `facts`, `local_fact_admissions`, and
+  `pending_projection`.
+- commit `PipelineEffects` from commands, projectors, and handlers.
+- record ephemeral projection inputs in `ephemeral_projection_inputs`.
 - submit durable intents to `intents`.
 - submit local intents to `local_intents`.
 - admit due time wakes as pending projection work.
-- drain pending projection with the registered protocol projector.
+- enqueue retained facts and due time wakes as replay projection work.
+- drain pending projection and ephemeral projection inputs with the registered
+  protocol projector.
 - dispatch queued intents with the registered protocol handlers.
 - purge exact facts and their core-owned derived rows.
 - run command, daemon, and replay work orders through one pipeline engine.
 
 Protocol code participates through `Projector`, `FactCodec`,
 `DecodedAuthenticator`, `Adapter`, `SemanticProjector`, `IntentHandler`,
-`ProjectionOutput`, and `PipelineEffects`. Fact families own the concrete stage
-implementations.
-Projectors decide what facts need or offer, what rows they materialize, and what
-follow-up intents to enqueue. Handlers decide what bounded stateful work to
-perform. The pipeline decides when those effects become durable.
+`ProjectionOutput`, `PipelineEffects`, and `HandlerRoute`. Fact families own the
+concrete stage implementations. Projectors decide what facts need or offer,
+what rows they materialize, what facts or ephemeral projection inputs they emit,
+and what follow-up intents to enqueue. Handlers decide what bounded stateful
+work to perform. Handler routes declare whether their intents may run during
+replay and whether a daemon should install a live-only recurring schedule. The
+pipeline decides when those effects become durable.
 
 ## Read Projection Path
 
@@ -42,6 +49,10 @@ loads the fact and context, then invokes the registered protocol projector. The
 protocol router selects the tag route, core's staged helper runs
 decode/authenticate/adapt/project, and the settled `ProjectionOutput` hands
 context replacement plus `PipelineEffects` to the same commit boundary.
+`Authentication::NeedsAuthentication` becomes standing context needs, so the
+fact can park until the required verifier, key, or envelope context appears.
+`ProjectionContext` also exposes the projection mode and due time ranges without
+giving projectors a storage handle or a clock read.
 
 ## Write Authoring Path
 
@@ -57,21 +68,28 @@ signing, encryption, and typed assembly. Family `encode.rs` owns canonical byte
 encoding only. Before storage, the runtime may call the protocol-owned
 `FactAdmissionFn`; poc-10 installs one that routes every fact tag to the same
 family `Codec` and `DecodedAuthenticator` used by the read path. After
-admission the fact is just queued for projection.
+admission the fact is just queued for projection. The authored-fact self-check
+accepts `NeedsAuthentication` because some valid facts require context that is
+unavailable at authoring time; it rejects `Invalid` because that means
+authoring, encoding, signing, or id construction drifted.
 
 ## Data Flow
 
 ```text
 submit_fact_to_store
   -> facts/local_fact_admissions
-  -> pending_projection
+  -> pending_projection(normal)
+
+PipelineEffects.ephemeral_facts
+  -> ephemeral_projection_inputs
 
 PipelineEngine::drain_projection
+  -> load durable pending_projection rows, then ephemeral_projection_inputs
   -> load fact, standing context, matched payload facts, and due time ranges
   -> run staged route and resolve already-satisfied declared needs
   -> replace context and time wakes for that owner
   -> wake newly matched dependents
-  -> commit row mutations, admitted facts, purges, and intents
+  -> commit purges, admitted durable facts, ephemeral inputs, row mutations, and intents
 
 dispatch_queued_intent
   -> claim one durable or local intent row
@@ -85,23 +103,42 @@ range; projection inserts matching owners into `pending_projection`, stores the
 due `TimeRange`, and projection context exposes that range without allowing
 projectors to read the clock.
 
+Replay also uses the same path. Replay queues retained facts and replay due
+time wakes into `pending_projection` with mode `replay`, exposes that mode
+through `ProjectionContext::is_replay()`, and suppresses follow-up intents
+unless the matching `HandlerRoute` declares `runs_during_replay`. Handler route
+recurrence is live-only daemon state: recurring schedules are installed in
+memory after startup and are not replayed.
+
 ## Invariants
 
 - Queue consumption and output commit are atomic. A fact is not removed from
   pending projection until its replacement context and effects commit. An
   intent row is not deleted until its handler output commits.
-- Retry is represented by keeping work queued. Projection failures and fatal
-  handler errors abort the pass. Handler retry errors leave the intent row in
+- Retry is represented by keeping work queued. Fatal handler errors and SQL
+  commit failures abort the pass. Handler retry errors leave the intent row in
   place; local retry rows rotate to the tail.
 - Durable intents win over matching local intents. When a durable intent is
   handled, the duplicate local row is removed in the same transaction.
+- Projection mode is sticky toward replay. If an owner is already queued in
+  replay mode, later normal wakes do not downgrade it.
 - Context is replacement by owner. The settled `ProjectionOutput` is the
   complete standing needs/offers/time-wake set for that fact.
 - Wake fanout is based on newly added context rows from the replacement delta.
   Stable unmet needs do not self-wake forever.
 - Projector output may purge only the fact being projected. Cross-fact purge is
   rejected before commit.
+- Rejected durable projection items do not stall the batch. Context-free
+  rejection purges the fact; context-dependent rejection keeps the fact bytes as
+  evidence and clears only the pending row.
+- Ephemeral projection inputs are one-shot temp rows. They may read durable
+  context and emit facts, other ephemeral inputs, rows, or intents, but they
+  cannot leave standing offers or time wakes; if transient needs remain, they
+  cannot emit effects in the same projection.
 - Row mutations are validated against the runtime allowlist before SQL writes.
+- Typed-table inserts are idempotent only when the existing row matches every
+  supplied column; changing typed projection state is expressed as
+  `DeleteWhere` followed by `InsertValues`.
 - `insert_select` accepts only static, comment-free `SELECT` statements over
   declared source tables and bound parameters.
 
@@ -109,8 +146,8 @@ projectors to read the clock.
 
 - `pipeline.rs` owns `WorkStatus`, handler route metadata, handler sets, and
   `PipelineEngine`, the generic state machine that admits facts and due time
-  wakes, drains pending projection over durable and ephemeral inputs, and orders
-  intent dispatch.
+  wakes, queues replay work, drains pending projection over durable and
+  ephemeral inputs, and orders intent dispatch.
 - `route.rs` owns tag route declarations, staged route metadata, and the
   optional protocol-owned fact admission hook type.
 - `decode.rs` owns the decode trait core invokes at the read-stage boundary.
@@ -125,31 +162,35 @@ projectors to read the clock.
 - `effects.rs` owns `ProjectionOutput`, time wakes, and due time ranges.
 - `pipeline_one.rs` owns one queued fact pipeline item: matched-context and due
   time-range loading, staged decode/authenticate/adapt/project execution,
-  rejection handling, and the commit boundary.
-- `pipeline.rs` owns pending projection draining over durable facts and
-  ephemeral inputs as part of the runtime state machine.
-- `context_store.rs` owns persisted context edges, range-overlap matching, projection
-  context assembly, and wake fanout.
+  durable/ephemeral source rules, rejection handling, context resolution, and
+  the projection commit boundary.
+- `context_store.rs` owns persisted context edges, range-overlap matching,
+  projection context assembly, and wake fanout.
 - `dispatch.rs` owns intent queue claiming, handler input loading, retry
   handling, and handler-output commit.
 - `commit_effects.rs` owns shared effect validation and the ordered SQL commit
-  of purges, admitted facts, ephemeral facts, row mutations, and follow-up
-  intents.
+  of purges, admitted durable facts, ephemeral projection inputs, row
+  mutations, and follow-up intents, including replay-mode intent suppression.
 - `insert_select.rs` owns the narrow checked `INSERT OR IGNORE ... SELECT`
   helper used by pipeline fanout operations.
 
 ## Projection Commit Boundary
 
-One projection commit performs this ordered unit:
+For a durable fact, one projection commit performs this ordered unit:
 
 ```text
-delete pending row
+delete durable pending row
 clear due time range rows for this owner
 delete old context and time wakes owned by fact
 insert new needs, offers, and time wakes
 wake owners whose needs match newly added offers
 apply PipelineEffects through commit_effects
 ```
+
+For an ephemeral projection input, the commit validates that no durable offers
+or time wakes remain, deletes any old context for that input id, deletes the
+ephemeral input row, and applies `PipelineEffects` through `commit_effects`.
+Ephemeral inputs do not write `facts` or `local_fact_admissions` for themselves.
 
 Before that boundary, projector runs are calculation. The projection loop may
 grow `ProjectionContext` for this one item and rerun the projector when the
