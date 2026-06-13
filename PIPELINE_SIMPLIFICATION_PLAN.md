@@ -1,343 +1,449 @@
-# Pipeline Simplification Plan
+# Poc-10 Runtime Cutover Plan
 
 ## Goal
 
-Simplify the `poc-10` pipeline so `src/core/pipeline.rs` owns only durable
-runtime mechanics:
+Replace the current pipeline abstraction with a smaller runtime model:
 
-- queueing projection work,
-- running projectors,
-- reading and writing projection state,
-- recording emitted effects,
-- replacing unmet needs while a fact is parked,
-- recording append-only offers,
-- carrying matched context on pending projection work,
-- unparking facts whose needs are satisfied by new offers.
+- commands snapshot pre-command state and author durable facts,
+- runtime enqueues authored facts,
+- `project_fact` projects one queued fact and commits it,
+- `handle_intent` handles one queued intent and commits it,
+- store provides storage primitives only,
+- daemon drains queues and owns replay timing.
 
-Projectors should own the meaning of facts. That means each projector should
-handle raw fact decoding, signature/context validation, legacy adaptation,
-semantic projection, and effect/need/offer emission.
+There is no backwards-compatible staged pipeline. Projectors own fact meaning.
+Core owns work-item mechanics.
 
-## Current State
+## File Shape
 
-The worktree is `/home/holmes/poc-10`.
+Target core files:
 
-Recent commits already completed related groundwork:
+- `src/core/store.rs`: SQLite connection, transactions, fact storage primitives,
+  and typed row primitives.
+- `src/core/project_fact.rs`: `drain_facts`, `project_fact`, projection commit,
+  context matching/requeue, and time wakes.
+- `src/core/handle_intent.rs`: `drain_intents`, `handle_intent`, intent retry,
+  and intent commit.
+- `src/core/command_context.rs`: command read context and authored command
+  result types.
 
-- `4367fcf Carry projection matches on pending queue`
-- `34b8aad Simplify pipeline module layout`
+`src/core/pipeline.rs` is dissolved. Do not preserve a compatibility facade.
 
-Already done:
+Protocol files:
 
-- `src/core/pipeline/` was folded into `src/core/pipeline.rs`.
-- `src/core/pipeline/README.md` was moved to `src/core/pipeline.md`.
-- `pending_projection_matches` exists.
-- Queued durable projection work now carries matched context.
-- Durable offers are append-only.
-- Needs are replacement-style while a fact is parked.
-- Needs can be reset/removed when projection completes.
-- `insert_select` was removed.
+- `author.rs`: constructs fact bytes and `Fact` values.
+- `queries.rs`: exposes projected-state reads owned by the fact family.
+- `commands.rs`: queries pre-command state, calls authors, and returns authored
+  facts plus a receipt.
+- `project.rs`: owns decode, authenticate, adapt, replay behavior, retention,
+  deletion, context needs/offers, rows, effects, and intents for that fact
+  family.
 
-Remaining simplification:
+All fact-family `decode`, `authenticate`, and `adapt` helpers must be local
+modules inside the owning `project.rs`.
 
-- Remove the staged core API:
-  - `FactPipeline::Staged`
-  - `FactCodec`
-  - `DecodedAuthenticator`
-  - `Adapter`
-  - `SemanticProjector`
-  - `project_staged`
-- Move the staged logic into each relevant projector.
+## Commands
 
-## Target Model
+A simple command is:
 
-The target flow should be:
+```text
+queries.rs snapshot -> author.rs facts -> runtime enqueue
+```
 
-1. Route a raw fact to the matching projector.
-2. The projector decodes the fact body.
-3. The projector checks whether the required context offers are present.
-4. If context is missing, the projector emits needs.
-5. The pipeline records those needs and parks the fact.
-6. When new offers arrive, the pipeline finds parked facts with matching needs.
-7. The pipeline adds matched offers to `pending_projection_matches`.
-8. The pipeline queues those facts again as pending projection work.
-9. The projector runs again with the matched context already attached.
-10. If validation succeeds, the projector emits durable effects.
-11. The pipeline commits effects, clears parked needs for completed projection,
-    and records any new offers.
+Rules:
 
-The pipeline should not perform a separate initial context search. Context
-should be built through projector-emitted needs and offers, then carried on the
-pending projection queue.
+- Commands do not call other commands.
+- Commands do not commit, drain, project, handle intents, or mutate rows.
+- Commands do not emit intents, row mutations, purges, or derived state.
+- Commands query only pre-command state.
+- Pre-command projected-state reads must go through the owning fact family's
+  `queries.rs`.
+- Commands may read clock/local capabilities through the command host.
+- Commands may compose multiple newly authored facts in memory.
+- Dependencies between newly authored facts are passed directly as ids/values,
+  not through projected rows.
+- `author.rs` constructs `Fact` values only. It does not enqueue.
+- Runtime atomically inserts authored facts as retained and enqueues them for
+  projection.
 
-## Success Criteria
+Command shape:
 
-Treat the work as incomplete until every applicable success criterion below is
-met or explicitly documented as intentionally deferred.
+```rust
+struct AuthoredCommand<T> {
+    receipt: T,
+    facts: Vec<Fact>,
+}
 
-### Core Pipeline Success Criteria
+fn command(ctx: &CommandContext<'_>, input: Input) -> Result<AuthoredCommand<Receipt>, String> {
+    let snapshot = family::queries::snapshot(ctx.store(), input)?;
+    let capability = ctx.local_signing_capability(snapshot.workspace_id)?;
+    let now = ctx.next_timestamp();
 
-- `src/core/pipeline.rs` no longer defines or exports staged processing traits
-  or helpers:
-  - no `FactCodec`,
-  - no `DecodedAuthenticator`,
-  - no `Adapter`,
-  - no `SemanticProjector`,
-  - no `project_staged`,
-  - no `authenticate_authored` helper that combines staged decode/auth logic.
-- `FactPipeline::Staged` is removed. If a route metadata type remains, it
-  describes projector routing only.
-- Core pipeline code does not know about decode/authenticate/adapt stage names.
-- Core pipeline code invokes a projector with:
-  - the raw `Fact`,
-  - the projection context already attached to pending work,
-  - database/runtime services needed to commit effects.
-- Core pipeline code is responsible for:
-  - enqueueing pending projection work,
-  - loading pending projection matches,
-  - passing loaded context into projectors,
-  - recording effects,
-  - recording replacement needs for parked facts,
-  - recording append-only offers,
-  - matching new offers to parked needs,
-  - adding matched offers to `pending_projection_matches`,
-  - requeueing facts whose needs were matched,
-  - clearing needs after successful projection.
-- Core pipeline code is not responsible for:
-  - deciding whether a fact is semantically authenticated,
-  - adapting fact versions into semantic payloads,
-  - interpreting signature-checked offers beyond need/offer matching,
-  - performing a pre-projection context search.
+    let fact = family::author::fact(&snapshot, &capability, now, input)?;
+    let signature = auth::signature::author::sign_fact(
+        snapshot.workspace_id,
+        &fact,
+        &capability.private_key,
+        now,
+    )?;
 
-### Projector Success Criteria
+    Ok(AuthoredCommand {
+        receipt: Receipt { fact_id: fact.id },
+        facts: vec![fact, signature],
+    })
+}
+```
 
-- Every protocol fact that was previously wired through `project_staged` has an
-  explicit `Projector::project` implementation that performs the full local
-  flow.
-- Each projector-local flow is readable at the call site:
-  - decode raw fact body,
-  - request missing context as needs,
-  - validate present context offers,
-  - adapt payload shape if needed,
-  - project semantic meaning,
-  - emit effects/offers/needs.
-- New projector code contains short comments for context-dependent validation.
-  Comments should explain:
-  - what offer is required,
-  - why the fact parks when the offer is missing,
-  - what compatibility check is made when the offer is present.
-- No projector hides the old staged model behind a new generic helper with a
-  different name.
-- Repetition is acceptable when it keeps the projector boundary obvious. Only
-  extract helpers that are protocol-local and make the individual projector
-  easier to read.
-- Legacy version adaptation, when needed, happens in the relevant projector or
-  in a helper called directly by that projector.
-- A projector may use helper functions in sibling `decode.rs`, `adapt.rs`, or
-  validation files, but those helpers are plain functions, not core pipeline
-  stages.
+Runtime submit:
 
-### Signature Context Success Criteria
+```rust
+fn submit_authored_command<T>(cmd: AuthoredCommand<T>) -> Result<T, String> {
+    let receipt = cmd.receipt;
 
-- Signature validation is represented to most projectors by a
-  signature-checked context offer.
-- Projectors that require a signature-checked context offer must handle all
-  three cases explicitly:
-  - missing offer: emit a need and return a non-error `ProjectionOutput` that
-    parks the fact,
-  - present compatible offer: continue projection,
-  - present incompatible offer: return an error.
-- The need emitted for a missing signature-checked offer must be precise enough
-  that a later matching offer can be joined back to the same parked fact.
-- When the matching offer arrives, pipeline code must add it to
-  `pending_projection_matches` for the parked fact before requeueing projection.
-- On retry, the projector should read the signature-checked offer from the
-  context passed with pending work. It should not perform its own database
-  search for context.
-- A projector must validate that a present signature-checked offer applies to
-  the current fact. The check should include the relevant author/fact/purpose
-  fields used by that protocol family.
-- Signature context offers should be durable context facts/offers, not replayed
-  local intents.
-- Local intents must be described wherever mentioned as ephemeral,
-  not-replayed intents.
+    store.write_transaction(|tx| {
+        for fact in cmd.facts {
+            tx.insert_retained_fact(&fact)?;
+            enqueue_projection(tx, fact.id, ProjectionMode::Normal)?;
+        }
+        Ok(())
+    })?;
 
-### Need And Offer Success Criteria
+    Ok(receipt)
+}
+```
 
-- Offers are append-only.
-- Needs are replacement-style for a parked projection attempt.
-- A projector may replace the current unmet needs for a parked fact by emitting
-  the needs that are currently required.
-- Successful projection clears the parked needs for that fact.
-- Replacing needs must not withdraw durable offers.
-- The docs must use "replacement needs" only in this limited sense:
-  replacement of the parked fact's current unmet-needs set, not mutation of
-  historical offers or completed effects.
-- The matching flow is:
-  - projector emits needs,
-  - pipeline parks those needs,
-  - later projector or runtime work emits offers,
-  - pipeline matches offers to parked needs,
-  - pipeline records matches on pending work,
-  - pipeline reruns the projector with matched context.
+Command-created facts are retained immediately. They never enter the volatile
+incoming candidate store.
 
-### Registry And Admission Success Criteria
+## Command Chains
 
-- The protocol registry routes facts to projectors without exposing staged
-  decode/authenticate/adapt metadata.
-- Admission checks, where still needed, are protocol-local.
-- Admission helpers may decode and validate fact bytes, but they must not
-  depend on core `FactCodec` or `DecodedAuthenticator` traits.
-- Admission helpers must not make replay-only assumptions about local intents.
-- Tests that inspect protocol registry metadata are updated to assert the new
-  simpler model.
+Simple commands may compose facts in memory, but they must not commit or query
+mid-chain.
 
-### Documentation Success Criteria
+Allowed:
 
-- `src/core/pipeline.md` describes the new model:
-  - route raw facts to projectors,
-  - projectors emit effects/needs/offers,
-  - pipeline records effects,
-  - pipeline parks unmet needs,
-  - pipeline carries matched context on pending work,
-  - pipeline unparks facts when offers satisfy needs.
-- `src/core/pipeline.md` does not describe the active pipeline as
-  `route -> decode -> authenticate -> adapt -> project`.
-- Any historical discussion of the old staged model is clearly labeled as old
-  context or removed.
-- `src/core/README.md`, `docs/RULES.md`, tests, and research notes are updated
-  so they do not contradict the new model.
-- The docs explicitly clarify:
-  - ephemeral projection inputs are pending-work/context inputs, not replayed
-    durable facts,
-  - local intents are ephemeral, not-replayed intents,
-  - "due time wakes" means scheduled time-based wakeups that become pending
-    projection work when their time arrives,
-  - recurring work uses recurring intents and should not require a live-only
-    recurring daemon schedule in replay docs unless a real live-only runtime
-    behavior remains.
+```text
+query existing state
+author fact A
+pass A.id directly to author fact B
+return [A, B]
+```
 
-### Test Success Criteria
+Disallowed:
 
-- The test suite includes realistic coverage for a context-dependent projection
-  parking when a required offer is missing.
-- The test suite includes realistic coverage for the same projection resuming
-  after a matching offer is recorded on pending work.
-- Tests verify that matched context is read from pending projection matches, not
-  from an initial context search.
-- Tests or guardrails verify that old staged pipeline names are removed from
-  active core pipeline APIs.
-- Registry tests verify projector-only routing or the chosen simplified route
-  metadata.
-- Documentation layout/cleanliness tests are updated to match the new doc path
-  and wording.
-- Run at least:
-  - `cargo fmt --check`,
-  - focused tests changed by the work,
-  - `cargo test -q`.
+```text
+author fact A
+commit/project A
+query A's projected row
+author fact B
+```
 
-### Completion Success Criteria
+If an operation needs mid-chain projected state, it is not a simple command. It
+must be either:
 
-- `rg "FactPipeline::Staged|project_staged|FactCodec|DecodedAuthenticator|SemanticProjector|authenticate_authored" src tests docs`
-  returns no active references, except any intentionally retained historical
-  note that clearly says the staged model was removed.
-- `rg "route -> decode -> authenticate -> adapt -> project" src docs tests`
-  returns no active description of the current pipeline.
-- `git status --short` shows only intentional files before committing.
-- The final implementation is committed on the same `/home/holmes/poc-10`
-  branch before handoff or review.
+- a user-visible sequence of commands where command A returns only after its
+  command-visible projection barrier, then command B queries normal state, or
+- an explicit workflow/daemon operation.
 
-## Auth And Signature Context
+`chop_now`-style operations that submit/drain in phases are workflows, not
+simple commands.
 
-Do not keep a shared core auth outcome as a pipeline concept.
+## Incoming Facts
 
-Auth outcome should be projector-handled in most cases. In almost all cases,
-the projector should decide that a fact is authenticated enough to project
-based on the presence of a signature-checked context offer.
+Network/sync/handler-arrived facts enter as volatile candidates:
 
-The intended pattern is:
+```rust
+fn submit_incoming_fact(fact: Fact) -> Result<(), String> {
+    store.write_transaction(|tx| {
+        tx.insert_candidate_fact(&fact)?;
+        enqueue_candidate_projection(tx, fact.id)?;
+        Ok(())
+    })
+}
+```
 
-- If the required signature-checked offer is missing, the projector emits a
-  need and projection parks.
-- If the offer is present, the projector verifies that the offer applies to
-  this fact, author, and purpose, then continues.
-- If the offer is present but incompatible, the projector returns an error.
-- Admission may still use small protocol-local helpers where needed, but those
-  helpers must not recreate a core `decode -> authenticate -> adapt -> project`
-  pipeline.
+Candidate facts may be lost before projection. Projectors decide whether a
+candidate should become retained.
 
-Projector code should make this boundary readable and explicit. New projector
-code should have short comments documenting why a fact is parked, what offer is
-needed, and what validation is performed after that offer is present.
+## Projection
 
-## Implementation Plan
+`drain_facts` is only a loop and budget:
 
-1. Verify the starting state with `git status --short` in
-   `/home/holmes/poc-10`.
+```rust
+fn drain_facts(limit: usize) -> Result<ProjectionProgress, String> {
+    let mut progress = ProjectionProgress::default();
 
-2. Remove staged pipeline vocabulary from `src/core/pipeline.rs`.
-   Keep only runtime mechanics that the pipeline owns: pending queues, matched
-   context, need/offer parking, projector invocation, effect application, and
-   commits.
+    while progress.projected < limit {
+        match project_fact()? {
+            ProjectFact::Projected(report) => progress.merge(report),
+            ProjectFact::NoWork => break,
+        }
+    }
 
-3. Simplify route metadata.
-   Replace `FactPipeline::Staged { decode, authenticate, adapt, project }`
-   with projector-only routing, or remove the field entirely if the registry
-   only needs tag-to-projector mapping.
+    Ok(progress)
+}
+```
 
-4. Update `src/protocol/registry.rs` and `src/core/versioning.rs`.
-   Registry/versioning code should route by fact tag and projector. It should
-   not expose decode/authenticate/adapt as core pipeline stages.
+`project_fact` is the complete n=1 fact projection transaction:
 
-5. Move orchestration into each `project.rs`.
-   Each `Projector::project` implementation should explicitly:
-   - decode the raw fact body,
-   - check required context offers,
-   - emit needs when context is missing,
-   - validate present offers,
-   - adapt legacy/current payloads where needed,
-   - project semantic data,
-   - emit effects, needs, and offers.
+```rust
+fn project_fact() -> Result<ProjectFact, String> {
+    store.write_transaction(|tx| {
+        let Some(item) = claim_next_fact_item(tx)? else {
+            return Ok(ProjectFact::NoWork);
+        };
 
-6. Convert protocol helper modules.
-   - `decode.rs` should expose plain decode functions, not `FactCodec`.
-   - `adapt.rs` should expose plain adapt functions, not `Adapter`.
-   - `authenticate.rs` should expose projector/protocol-local validation
-     helpers, not `DecodedAuthenticator`.
+        let input = load_projection_input(tx, item)?;
+        let output = projector.project(&input.fact, &input.context)?;
 
-7. Update admission authentication.
-   Replace `authenticate_authored::<Codec, Authenticator>` style calls with
-   projector/protocol-local admission helpers. Admission helpers may decode and
-   validate facts, but should not reintroduce the old staged model.
+        validate_projection_output(&input, &output)?;
+        commit_projection(tx, input, output)?;
 
-8. Update documentation.
-   Update at least:
-   - `src/core/pipeline.md`
-   - `src/core/README.md`
-   - `docs/RULES.md`
-   - any research docs that still describe
-     `route -> decode -> authenticate -> adapt -> project`
+        Ok(ProjectFact::Projected(report))
+    })
+}
+```
 
-9. Update guardrail and behavior tests.
-   Add or update realistic tests for:
-   - simplified registry/routing metadata,
-   - old staged terms not appearing where they should be removed,
-   - context-dependent projection parking with needs,
-   - resuming projection from matched context carried on the pending queue.
+Projectors run once per queued item. They do not search for additional context.
+The context visible to a projector is only the context attached to that queued
+work item.
 
-10. Run verification.
-    - `cargo fmt --check`
-    - focused tests touched by the change
-    - `cargo test -q`
+## Projection Commit
 
-11. Commit the completed work on the same `/home/holmes/poc-10` branch before
-    handoff or review.
+Projection commit stays in `project_fact.rs` for readability. It owns:
 
-## Readability Priorities
+- retaining or dropping candidates,
+- consuming the queued fact item,
+- replacing owner needs,
+- appending owner offers,
+- matching added needs/offers,
+- requeueing matched owners with attached context,
+- replacing time wakes,
+- applying projection-emitted facts, purges, typed rows, and intents.
 
-- Prefer explicit projector code over hidden staging machinery.
-- Keep comments short and useful.
-- Document context-dependent validation where it parks projection.
-- Avoid introducing a new generic auth pipeline under a different name.
-- Keep `src/core/pipeline.rs` focused on queueing, running, parking,
-  unparking, and persistence.
+Sketch:
+
+```rust
+fn commit_projection(tx: &Store, input: ProjectionInput, output: ProjectionOutput) -> Result<()> {
+    retain_or_drop_candidate(tx, &input, output.retain_self)?;
+
+    if input.is_retained_after_commit() {
+        commit_context_and_requeue_matches(tx, input.fact.id, output.context_set())?;
+        replace_time_wakes(tx, input.fact.id, output.time_wakes)?;
+        apply_projection_effects(tx, output.effects)?;
+    }
+
+    consume_fact_queue_item(tx, input.item)?;
+    Ok(())
+}
+```
+
+Need/offer matching happens only during projection commit:
+
+```rust
+fn commit_context_and_requeue_matches(
+    tx: &Store,
+    owner: FactId,
+    next: ContextSet,
+) -> Result<()> {
+    let previous = previous_context_for_owner(tx, owner)?;
+
+    replace_owner_needs(tx, owner, &next.needs)?;
+    append_owner_offers(tx, owner, &next.offers)?;
+
+    let delta = diff_context_sets(previous, next);
+
+    for need in delta.added_needs {
+        for offer in find_matching_offers(tx, &need)? {
+            requeue_owner_with_match(tx, need.owner, need.clone(), offer)?;
+        }
+    }
+
+    for offer in delta.added_offers {
+        for need in find_matching_needs(tx, &offer)? {
+            requeue_owner_with_match(tx, need.owner, need, offer.clone())?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+There are no same-drain probes. The database queue is the loop.
+
+## Projector Responsibilities
+
+Each projector owns the full local meaning of its fact:
+
+- decode raw bytes,
+- authenticate intrinsic fields and ids,
+- adapt legacy versions if any,
+- inspect supplied context,
+- emit missing needs,
+- validate present offers,
+- decide candidate retention,
+- decide replay behavior from `ProjectionContext::mode()`,
+- decide when to purge/delete itself,
+- emit offers, time wakes, rows, child facts, and intents.
+
+Projectors must document context-dependent validation in the current local
+style: what context is required, why a missing context parks, and what is
+validated when the context is present.
+
+## Intents
+
+`handle_intent.rs` mirrors `project_fact.rs`.
+
+`drain_intents` is only a loop and budget. `handle_intent` owns one intent
+transaction:
+
+```rust
+fn handle_intent() -> Result<HandleIntent, String> {
+    store.write_transaction(|tx| {
+        let Some(intent) = claim_next_intent(tx)? else {
+            return Ok(HandleIntent::NoWork);
+        };
+
+        let handler = handlers.for_kind(intent.kind)?;
+        let context = load_handler_context(tx, handler, &intent)?;
+        let effects = handler.handle(&intent, &context)?;
+
+        commit_handled_intent(tx, intent, effects)?;
+
+        Ok(HandleIntent::Handled(report))
+    })
+}
+```
+
+Commands do not create intents directly. Projectors and handlers may.
+
+Intent commit stays in `handle_intent.rs` even if it duplicates short storage
+helpers from projection. Prefer readable local transaction bodies over abstract
+shared commit machinery.
+
+## Store
+
+`store.rs` provides storage mechanics only:
+
+- transaction helpers,
+- retained fact primitives,
+- candidate fact primitives,
+- typed protocol row insert/delete,
+- opaque row primitives if still needed,
+- validated table clearing primitives.
+
+Good store methods are primitive:
+
+```rust
+insert_retained_fact
+insert_candidate_fact
+move_candidate_to_retained
+load_retained_fact
+load_candidate_fact
+purge_retained_fact
+delete_candidate_fact
+insert_values
+delete_where
+delete_all_rows
+```
+
+Bad store methods are workflow-shaped and do not belong in `store.rs`:
+
+```rust
+project_fact
+handle_intent
+commit_projection
+requeue_context_matches
+replay_all_facts
+```
+
+`store.rs` may provide `delete_all_rows(table)` or `clear_tables(tables)`.
+Replay code chooses which tables to wipe.
+
+## Protocol Rows
+
+Projectors and handlers emit typed row mutations from protocol schema. They do
+not emit raw SQL.
+
+Protocol schema declares table names, columns, and key columns. Store builds
+generic SQL from registered schema:
+
+```rust
+CONTENT_MESSAGES.insert(values)
+CONTENT_MESSAGES.delete_by_key(values)
+```
+
+Commit validates target tables and columns against the schema used to build the
+runtime.
+
+## Replay
+
+Daemon owns when replay happens. Replay is wipe and rebuild:
+
+```rust
+fn run_replay() -> Result<(), String> {
+    store.write_transaction(|tx| {
+        mark_replay_in_progress(tx)?;
+        wipe_derived_state(tx, protocol_schema)?;
+        enqueue_all_retained_facts(tx, ProjectionMode::Replay)?;
+        Ok(())
+    })?;
+
+    drain_facts_until_idle()?;
+
+    store.write_transaction(|tx| mark_replay_complete(tx))?;
+    Ok(())
+}
+```
+
+Replay wipe policy lives with daemon/replay, not store:
+
+```rust
+fn wipe_derived_state(tx: &Store, schema: &ProtocolSchema) -> Result<()> {
+    for table in core_replay_reset_tables() {
+        tx.delete_all_rows(table)?;
+    }
+    for table in schema.replay_reset_tables {
+        tx.delete_all_rows(table)?;
+    }
+    Ok(())
+}
+```
+
+Retained facts, source metadata, local secrets/config, and schema/replay
+metadata survive replay. Candidate facts, pending queues, context edges, time
+wakes, intent queues, and derived protocol rows are wiped.
+
+Projectors receive replay mode in `ProjectionContext` and decide protocol-local
+replay behavior.
+
+## Daemon
+
+Daemon owns scheduling:
+
+- live drain order,
+- startup replay checks,
+- manual replay,
+- time wake admission into pending projection,
+- recurring live work.
+
+Time wake admission is daemon-managed queueing. Projection commit stores the
+time-wake subscriptions emitted by projectors.
+
+## Definition Of Done
+
+- `pipeline.rs` is gone or reduced to no active runtime abstraction.
+- `project_fact.rs` and `handle_intent.rs` are the readable work-item files.
+- Commands return authored facts plus receipts and never call commands.
+- Commands query pre-command state only through owning `queries.rs` helpers.
+- Command-authored facts are retained and pending durably.
+- Incoming/network/sync facts are volatile candidates until retained by a
+  projector.
+- Need/offer matching occurs only during projection commit.
+- Same-drain context probing is removed.
+- Replay is a daemon-owned wipe/rebuild over retained facts.
+- Store contains storage primitives, not workflow policy.
+- All fact projectors absorb decode/authenticate/adapt helpers into `project.rs`
+  and document local context/replay/retention decisions.
+- Significant black-box tests pass.
+- Commit the completed work on this branch before handoff or review.
