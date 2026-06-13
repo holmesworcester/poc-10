@@ -252,7 +252,7 @@ Patterns to avoid in projector files:
   context.
 - Intent type determines whether work is atomic or deferred.
 - Row mutations are bounded read-model mutations and are applied by
-  the core pipeline during projection drain.
+  the core projection worker during projection drain.
 - Deferred handlers must be retry-safe: if required inputs or external effects
   are unavailable, return an error so the intent remains queued.
 - Handlers must not construct shared fact wire layouts inline. If a handler
@@ -362,11 +362,11 @@ keys already observed before retirement.
 
 ## Commands
 
-- Commands are pure constructors over explicit parameters and a narrow
-  `CommandContext`.
-- Commands may read allowed local capabilities such as signer or encryption
-  secrets from the context. They must not mint capabilities unless the owning
-  auth fact module explicitly owns that command.
+- Commands are pure constructors over explicit parameters, `Store` queries, and
+  a `CommandClock`.
+- Commands may query allowed local capabilities such as signer or encryption
+  secrets from protocol-owned state. They must not mint capabilities unless the
+  owning auth fact module explicitly owns that command.
 - Commands do not write the store, drive the runtime pipeline, dispatch
   handlers, call workers, parse CLI argv, or format user output.
 - Any invariant required for accepting received/shared facts must be enforced by

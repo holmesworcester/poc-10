@@ -292,8 +292,8 @@ Active design and maintenance docs are:
 - `ARCHITECTURE_DIAGRAMS.md`: GitHub-renderable architecture flowcharts.
 - `docs/RULES.md`: architecture rules, projector rules, and guardrails.
 - `docs/todo-add-verus-proofs.md`: TODO plan for adding Verus proofs.
-- `src/core/README.md`: core/runtime responsibility boundaries.
-- `src/core/pipeline.md`: projection and handler commit boundaries.
+- `src/core/README.md`: core/runtime responsibility boundaries, including
+  projection and handler commit boundaries.
 - `src/protocol/*/README.md`: fact-scope responsibilities, facts, handlers,
   row state, and cross-scope interfaces.
 

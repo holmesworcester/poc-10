@@ -81,7 +81,7 @@ Protocol code enters core through declarations and effect values:
   local intents.
 - `store::SchemaSource` lets core, network IO, and protocol registry code
   declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
-  protected, resettable, and state-summary tables.
+  retained fact storage, resettable runtime state, and state-summary tables.
 
 Data leaves core through the same narrow surfaces: commands receive
 `CliOutput`, protocol queries read schema-owned rows through `Store`, daemon
@@ -105,6 +105,9 @@ Facts can enter through commands, handlers, sync, or incoming daemon input.
 Core records durable bytes or candidate bytes with admission scope and
 timestamp, then queues them for projection. Projection is the only path from
 fact bytes to standing context, read-model rows, time wakes, and follow-up work.
+Runtime work can record candidate facts in `candidate_facts`, submit local
+(ephemeral, not-replayed) intents to `local_intents`, and mark facts whose
+scheduled wake-up time has arrived as pending projection work.
 
 Network bytes enter as `network_in` rows, become local protocol intents via the
 daemon declaration, then stage protocol frame facts as candidates. Candidate
@@ -132,6 +135,22 @@ the owning projector decide whether that time proves anything.
   payload is idempotent; conflicting payloads for the same identity reject.
 - Handler output commits atomically with deletion of the handled queue row.
   Retry errors leave the row queued.
+- Projection mode is sticky toward replay. If an owner is already queued in
+  replay mode, later normal wakes do not downgrade it.
+- Needs are replacement subscriptions. The settled `ProjectionOutput` is the
+  complete standing need set for that fact; emitting no needs marks the fact no
+  longer parked on context.
+- Durable offers are append-only evidence. Once a fact offers context, that
+  offer remains until the fact is purged.
+- Rejected durable projection items do not stall the batch. Context-free
+  rejection purges the fact; context-dependent rejection keeps the fact bytes as
+  evidence and clears only the pending row.
+- Candidate facts start as temp rows. A projector may keep a candidate retained
+  while parked on standing context needs, retain it as protocol evidence, or
+  drop it.
+- Typed-table inserts are idempotent only when the existing row matches every
+  supplied column; changing typed projection state is expressed as
+  `DeleteWhere` followed by `InsertValues`.
 - Row mutations are accepted only for tables declared by the selected runtime.
   The module that builds a row owns its columns, key bytes, and semantics.
 - Store is below policy. It applies schemas, transactions, and row helpers; it
@@ -255,8 +274,8 @@ mode.
   append-only offers, plus shared `PipelineEffects` for one fact.
 - `project_fact.rs::commit_effects`: shared atomic commit path for
   `PipelineEffects`. It validates duplicate or conflicting effects, purges exact
-  facts, admits durable and candidate facts, applies allowed row mutations, and
-  queues follow-up intents inside the caller's transaction.
+  facts, admits durable facts, candidate facts, row mutations, and queues
+  follow-up intents inside the caller's transaction.
 - `project_fact.rs::context_store`: SQL implementation of standing context. It
   stores need/offer edges, assembles projection context from queued
   `pending_projection_matches`, computes replacement-need and append-only-offer
@@ -273,6 +292,111 @@ mode.
   selects durable and candidate projection items through `project_fact.rs`,
   dispatches queued intents through `handle_intent.rs`, and lets context wakes
   or emitted child facts re-enter the queue explicitly.
+
+### Projection Path And Commit Boundary
+
+The write-side authoring path is:
+
+```text
+command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> projection
+```
+
+Commands own user intent, argument parsing, local capability lookup, receipts,
+and the decision to author facts. They return `AuthoredCommand` facts plus a
+receipt, not row mutations, purges, or intents. Family `author.rs` owns
+construction crypto: signing, encryption, and typed assembly. Family
+`encode.rs` owns canonical byte encoding only. Before storage, the runtime may
+call the protocol-owned `FactAdmissionFn`; poc-10 installs one that dispatches
+by fact tag to protocol-local decode and validation helpers. After admission
+each fact is queued for projection like any other durable fact.
+
+The routed fact path is:
+
+```text
+raw fact -> tag route -> projector -> ProjectionOutput -> commit
+```
+
+The core projection worker stays protocol-neutral. It loads one durable or
+candidate fact, the matched context already attached to that pending row, due
+time ranges, and projection mode, then invokes the registered protocol
+projector. A typical projector locally decodes the raw body, validates the fact
+id and cryptographic/container proof, requests missing context as needs,
+validates matched offers when present, adapts any legacy payload shape, and
+projects rows, context, time wakes, purges, or intents.
+
+Missing context is normal projection output, not a separate core stage. The
+projector emits standing needs; core records those replacement needs and parks
+the fact. When a later offer matches a parked need, core records that offer in
+`pending_projection_matches` for the parked owner and queues the owner again.
+The pending item already carries the context that woke it, so the retried
+projector reads the matched payload through `ProjectionContext` instead of
+doing a database search.
+
+Detached signature evidence, key material, deletion markers, receipts, and
+other cross-fact proof are ordinary facts that may publish context offers after
+their own projector accepts them. A consumer projector still validates that the
+matched offer applies to the current fact before treating it as authority.
+
+For a durable fact, one projection commit performs this ordered unit:
+
+```text
+delete durable pending row
+delete queued pending_projection_matches for this owner
+clear due time range rows for this owner
+delete old needs and time wakes owned by fact
+insert new needs, append new offers, and insert new time wakes
+wake owners whose needs match newly added offers and record their matched context
+apply PipelineEffects through commit_effects
+```
+
+For a retained candidate fact, the commit moves the candidate into `facts` and
+`local_fact_admissions`, then applies the same context/time/effect commit as a
+durable fact. For a dropped candidate fact, the commit validates that no durable
+offers or time wakes remain, deletes any old context for that input id, deletes
+the candidate fact row, and applies `PipelineEffects` through `commit_effects`.
+
+Before that boundary, projector runs are calculation. Durable pending items
+start with the matched context already attached to their queue row. Newly
+declared needs are matched during commit and wake a later queue item; the
+projector does not search the store for more context during the same run.
+
+### Handler Commit Boundary
+
+One handler commit performs this ordered unit:
+
+```text
+delete claimed intent row
+delete shadowed local duplicate intent when the claimed row was durable
+purge exact facts
+admit emitted facts and mark them pending
+insert emitted candidate facts
+apply row mutations
+record durable follow-up intents
+record local follow-up intents
+```
+
+If any step fails, SQLite rolls back the whole unit. This is what makes handler
+replay and process restart safe. Retry errors leave the intent row in place;
+fatal errors consume the row only when the fatal outcome itself commits.
+
+### Replay And Time Wakes
+
+A projector can schedule its own fact on a protocol timeline. When the daemon
+advances that timeline, core marks matching fact owners in
+`pending_projection`, stores the due `TimeRange`, and projection context
+exposes that range without allowing projectors to read the clock.
+
+Replay uses the same projection and handler paths with a different runtime
+mode. It preserves only the retained fact store (`facts` plus
+`local_fact_admissions`), clears schema-declared resettable runtime state,
+queues retained facts and replayable scheduled wake-ups into
+`pending_projection` with mode `replay`, exposes that mode through
+`ProjectionContext::is_replay()`, and keeps facts emitted during replay in
+replay projection mode. Projectors use replay mode to avoid live-only
+projection intents. During replay dispatch, handler output is filtered unless
+the matching `HandlerRoute` declares `runs_during_replay`. Recurring work is
+represented as recurring intents; the live daemon's in-memory cadence is only
+the scheduling mechanism that enqueues due work.
 
 ## Example Runtime Graph
 

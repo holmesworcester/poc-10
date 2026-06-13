@@ -39,9 +39,10 @@ versioning work builds on that model.
 
 Agent note: Part II contains historical/current-code inventory refs captured
 while planning. When those refs conflict with the current projector-local model,
-use `fact-validators.md` and `src/core/pipeline.md` as the source of truth. Do
-not use the removed projector facade, old authenticated-projector helpers,
-`layout.rs`, `create.rs`, or fact-family `rows.rs` as target shapes.
+use `fact-validators.md`, `src/core/README.md`, and `project_fact.rs` inline
+docs as the source of truth. Do not use the removed projector facade, old
+authenticated-projector helpers, `layout.rs`, `create.rs`, or fact-family
+`rows.rs` as target shapes.
 
 ## 1. Summary — the model in one breath
 
@@ -454,7 +455,7 @@ queued operational intents, or local diagnostic bytes. Those surfaces are either
 current-runtime work or transport compatibility, and are handled by their own
 floor/negotiation/retry rules.
 
-The projection pipeline for primary facts is:
+The projection path for primary facts is:
 
 ```text
 raw retained fact bytes
@@ -3005,7 +3006,7 @@ several `--scramble --seed N` passes, compares `state_hash`), `intent-registry`
 `recurring-intents`. The in-tree replay diagnostics now exercise the real replay
 entry point directly: `con replay`, `con replay --reverse`, `con replay
 --scramble --seed N`, and `con replay-check` all rebuild through the ordinary
-pipeline rather than a synthetic dependency fixture.
+runtime workers rather than a synthetic dependency fixture.
 
 Per the charter, the `{new version}/{old version}` axis is enumerated as
 separate tests for the representative versioned families (`content::message`,
@@ -3016,7 +3017,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 
 ### REPLAY-01 — Wipe+replay rebuilds all read-model rows from retained facts only `replay-cli`
 - **Setup:** Single `con` node, protocol ceiling covers `content:1` (message tag 50). Create a workspace, send N messages, react, send a file (`content::file` 54 + `content::file_slice` 55). Capture `con state-summary` -> baseline `state_hash` H0 and per-area counts (CONTENT_MESSAGES, CONTENT_REACTIONS, CONTENT_FILES, FILE_SLICES).
-- **Action:** Run `con replay` (canonical pass: drops queued intents, clears schema-declared replay-resettable state — read-model rows, sync indexes, context edges, time_wakes, pending projection rows, ephemeral projection inputs, intent queues, temp network queues — marks all retained facts pending, drains fact projection to fixpoint). Retained fact storage and local admissions are schema-protected inputs, not replay's keep-list.
+- **Action:** Run `con replay` (canonical pass: drops queued intents, clears schema-declared replay-resettable state — read-model rows, sync indexes, context edges, time_wakes, pending projection rows, ephemeral projection inputs, intent queues, temp network queues, local clock observations — marks all retained facts pending, drains fact projection to fixpoint). Retained fact storage and local admission metadata are the schema-protected fact store, not a caller-supplied keep-list.
 - **Expect:** `con state-summary` after replay returns the SAME `state_hash` H0 and identical per-area counts; every read-model row is reconstructed solely from retained facts (no queued intent contributed). Replay counters report `dropped_intents>=0`, `projected_facts == retained fact count`, `blocked network/live-only work == 0`.
 - **Defends:** Invariant (4) — wipe+replay rebuilds derived state from retained facts.
 - **Refs:** `con replay`/`state-summary`; `core::replay` entry point; read_models OPENED_MESSAGES/CONTENT_MESSAGES/CONTENT_REACTIONS/CONTENT_FILES/FILE_SLICES.

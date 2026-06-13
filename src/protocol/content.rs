@@ -3,7 +3,7 @@
 //! Content facts are the user-visible workspace data and policy: messages,
 //! reactions, file metadata, file slices, deletion facts, and retention policies.
 //! The modules here own both authoring flows and projection rules for materialized
-//! content rows. Generic purge coordinates live in core pipeline context helpers.
+//! content rows. Generic purge coordinates live in core projection context helpers.
 //!
 //! Most content facts are gated by auth context. Projectors
 //! wait for workspace membership, signer authority, key material, deletion

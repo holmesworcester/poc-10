@@ -23,7 +23,7 @@ retained facts, and resume operational work without preserving queued intents.
   replay mode and may suppress or defer emitted intents according to
   intent-registry metadata.
 - Store and schema declarations own table lifecycle. Core and protocol schema
-  sources declare protected input tables, resettable derived/queue tables, and
+  sources declare retained fact-store tables, resettable runtime tables, and
   state-summary tables; replay does not discover a keep-list from SQLite.
 - All durable wall-clock `TimeWake` behavior must be replayable. If a
   wall-clock action is operational and not replayable, it must be a recurring
@@ -42,10 +42,9 @@ Add an explicit replay entry point to core runtime:
 2. Drop durable and local queued intents.
 3. Clear schema-declared replay-resettable state: read-model rows, sync
    indexes, context edges, `time_wakes`, pending projection rows, pending time
-   ranges, ephemeral projection inputs, intent queues, and temp network queues.
-   Protected inputs such as retained facts, local fact admissions,
-   clock/trusted-time observations, and local facts not covered by retained
-   purge or retirement facts are outside the resettable table set.
+   ranges, ephemeral projection inputs, intent queues, temp network queues, and
+   local clock observations. The retained fact store (`facts` plus local
+   admission metadata) is outside the resettable table set.
 4. Mark all retained facts pending for projection in replay mode.
 5. Drain fact projection; projectors decide from replay context whether to
    rebuild durable state or no-op live session/negotiation state.

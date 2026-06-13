@@ -362,8 +362,8 @@ impl Runtime {
 
     /// Run the replay entry point against this runtime's store.
     ///
-    /// Replay drops queued intents, clears schema-declared replay-resettable
-    /// state, and reprojects retained facts to a fixpoint using only
+    /// Replay drops queued intents and other schema-declared non-fact runtime
+    /// state, then reprojects retained facts to a fixpoint using only
     /// replay-allowed handler routes. The caller supplies the replayable
     /// semantic time-wake timelines; replay must not run network IO, recurring
     /// schedules, or operational wall-clock decisions.

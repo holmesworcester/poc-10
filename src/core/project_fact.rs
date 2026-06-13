@@ -6,6 +6,19 @@
 //! resolves newly declared needs that already match stored offers and commits
 //! the settled output once.
 //!
+//! Projection commits are the only path from fact bytes to standing context,
+//! read-model rows, time wakes, purges, and follow-up work. For a durable fact,
+//! the commit consumes the pending row, clears queued matches and due ranges for
+//! the owner, replaces owned needs/time wakes, appends offers, records wake
+//! matches for dependents, and applies `PipelineEffects` atomically. Candidate
+//! facts use the same boundary after either being retained into `facts` or
+//! dropped from `candidate_facts`.
+//!
+//! Projectors do not query the store for missing context during a run. Matched
+//! payload facts arrive through `ProjectionContext` because the pending row
+//! already carries the context that woke it. Newly emitted needs may match
+//! stored offers during commit, but those matches queue a later projection item.
+//!
 //! Queue recursion is explicit outside this item. If projection emits child
 //! facts, shared effect commit stores them in `pending_projection`; if a later
 //! item creates a matching offer, context fanout requeues the dependent owner.

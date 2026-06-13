@@ -1,10 +1,11 @@
 //! Replay entry point for the generic runtime.
 //!
-//! Replay rebuilds all derived runtime state from retained facts. It is the
-//! mechanism behind a safe upgrade: queued intents are not protocol truth, so a
-//! process can drop them, wipe everything projection derives, and reproject the
-//! retained facts to recover read-model rows, standing context, semantic time
-//! wakes, sync indexes, and key material. The same entry point backs the
+//! Replay rebuilds all non-fact runtime state from retained facts. It is the
+//! mechanism behind a safe upgrade: queued intents, projected rows, standing
+//! context, time wakes, candidate inputs, network queues, and local clock state
+//! are not protocol truth, so a process can drop them and reproject retained
+//! facts to recover read-model rows, standing context, semantic time wakes,
+//! sync indexes, and key material. The same entry point backs the
 //! `replay`/`replay-check` diagnostics, which prove that replay is idempotent
 //! and independent of fact projection order.
 //!
@@ -23,8 +24,9 @@
 //!
 //! State summary. `state_summary` hashes the store-declared replay summary
 //! tables in a canonical, order-independent way. Core and protocol schema
-//! sources declare which tables are protected, resettable, and summary-visible,
-//! so replay never decides by ad hoc SQLite table enumeration.
+//! sources declare which tables are retained fact storage, resettable runtime
+//! state, and summary-visible derived state, so replay never decides by ad hoc
+//! SQLite table enumeration.
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;

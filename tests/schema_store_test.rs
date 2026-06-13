@@ -435,6 +435,28 @@ fn replay_lifecycle_reset_preserves_protected_tables() {
 }
 
 #[test]
+fn core_replay_preserves_only_retained_fact_store_and_resets_clock() {
+    let store =
+        Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open core store");
+    let protected = store
+        .replay_protected_tables()
+        .iter()
+        .map(|table| table.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(protected, vec!["facts", "local_fact_admissions"]);
+
+    let reset = store
+        .replay_reset_tables()
+        .iter()
+        .map(|table| table.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        reset.contains(&"clock"),
+        "store-local clock is local runtime metadata, not replay-preserved fact truth: {reset:?}"
+    );
+}
+
+#[test]
 fn replay_lifecycle_rejects_protected_reset_overlap() {
     const BAD_SCHEMA: SchemaSource = SchemaSource {
         ddl: r#"

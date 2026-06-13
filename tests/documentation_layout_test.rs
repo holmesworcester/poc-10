@@ -19,7 +19,6 @@ fn documentation_layout_keeps_current_docs_live_and_old_notes_archived() {
         "docs/RULES.md",
         "docs/todo-add-verus-proofs.md",
         "src/core/README.md",
-        "src/core/pipeline.md",
         "src/protocol/auth/README.md",
         "src/protocol/content/README.md",
         "src/protocol/connection/README.md",
@@ -397,7 +396,7 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "projector-local decode, validation, adaptation, and projection helpers",
         "The active route model maps tags to projectors only",
         "Agent note: Part II contains historical/current-code inventory refs captured while planning",
-        "use `fact-validators.md` and `src/core/pipeline.md` as the source of truth",
+        "use `fact-validators.md`, `src/core/README.md`, and `project_fact.rs` inline docs as the source of truth",
         "current projector-local model",
         "Projector routes, then route gating",
         "Every routed family now carries a projector-local identity adapt helper",
@@ -472,9 +471,7 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
 fn core_readmes_document_runtime_and_pipeline_boundaries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core = source_text(&root.join("src/core/README.md"));
-    let pipeline = source_text(&root.join("src/core/pipeline.md"));
     let normalized_core = normalize_whitespace(&core);
-    let normalized_pipeline = normalize_whitespace(&pipeline);
     let how_core_works = core
         .find("## How Core Works")
         .expect("src/core/README.md documents how core works");
@@ -509,6 +506,9 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "## Responsibility Boundary",
         "### Top-Level Files",
         "### Runtime Work Sections",
+        "### Projection Path And Commit Boundary",
+        "### Handler Commit Boundary",
+        "### Replay And Time Wakes",
         "app.rs",
         "generic process runner over a `ProtocolDescription`",
         "cli.rs",
@@ -565,24 +565,7 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "one queued fact projection item",
         "runtime.rs",
         "bounded work ordering",
-    ] {
-        assert!(
-            normalized_core.contains(required),
-            "src/core/README.md is missing core boundary detail {required:?}"
-        );
-    }
-
-    for required in [
-        "## Interface To Core And Protocol",
-        "## Read Projection Path",
-        "## Data Flow",
-        "## Invariants",
-        "## Runtime Work Files",
-        "The active transaction bodies are split into named files",
-        "## Projection Commit Boundary",
-        "## Handler Commit Boundary",
         "raw fact -> tag route -> projector -> ProjectionOutput -> commit",
-        "## Write Authoring Path",
         "command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> projection",
         "`FactAdmissionFn`",
         "poc-10 installs one that dispatches by fact tag to protocol-local decode and validation helpers",
@@ -597,6 +580,8 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "Projectors use replay mode to avoid live-only projection intents",
         "handler output is filtered unless the matching `HandlerRoute` declares `runs_during_replay`",
         "Recurring work is represented as recurring intents",
+        "preserves only the retained fact store",
+        "`facts` plus `local_fact_admissions`",
         "Projection mode is sticky toward replay",
         "Needs are replacement subscriptions",
         "Durable offers are append-only evidence",
@@ -607,8 +592,6 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "retained while parked on standing context needs",
         "Typed-table inserts are idempotent only when the existing row matches every supplied column",
         "project_fact.rs",
-        "drains pending projection over durable and candidate facts",
-        "queues replay work",
         "durable/candidate source rules",
         "`project_fact.rs::context`",
         "handle_intent.rs",
@@ -616,8 +599,8 @@ fn core_readmes_document_runtime_and_pipeline_boundaries() {
         "candidate facts, row",
     ] {
         assert!(
-            normalized_pipeline.contains(required),
-            "src/core/pipeline.md is missing pipeline detail {required:?}"
+            normalized_core.contains(required),
+            "src/core/README.md is missing runtime work detail {required:?}"
         );
     }
 }
@@ -628,7 +611,6 @@ fn active_readmes_do_not_refer_to_previous_designs() {
     for readme in [
         "README.md",
         "src/core/README.md",
-        "src/core/pipeline.md",
         "src/protocol/auth/README.md",
         "src/protocol/content/README.md",
         "src/protocol/connection/README.md",

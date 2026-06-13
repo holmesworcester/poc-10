@@ -10,7 +10,7 @@
 //!   `maintain_connections` loop creates bootstrap request attempts later.
 //!
 //! This module does not write rows or run projection. It returns command output
-//! that the runtime admits through the normal projection pipeline.
+//! that the runtime admits through the normal projection path.
 
 use std::net::SocketAddr;
 use std::str::FromStr;

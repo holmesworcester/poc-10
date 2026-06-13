@@ -8,9 +8,9 @@
 //! state.
 //!
 //! If a new kind of runtime effect needs atomic commit with projection or
-//! intent dispatch, add it here and teach `pipeline::commit_effects` how to
-//! validate and write it. If it is only display data for a command, keep it in
-//! that command's receipt instead.
+//! intent dispatch, add it here and teach `project_fact::commit_effects` how
+//! to validate and write it. If it is only display data for a command, keep it
+//! in that command's receipt instead.
 
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};

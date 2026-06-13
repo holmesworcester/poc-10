@@ -3,7 +3,7 @@
 //! Store is the lowest runtime layer above SQLite. It knows how to apply SQL
 //! schema batches, run transactions, and read or write keyed byte rows. It does
 //! not know what any row means. Fact admission, projection context, dependency
-//! edges, network targets, and sync work are all core pipeline, protocol, or IO
+//! edges, network targets, and sync work are all core runtime, protocol, or IO
 //! concepts layered on top of these primitives.
 //!
 //! There are two row shapes in the project. Typed tables declare their own SQL
@@ -57,12 +57,13 @@ impl TableName {
 
 /// Replay lifecycle declarations for tables created by one schema source.
 ///
-/// `protected` tables are durable input state and are never cleared by replay.
-/// `reset` tables are derived, queued, or process-local state that replay can
-/// clear before rebuilding. `summary` tables are hashed by replay-check.
+/// `protected` tables are retained fact-store tables and are never cleared by
+/// replay. `reset` tables are derived, queued, or local runtime state that
+/// replay can clear before rebuilding. `summary` tables are hashed by
+/// replay-check.
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayTables {
-    /// Durable input tables that replay reset must not clear.
+    /// Retained fact-store tables that replay reset must not clear.
     pub protected: &'static [TableName],
     /// Tables cleared by replay reset.
     pub reset: &'static [TableName],
@@ -349,7 +350,7 @@ impl Store {
     /// Clear every schema-declared replay-resettable table.
     ///
     /// Replay callers do not provide a keep-list. Protected tables are excluded
-    /// by construction when the store opens, so immutable fact storage cannot be
+    /// by construction when the store opens, so retained fact storage cannot be
     /// cleared by a replay bug in a caller.
     pub fn clear_replay_reset_tables(&self) -> Result<usize, String> {
         self.write_transaction(|tx| {
@@ -803,21 +804,22 @@ CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
 // Fact storage for the runtime.
 //
 // Facts are immutable, content-addressed rows. This module owns inserting,
-// purging, and reading those rows; pipeline workers decide when those
+// purging, and reading those rows; runtime workers decide when those
 // operations should happen.
 //
 // This is the storage companion to `facts.rs` and the entry point used by the
-// projection pipeline. Inserting a new fact writes both the durable byte row
-// and the local admission row, then marks the fact pending so projection can
-// derive runtime state from it. Reading a fact reconstructs the protocol bytes
-// together with the local scope and timestamp that this store recorded at
+// projection worker. Inserting a new fact writes both the retained byte row and
+// the local admission metadata row, then marks the fact pending so projection
+// can derive runtime state from it. Reading a fact reconstructs the protocol
+// bytes together with the local scope and timestamp that this store recorded at
 // admission time.
 //
 // The important split is `facts` versus `local_fact_admissions`. `facts`
 // stores bytes by content id. `local_fact_admissions` records how this store
 // first admitted those bytes: scope, admission timestamp, and the derived
 // local admission id used for ordering. That admission record is local
-// runtime metadata, not a protocol fact to sync.
+// runtime metadata, not separate protocol truth and not a protocol fact to
+// sync.
 //
 // Purge is the reverse boundary. It removes the byte row and every core-owned
 // row keyed by the fact id: local admission, standing context, time wakes,
@@ -839,7 +841,7 @@ use crate::core::wire::Writer;
 /// Insert a fact and mark it pending for projection.
 ///
 /// Facts are immutable and content-addressed. The fact bytes live in `facts`;
-/// the local admission record is a separate local-only fact about those bytes.
+/// the local admission record is local metadata about those bytes.
 /// Returns whether either row was newly inserted.
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
     insert_fact_and_pending_with_mode_in_tx(store, fact, ProjectionMode::Normal)
