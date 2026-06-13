@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::core::cli::{
     decode_hex_32, encode_hex_32, read_file_bytes, write_file_bytes, CliArgs, CliOutput,
 };
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
 use crate::core::crypto::{self, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
 use crate::core::facts::FactId;
 use crate::core::store::persisted_facts;
@@ -65,13 +65,14 @@ pub struct DeleteMessageReceipt {
 }
 
 pub fn send(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<message::commands::SendReceipt>, String> {
     args.require_len(2, SEND_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let text = args.get(1).expect("length checked");
-    message::commands::send_message(ctx, workspace_id, text)
+    message::commands::send_message(store, clock, workspace_id, text)
 }
 
 pub fn send_output(receipt: &message::commands::SendReceipt, text: &str) -> CliOutput {
@@ -85,14 +86,15 @@ pub fn send_output(receipt: &message::commands::SendReceipt, text: &str) -> CliO
 }
 
 pub fn generate(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<message::commands::GenerateReceipt>, String> {
     args.require_len(3, GENERATE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let count = args.parse_positive_usize(1, GENERATE_USAGE)?;
     let message_text_bytes = args.parse_positive_usize(2, GENERATE_USAGE)?;
-    message::commands::generate_messages(ctx, workspace_id, count, message_text_bytes)
+    message::commands::generate_messages(store, clock, workspace_id, count, message_text_bytes)
 }
 
 pub fn generated_output(
@@ -110,12 +112,13 @@ pub fn generated_output(
 }
 
 pub fn react(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<ReactReceipt>, String> {
     args.require_len(3, REACT_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
-    let target = resolve_message_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
+    let target = resolve_message_selector(store, workspace_id, args.get(1).unwrap())?;
     let emoji = args.get(2).unwrap().trim();
     if emoji.is_empty() {
         return Err("reaction emoji must not be empty".to_string());
@@ -126,9 +129,9 @@ pub fn react(
         return Err("reaction emoji is too long".to_string());
     }
 
-    let author_user_id = local_author_user_id(ctx.store(), workspace_id)?;
-    let encryption = ctx.local_encryption_capability(workspace_id)?;
-    let created_at_ms = ctx.next_timestamp();
+    let author_user_id = local_author_user_id(store, workspace_id)?;
+    let encryption = message::commands::local_encryption_capability(store, workspace_id)?;
+    let created_at_ms = clock.next_timestamp();
     let nonce = deterministic_nonce(b"topo:reaction-nonce:v1", workspace_id, created_at_ms);
     let ciphertext = seal_bytes(
         &encryption.key_secret,
@@ -150,7 +153,7 @@ pub fn react(
         ciphertext: reaction::fact::ReactionCiphertext::new(&ciphertext)
             .map_err(|err| format!("reaction ciphertext: {err}"))?,
     };
-    let authored = authored_reaction_fact(ctx, workspace_id, created_at_ms, reaction)?;
+    let authored = authored_reaction_fact(store, workspace_id, created_at_ms, reaction)?;
     Ok(CommandOutput::new(ReactReceipt {
         workspace_id,
         reaction_fact_id: authored.fact.id,
@@ -175,7 +178,8 @@ pub fn react_output(receipt: &ReactReceipt) -> CliOutput {
 }
 
 pub fn send_file(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<SendFileReceipt>, String> {
     let parsed = parse_send_file_args(args)?;
@@ -186,11 +190,12 @@ pub fn send_file(
         .and_then(|name| name.to_str())
         .ok_or_else(|| "file path must have a utf-8 filename".to_string())?
         .to_string();
-    let message_output = message::commands::send_message(ctx, parsed.workspace_id, &parsed.text)?;
+    let message_output =
+        message::commands::send_message(store, clock, parsed.workspace_id, &parsed.text)?;
     let message_receipt = message_output.receipt.clone();
-    let author_user_id = local_author_user_id(ctx.store(), parsed.workspace_id)?;
+    let author_user_id = local_author_user_id(store, parsed.workspace_id)?;
     let created_at_ms = message_receipt.created_at_ms.saturating_add(1);
-    let encryption = ctx.local_encryption_capability(parsed.workspace_id)?;
+    let encryption = message::commands::local_encryption_capability(store, parsed.workspace_id)?;
     let total_slices = if payload.is_empty() {
         0
     } else {
@@ -237,7 +242,7 @@ pub fn send_file(
         sealed_metadata: file::fact::SealedMetadata::new(&sealed_metadata)
             .map_err(|err| format!("file metadata: {err}"))?,
     };
-    let descriptor = authored_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
+    let descriptor = authored_file_fact(store, parsed.workspace_id, created_at_ms, descriptor)?;
     let descriptor_fact_id = descriptor.fact.id;
     let mut facts = message_output.facts;
     facts.extend(descriptor.into_facts());
@@ -253,7 +258,7 @@ pub fn send_file(
                 .map_err(|err| format!("file slice bao proof: {err}"))?,
         };
         facts.extend(
-            authored_file_slice_fact(ctx, parsed.workspace_id, slice.created_at_ms, slice)?
+            authored_file_slice_fact(store, parsed.workspace_id, slice.created_at_ms, slice)?
                 .into_facts(),
         );
     }
@@ -287,14 +292,16 @@ pub fn send_file_output(receipt: &SendFileReceipt) -> CliOutput {
 }
 
 pub fn delete_message(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<DeleteMessageReceipt>, String> {
     args.require_len(2, DELETE_MESSAGE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
-    let target = resolve_message_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
+    let target = resolve_message_selector(store, workspace_id, args.get(1).unwrap())?;
     let output = message_deletion::commands::delete_message(
-        ctx,
+        store,
+        clock,
         workspace_id,
         target.message_id,
         target.frontier_id,
@@ -321,17 +328,17 @@ pub fn delete_message_output(receipt: &DeleteMessageReceipt) -> CliOutput {
     ])
 }
 
-pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn messages(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(1, MESSAGES_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
-    let messages = queries::opened_messages(ctx.store(), workspace_id)?;
-    let reactions = reactions_by_message(ctx.store(), workspace_id)?;
-    let files = files_by_message(ctx.store(), workspace_id)?;
+    let messages = queries::opened_messages(store, workspace_id)?;
+    let reactions = reactions_by_message(store, workspace_id)?;
+    let files = files_by_message(store, workspace_id)?;
     let mut lines = vec![format!("messages: {}", messages.len())];
     for (index, message) in messages.into_iter().enumerate() {
-        let author = author_name(ctx.store(), workspace_id, message.signer_id)?
+        let author = author_name(store, workspace_id, message.signer_id)?
             .or_else(|| {
-                user_name(ctx.store(), workspace_id, message.author_user_id)
+                user_name(store, workspace_id, message.author_user_id)
                     .ok()
                     .flatten()
             })
@@ -364,13 +371,10 @@ pub fn messages(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput
     Ok(CliOutput::lines(lines))
 }
 
-pub fn content_count(
-    ctx: &CommandContext<'_>,
-    args: CliArgs<'_>,
-) -> Result<queries::ContentCount, String> {
+pub fn content_count(store: &Store, args: CliArgs<'_>) -> Result<queries::ContentCount, String> {
     args.require_len(1, CONTENT_COUNT_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
-    queries::count_for_workspace(ctx.store(), workspace_id)
+    queries::count_for_workspace(store, workspace_id)
 }
 
 pub fn content_count_output(count: queries::ContentCount) -> CliOutput {
@@ -382,7 +386,7 @@ pub fn content_count_output(count: queries::ContentCount) -> CliOutput {
     ])
 }
 
-pub fn files(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn files(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     if args.values().is_empty() || args.values().len() > 2 {
         return Err(FILES_USAGE.to_string());
     }
@@ -392,7 +396,7 @@ pub fn files(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, S
         .map(|value| value.parse::<usize>().map_err(|_| FILES_USAGE.to_string()))
         .transpose()?
         .unwrap_or(usize::MAX);
-    let mut rows = visible_files(ctx.store(), workspace_id)?;
+    let mut rows = visible_files(store, workspace_id)?;
     rows.truncate(limit);
     let mut lines = vec![format!("FILES ({} total):", rows.len())];
     for (index, row) in rows.iter().enumerate() {
@@ -420,10 +424,10 @@ pub fn files(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, S
     Ok(CliOutput::lines(lines))
 }
 
-pub fn save_file(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn save_file(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     args.require_len(3, SAVE_FILE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
-    let file = resolve_file_selector(ctx.store(), workspace_id, args.get(1).unwrap())?;
+    let file = resolve_file_selector(store, workspace_id, args.get(1).unwrap())?;
     if file.slices_received < file.total_slices {
         return Err(format!(
             "file incomplete: have {}/{} slices",
@@ -431,16 +435,11 @@ pub fn save_file(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutpu
         ));
     }
     let mut bytes = Vec::new();
-    let message = queries::content_message_row(ctx.store(), workspace_id, file.message_id)?
+    let message = queries::content_message_row(store, workspace_id, file.message_id)?
         .ok_or_else(|| "file parent message is not visible".to_string())?;
-    let key = local_content_key(
-        ctx.store(),
-        workspace_id,
-        message.frontier_id,
-        message.minute,
-    )?;
+    let key = local_content_key(store, workspace_id, message.frontier_id, message.minute)?;
     let mut encrypted_blob = Vec::new();
-    for slice in file_slices(ctx.store(), workspace_id, file.file_id)? {
+    for slice in file_slices(store, workspace_id, file.file_id)? {
         encrypted_blob.extend_from_slice(&slice.ciphertext);
         let nonce = file_slice_nonce(
             workspace_id,
@@ -465,16 +464,16 @@ pub fn save_file(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutpu
     ]))
 }
 
-pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, String> {
+pub fn view(store: &Store, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace_id = match args.values() {
-        [] => selected_workspace_id(ctx)?,
+        [] => selected_workspace_id(store)?,
         [value] => decode_id(value)?,
         _ => return Err(VIEW_USAGE.to_string()),
     };
 
-    let local = auth::endpoint::queries::local_endpoint_public(ctx.store())?
+    let local = auth::endpoint::queries::local_endpoint_public(store)?
         .ok_or_else(|| "local endpoint is missing".to_string())?;
-    let local_memberships = auth::workspace::queries::local_memberships(ctx.store())?;
+    let local_memberships = auth::workspace::queries::local_memberships(store)?;
     if !local_memberships
         .iter()
         .any(|membership| membership.workspace_id == workspace_id)
@@ -482,12 +481,12 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
         return Err("local endpoint has not joined this workspace".to_string());
     }
 
-    let workspace = auth::workspace::queries::workspace_by_id(ctx.store(), workspace_id)?;
-    let users = auth::user::queries::users_in_workspace(ctx.store(), workspace_id)?;
-    let peers = auth::endpoint_shared::queries::peers_in_workspace(ctx.store(), workspace_id)?;
-    let messages = queries::opened_messages(ctx.store(), workspace_id)?;
-    let reactions = reactions_by_message(ctx.store(), workspace_id)?;
-    let files = files_by_message(ctx.store(), workspace_id)?;
+    let workspace = auth::workspace::queries::workspace_by_id(store, workspace_id)?;
+    let users = auth::user::queries::users_in_workspace(store, workspace_id)?;
+    let peers = auth::endpoint_shared::queries::peers_in_workspace(store, workspace_id)?;
+    let messages = queries::opened_messages(store, workspace_id)?;
+    let reactions = reactions_by_message(store, workspace_id)?;
+    let files = files_by_message(store, workspace_id)?;
 
     let mut username_by_user = BTreeMap::new();
     for user in &users {
@@ -579,8 +578,8 @@ pub fn view(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<CliOutput, St
     Ok(CliOutput::lines(lines))
 }
 
-fn selected_workspace_id(ctx: &CommandContext<'_>) -> Result<FactId, String> {
-    let memberships = auth::workspace::queries::local_memberships(ctx.store())?;
+fn selected_workspace_id(store: &Store) -> Result<FactId, String> {
+    let memberships = auth::workspace::queries::local_memberships(store)?;
     match memberships.as_slice() {
         [] => Err("no joined workspaces; create or accept one first".to_string()),
         [membership] => Ok(membership.workspace_id),
@@ -916,10 +915,10 @@ fn decode_file_metadata(bytes: &[u8]) -> Result<FileMetadata, String> {
 }
 
 fn signing_fields(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     workspace_id: FactId,
 ) -> Result<(FactId, crypto::Ed25519PublicKey, crypto::Ed25519PrivateKey), String> {
-    let signing = ctx.local_signing_capability(workspace_id)?;
+    let signing = auth::endpoint::commands::local_signing_capability(store, workspace_id)?;
     if signing.workspace_id != workspace_id {
         return Err("signing capability is not bound to this workspace".to_string());
     }
@@ -931,12 +930,12 @@ fn signing_fields(
 }
 
 fn authored_reaction_fact(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     workspace_id: FactId,
     created_at_ms: u64,
     reaction: reaction::fact::ContentReactionFact,
 ) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
-    let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
+    let (signer_id, _signer_public_key, private_key) = signing_fields(store, workspace_id)?;
     let fact = reaction::author::authored_reaction_fact(
         created_at_ms,
         workspace_id,
@@ -953,12 +952,12 @@ fn authored_reaction_fact(
 }
 
 fn authored_file_fact(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     workspace_id: FactId,
     created_at_ms: u64,
     file: file::fact::ContentFileFact,
 ) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
-    let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
+    let (signer_id, _signer_public_key, private_key) = signing_fields(store, workspace_id)?;
     let fact = file::author::authored_file_fact(
         workspace_id,
         created_at_ms,
@@ -979,12 +978,12 @@ fn authored_file_fact(
 }
 
 fn authored_file_slice_fact(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     workspace_id: FactId,
     created_at_ms: u64,
     slice: file_slice::fact::ContentFileSliceFact,
 ) -> Result<auth::signature::author::AuthoredFactEvidence, String> {
-    let (signer_id, _signer_public_key, private_key) = signing_fields(ctx, workspace_id)?;
+    let (signer_id, _signer_public_key, private_key) = signing_fields(store, workspace_id)?;
     let fact = file_slice::author::authored_file_slice_fact(
         workspace_id,
         created_at_ms,

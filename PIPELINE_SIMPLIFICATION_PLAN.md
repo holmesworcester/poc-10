@@ -29,8 +29,8 @@ Target core files:
   context matching/requeue, and time wakes.
 - `src/core/handle_intent.rs`: `drain_intents`, `handle_intent`, intent retry,
   and intent commit.
-- `src/core/command_context.rs`: command read context and authored command
-  result types.
+- `src/core/command.rs`: command clock, local capability value types, and
+  authored command result types.
 
 `src/core/pipeline.rs` is dissolved. Do not preserve a compatibility facade.
 
@@ -63,7 +63,8 @@ Rules:
 - Commands query only pre-command state.
 - Pre-command projected-state reads must go through the owning fact family's
   `queries.rs`.
-- Commands may read clock/local capabilities through the command host.
+- Commands receive the command clock directly and query local capabilities from
+  protocol-owned state before authoring facts.
 - Commands may compose multiple newly authored facts in memory.
 - Dependencies between newly authored facts are passed directly as ids/values,
   not through projected rows.
@@ -79,10 +80,17 @@ struct AuthoredCommand<T> {
     facts: Vec<Fact>,
 }
 
-fn command(ctx: &CommandContext<'_>, input: Input) -> Result<AuthoredCommand<Receipt>, String> {
-    let snapshot = family::queries::snapshot(ctx.store(), input)?;
-    let capability = ctx.local_signing_capability(snapshot.workspace_id)?;
-    let now = ctx.next_timestamp();
+fn command(
+    store: &Store,
+    clock: &dyn CommandClock,
+    input: Input,
+) -> Result<AuthoredCommand<Receipt>, String> {
+    let snapshot = family::queries::snapshot(store, input)?;
+    let capability = auth::endpoint::commands::local_signing_capability(
+        store,
+        snapshot.workspace_id,
+    )?;
+    let now = clock.next_timestamp();
 
     let fact = family::author::fact(&snapshot, &capability, now, input)?;
     let signature = auth::signature::author::sign_fact(

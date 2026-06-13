@@ -43,7 +43,7 @@ pub struct ProtocolDescription<C: 'static> {
     pub daemon: DaemonDescription,
     /// Non-daemon command registry.
     pub commands: &'static [CliCommand<C>],
-    /// Convert an opened runtime into the protocol-owned command context.
+    /// Convert an opened runtime into the protocol-owned CLI context.
     pub context: fn(Runtime, Option<PathBuf>) -> C,
 }
 

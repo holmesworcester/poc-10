@@ -5,7 +5,8 @@
 //! store, drains projection, or dispatches handlers.
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs, CliOutput};
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::store::Store;
 use crate::protocol::auth::workspace::{commands, queries};
 
 pub const CREATE_WORKSPACE_USAGE: &str =
@@ -14,14 +15,17 @@ pub const WORKSPACES_USAGE: &str = "workspaces";
 pub const COUNT_USAGE: &str = "count";
 
 pub fn create_workspace(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<commands::CreateWorkspaceReceipt>, String> {
     let parsed = CreateWorkspaceArgs::parse(args)?;
     match parsed.identity {
-        Some(identity) => commands::create_workspace_with_identity(ctx, &parsed.name, identity),
+        Some(identity) => {
+            commands::create_workspace_with_identity(store, clock, &parsed.name, identity)
+        }
         None => commands::create_workspace(
-            ctx,
+            clock,
             parsed
                 .public_key
                 .ok_or_else(|| "create-workspace requires --public-key HEX64".to_string())?,
@@ -130,11 +134,11 @@ pub fn created_workspace_output(
 }
 
 pub fn workspaces(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     args: CliArgs<'_>,
 ) -> Result<Vec<queries::WorkspaceSummary>, String> {
     args.require_len(0, WORKSPACES_USAGE)?;
-    queries::list_workspaces(ctx.store())
+    queries::list_workspaces(store)
 }
 
 pub fn workspaces_output(workspaces: &[queries::WorkspaceSummary]) -> CliOutput {
@@ -155,9 +159,9 @@ pub fn workspaces_output(workspaces: &[queries::WorkspaceSummary]) -> CliOutput 
     CliOutput::lines(lines)
 }
 
-pub fn count(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<usize, String> {
+pub fn count(store: &Store, args: CliArgs<'_>) -> Result<usize, String> {
     args.require_len(0, COUNT_USAGE)?;
-    queries::count_workspaces(ctx.store())
+    queries::count_workspaces(store)
 }
 
 pub fn count_output(

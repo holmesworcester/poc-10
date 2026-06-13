@@ -5,17 +5,17 @@
 //! app/runtime boundary.
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs, CliOutput};
-use crate::core::command_context::CommandContext;
+use crate::core::store::Store;
 
 use super::queries;
 use super::queries::UserRow;
 
 pub const USERS_USAGE: &str = "users WORKSPACE_ID_HEX";
 
-pub fn users(ctx: &CommandContext<'_>, args: CliArgs<'_>) -> Result<Vec<UserRow>, String> {
+pub fn users(store: &Store, args: CliArgs<'_>) -> Result<Vec<UserRow>, String> {
     args.require_len(1, USERS_USAGE)?;
     let workspace_id = decode_hex_32(args.get(0).expect("length checked"), "workspace id")?;
-    queries::users_in_workspace(ctx.store(), workspace_id)
+    queries::users_in_workspace(store, workspace_id)
 }
 
 pub fn users_output(users: &[UserRow]) -> CliOutput {

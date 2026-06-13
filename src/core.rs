@@ -23,7 +23,7 @@
 pub mod app;
 pub mod cli;
 pub mod clock;
-pub mod command_context;
+pub mod command;
 pub mod context;
 pub mod crypto;
 pub mod daemon;

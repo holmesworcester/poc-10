@@ -3465,7 +3465,7 @@ pub use route::{
     ProjectorFn, RouterProjector,
 };
 
-use crate::core::command_context::CommandOutput;
+use crate::core::command::CommandOutput;
 use crate::core::handle_intent::WorkStatus;
 use crate::core::schema::{CANDIDATE_FACTS, PENDING_PROJECTION};
 use crate::core::store::{

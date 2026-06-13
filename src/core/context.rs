@@ -1,10 +1,24 @@
-//! Standing context relationships used to wake fact projection.
+//! Public context vocabulary used by fact projection.
+//!
+//! This file intentionally contains only types and pure helpers. The SQLite
+//! tables, overlap queries, pending wake rows, and commit rules live in
+//! `project_fact.rs`. Projectors use these types to say "this fact still needs
+//! matching payload" (`ContextNeed`) or "this fact can satisfy matching needs"
+//! (`ContextOffer`) without importing SQL or queue machinery.
+//!
+//! `context.rs` stays separate from `project_fact.rs` because the types are the
+//! public language shared by protocol projectors and the projection runner.
+//! Keeping that language small and store-free lets fact modules construct and
+//! test context edges without depending on the projection transaction
+//! implementation. `project_fact.rs` remains responsible for querying,
+//! matching, waking, and committing those edges.
 //!
 //! Context is the durable dependency surface between projectors; it is not a
-//! hidden dependency loader or a second projection queue. A projector writes the
-//! needs and offers it owns, and core reports newly satisfiable range overlaps.
-//! The semantic meaning of a role or byte range stays with the projector that
-//! created it and with the projector that later validates the matched payload.
+//! hidden dependency loader or a second projection queue. A projector emits the
+//! needs and offers it owns, and `project_fact.rs` records newly satisfiable
+//! range overlaps. The semantic meaning of a role or byte range stays with the
+//! projector that created it and with the projector that later validates the
+//! matched payload.
 //!
 //! Every context edge is a range:
 //!

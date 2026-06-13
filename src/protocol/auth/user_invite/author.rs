@@ -1,7 +1,7 @@
 //! Deterministic constructors for user-invite facts.
 //!
 //! This layer takes already-resolved parameters and returns the canonical fact
-//! bytes. API and CLI workflows that need command context, local capabilities,
+//! bytes. API and CLI workflows that need store-queried local capabilities,
 //! or multi-fact orchestration belong in `commands.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};

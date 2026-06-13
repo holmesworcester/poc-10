@@ -3,7 +3,7 @@
 //! This layer takes already-resolved parameters and returns canonical fact
 //! bytes. User-facing timestamping and receipts live in `commands.rs`.
 
-use crate::core::command_context::LocalSigningCapability;
+use crate::core::command::LocalSigningCapability;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 

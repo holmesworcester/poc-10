@@ -6,9 +6,10 @@
 //! file owns that local orchestration; projection still validates the signed
 //! grant when it is later submitted or received.
 
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::CommandOutput;
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::{Fact, FactId};
+use crate::core::store::Store;
 use crate::protocol::auth;
 
 use super::author;
@@ -28,13 +29,12 @@ pub struct GrantAdminReceipt {
 }
 
 pub fn grant_admin(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: GrantAdmin,
 ) -> Result<CommandOutput<GrantAdminReceipt>, String> {
-    let membership = auth::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
+    let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
-    let authority_admin_id = ctx
-        .store()
+    let authority_admin_id = store
         .table_rows_with_key_prefix(super::ADMIN_ROWS, &input.workspace_id, usize::MAX)
         .map_err(|err| format!("load admin rows: {err}"))?
         .into_iter()
@@ -44,11 +44,11 @@ pub fn grant_admin(
         .find(|admin| admin.user_fact_id == membership.user_authority_fact_id)
         .map(|admin| admin.admin_id)
         .ok_or_else(|| "local user is not an admin in this workspace".to_string())?;
-    let target = auth::user::queries::users_in_workspace(ctx.store(), input.workspace_id)?
+    let target = auth::user::queries::users_in_workspace(store, input.workspace_id)?
         .into_iter()
         .find(|user| user.user_id == input.user_id)
         .ok_or_else(|| "target user is not in this workspace".to_string())?;
-    let local_endpoint = auth::endpoint::author::local_endpoint(ctx.store())?
+    let local_endpoint = auth::endpoint::author::local_endpoint(store)?
         .ok_or_else(|| "local endpoint has not been created".to_string())?;
     let grant = AdminFact {
         created_at_ms: input.created_at_ms,

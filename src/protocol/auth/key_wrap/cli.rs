@@ -5,7 +5,8 @@
 //! dispatch, and persistence stay at the root app/runtime boundary.
 
 use crate::core::cli::{decode_hex_32_named as core_decode_hex_32, encode_hex, CliArgs, CliOutput};
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::store::Store;
 
 use super::commands;
 
@@ -21,14 +22,15 @@ pub const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
 pub const CHOP_NOW_USAGE: &str = "chop-now WORKSPACE_ID_HEX FLOOR_MINUTE";
 
 pub fn key_recipient(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
     let workspace = args.get(0).ok_or_else(|| KEY_RECIPIENT_USAGE.to_string())?;
     commands::create_recipient_key(
-        ctx,
+        store,
         commands::CreateRecipientKey {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             workspace_id: decode_hex_32(workspace)?,
             previous_recipient_key_id:
                 crate::protocol::auth::recipient_key::fact::NO_PREVIOUS_RECIPIENT_KEY,
@@ -37,16 +39,17 @@ pub fn key_recipient(
 }
 
 pub fn rotate_recipient(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
     previous_recipient_key_id: [u8; 32],
 ) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
     args.require_len(1, KEY_ROTATE_RECIPIENT_USAGE)?;
     let workspace = args.get(0).expect("length checked");
     commands::create_recipient_key(
-        ctx,
+        store,
         commands::CreateRecipientKey {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             workspace_id: decode_hex_32(workspace)?,
             previous_recipient_key_id,
         },
@@ -54,11 +57,12 @@ pub fn rotate_recipient(
 }
 
 pub fn key_recipient_rotation(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
     previous_recipient_key_id: [u8; 32],
 ) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
-    rotate_recipient(ctx, args, previous_recipient_key_id)
+    rotate_recipient(store, clock, args, previous_recipient_key_id)
 }
 
 pub fn key_recipient_output(receipt: &commands::CreateRecipientKeyReceipt) -> CliOutput {
@@ -87,14 +91,15 @@ pub fn key_recipient_rotation_output(
 }
 
 pub fn key_frontier(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<commands::CreateKeyFrontierReceipt>, String> {
     args.require_len(1, KEY_FRONTIER_USAGE)?;
     commands::create_key_frontier(
-        ctx,
+        store,
         commands::CreateKeyFrontier {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
         },
     )

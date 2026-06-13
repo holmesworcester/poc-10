@@ -106,7 +106,7 @@ pub mod authenticate {
 
     #[cfg(test)]
     mod tests {
-        use crate::core::command_context::LocalSigningCapability;
+        use crate::core::command::LocalSigningCapability;
         use crate::core::crypto;
         use crate::core::facts::Fact;
         use crate::core::project_fact::ProjectionContext;

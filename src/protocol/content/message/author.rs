@@ -5,9 +5,7 @@
 //! target fact. Runtime gathering and signature evidence belong in
 //! `commands.rs`.
 
-use crate::core::command_context::{
-    LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
-};
+use crate::core::command::{LocalEncryptionCapability, LocalSigningCapability, WorkspaceId};
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce};
 use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
 use crate::core::wire;

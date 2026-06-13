@@ -15,7 +15,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::CommandOutput;
 use crate::core::crypto;
 use crate::core::facts::FactId;
 use crate::core::store::Store;
@@ -92,17 +92,16 @@ pub struct CreateInviteServer {
 }
 
 pub fn create(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: CreateInvite,
 ) -> Result<CommandOutput<CreateInviteReceipt>, String> {
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
     let invite_private_key = crypto::random_ed25519_private_key();
 
     let (invite_fact_id, workspace_id, mut facts) = match input.workspace_id {
         Some(workspace_id) => {
-            let authority = local_admin_id(ctx.store(), workspace_id, local.signing_public_key)?;
+            let authority = local_admin_id(store, workspace_id, local.signing_public_key)?;
             let user_invite = auth::user_invite::commands::create_with_secret(
                 auth::user_invite::commands::CreateUserInviteWithSecret {
                     created_at_ms: input.created_at_ms.saturating_add(1),
@@ -162,13 +161,12 @@ pub fn create(
 }
 
 pub fn create_device_link(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: CreateDeviceLink,
 ) -> Result<CommandOutput<CreateInviteReceipt>, String> {
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
-    let membership = auth::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
+    let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.signing_public_key != local.signing_public_key {
         return Err("local endpoint signing key does not match workspace membership".to_string());
@@ -176,7 +174,7 @@ pub fn create_device_link(
     if membership.endpoint_role != auth::endpoint_shared::fact::EndpointRole::Device {
         return Err("local endpoint role cannot create device links".to_string());
     }
-    let user = auth::user::queries::users_in_workspace(ctx.store(), input.workspace_id)?
+    let user = auth::user::queries::users_in_workspace(store, input.workspace_id)?
         .into_iter()
         .find(|user| user.user_id == membership.user_authority_fact_id)
         .ok_or_else(|| "local endpoint user is missing".to_string())?;
@@ -229,13 +227,12 @@ pub fn create_device_link(
 }
 
 pub fn create_invite_server(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: CreateInviteServer,
 ) -> Result<CommandOutput<CreateInviteReceipt>, String> {
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
-    let authority = local_admin_id(ctx.store(), input.workspace_id, local.signing_public_key)?;
+    let authority = local_admin_id(store, input.workspace_id, local.signing_public_key)?;
     let invite_private_key = crypto::random_ed25519_private_key();
     let invite_server_fact = auth::invite_server::author::authored_invite_server_fact(
         input.created_at_ms.saturating_add(1),
@@ -317,14 +314,13 @@ pub struct AcceptInviteServer {
 }
 
 pub fn accept(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: AcceptInvite,
 ) -> Result<CommandOutput<AcceptInviteReceipt>, String> {
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
     if input.invite.identity_scope {
-        reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
+        reject_duplicate_join(store, local.endpoint, input.invite.workspace_id)?;
     }
 
     let mut facts = endpoint_output.facts;
@@ -437,7 +433,7 @@ fn endpoint_role_for_shared(role: InviteEndpointRole) -> auth::endpoint_shared::
 }
 
 pub fn accept_device_link(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: AcceptDeviceLink,
 ) -> Result<CommandOutput<AcceptInviteReceipt>, String> {
     if !input.invite.identity_scope {
@@ -450,10 +446,9 @@ pub fn accept_device_link(
         .invite
         .user_authority_fact_id
         .ok_or_else(|| "accept-link requires a USER_ID invite part".to_string())?;
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
-    reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
+    reject_duplicate_join(store, local.endpoint, input.invite.workspace_id)?;
 
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
         created_at_ms: input.created_at_ms.saturating_add(4),
@@ -494,7 +489,7 @@ pub fn accept_device_link(
 }
 
 pub fn accept_invite_server(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: AcceptInviteServer,
 ) -> Result<CommandOutput<AcceptInviteReceipt>, String> {
     if !input.invite.identity_scope
@@ -508,10 +503,9 @@ pub fn accept_invite_server(
     if input.device_name.trim().is_empty() {
         return Err("device name must not be empty".to_string());
     }
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), input.created_at_ms)?;
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, input.created_at_ms)?;
     let local = endpoint_output.receipt.endpoint;
-    reject_duplicate_join(ctx.store(), local.endpoint, input.invite.workspace_id)?;
+    reject_duplicate_join(store, local.endpoint, input.invite.workspace_id)?;
 
     let endpoint_shared = endpoint_shared_fact(EndpointSharedFactInput {
         created_at_ms: input.created_at_ms.saturating_add(4),

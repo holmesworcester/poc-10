@@ -1218,13 +1218,17 @@ fn root_command_module_does_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "there is no root command module. User-facing command context lives in src/core/command_context.rs, and module commands stay under protocol fact modules:\n{}",
+        "there is no root command module. User-facing command primitives live in src/core/command.rs, and module commands stay under protocol fact modules:\n{}",
         offenders.join("\n")
     );
 
     assert!(
-        root.join("src/core/command_context.rs").is_file(),
-        "missing src/core/command_context.rs"
+        !root.join("src/core/command_context.rs").exists(),
+        "src/core/command_context.rs should not reappear"
+    );
+    assert!(
+        root.join("src/core/command.rs").is_file(),
+        "missing src/core/command.rs"
     );
 }
 

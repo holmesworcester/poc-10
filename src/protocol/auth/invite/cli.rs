@@ -7,7 +7,8 @@
 use std::net::SocketAddr;
 
 use crate::core::cli::{CliArgs, CliOutput};
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::store::Store;
 
 use super::commands;
 
@@ -20,14 +21,15 @@ pub const LINK_USAGE: &str = "link WORKSPACE_ID_HEX --public-addr ADDR";
 pub const ACCEPT_LINK_USAGE: &str = "accept-link INVITE_LINK --devicename DEVICE";
 
 pub fn invite(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<commands::CreateInviteReceipt>, String> {
     let parsed = InviteArgs::parse(args)?;
     commands::create(
-        ctx,
+        store,
         commands::CreateInvite {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             workspace_id: parsed.workspace_id,
             public_addr: parsed.public_addr,
         },
@@ -35,15 +37,16 @@ pub fn invite(
 }
 
 pub fn accept(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
     from_listen_addr: Option<SocketAddr>,
 ) -> Result<CommandOutput<commands::AcceptInviteReceipt>, String> {
     let parsed = AcceptArgs::parse(args)?;
     commands::accept(
-        ctx,
+        store,
         commands::AcceptInvite {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             invite: parsed.invite,
             username: parsed.username,
             device_name: parsed.device_name,
@@ -53,14 +56,15 @@ pub fn accept(
 }
 
 pub fn invite_server(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<commands::CreateInviteReceipt>, String> {
     let parsed = InviteServerArgs::parse(args)?;
     commands::create_invite_server(
-        ctx,
+        store,
         commands::CreateInviteServer {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             workspace_id: parsed.workspace_id,
             public_addr: parsed.public_addr,
         },
@@ -68,15 +72,16 @@ pub fn invite_server(
 }
 
 pub fn accept_invite_server(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
     from_listen_addr: Option<SocketAddr>,
 ) -> Result<CommandOutput<commands::AcceptInviteReceipt>, String> {
     let parsed = AcceptInviteServerArgs::parse(args)?;
     commands::accept_invite_server(
-        ctx,
+        store,
         commands::AcceptInviteServer {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             invite: parsed.invite,
             device_name: parsed.device_name,
             from_listen_addr,
@@ -85,14 +90,15 @@ pub fn accept_invite_server(
 }
 
 pub fn link(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
 ) -> Result<CommandOutput<commands::CreateInviteReceipt>, String> {
     let parsed = LinkArgs::parse(args)?;
     commands::create_device_link(
-        ctx,
+        store,
         commands::CreateDeviceLink {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             workspace_id: parsed.workspace_id,
             public_addr: parsed.public_addr,
         },
@@ -100,15 +106,16 @@ pub fn link(
 }
 
 pub fn accept_link(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     args: CliArgs<'_>,
     from_listen_addr: Option<SocketAddr>,
 ) -> Result<CommandOutput<commands::AcceptInviteReceipt>, String> {
     let parsed = AcceptLinkArgs::parse(args)?;
     commands::accept_device_link(
-        ctx,
+        store,
         commands::AcceptDeviceLink {
-            created_at_ms: ctx.next_timestamp(),
+            created_at_ms: clock.next_timestamp(),
             invite: parsed.invite,
             device_name: parsed.device_name,
             from_listen_addr,

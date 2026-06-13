@@ -1,10 +1,12 @@
 //! User-facing content-message deletion commands.
 //!
-//! Commands stamp deterministic constructors with command context and return
-//! receipts only. Projection and purge effects happen after runtime drain.
+//! Commands query local authority from the store, stamp deterministic
+//! constructors with the command clock, and return receipts only. Projection
+//! and purge effects happen after runtime drain.
 
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
 use crate::core::facts::FactId;
+use crate::core::store::Store;
 use crate::protocol::auth;
 
 use super::author;
@@ -22,21 +24,22 @@ pub struct DeleteMessageReceipt {
 }
 
 pub fn delete_message(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     workspace_id: WorkspaceId,
     target_message_id: FactId,
     target_frontier_id: FactId,
     target_minute: u64,
     author_user_id: AuthorId,
 ) -> Result<CommandOutput<DeleteMessageReceipt>, String> {
-    let created_at_ms = ctx.next_timestamp();
+    let created_at_ms = clock.next_timestamp();
     author::validate_delete_message(
         workspace_id,
         target_message_id,
         target_frontier_id,
         author_user_id,
     )?;
-    let signing = ctx.local_signing_capability(workspace_id)?;
+    let signing = auth::endpoint::commands::local_signing_capability(store, workspace_id)?;
     let fact = author::delete_message(
         &signing,
         workspace_id,

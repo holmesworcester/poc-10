@@ -4,7 +4,7 @@
 //! fact carries the invite-link bootstrap context needed to replay workspace
 //! admission and to let live connection maintenance rebuild bootstrap attempts.
 
-use crate::core::command_context::CommandOutput;
+use crate::core::command::CommandOutput;
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::FactId;
 use crate::protocol::auth;

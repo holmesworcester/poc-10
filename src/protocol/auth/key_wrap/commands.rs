@@ -6,10 +6,7 @@
 //! and return receipts suitable for CLI output.
 
 use crate::core::clock;
-use crate::core::command_context::{
-    CommandClock, CommandContext, CommandOutput, IdentityVault, LocalEncryptionCapability,
-    LocalSigningCapability, WorkspaceId,
-};
+use crate::core::command::CommandOutput;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::runtime::Runtime;
@@ -154,15 +151,15 @@ pub struct HistoryLeafRow {
 }
 
 pub fn create_recipient_key(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: CreateRecipientKey,
 ) -> Result<CommandOutput<CreateRecipientKeyReceipt>, String> {
-    let membership = auth::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
+    let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.endpoint_role != auth::endpoint_shared::fact::EndpointRole::Device {
         return Err("local endpoint role cannot receive key wraps".to_string());
     }
-    let signing = ctx.local_signing_capability(input.workspace_id)?;
+    let signing = auth::endpoint::commands::local_signing_capability(store, input.workspace_id)?;
     if signing.signer_id != membership.endpoint_id {
         return Err("local signing capability does not match workspace endpoint".to_string());
     }
@@ -201,12 +198,12 @@ pub fn create_recipient_key(
 }
 
 pub fn create_key_frontier(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: CreateKeyFrontier,
 ) -> Result<CommandOutput<CreateKeyFrontierReceipt>, String> {
-    let endpoint = auth::endpoint::author::local_endpoint(ctx.store())?
+    let endpoint = auth::endpoint::author::local_endpoint(store)?
         .ok_or_else(|| "local endpoint is not initialized".to_string())?;
-    let membership = auth::workspace::queries::local_membership(ctx.store(), input.workspace_id)?
+    let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.endpoint_id != endpoint.endpoint {
         return Err("local endpoint membership does not match local endpoint".to_string());
@@ -601,19 +598,14 @@ fn apply_retention_floor(runtime: &mut Runtime, input: ChopNow) -> Result<(), St
 
 fn rotate_recipient_for_chop(runtime: &mut Runtime, input: ChopNow) -> Result<(), String> {
     if let Some(previous) = latest_local_recipient_key(runtime, input.workspace_id)? {
-        let clock = FixedClock(input.created_at_ms);
-        let vault = KeyMaterialVault::new(runtime.store());
-        let output = {
-            let ctx = runtime.command_context(&clock, &vault);
-            create_recipient_key(
-                &ctx,
-                CreateRecipientKey {
-                    created_at_ms: input.created_at_ms,
-                    workspace_id: input.workspace_id,
-                    previous_recipient_key_id: previous,
-                },
-            )?
-        };
+        let output = create_recipient_key(
+            runtime.store(),
+            CreateRecipientKey {
+                created_at_ms: input.created_at_ms,
+                workspace_id: input.workspace_id,
+                previous_recipient_key_id: previous,
+            },
+        )?;
         let _ = runtime.submit_command_output(output)?;
         runtime.process_all_work_until_idle(4, 512)?;
     }
@@ -685,55 +677,4 @@ fn history_source_is_tombstoned(
         }
     }
     Ok(false)
-}
-
-struct FixedClock(u64);
-
-impl CommandClock for FixedClock {
-    fn next_timestamp(&self) -> u64 {
-        self.0
-    }
-}
-
-pub struct KeyMaterialVault<'a> {
-    store: &'a Store,
-}
-
-impl<'a> KeyMaterialVault<'a> {
-    pub fn new(store: &'a Store) -> Self {
-        Self { store }
-    }
-}
-
-impl IdentityVault for KeyMaterialVault<'_> {
-    fn local_signing_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        let endpoint = auth::endpoint::author::local_endpoint(self.store)?
-            .ok_or_else(|| "local endpoint is not initialized".to_string())?;
-        let membership = auth::workspace::queries::local_membership(self.store, workspace_id)?
-            .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
-        if membership.endpoint_id != endpoint.endpoint {
-            return Err("local endpoint membership does not match local endpoint".to_string());
-        }
-        if membership.signing_public_key != endpoint.signing_public_key {
-            return Err(
-                "local endpoint signing key does not match workspace membership".to_string(),
-            );
-        }
-        Ok(LocalSigningCapability {
-            workspace_id,
-            signer_id: endpoint.endpoint,
-            public_key: endpoint.signing_public_key,
-            private_key: endpoint.signing_secret,
-        })
-    }
-
-    fn local_encryption_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        Err("local encryption capability is not configured for this command".to_string())
-    }
 }

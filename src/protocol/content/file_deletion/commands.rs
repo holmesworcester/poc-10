@@ -1,10 +1,12 @@
 //! User-facing content-file deletion commands.
 //!
-//! Commands stamp deterministic constructors with command context and return
-//! receipts only. Projection and purge effects happen after runtime drain.
+//! Commands query local authority from the store, stamp deterministic
+//! constructors with the command clock, and return receipts only. Projection
+//! and purge effects happen after runtime drain.
 
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
 use crate::core::facts::FactId;
+use crate::core::store::Store;
 use crate::protocol::auth;
 
 use super::author;
@@ -20,14 +22,15 @@ pub struct DeleteFileReceipt {
 }
 
 pub fn delete_file(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     workspace_id: WorkspaceId,
     target_file_id: FactId,
     author_user_id: AuthorId,
 ) -> Result<CommandOutput<DeleteFileReceipt>, String> {
-    let created_at_ms = ctx.next_timestamp();
+    let created_at_ms = clock.next_timestamp();
     author::validate_delete_file(workspace_id, target_file_id, author_user_id)?;
-    let signing = ctx.local_signing_capability(workspace_id)?;
+    let signing = auth::endpoint::commands::local_signing_capability(store, workspace_id)?;
     let fact = author::delete_file(
         &signing,
         workspace_id,

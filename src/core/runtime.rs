@@ -20,7 +20,7 @@
 //! description, and composes the one-item projection and intent workers into
 //! command, daemon, and replay ordering.
 
-use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
+use crate::core::command::CommandOutput;
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_intents, HandlerSet};
 use crate::core::intents::Intent;
@@ -153,15 +153,6 @@ impl Runtime {
     /// diagnostic reports this as the `command_excluded` policy answer.
     pub fn command_excluded_handlers(&self) -> &'static [&'static str] {
         self.description.command_excluded_handlers
-    }
-
-    /// Build the narrow command context for a user-facing command.
-    pub fn command_context<'a>(
-        &'a self,
-        clock: &'a dyn CommandClock,
-        vault: &'a dyn IdentityVault,
-    ) -> CommandContext<'a> {
-        CommandContext::new(&self.store, clock, vault)
     }
 
     /// Admit one fact and mark it pending for projection.

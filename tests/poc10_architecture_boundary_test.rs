@@ -193,7 +193,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
     let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
     let required = [
         "## Architecture Principles",
-        "src/core/command_context.rs",
+        "src/core/command.rs",
         "src/protocol.rs",
         "src/protocol/<scope>.rs",
         "generic runtime/app mechanics",
@@ -248,7 +248,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
 fn poc10_core_contract_files_are_present() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let required = [
-        "src/core/command_context.rs",
+        "src/core/command.rs",
         "src/core/runtime.rs",
         "src/core/facts.rs",
         "src/core/context.rs",
@@ -320,13 +320,17 @@ fn poc10_root_exports_protocol_owned_manifests() {
     ] {
         assert!(
             !root.join(forbidden).exists(),
-            "{forbidden} should not exist; command context belongs in core and concrete protocol modules live under src/protocol"
+            "{forbidden} should not exist; command primitives belong in core and concrete protocol modules live under src/protocol"
         );
     }
 
     assert!(
-        root.join("src/core/command_context.rs").is_file(),
-        "missing src/core/command_context.rs"
+        !root.join("src/core/command_context.rs").exists(),
+        "src/core/command_context.rs should not reappear"
+    );
+    assert!(
+        root.join("src/core/command.rs").is_file(),
+        "missing src/core/command.rs"
     );
     for scope in PROTOCOL_SCOPES {
         let required = format!("src/protocol/{scope}.rs");
@@ -413,15 +417,15 @@ fn poc10_pipeline_effects_names_the_common_commit_shape() {
 
 #[test]
 fn poc10_command_output_is_authored_receipt_plus_facts_only() {
-    let topo::core::command_context::AuthoredCommand { receipt, facts } =
-        topo::core::command_context::AuthoredCommand::new(());
+    let topo::core::command::AuthoredCommand { receipt, facts } =
+        topo::core::command::AuthoredCommand::new(());
 
     assert_eq!(receipt, ());
     assert!(facts.is_empty());
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let command_context = root.join("src/core/command_context.rs");
-    let source = source_text(&command_context);
+    let command = root.join("src/core/command.rs");
+    let source = source_text(&command);
     for required in [
         "pub struct AuthoredCommand<T>",
         "pub receipt: T",
@@ -436,7 +440,7 @@ fn poc10_command_output_is_authored_receipt_plus_facts_only() {
 
     let offenders = source_code_matches_in_paths(
         root,
-        vec![command_context],
+        vec![command],
         &[
             "PipelineEffects",
             "pub effects:",

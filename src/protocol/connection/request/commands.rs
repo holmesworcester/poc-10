@@ -7,9 +7,10 @@
 use std::net::SocketAddr;
 
 use crate::core::cli::encode_hex;
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::CommandOutput;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint::fact::EndpointFact;
@@ -164,15 +165,15 @@ pub struct Connect {
 
 /// Build a membership connection request to a known endpoint.
 pub fn connect(
-    ctx: &CommandContext<'_>,
+    store: &Store,
     input: Connect,
 ) -> Result<CommandOutput<CreateConnectionRequestReceipt>, String> {
     if input.from_listen_addr.is_none() {
         return Err("connect requires a running local daemon".to_string());
     }
-    let local = local_endpoint(ctx.store())?
+    let local = local_endpoint(store)?
         .ok_or_else(|| "connect requires a local endpoint identity".to_string())?;
-    let plan = choose_connection_mode(ctx.store(), input.target_endpoint)?.ok_or_else(|| {
+    let plan = choose_connection_mode(store, input.target_endpoint)?.ok_or_else(|| {
         format!(
             "no membership connection available for {}; accept an invite to bootstrap first",
             encode_hex(&input.target_endpoint)

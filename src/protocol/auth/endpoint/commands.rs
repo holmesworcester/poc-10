@@ -4,8 +4,9 @@
 //! fact when no complete local keypair exists yet, reusing the constructors and
 //! capability access in `author.rs`.
 
-use crate::core::command_context::CommandOutput;
+use crate::core::command::{CommandOutput, LocalSigningCapability, WorkspaceId};
 use crate::core::store::Store;
+use crate::protocol::auth;
 
 use super::author::{create_local_endpoint, endpoint_fact, local_endpoint};
 use super::fact::EndpointFact;
@@ -35,6 +36,28 @@ pub fn local_or_create(
             .with_facts(vec![fact]))
         }
     }
+}
+
+pub fn local_signing_capability(
+    store: &Store,
+    workspace_id: WorkspaceId,
+) -> Result<LocalSigningCapability, String> {
+    let endpoint =
+        local_endpoint(store)?.ok_or_else(|| "local endpoint is not initialized".to_string())?;
+    let membership = auth::workspace::queries::local_membership(store, workspace_id)?
+        .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
+    if membership.endpoint_id != endpoint.endpoint {
+        return Err("local endpoint membership does not match local endpoint".to_string());
+    }
+    if membership.signing_public_key != endpoint.signing_public_key {
+        return Err("local endpoint signing key does not match workspace membership".to_string());
+    }
+    Ok(LocalSigningCapability {
+        workspace_id,
+        signer_id: endpoint.endpoint,
+        public_key: endpoint.signing_public_key,
+        private_key: endpoint.signing_secret,
+    })
 }
 
 #[cfg(test)]

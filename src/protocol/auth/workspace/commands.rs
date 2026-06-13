@@ -3,7 +3,7 @@
 //! Commands receive stable context and compose deterministic constructors. They
 //! do not project, write rows, or call intent handlers.
 
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
 use crate::core::crypto::{self, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
 use crate::core::project_fact::ProjectionContext;
@@ -28,11 +28,11 @@ pub struct BootstrapIdentity<'a> {
 }
 
 pub fn create_workspace(
-    ctx: &CommandContext<'_>,
+    clock: &dyn CommandClock,
     public_key: Ed25519PublicKey,
     name: &str,
 ) -> Result<CommandOutput<CreateWorkspaceReceipt>, String> {
-    let _ = (ctx, public_key, name);
+    let _ = (clock, public_key, name);
     Err(
         "create_workspace now requires a local signing key; use the bootstrap identity form"
             .to_string(),
@@ -40,13 +40,13 @@ pub fn create_workspace(
 }
 
 pub fn create_workspace_with_identity(
-    ctx: &CommandContext<'_>,
+    store: &Store,
+    clock: &dyn CommandClock,
     name: &str,
     identity: BootstrapIdentity<'_>,
 ) -> Result<CommandOutput<CreateWorkspaceReceipt>, String> {
-    let created_at_ms = ctx.next_timestamp();
-    let endpoint_output =
-        auth::endpoint::commands::local_or_create(ctx.store(), created_at_ms + 4)?;
+    let created_at_ms = clock.next_timestamp();
+    let endpoint_output = auth::endpoint::commands::local_or_create(store, created_at_ms + 4)?;
     let endpoint = endpoint_output.receipt.endpoint;
     let user_public = endpoint.signing_public_key;
     let workspace_private_key = crypto::random_ed25519_private_key();
@@ -110,7 +110,7 @@ pub fn create_workspace_with_identity(
         signer_id: device_invite.fact.id,
         signer_private_key: endpoint.signing_secret,
         new_endpoint_fact: endpoint_output.facts.first(),
-        store: ctx.store(),
+        store,
     })?;
     let user_id = user.fact.id;
     let mut facts = vec![workspace, workspace_signature];

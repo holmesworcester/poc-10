@@ -2,10 +2,7 @@
 
 use std::cell::Cell;
 
-use topo::core::command_context::{
-    CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
-    WorkspaceId,
-};
+use topo::core::command::CommandClock;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::{
@@ -27,34 +24,15 @@ impl CommandClock for FixedClock {
     }
 }
 
-struct EmptyVault;
-
-impl IdentityVault for EmptyVault {
-    fn local_signing_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        Err("no signing capability".to_string())
-    }
-
-    fn local_encryption_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        Err("no encryption capability".to_string())
-    }
-}
-
 #[test]
 fn create_workspace_emits_decodable_workspace_fact() {
     let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("store");
     let clock = FixedClock(Cell::new(60_000));
-    let vault = EmptyVault;
-    let ctx = CommandContext::new(&store, &clock, &vault);
 
     let output = create_workspace_with_identity(
-        &ctx,
+        &store,
+        &clock,
         "Research",
         BootstrapIdentity {
             username: "alice",
@@ -87,11 +65,10 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("store");
     let clock = FixedClock(Cell::new(70_000));
-    let vault = EmptyVault;
-    let ctx = CommandContext::new(&store, &clock, &vault);
 
     let output = create_workspace_with_identity(
-        &ctx,
+        &store,
+        &clock,
         "Research",
         BootstrapIdentity {
             username: "alice",
@@ -185,20 +162,18 @@ fn create_workspace_rejects_blank_or_oversize_name() {
     let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
         .expect("store");
     let clock = FixedClock(Cell::new(0));
-    let vault = EmptyVault;
-    let ctx = CommandContext::new(&store, &clock, &vault);
 
     let identity = BootstrapIdentity {
         username: "alice",
         device_name: "alice-laptop",
         ttl_minutes: Some(0),
     };
-    let err = create_workspace_with_identity(&ctx, "   ", identity.clone())
+    let err = create_workspace_with_identity(&store, &clock, "   ", identity.clone())
         .expect_err("blank name must reject");
     assert!(err.to_lowercase().contains("blank"), "{err}");
 
     let too_long = "a".repeat(200);
-    let err = create_workspace_with_identity(&ctx, &too_long, identity)
+    let err = create_workspace_with_identity(&store, &clock, &too_long, identity)
         .expect_err("long name must reject");
     assert!(err.contains("exceeds"), "{err}");
 }

@@ -5,7 +5,7 @@
 //! target runtime.
 
 use crate::core::clock;
-use crate::core::command_context::CommandOutput;
+use crate::core::command::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::FactId;
 use crate::core::store::Store;

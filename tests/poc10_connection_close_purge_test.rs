@@ -2,9 +2,7 @@
 
 use std::cell::Cell;
 
-use topo::core::command_context::{
-    CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
-};
+use topo::core::command::CommandClock;
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::runtime::Runtime;
@@ -34,24 +32,6 @@ impl CommandClock for FixedClock {
         let next = self.0.get();
         self.0.set(next + 1);
         next
-    }
-}
-
-struct EmptyVault;
-
-impl IdentityVault for EmptyVault {
-    fn local_signing_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        Err("no signing capability".to_string())
-    }
-
-    fn local_encryption_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        Err("no encryption capability".to_string())
     }
 }
 
@@ -163,11 +143,7 @@ fn closing_connection_purges_connection_fact_and_row() {
     );
 
     let clock = FixedClock(Cell::new(2_000));
-    let vault = EmptyVault;
-    let close_output = {
-        let ctx = runtime.command_context(&clock, &vault);
-        close(&ctx, connection_id).expect("close connection")
-    };
+    let close_output = close(&clock, connection_id).expect("close connection");
     runtime
         .submit_command_output(close_output)
         .expect("submit close");

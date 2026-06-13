@@ -7,12 +7,13 @@
 //! public key and a removal frontier are meaningful only through endpoint
 //! identity and workspace authority.
 //!
-//! These modules are the source of signing and encryption capabilities exposed
-//! through `CommandContext`. Commands borrow already-established local
-//! capability; they do not mint authority. Projectors publish context offers
-//! such as workspace membership, local signer secret, invite secret, endpoint
-//! identity, recipient-key state, and removal-frontier state so content,
-//! connection, and sync modules can wait for the correct proof.
+//! These modules are the source of signing and encryption capability rows that
+//! commands query before authoring workspace-scoped facts. Commands borrow
+//! already-established local capability; they do not mint authority. Projectors
+//! publish context offers such as workspace membership, local signer secret,
+//! invite secret, endpoint identity, recipient-key state, and removal-frontier
+//! state so content, connection, and sync modules can wait for the correct
+//! proof.
 //!
 //! Change auth here when membership, local endpoint material, invite flow,
 //! authority projection, recipient-key projection, key wrapping, or key-material

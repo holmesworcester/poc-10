@@ -115,10 +115,10 @@ scheduler, one intent scheduling surface, and one product-facing binary:
 The current architecture is described by these boundaries:
 
 - **Core mechanics.** Core owns protocol-neutral mechanics: facts, context,
-  command context (`src/core/command_context.rs`), byte-range context matching,
-  generic runtime/app mechanics, pending fact processing, context wake fanout,
-  intent dispatch, storage mechanics, wire field primitives, network queues,
-  TCP, clock, and crypto helpers.
+  command authoring primitives (`src/core/command.rs`), byte-range context
+  matching, generic runtime/app mechanics, pending fact processing, context wake
+  fanout, intent dispatch, storage mechanics, wire field primitives, network
+  queues, TCP, clock, and crypto helpers.
 - **Scope semantics.** Protocol scopes own fact semantics: layouts,
   projectors, context
   roles/ranges, command constructors, read-model rows, queries, CLI adapters,

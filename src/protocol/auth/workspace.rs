@@ -2,9 +2,9 @@
 //!
 //! Workspace facts are the root identity object for most protocol state.
 //! Projection materializes workspace rows and context that users, endpoints,
-//! content, auth key material, and sync all depend on. Commands here create or inspect
-//! workspaces; local membership helpers expose this store's capabilities for
-//! command contexts.
+//! content, auth key material, and sync all depend on. Commands here create or
+//! inspect workspaces; local membership helpers expose this store's
+//! capabilities for command queries.
 
 pub mod author;
 pub mod cli;

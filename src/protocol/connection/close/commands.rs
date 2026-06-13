@@ -4,7 +4,7 @@
 //! the referenced connection, and target facts perform their own row deletion
 //! and purge scheduling when close context arrives.
 
-use crate::core::command_context::{CommandContext, CommandOutput};
+use crate::core::command::{CommandClock, CommandOutput};
 use crate::core::facts::FactId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,10 +15,10 @@ pub struct CloseConnectionReceipt {
 }
 
 pub fn close(
-    ctx: &CommandContext<'_>,
+    clock: &dyn CommandClock,
     connection_id: FactId,
 ) -> Result<CommandOutput<CloseConnectionReceipt>, String> {
-    let closed_at_ms = ctx.next_timestamp();
+    let closed_at_ms = clock.next_timestamp();
     let fact = super::author::close_fact(connection_id, closed_at_ms)?;
     Ok(CommandOutput::new(CloseConnectionReceipt {
         close_id: fact.id,

@@ -2,9 +2,7 @@
 
 use std::{cell::Cell, collections::BTreeSet};
 
-use topo::core::command_context::{
-    CommandClock, IdentityVault, LocalEncryptionCapability, LocalSigningCapability, WorkspaceId,
-};
+use topo::core::command::CommandClock;
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope, ScopeKind};
 use topo::core::runtime::Runtime;
@@ -29,42 +27,21 @@ impl CommandClock for FixedClock {
     }
 }
 
-struct EmptyVault;
-
-impl IdentityVault for EmptyVault {
-    fn local_signing_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        Err("no signing capability".to_string())
-    }
-
-    fn local_encryption_capability(
-        &self,
-        _workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        Err("no encryption capability".to_string())
-    }
-}
-
 #[test]
 fn runtime_submits_command_output_and_projects_workspace_rows() {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let clock = FixedClock(Cell::new(123_000));
-    let vault = EmptyVault;
-    let output = {
-        let ctx = runtime.command_context(&clock, &vault);
-        create_workspace_with_identity(
-            &ctx,
-            "Runtime",
-            BootstrapIdentity {
-                username: "alice",
-                device_name: "laptop",
-                ttl_minutes: Some(0),
-            },
-        )
-        .expect("create workspace")
-    };
+    let output = create_workspace_with_identity(
+        runtime.store(),
+        &clock,
+        "Runtime",
+        BootstrapIdentity {
+            username: "alice",
+            device_name: "laptop",
+            ttl_minutes: Some(0),
+        },
+    )
+    .expect("create workspace");
 
     let receipt = runtime
         .submit_command_output(output)

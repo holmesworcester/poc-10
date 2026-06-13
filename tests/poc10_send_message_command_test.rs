@@ -1,25 +1,26 @@
 //! Integration tests for the `send_message` command.
 //!
-//! The tests hand-build a `CommandContext` from a vault and a fixed clock,
-//! drive the command, and assert: (1) the happy path produces a message fact
-//! plus signature evidence and a
+//! The tests build the projected local identity/key state a real command sees,
+//! drive the command directly with `Store` plus a fixed clock, and assert: (1)
+//! the happy path produces a message fact plus signature evidence and a
 //! receipt, (2) blank or empty text is rejected, (3) the produced fact is a
-//! `content_message` fact whose ciphertext decrypts back to
-//! the original plaintext under the workspace key.
+//! `content_message` fact whose ciphertext decrypts back to the original
+//! plaintext under the workspace key queried from the store.
 
 use std::cell::Cell;
 
-use topo::core::command_context::{
-    CommandClock, CommandContext, IdentityVault, LocalEncryptionCapability, LocalSigningCapability,
-    WorkspaceId,
-};
+use topo::core::command::{CommandClock, WorkspaceId};
 use topo::core::crypto;
-use topo::core::schema::CORE_SCHEMA_SOURCE;
+use topo::core::runtime::Runtime;
 use topo::core::store::Store;
-use topo::protocol::content::message::commands::send_message;
+use topo::protocol::app::MATCH_RUNTIME;
+use topo::protocol::auth::key_wrap::commands::{create_key_frontier, CreateKeyFrontier};
+use topo::protocol::auth::workspace::commands::{
+    create_workspace_with_identity, BootstrapIdentity,
+};
+use topo::protocol::content::message::commands::{local_encryption_capability, send_message};
 use topo::protocol::content::message::encode::associated_data;
 use topo::protocol::content::message::project::decode::{decode_fact, recover_text};
-use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 struct FixedClock(Cell<u64>);
 
@@ -37,83 +38,55 @@ impl CommandClock for FixedClock {
     }
 }
 
-/// A test-only vault. Production code wires the identity-owned vault here.
-struct TestVault {
-    signing: Option<LocalSigningCapability>,
-    encryption: Option<LocalEncryptionCapability>,
-}
-
-impl IdentityVault for TestVault {
-    fn local_signing_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalSigningCapability, String> {
-        let capability = self
-            .signing
-            .clone()
-            .ok_or_else(|| "no signing capability".to_string())?;
-        if capability.workspace_id != workspace_id {
-            return Err("vault has no signing capability for workspace".to_string());
-        }
-        Ok(capability)
-    }
-
-    fn local_encryption_capability(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<LocalEncryptionCapability, String> {
-        let capability = self
-            .encryption
-            .clone()
-            .ok_or_else(|| "no encryption capability".to_string())?;
-        if capability.workspace_id != workspace_id {
-            return Err("vault has no encryption capability for workspace".to_string());
-        }
-        Ok(capability)
-    }
-}
-
-fn seeded_vault(workspace_id: WorkspaceId) -> TestVault {
-    // The private key bytes are deterministic test fixtures, not random
-    // material. The command never sees them except through the vault.
-    let signer_private: crypto::Ed25519PrivateKey = [7; 32];
-    let signer_public = crypto::ed25519_public_key(&signer_private);
-    let signer_id = [11; 32];
-
-    let signing = LocalSigningCapability {
-        workspace_id,
-        signer_id,
-        public_key: signer_public,
-        private_key: signer_private,
-    };
-    let encryption = LocalEncryptionCapability {
-        workspace_id,
-        frontier_id: [22; 32],
-        owner_endpoint_id: [33; 32],
-        created_at_ms: 1,
-        key_secret: [9; crypto::XCHACHA20_POLY1305_KEY_BYTES],
-    };
-    TestVault {
-        signing: Some(signing),
-        encryption: Some(encryption),
-    }
-}
-
 fn open_store() -> Store {
-    Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-        .expect("open protocol memory store")
+    Store::open_memory().expect("open memory store")
+}
+
+fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let workspace_clock = FixedClock::new(1_000);
+    let workspace = create_workspace_with_identity(
+        runtime.store(),
+        &workspace_clock,
+        "Research",
+        BootstrapIdentity {
+            username: "alice",
+            device_name: "alice-laptop",
+            ttl_minutes: Some(0),
+        },
+    )
+    .expect("workspace command");
+    let workspace_id = workspace.receipt.workspace_fact_id;
+    runtime
+        .submit_command_output(workspace)
+        .expect("submit workspace");
+    runtime
+        .process_all_work_until_idle(8, 512)
+        .expect("project workspace");
+    let frontier = create_key_frontier(
+        runtime.store(),
+        CreateKeyFrontier {
+            created_at_ms: 2_000,
+            workspace_id,
+        },
+    )
+    .expect("frontier command");
+    runtime
+        .submit_command_output(frontier)
+        .expect("submit frontier");
+    runtime
+        .process_all_work_until_idle(8, 512)
+        .expect("project frontier");
+    (runtime, workspace_id)
 }
 
 #[test]
 fn send_message_happy_path_emits_message_and_signature_facts() {
-    let store = open_store();
-    let workspace_id = [1u8; 32];
-    let vault = seeded_vault(workspace_id);
+    let (runtime, workspace_id) = runtime_with_workspace_and_key();
     let clock = FixedClock::new(60_000);
-    let ctx = CommandContext::new(&store, &clock, &vault);
 
-    let output =
-        send_message(&ctx, workspace_id, "hello, target tree").expect("happy path send_message");
+    let output = send_message(runtime.store(), &clock, workspace_id, "hello, target tree")
+        .expect("happy path send_message");
 
     assert_eq!(output.receipt.workspace_id, workspace_id);
     assert_eq!(output.receipt.created_at_ms, 60_000);
@@ -136,27 +109,23 @@ fn send_message_happy_path_emits_message_and_signature_facts() {
 fn send_message_rejects_blank_or_empty_text() {
     let store = open_store();
     let workspace_id = [1u8; 32];
-    let vault = seeded_vault(workspace_id);
     let clock = FixedClock::new(60_000);
-    let ctx = CommandContext::new(&store, &clock, &vault);
 
-    let err = send_message(&ctx, workspace_id, "").expect_err("empty text must reject");
+    let err = send_message(&store, &clock, workspace_id, "").expect_err("empty text must reject");
     assert!(err.to_lowercase().contains("blank"), "{err}");
 
-    let err = send_message(&ctx, workspace_id, "   \t\n").expect_err("whitespace must reject");
+    let err =
+        send_message(&store, &clock, workspace_id, "   \t\n").expect_err("whitespace must reject");
     assert!(err.to_lowercase().contains("blank"), "{err}");
 }
 
 #[test]
 fn send_message_fact_round_trips_through_decode_content_message() {
-    let store = open_store();
-    let workspace_id = [42u8; 32];
-    let vault = seeded_vault(workspace_id);
+    let (runtime, workspace_id) = runtime_with_workspace_and_key();
     let clock = FixedClock::new(120_000);
-    let ctx = CommandContext::new(&store, &clock, &vault);
 
     let text = "round-trip me through decode_fact";
-    let output = send_message(&ctx, workspace_id, text).expect("send_message");
+    let output = send_message(runtime.store(), &clock, workspace_id, text).expect("send_message");
 
     assert_eq!(output.facts.len(), 2, "message plus signature proof");
     let message = decode_fact(&output.facts[0].bytes).expect("decode content message");
@@ -165,12 +134,9 @@ fn send_message_fact_round_trips_through_decode_content_message() {
             .expect("decode signature evidence");
     assert_eq!(signature.target_fact_id, output.facts[0].id);
 
-    // Recover the plaintext using the same workspace key the vault handed
-    // to the command. The test must not be able to read the key from any
-    // back channel: it knows the key because the vault holds it.
-    let encryption = vault
-        .local_encryption_capability(workspace_id)
-        .expect("vault encryption capability");
+    // Recover the plaintext using the same workspace key the command queried.
+    let encryption = local_encryption_capability(runtime.store(), workspace_id)
+        .expect("store encryption capability");
     let plaintext = crypto::xchacha20poly1305_decrypt(
         &encryption.key_secret,
         &associated_data(workspace_id, message.frontier_id, message.minute),

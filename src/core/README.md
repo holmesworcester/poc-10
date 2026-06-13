@@ -16,8 +16,8 @@ allowlist, schema sources, and daemon hooks. From that point on, core does not
 ask what a protocol fact means. It only moves facts, context, rows, intents,
 time wakes, and opaque network bytes through the declared pipeline.
 
-A normal command is a serialized runtime turn. Core opens the store, builds a
-`CommandContext`, calls the protocol command, and commits the command's
+A normal command is a serialized runtime turn. Core opens the store, passes the
+store and command clock to protocol command code, and commits the command's
 authored facts. Core stores their immutable bytes, records local admission
 metadata, and marks them pending for projection. The command can return
 human-readable `CliOutput`, but command-authored durable protocol state must
@@ -64,16 +64,18 @@ Protocol code enters core through declarations and effect values:
 - `runtime::RuntimeDescription` declares protocol schema sources, allowed row
   mutation tables, the projector factory, registered intent handlers, and
   command-excluded handler names.
-- `app::ProtocolDescription` adds the product name, daemon declarations, CLI
-  command table, and command context constructor.
+- `app::ProtocolDescription` adds the product name, daemon declarations, and
+  CLI command table.
 - `project_fact::Projector` receives one `Fact` plus a `ProjectionContext` and
   returns a `ProjectionOutput`; fact families keep decode, authenticate, adapt,
   and semantic projection helpers inside their owning `project.rs`.
 - `intents::IntentHandler` receives one idempotent `Intent` plus a
   `HandlerContext` containing only declared input facts and returns
   `PipelineEffects`.
-- `command_context::CommandContext` gives user-facing commands read-only store
-  access, a monotonic timestamp source, and identity-owned local capabilities.
+- `command` defines the protocol-neutral command clock, local capability value
+  types, and authored command output. User-facing commands receive `Store` and
+  `CommandClock` directly, then query protocol-owned state before authoring
+  facts.
 - `effects::PipelineEffects` is the shared language for projector and handler
   facts to admit, candidate facts, purges, row mutations, durable intents, and
   local intents.
@@ -163,10 +165,11 @@ use core syntax and contracts, but core must not import their semantic rules.
   It is local runtime metadata, not synced protocol state. Commands use it as a
   lower bound for new timestamps without changing the timestamp semantics of
   already-authored facts.
-- `command_context.rs`: read-only command boundary. Commands get store queries,
-  monotonic timestamp allocation, and identity-owned signing/encryption
-  capabilities through this type. They do not get a runtime handle, handler
-  dispatcher, network socket, or write transaction.
+- `command.rs`: command authoring primitives. It defines the command clock,
+  local signing/encryption capability value types, workspace id alias, and
+  authored receipt-plus-facts output. Commands query `Store` directly and do
+  not get a runtime handle, handler dispatcher, network socket, or write
+  transaction.
 - `context.rs`: public vocabulary for standing context relationships. It
   defines needs, offers, roles, opaque byte keys, canonical key construction,
   replacement need subscriptions, append-only offer evidence, and the

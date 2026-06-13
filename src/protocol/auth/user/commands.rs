@@ -6,7 +6,7 @@
 //! the user is connected to a valid invite or authority chain before rows become
 //! visible.
 
-use crate::core::command_context::CommandOutput;
+use crate::core::command::CommandOutput;
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth;
