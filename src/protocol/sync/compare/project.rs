@@ -114,7 +114,7 @@ pub mod authenticate {
     //! projector and its intents own.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::SyncCompareFact;
 
@@ -138,7 +138,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::sync::compare::author::start_compare_fact_with_summary;
         use crate::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact};
 
@@ -233,7 +233,7 @@ pub mod adapt {
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::sync::send_compare_response::{
     send_sync_compare_response_intent, SendSyncCompareResponse,
 };
@@ -271,13 +271,18 @@ impl SyncCompareProjector {
         &self,
         fact: &Fact,
         compare: super::fact::SyncCompareFact,
-        _context: &ProjectionContext,
+        context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
         // 3. Materialize.
-        Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::PutRow(sync_compare_row(fact.id, &compare)?))
-            .intent(send_sync_compare_response_intent(SendSyncCompareResponse {
+        let output = ProjectionOutput::new()
+            .row_mutation(RowMutation::PutRow(sync_compare_row(fact.id, &compare)?));
+        if context.is_replay() {
+            return Ok(output);
+        }
+        Ok(
+            output.intent(send_sync_compare_response_intent(SendSyncCompareResponse {
                 compare_fact_id: fact.id,
-            })))
+            })),
+        )
     }
 }

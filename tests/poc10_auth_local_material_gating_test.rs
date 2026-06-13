@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
 use topo::protocol::auth::local_history_node_secret::encode as local_history_layout;
 use topo::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
 use topo::protocol::auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector;

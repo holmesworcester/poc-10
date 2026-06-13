@@ -122,7 +122,7 @@ pub mod authenticate {
     //! projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::RetentionPolicyFact;
 
@@ -158,7 +158,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::retention_policy::author::authored_retention_policy_fact;
         use crate::protocol::content::retention_policy::fact::{
             RetentionPolicyFact, SCOPE_KIND_WORKSPACE,
@@ -262,7 +262,7 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth;
 use crate::protocol::content::message;
 use crate::protocol::sync::shared_fact::project::{
@@ -513,7 +513,7 @@ mod projector_tests {
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth;
     use topo::protocol::auth::admin;
     use topo::protocol::auth::admin::fact::AdminFact;

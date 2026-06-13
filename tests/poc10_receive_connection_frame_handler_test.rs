@@ -5,7 +5,7 @@ use topo::core::crypto;
 use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
-use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
 use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::auth::endpoint::encode as endpoint_layout;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
@@ -19,9 +19,6 @@ use topo::protocol::connection;
 use topo::protocol::connection::connection::encode as connection_layout_encode;
 use topo::protocol::connection::connection::fact::ConnectionFact;
 use topo::protocol::connection::connection::project::decode as connection_layout_decode;
-use topo::protocol::connection::create_frame_observation::{
-    decode_create_frame_observation, CREATE_FRAME_OBSERVATION,
-};
 use topo::protocol::connection::frame_bundle::encode::{
     self as frame_bundle_layout_encode, CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
 };
@@ -33,6 +30,7 @@ use topo::protocol::connection::frame_file_slice::encode::{
 };
 use topo::protocol::connection::frame_file_slice::project::decode as frame_file_slice_layout_decode;
 use topo::protocol::connection::frame_observation::author as frame_observation_create;
+use topo::protocol::connection::frame_observation::project::decode as frame_observation_layout_decode;
 use topo::protocol::connection::frame_small::author as frame_small_author;
 use topo::protocol::connection::frame_small::encode::{
     self as frame_small_layout_encode, CONNECTION_FRAME_SMALL_WIRE_BYTES,
@@ -100,15 +98,18 @@ fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
     )
 }
 
-fn assert_observation_intent(
+fn assert_observation_fact(
     output: &PipelineEffects,
     frame_fact_id: [u8; 32],
-) -> topo::protocol::connection::create_frame_observation::CreateFrameObservation {
-    assert_eq!(output.intents.len(), 1);
+) -> topo::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact {
+    assert!(output.intents.is_empty());
     assert!(output.local_intents.is_empty());
-    assert_eq!(output.intents[0].kind.as_str(), CREATE_FRAME_OBSERVATION);
-    let observation =
-        decode_create_frame_observation(&output.intents[0]).expect("observation intent");
+    let observation = output
+        .facts
+        .iter()
+        .filter_map(|fact| frame_observation_layout_decode::decode_fact(fact.body()).ok())
+        .find(|observation| observation.frame_fact_id == frame_fact_id)
+        .expect("frame observation fact");
     assert_eq!(observation.frame_fact_id, frame_fact_id);
     assert_eq!(observation.origin_addr, ORIGIN);
     assert_eq!(observation.received_at_local_ms, RECEIVED_AT);
@@ -118,7 +119,7 @@ fn assert_observation_intent(
 fn project_connection_frame_fact(
     fact: &Fact,
     context: ProjectionContext,
-) -> topo::core::pipeline::ProjectionOutput {
+) -> topo::core::project_fact::ProjectionOutput {
     match fact.body().first().copied() {
         Some(frame_small_layout_encode::TYPE_CONNECTION_FRAME_SMALL) => {
             ConnectionFrameSmallProjector::new()
@@ -296,12 +297,12 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
         .handle(&intent, &HandlerContext::new())
         .expect("receive intent becomes connection frame input");
 
-    assert!(output.facts.is_empty());
-    assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = frame_small_layout_decode::decode_fact(output.ephemeral_facts[0].body())
+    assert_eq!(output.facts.len(), 1);
+    assert_eq!(output.candidate_facts.len(), 1);
+    let input = frame_small_layout_decode::decode_fact(output.candidate_facts[0].body())
         .expect("decode small connection frame");
     assert_eq!(input.frame, frame);
-    assert_observation_intent(&output, output.ephemeral_facts[0].id);
+    assert_observation_fact(&output, output.candidate_facts[0].id);
 }
 
 #[test]
@@ -318,12 +319,12 @@ fn receive_handler_emits_ephemeral_connection_frame_file_slice() {
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
         .expect("receive intent becomes file-slice connection frame input");
 
-    assert!(output.facts.is_empty());
-    assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = frame_file_slice_layout_decode::decode_fact(output.ephemeral_facts[0].body())
+    assert_eq!(output.facts.len(), 1);
+    assert_eq!(output.candidate_facts.len(), 1);
+    let input = frame_file_slice_layout_decode::decode_fact(output.candidate_facts[0].body())
         .expect("decode file-slice connection frame");
     assert_eq!(input.frame, frame);
-    assert_observation_intent(&output, output.ephemeral_facts[0].id);
+    assert_observation_fact(&output, output.candidate_facts[0].id);
 }
 
 #[test]
@@ -340,16 +341,16 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
         .handle(&receive_intent(frame.clone()), &HandlerContext::new())
         .expect("receive intent becomes bundle connection frame input");
 
-    assert!(output.facts.is_empty());
-    assert_eq!(output.ephemeral_facts.len(), 1);
-    let input = frame_bundle_layout_decode::decode_fact(output.ephemeral_facts[0].body())
+    assert_eq!(output.facts.len(), 1);
+    assert_eq!(output.candidate_facts.len(), 1);
+    let input = frame_bundle_layout_decode::decode_fact(output.candidate_facts[0].body())
         .expect("decode bundle connection frame");
     assert_eq!(input.frame, frame);
-    assert_observation_intent(&output, output.ephemeral_facts[0].id);
+    assert_observation_fact(&output, output.candidate_facts[0].id);
 }
 
 #[test]
-fn sealed_request_frame_is_admitted_as_durable_request_plus_observation() {
+fn sealed_request_frame_is_admitted_as_candidate_request_plus_observation() {
     let frame = sealed_request_frame();
 
     let output = ReceiveNetworkFrameHandler::new()
@@ -357,9 +358,9 @@ fn sealed_request_frame_is_admitted_as_durable_request_plus_observation() {
         .expect("receive sealed request");
 
     assert_eq!(output.facts.len(), 1);
-    assert!(output.ephemeral_facts.is_empty());
+    assert_eq!(output.candidate_facts.len(), 1);
     let request_fact = output
-        .facts
+        .candidate_facts
         .iter()
         .find(|fact| {
             fact.scope == FactScope::Global
@@ -367,7 +368,7 @@ fn sealed_request_frame_is_admitted_as_durable_request_plus_observation() {
                 && connection_request_layout_decode::is_sealed_fact(fact.body())
         })
         .expect("sealed request fact");
-    assert_observation_intent(&output, request_fact.id);
+    assert_observation_fact(&output, request_fact.id);
 }
 
 #[test]
@@ -380,7 +381,7 @@ fn raw_connection_request_bytes_are_discarded_at_the_network_boundary() {
         .expect("raw request is consumed");
 
     assert!(output.facts.is_empty());
-    assert!(output.ephemeral_facts.is_empty());
+    assert!(output.candidate_facts.is_empty());
     assert!(output.intents.is_empty());
 }
 
@@ -394,12 +395,12 @@ fn raw_connection_bytes_are_discarded_at_the_network_boundary() {
         .expect("raw connection is consumed");
 
     assert!(output.facts.is_empty());
-    assert!(output.ephemeral_facts.is_empty());
+    assert!(output.candidate_facts.is_empty());
     assert!(output.intents.is_empty());
 }
 
 #[test]
-fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() {
+fn sealed_connection_frame_is_admitted_as_candidate_connection_plus_observation() {
     let responder_ephemeral_private = [72; 32];
     let connection = ConnectionFact {
         from_endpoint: crypto::x25519_public_key(&[71; 32]),
@@ -421,9 +422,9 @@ fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() 
         .expect("receive sealed connection");
 
     assert_eq!(output.facts.len(), 1);
-    assert!(output.ephemeral_facts.is_empty());
+    assert_eq!(output.candidate_facts.len(), 1);
     let connection_fact = output
-        .facts
+        .candidate_facts
         .iter()
         .find(|fact| {
             fact.scope == FactScope::Local
@@ -431,7 +432,7 @@ fn sealed_connection_frame_is_admitted_as_durable_connection_plus_observation() 
                 && connection_layout_decode::is_sealed_fact(fact.body())
         })
         .expect("sealed connection fact");
-    assert_observation_intent(&output, connection_fact.id);
+    assert_observation_fact(&output, connection_fact.id);
 }
 
 #[test]
@@ -443,15 +444,15 @@ fn well_formed_frame_opens_key_wrap_and_records_fact_receipt() {
 
     let output = project_connection_frame_fact(&input_fact, context);
 
-    assert_eq!(output.effects.facts.len(), 2);
+    assert_eq!(output.effects.candidate_facts.len(), 2);
     let admitted_wrap = auth_create::admit_key_wrap_fact(signed_wrap).expect("admit expected wrap");
     assert!(
-        output.effects.facts.contains(&admitted_wrap),
+        output.effects.candidate_facts.contains(&admitted_wrap),
         "opened frame should emit the admitted key-wrap fact"
     );
     let receipt_fact = output
         .effects
-        .facts
+        .candidate_facts
         .iter()
         .find(|fact| fact.scope == FactScope::Local && fact.id != admitted_wrap.id)
         .expect("local receipt fact");
@@ -476,7 +477,7 @@ fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
         .handle(&intent, &HandlerContext::new())
         .expect("receive connection::frame stages input");
 
-    let observation = assert_observation_intent(&output, output.ephemeral_facts[0].id);
+    let observation = assert_observation_fact(&output, output.candidate_facts[0].id);
     assert_eq!(observation.origin_addr, ORIGIN);
 }
 
@@ -507,12 +508,12 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
 
     let output = project_connection_frame_fact(&input_fact, context);
 
-    assert_eq!(output.effects.facts.len(), 2);
+    assert_eq!(output.effects.candidate_facts.len(), 2);
     let admitted = Fact::new(FactScope::Global, 0, compare_bytes);
-    assert!(output.effects.facts.contains(&admitted));
+    assert!(output.effects.candidate_facts.contains(&admitted));
     let receipt_fact = output
         .effects
-        .facts
+        .candidate_facts
         .iter()
         .find(|fact| fact.scope == FactScope::Local)
         .expect("local receipt fact");
@@ -535,6 +536,7 @@ fn well_formed_bundle_frame_without_observation_context_emits_transient_need_onl
 
         let output = project_connection_frame_fact(&input_fact, ProjectionContext::default());
 
+        assert!(output.retain_self);
         assert_eq!(output.needs.len(), 1);
         assert_eq!(
             output.needs[0].role.as_str(),
@@ -559,8 +561,16 @@ fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only
 
         let output = project_connection_frame_fact(&input_fact, context);
 
-        assert_eq!(output.needs.len(), 1);
-        assert_eq!(output.needs[0].role.as_str(), "connection");
+        assert!(output.retain_self);
+        assert_eq!(output.needs.len(), 2);
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection_frame_observation"));
+        assert!(output
+            .needs
+            .iter()
+            .any(|need| need.role.as_str() == "connection"));
         assert!(output.effects.facts.is_empty());
     });
 }
@@ -572,7 +582,7 @@ fn malformed_frame_header_is_discarded_by_receive_handler() {
         .expect("malformed frame is consumed");
 
     assert!(output.facts.is_empty());
-    assert!(output.ephemeral_facts.is_empty());
+    assert!(output.candidate_facts.is_empty());
     assert!(output.intents.is_empty());
 }
 
@@ -586,7 +596,7 @@ fn truncated_small_frame_after_valid_header_is_discarded_by_receive_handler() {
         .expect("truncated frame is consumed");
 
     assert!(output.facts.is_empty());
-    assert!(output.ephemeral_facts.is_empty());
+    assert!(output.candidate_facts.is_empty());
     assert!(output.intents.is_empty());
 }
 

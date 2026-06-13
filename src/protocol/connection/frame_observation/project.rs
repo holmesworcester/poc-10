@@ -89,7 +89,7 @@ pub mod authenticate {
     //! observation context for the observed frame fact.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ConnectionFrameObservationFact;
 
@@ -113,7 +113,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::connection::frame_observation::author::fact_from_observation;
         use crate::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact;
 
@@ -200,33 +200,10 @@ pub mod adapt {
 //      by the observed frame fact id.
 
 use crate::core::context::ContextOffer;
-use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
-use crate::protocol::connection::create_frame_observation::{
-    create_frame_observation_intent, CreateFrameObservation,
-};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::fact::ConnectionFrameObservationFact;
-
-pub fn observed_frame_effect(
-    frame_fact: Fact,
-    origin_addr: &[u8],
-    received_at_local_ms: u64,
-    ephemeral: bool,
-) -> Result<PipelineEffects, String> {
-    let output =
-        PipelineEffects::new().intent(create_frame_observation_intent(CreateFrameObservation {
-            frame_fact_id: frame_fact.id,
-            origin_addr: origin_addr.to_vec(),
-            received_at_local_ms,
-        }));
-    Ok(if ephemeral {
-        output.ephemeral_fact(frame_fact)
-    } else {
-        output.fact(frame_fact)
-    })
-}
 
 /// Projector route metadata for the frame_observation fact.
 pub const PIPELINE: FactPipeline = FactPipeline::projector(

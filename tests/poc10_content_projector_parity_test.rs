@@ -1,6 +1,6 @@
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactId, FactScope};
-use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
 use topo::protocol::auth;
 use topo::protocol::content;
 
@@ -514,7 +514,7 @@ fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, Stri
     }
 }
 
-fn assert_waits_for_signature(output: topo::core::pipeline::ProjectionOutput) {
+fn assert_waits_for_signature(output: topo::core::project_fact::ProjectionOutput) {
     assert!(output.offers.is_empty());
     assert!(output.effects.intents.is_empty());
     assert!(output

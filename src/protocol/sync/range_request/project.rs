@@ -67,7 +67,7 @@ pub mod authenticate {
     //! owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::SyncRangeRequestFact;
 
@@ -91,7 +91,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::sync::range_request::encode;
         use crate::protocol::sync::range_request::fact::SyncRangeRequestFact;
 
@@ -187,7 +187,7 @@ pub mod adapt {
 //      progressive send own transfer for this protocol slice.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 /// Projector route metadata for the range_request fact.
 pub const PIPELINE: FactPipeline =

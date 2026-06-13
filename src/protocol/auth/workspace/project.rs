@@ -106,7 +106,7 @@ pub mod authenticate {
     //! retained invite acceptance context and materialization stays in the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::WorkspaceFact;
 
@@ -130,7 +130,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::workspace::author::create_workspace;
         use crate::protocol::auth::workspace::fact::WorkspaceFact;
 
@@ -216,7 +216,7 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::{invite_accepted, signature};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
@@ -315,7 +315,7 @@ impl WorkspaceProjector {
 mod projector_tests {
     use super::*;
     use crate::core::context::{ContextNeed, ContextOffer};
-    use crate::core::pipeline::MatchedContext;
+    use crate::core::project_fact::MatchedContext;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
     use crate::protocol::auth::workspace::{author, encode, queries};
     use crate::protocol::auth::{invite, invite_accepted};

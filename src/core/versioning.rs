@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::pipeline::{FactPipeline, FactRoute};
+use crate::core::project_fact::{FactPipeline, FactRoute};
 
 /// Fleet-wide protocol version.
 pub type ProtocolVersion = u32;

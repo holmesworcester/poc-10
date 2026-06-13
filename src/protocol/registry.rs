@@ -23,10 +23,10 @@ use crate::core::cli::CliCommand;
 use crate::core::facts::Fact;
 use crate::core::intents::TypedTableSchema;
 use crate::core::network;
-use crate::core::pipeline::{
-    FactRoute, HandlerRoute, ProjectionContext, ProjectionOutput, Projector, RecurringIntentSpec,
-    RouterProjector,
+use crate::core::project_fact::{
+    FactRoute, ProjectionContext, ProjectionOutput, Projector, RouterProjector,
 };
+use crate::core::runtime::{HandlerRoute, RecurringIntentSpec};
 use crate::core::store::{ReplayTables, SchemaSource, TableName};
 use crate::protocol::cli as command;
 use crate::protocol::{auth, connection, content, sync};
@@ -833,7 +833,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
 ];
 
 pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
-    "create_frame_observation",
     "send_facts_on_connection",
     "send_network_frame",
     "receive_network_frame",
@@ -1077,12 +1076,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         "send_facts_on_connection",
         connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
         connection::send_facts_on_connection::SendFactsOnConnectionHandler,
-        replay = false
-    ),
-    handler_route!(
-        "create_frame_observation",
-        connection::create_frame_observation::CREATE_FRAME_OBSERVATION,
-        connection::create_frame_observation::CreateFrameObservationHandler,
         replay = false
     ),
     handler_route!(

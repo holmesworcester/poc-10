@@ -56,7 +56,7 @@ pub mod authenticate {
     //! owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::SharedFact;
 
@@ -77,7 +77,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::sync::shared_fact::encode;
         use crate::protocol::sync::shared_fact::fact::SharedFact;
 
@@ -174,7 +174,7 @@ pub mod adapt {
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use std::collections::BTreeSet;
 
 use crate::protocol::sync::share_fact_with_sync as share_sync;

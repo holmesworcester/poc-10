@@ -162,7 +162,7 @@ pub mod authenticate {
     //! owns through `project.rs`.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ConnectionFrameSmallFact;
 
@@ -186,7 +186,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::core::wire::FixedBytes;
         use crate::protocol::connection::frame_small::author::fact_from_wire;
         use crate::protocol::connection::frame_small::encode as frame_encode;
@@ -284,7 +284,7 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
 use crate::protocol::{auth, connection, content, sync};
@@ -341,7 +341,7 @@ pub fn project_observed_frame(
     }
 
     let Ok(connection_id) = decode::received_connection_fact_id(frame) else {
-        return Ok(ProjectionOutput::new());
+        return Ok(ProjectionOutput::new().drop_candidate());
     };
 
     let observation_need = exact_need(
@@ -364,7 +364,9 @@ pub fn project_observed_frame(
 
     let connection_need = connection::connection::project::connection_need(fact.id, connection_id);
     let Some(connection_fact) = context.payload_for(&connection_need) else {
-        return Ok(ProjectionOutput::new().need(connection_need));
+        return Ok(ProjectionOutput::new()
+            .need(observation_need)
+            .need(connection_need));
     };
     if connection_fact.scope != FactScope::Local {
         return Err("connection frame context must be local".to_string());
@@ -380,7 +382,7 @@ pub fn project_observed_frame(
             }
             return Ok(output);
         }
-        ConnectionMaterialContext::Invalid => return Ok(ProjectionOutput::new()),
+        ConnectionMaterialContext::Invalid => return Ok(ProjectionOutput::new().drop_candidate()),
     };
 
     match open_received_frame_with_material(
@@ -390,7 +392,7 @@ pub fn project_observed_frame(
         observation.received_at_local_ms,
     ) {
         Ok(facts) => Ok(facts_output(fact.id, facts)),
-        Err(_) => Ok(ProjectionOutput::new()),
+        Err(_) => Ok(ProjectionOutput::new().drop_candidate()),
     }
 }
 
@@ -399,9 +401,11 @@ fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 3
 }
 
 fn facts_output(frame_fact_id: FactId, facts: Vec<Fact>) -> ProjectionOutput {
-    let mut output = ProjectionOutput::new().purge_self(frame_fact_id);
+    let mut output = ProjectionOutput::new()
+        .drop_candidate()
+        .purge_self(frame_fact_id);
     for fact in facts {
-        output = output.fact(fact);
+        output = output.candidate_fact(fact);
     }
     output
 }

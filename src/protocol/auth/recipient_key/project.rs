@@ -77,7 +77,7 @@ pub mod authenticate {
     //! signer matching are proven from other facts, also in the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::RecipientKeyFact;
 
@@ -109,7 +109,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto;
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::recipient_key::author::authored_recipient_key_fact;
         use crate::protocol::auth::recipient_key::fact::{
             RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY,
@@ -205,7 +205,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{

@@ -87,7 +87,7 @@ pub mod authenticate {
     //! other facts, also in the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::UserInviteFact;
 
@@ -121,7 +121,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::user_invite::author::authored_user_invite_fact;
         use crate::protocol::auth::user_invite::fact::UserInviteFact;
 
@@ -211,7 +211,7 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::user_invite::fact::UserInviteFact;
 use crate::protocol::auth::{admin, endpoint_shared, signature, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};

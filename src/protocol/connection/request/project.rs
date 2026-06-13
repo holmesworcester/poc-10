@@ -309,7 +309,7 @@ pub mod authenticate {
     use crate::core::context::ContextNeed;
     use crate::core::crypto::{self, Ed25519PublicKey};
     use crate::core::facts::{Fact, FactId, FactScope};
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
     use crate::protocol::auth::{endpoint, endpoint_shared, invite, invite_accepted};
     use crate::protocol::connection::ephemeral_secret;
 
@@ -688,7 +688,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto::{self, ED25519_SIGNATURE_BYTES};
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::endpoint::fact::EndpointFact;
         use crate::protocol::connection::request::author::sign_request;
         use crate::protocol::connection::request::encode;
@@ -827,7 +827,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::{endpoint_shared, workspace};
 use crate::protocol::connection::create_connection::{create_connection_intent, CreateConnection};
@@ -1137,7 +1137,7 @@ mod tests {
     use crate::core::crypto;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::RowMutation;
-    use crate::core::pipeline::{MatchedContext, ProjectionContext, ProjectionMode, Projector};
+    use crate::core::project_fact::{MatchedContext, ProjectionContext, ProjectionMode, Projector};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::invite::{encode as invite_encode, fact::InviteSecretFact};
     use crate::protocol::connection::ephemeral_secret::{

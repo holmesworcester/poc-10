@@ -2,7 +2,7 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, pending projection matches, ephemeral projection inputs, intent
+//! projection, pending projection matches, candidate facts, intent
 //! queues, and the store-local clock. It exposes one executable `SchemaSource`
 //! plus typed `TableName` constants so the rest of core does not repeat string
 //! literals.
@@ -45,9 +45,8 @@ pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_r
 pub(crate) const INTENTS: TableName = TableName::new("intents");
 /// Ephemeral intent queue table.
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
-/// Ephemeral projectable-input queue table.
-pub(crate) const EPHEMERAL_PROJECTION_INPUTS: TableName =
-    TableName::new("ephemeral_projection_inputs");
+/// Volatile incoming fact candidate table.
+pub(crate) const CANDIDATE_FACTS: TableName = TableName::new("candidate_facts");
 /// Store-local trusted clock observation table.
 pub(crate) const CLOCK: TableName = TableName::new("clock");
 
@@ -61,7 +60,7 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     PENDING_TIME_RANGES,
     INTENTS,
     LOCAL_INTENTS,
-    EPHEMERAL_PROJECTION_INPUTS,
+    CANDIDATE_FACTS,
 ];
 
 const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
@@ -169,7 +168,7 @@ CREATE TEMP TABLE IF NOT EXISTS local_intents (
     PRIMARY KEY (kind, idempotence_key)
 );
 
-CREATE TEMP TABLE IF NOT EXISTS ephemeral_projection_inputs (
+CREATE TEMP TABLE IF NOT EXISTS candidate_facts (
     id BLOB PRIMARY KEY NOT NULL,
     scope TEXT NOT NULL,
     scope_kind TEXT NOT NULL,
@@ -177,8 +176,8 @@ CREATE TEMP TABLE IF NOT EXISTS ephemeral_projection_inputs (
     received_at INTEGER NOT NULL,
     bytes BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ephemeral_projection_inputs_by_received_at
-    ON ephemeral_projection_inputs (received_at, id);
+CREATE INDEX IF NOT EXISTS candidate_facts_by_received_at
+    ON candidate_facts (received_at, id);
 
 CREATE TABLE IF NOT EXISTS clock (
     key TEXT PRIMARY KEY NOT NULL,

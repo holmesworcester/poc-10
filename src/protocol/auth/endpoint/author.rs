@@ -7,8 +7,8 @@
 //! projected public state. Reactive paths share these constructors.
 
 use crate::core::crypto;
-use crate::core::fact_store::persisted_facts;
 use crate::core::facts::{Fact, FactScope};
+use crate::core::store::persisted_facts;
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;

@@ -12,7 +12,7 @@ use crate::core::effects::PipelineEffects;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind, RowMutation,
 };
-use crate::core::pipeline::RecurringIntentContext;
+use crate::core::runtime::RecurringIntentContext;
 use crate::core::store::Store;
 use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,

@@ -93,7 +93,7 @@ pub mod authenticate {
     //! interpretation the projector owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::LocalHistoryNodeSecretFact;
 
@@ -118,7 +118,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::local_history_node_secret::encode;
         use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
 
@@ -221,7 +221,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
 };

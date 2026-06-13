@@ -75,7 +75,7 @@ pub mod authenticate {
     //! and publishing local signer context are interpretation the projector owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::LocalSignerSecretFact;
 
@@ -100,7 +100,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto;
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::local_signer_secret::encode;
         use crate::protocol::auth::local_signer_secret::fact::LocalSignerSecretFact;
 
@@ -192,7 +192,7 @@ pub mod adapt {
 //      scope and emits no rows, facts, intents, or shareable context.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::fact::LocalSignerSecretFact;
 

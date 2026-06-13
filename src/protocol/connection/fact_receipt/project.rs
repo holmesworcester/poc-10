@@ -195,7 +195,7 @@ pub mod authenticate {
     //! context for the received fact.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ConnectionFactReceipt;
 
@@ -219,7 +219,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::connection::fact_receipt::encode;
         use crate::protocol::connection::fact_receipt::fact::{
             ConnectionFactReceipt, OriginAddr, RECEIVE_PATH_CONNECTION,
@@ -329,7 +329,7 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 pub fn connection_fact_receipt_for_path(
     input: super::fact::ReceiptPathInput<'_>,

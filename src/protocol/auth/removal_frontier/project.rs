@@ -70,7 +70,7 @@ pub mod authenticate {
     //! signer secret) are interpretation the projector owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::RemovalFrontierFact;
 
@@ -94,7 +94,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::removal_frontier::author::authored_removal_frontier_fact;
         use crate::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
 
@@ -179,7 +179,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth;
 use crate::protocol::auth::key_wrap::project::require_fact_scope;
 use crate::protocol::auth::signature;

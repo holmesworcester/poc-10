@@ -14,8 +14,8 @@ use crate::core::cli::{
 };
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::{self, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
-use crate::core::fact_store::persisted_facts;
 use crate::core::facts::FactId;
+use crate::core::store::persisted_facts;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::content::{file, file_slice, message, message_deletion, reaction};

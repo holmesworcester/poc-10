@@ -192,7 +192,6 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             "connection",
             &[
                 "create_connection",
-                "create_frame_observation",
                 "maintain_connections",
                 "receive_network_frame",
                 "send_facts_on_connection",
@@ -692,14 +691,7 @@ fn legacy_custom_context_matcher_api_does_not_reappear() {
         if !contains_legacy_custom_context_matcher_api(&text) {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap();
-        if relative.starts_with("src/core/pipeline.rs")
-            || relative.starts_with("src/core/fact_store.rs")
-        {
-            continue;
-        }
-
-        offenders.push(relative.display().to_string());
+        offenders.push(path.strip_prefix(root).unwrap().display().to_string());
     }
 
     assert!(
@@ -2095,10 +2087,18 @@ fn retired_signed_envelope_module_does_not_reappear() {
 }
 
 #[test]
-fn core_pipeline_stays_protocol_neutral() {
+fn core_runtime_workers_stay_protocol_neutral() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("src/core/pipeline.rs");
-    let text = source_text(&path);
+    let paths = [
+        root.join("src/core/project_fact.rs"),
+        root.join("src/core/handle_intent.rs"),
+        root.join("src/core/runtime.rs"),
+    ];
+    let text = paths
+        .iter()
+        .map(|path| source_text(path))
+        .collect::<Vec<_>>()
+        .join("\n");
     let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();
 
@@ -2110,16 +2110,13 @@ fn core_pipeline_stays_protocol_neutral() {
         "Connection",
     ] {
         if production.contains(forbidden) {
-            offenders.push(format!(
-                "{} contains {forbidden:?}",
-                path.strip_prefix(root).unwrap().display()
-            ));
+            offenders.push(format!("core runtime worker contains {forbidden:?}"));
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "core intent pipeline must stay generic and protocol-neutral:\n{}",
+        "core runtime workers must stay generic and protocol-neutral:\n{}",
         offenders.join("\n")
     );
 }

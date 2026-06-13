@@ -96,7 +96,7 @@ pub mod authenticate {
     //! interpretation the projector owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::AdminFact;
 
@@ -130,7 +130,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::admin::author::authored_admin_fact;
         use crate::protocol::auth::admin::fact::AdminFact;
 
@@ -231,7 +231,7 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;

@@ -27,18 +27,202 @@
 //! repeat work already accepted durably.
 
 use crate::core::effects::PipelineEffects;
-use crate::core::fact_store::persisted_fact;
 use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler, IntentKind};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
+use crate::core::store::persisted_fact;
 use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
-use crate::core::pipeline::commit_effects::{
+use crate::core::project_fact::commit_effects::{
     commit_pipeline_effects_in_tx, suppress_disallowed_intents,
     validate_pipeline_effects_for_admission, IntentAdmissionPolicy,
 };
-use crate::core::pipeline::route::FactAdmissionFn;
-use crate::core::pipeline::WorkStatus;
+use crate::core::project_fact::route::FactAdmissionFn;
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+
+/// Factory for one protocol intent handler.
+pub type HandlerFactory = fn() -> Box<dyn IntentHandler>;
+
+/// Build the current intent for a recurring operational loop.
+///
+/// The daemon calls this while the process is online to mint one tick of live
+/// work. Returning `Ok(None)` means there is nothing to do this tick. The
+/// builder reads the store the same way a handler reads its inputs; it must not
+/// depend on persisted scheduler rows, because recurring schedules are
+/// in-memory only and never replayed.
+pub type RecurringIntentBuilder =
+    fn(&Store, RecurringIntentContext) -> Result<Option<Intent>, String>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecurringIntentContext {
+    /// Wall-clock time captured by the live daemon tick that fired this intent.
+    pub now_ms: u64,
+    /// Current process listen address, when this recurring run came from a daemon.
+    pub local_addr: Option<SocketAddr>,
+}
+
+/// In-memory schedule for a live-only recurring operational intent.
+///
+/// Recurring intents are not durable state. The daemon installs these schedules
+/// at startup, after replay has finished, and fires them on a fixed cadence
+/// while the process runs. There is nothing to wipe on upgrade and nothing to
+/// replay: operational repetition belongs here, not in durable time wakes or
+/// projectors.
+#[derive(Debug, Clone, Copy)]
+pub struct RecurringIntentSpec {
+    /// Cadence between successive fires once the loop is running.
+    pub interval_ms: u64,
+    /// Delay from daemon startup before the first fire.
+    pub initial_delay_ms: u64,
+    /// Build this tick's intent from current store state, or `None` to skip.
+    pub build_intent: RecurringIntentBuilder,
+}
+
+/// One handler route in the protocol registry.
+///
+/// `name` is a human-facing route name used for exclusion lists. `intent_kind`
+/// is the queue routing key that selects this handler for both durable and
+/// ephemeral intents.
+///
+/// `runs_during_replay` answers one question: if this intent is emitted while
+/// replay is rebuilding facts and rows, may core record and dispatch it before
+/// the replay barrier finishes? Replay-enabled handlers must be deterministic
+/// rebuild work over retained facts: no network IO, no fresh randomness, no
+/// process-global mutable state, and no operational wall-clock decisions. Every
+/// route declares this flag explicitly so adding a route forces a conscious
+/// replay decision.
+///
+/// `recurrence` marks live-only operational repetition. A route with a
+/// recurrence is installed as an in-memory daemon schedule and must not run
+/// during replay.
+#[derive(Debug, Clone, Copy)]
+pub struct HandlerRoute {
+    /// Human-facing route name used for exclusion lists.
+    pub name: &'static str,
+    /// Intent kind handled by this route.
+    pub intent_kind: &'static str,
+    /// Handler factory.
+    pub factory: HandlerFactory,
+    /// Whether core may dispatch this intent before the replay barrier finishes.
+    pub runs_during_replay: bool,
+    /// Live-only recurring schedule installed by the daemon, if any.
+    pub recurrence: Option<RecurringIntentSpec>,
+}
+
+/// Outcome returned by bounded runtime work calls.
+///
+/// Runtime callers only need to know whether a bounded pass moved work forward
+/// and whether any handler asked to retry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkStatus {
+    /// Whether a bounded pass committed or staged any work.
+    pub progressed: bool,
+    /// Whether a handler asked to leave work queued for a later pass.
+    pub retried: bool,
+}
+
+impl WorkStatus {
+    /// No progress and no retry.
+    pub fn idle() -> Self {
+        Self::default()
+    }
+
+    /// Build status from a simple progressed flag.
+    pub fn progressed(progressed: bool) -> Self {
+        Self {
+            progressed,
+            retried: false,
+        }
+    }
+
+    /// Accumulate status across runtime stages.
+    pub fn merge(&mut self, other: Self) {
+        self.progressed |= other.progressed;
+        self.retried |= other.retried;
+    }
+
+    /// Return whether the pass did nothing and hit no retry.
+    pub fn is_idle(self) -> bool {
+        !self.progressed && !self.retried
+    }
+}
+
+/// Instantiated handlers for one runtime pass.
+///
+/// The set owns concrete handler values so dispatch can borrow trait objects
+/// without rebuilding them for every queued row. Command processing builds a
+/// filtered set to avoid daemon/network side effects; replay builds a filtered
+/// set that contains only replay-allowed routes.
+pub(crate) struct HandlerSet {
+    entries: Vec<HandlerEntry>,
+}
+
+struct HandlerEntry {
+    intent_kind: &'static str,
+    handler: Box<dyn IntentHandler>,
+}
+
+impl HandlerSet {
+    /// Instantiate all declared routes.
+    pub(crate) fn new(routes: &'static [HandlerRoute]) -> Self {
+        Self {
+            entries: routes
+                .iter()
+                .map(|route| HandlerEntry {
+                    intent_kind: route.intent_kind,
+                    handler: (route.factory)(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Instantiate every route except the protocol-declared command exclusions.
+    pub(crate) fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
+        Self {
+            entries: routes
+                .iter()
+                .filter(|route| !excluded_names.contains(&route.name))
+                .map(|route| HandlerEntry {
+                    intent_kind: route.intent_kind,
+                    handler: (route.factory)(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Instantiate only routes allowed to run before the replay barrier.
+    pub(crate) fn new_replay(routes: &'static [HandlerRoute]) -> Self {
+        Self {
+            entries: routes
+                .iter()
+                .filter(|route| route.runs_during_replay)
+                .map(|route| HandlerEntry {
+                    intent_kind: route.intent_kind,
+                    handler: (route.factory)(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn intent_kinds(&self) -> Vec<&'static str> {
+        self.entries.iter().map(|entry| entry.intent_kind).collect()
+    }
+
+    fn handler_for_kind(&self, kind: &str) -> Option<&dyn IntentHandler> {
+        self.entries
+            .iter()
+            .find(|entry| entry.intent_kind == kind)
+            .map(|entry| entry.handler.as_ref())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IntentDispatchProgress {
+    pub(crate) status: WorkStatus,
+    pub(crate) dispatched: usize,
+    pub(crate) suppressed_intents: usize,
+}
 
 /// Queue ephemeral handler work on this SQLite connection.
 pub(crate) fn submit_local_intent_to_store(store: &Store, intent: Intent) -> Result<bool, String> {
@@ -122,6 +306,64 @@ pub(crate) fn dispatch_queued_intent_with_policy(
         status,
         suppressed_intents,
     })
+}
+
+/// Dispatch queued intents with the provided handler set.
+///
+/// The policy decides which follow-up intents emitted by handlers may be
+/// recorded; inadmissible ones are suppressed and counted.
+pub(crate) fn dispatch_intents(
+    store: &Store,
+    handlers: &HandlerSet,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    limit: usize,
+    policy: IntentAdmissionPolicy<'_>,
+) -> Result<IntentDispatchProgress, String> {
+    let mut progress = IntentDispatchProgress::default();
+    let kinds = handlers.intent_kinds();
+    let mut retried_local = BTreeSet::<(String, Vec<u8>)>::new();
+    for _ in 0..limit {
+        let Some(queued) = next_queued_intent(store, &kinds)? else {
+            break;
+        };
+        let kind = queued.intent.kind.as_str();
+        let local_retry_key = if queued.table == LOCAL_INTENTS {
+            Some((kind.to_owned(), queued.intent.key.clone()))
+        } else {
+            None
+        };
+        if local_retry_key
+            .as_ref()
+            .is_some_and(|key| retried_local.contains(key))
+        {
+            break;
+        }
+        let handler = handlers
+            .handler_for_kind(kind)
+            .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
+        let report = dispatch_queued_intent_with_policy(
+            handler,
+            store,
+            allowed_tables,
+            fact_admission,
+            queued,
+            policy,
+        )?;
+        progress.status.merge(report.status);
+        progress.suppressed_intents += report.suppressed_intents;
+        if report.status.progressed {
+            progress.dispatched += 1;
+        }
+        if report.status.retried {
+            if let Some(key) = local_retry_key {
+                retried_local.insert(key);
+                continue;
+            }
+            break;
+        }
+    }
+    Ok(progress)
 }
 
 /// Return the first queued intent matching a declared handler route.
@@ -223,7 +465,7 @@ fn commit_handler_output(
     effects: &PipelineEffects,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    pending_mode: crate::core::pipeline::ProjectionMode,
+    pending_mode: crate::core::project_fact::ProjectionMode,
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {

@@ -6,7 +6,7 @@
 use crate::core::command_context::{CommandContext, CommandOutput};
 use crate::core::crypto::{self, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
-use crate::core::pipeline::ProjectionContext;
+use crate::core::project_fact::ProjectionContext;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;

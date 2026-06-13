@@ -8,11 +8,11 @@
 //! dependency closure from fact bodies.
 
 use crate::core::{
-    fact_store::persisted_fact,
     intents::{
         HandlerContext, HandlerError, HandlerFactId, HandlerFactId as FactId, HandlerResult,
         Intent, IntentHandler, IntentKind,
     },
+    store::persisted_fact,
     wire::{Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter},
 };
 use crate::protocol::sync::{seed_connection, shared_fact};

@@ -93,7 +93,7 @@ pub mod authenticate {
     //! facts, also in the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ContentReactionFact;
 
@@ -117,7 +117,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::reaction::author::authored_reaction_fact;
         use crate::protocol::content::reaction::fact::{
             ContentReactionFact, ReactionCiphertext, REACTION_NONCE_BYTES,
@@ -217,7 +217,7 @@ pub mod adapt {
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -358,7 +358,7 @@ impl ContentReactionProjector {
             reaction.target_message_id,
             "reaction target",
         )?;
-        let target_deletion_need = crate::core::pipeline::fact_purged_need(
+        let target_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope.clone(),
             project::fact_purged_key(

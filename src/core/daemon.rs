@@ -21,11 +21,12 @@
 //! wakes, or intents rather than calling daemon steps directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::handle_intent::{
+    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, WorkStatus,
+};
 use crate::core::intents::Intent;
 use crate::core::network;
-use crate::core::pipeline::{
-    HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, Timeline, WorkStatus,
-};
+use crate::core::project_fact::Timeline;
 use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use std::fs::{self, File, OpenOptions};

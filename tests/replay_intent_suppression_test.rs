@@ -1,14 +1,13 @@
 //! Replay-mode intent suppression tests.
 //!
 //! These use a tiny runtime description instead of the full protocol so the
-//! assertion is about core behavior: replay may record only replay-allowed
-//! follow-up intents, even when projectors or replay handlers emit live-only
-//! work.
+//! assertion is about core behavior: projectors own replay-mode emissions, and
+//! replay dispatch still filters live-only follow-up work from handlers.
 
 use topo::core::effects::PipelineEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
-use topo::core::pipeline::{ProjectionContext, ProjectionOutput, Projector};
+use topo::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
 use topo::core::runtime::{HandlerRoute, Runtime, RuntimeDescription};
 use topo::core::store::SchemaSource;
 
@@ -42,9 +41,26 @@ impl Projector for TestProjector {
 }
 
 #[derive(Debug)]
-struct ReplayAwareProjector;
+struct ReplayAllowedProjector;
 
-impl Projector for ReplayAwareProjector {
+impl Projector for ReplayAllowedProjector {
+    fn project(
+        &self,
+        fact: &Fact,
+        context: &ProjectionContext,
+    ) -> Result<ProjectionOutput, String> {
+        if context.is_replay() {
+            Ok(ProjectionOutput::new().intent(intent(REPLAY_OK, &fact.id)))
+        } else {
+            Ok(ProjectionOutput::new().intent(intent(REPLAY_OK, &fact.id)))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReplayNoopProjector;
+
+impl Projector for ReplayNoopProjector {
     fn project(
         &self,
         fact: &Fact,
@@ -96,8 +112,12 @@ fn test_projector() -> Box<dyn Projector> {
     Box::new(TestProjector)
 }
 
-fn replay_aware_projector() -> Box<dyn Projector> {
-    Box::new(ReplayAwareProjector)
+fn replay_allowed_projector() -> Box<dyn Projector> {
+    Box::new(ReplayAllowedProjector)
+}
+
+fn replay_noop_projector() -> Box<dyn Projector> {
+    Box::new(ReplayNoopProjector)
 }
 
 fn replay_handler() -> Box<dyn IntentHandler> {
@@ -156,7 +176,17 @@ const RUNTIME: RuntimeDescription = RuntimeDescription {
 const RUNTIME_REPLAY_AWARE: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
     row_mutation_tables: &[],
-    projector: replay_aware_projector,
+    projector: replay_allowed_projector,
+    fact_routes: &[],
+    fact_admission: None,
+    handlers: HANDLERS,
+    command_excluded_handlers: &[],
+};
+
+const RUNTIME_REPLAY_NOOP: RuntimeDescription = RuntimeDescription {
+    schema_sources: SCHEMA_SOURCES,
+    row_mutation_tables: &[],
+    projector: replay_noop_projector,
     fact_routes: &[],
     fact_admission: None,
     handlers: HANDLERS,
@@ -184,8 +214,8 @@ fn live_projection_records_all_projector_intents() {
 }
 
 #[test]
-fn replay_suppresses_non_replayable_projector_and_handler_intents() {
-    let mut runtime = Runtime::open_memory(&RUNTIME).expect("runtime");
+fn replay_suppresses_non_replayable_handler_followup_intents() {
+    let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_AWARE).expect("runtime");
     runtime.submit_fact(fact());
 
     let report = runtime
@@ -194,8 +224,8 @@ fn replay_suppresses_non_replayable_projector_and_handler_intents() {
 
     assert_eq!(report.replay_allowed_intents, 1);
     assert_eq!(
-        report.suppressed_live_only_work, 3,
-        "replay suppresses two projector live-only intents and one handler follow-up"
+        report.suppressed_live_only_work, 1,
+        "replay suppresses the live-only handler follow-up"
     );
     assert_eq!(
         runtime.pending_intent_count(),
@@ -206,7 +236,7 @@ fn replay_suppresses_non_replayable_projector_and_handler_intents() {
 
 #[test]
 fn replay_projects_retained_facts_with_replay_context() {
-    let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_AWARE).expect("runtime");
+    let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_NOOP).expect("runtime");
     runtime.submit_fact(fact());
     runtime
         .process_projection_until_idle(4, 32)

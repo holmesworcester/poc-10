@@ -94,7 +94,7 @@ pub mod authenticate {
     //! owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::KeyWrapFact;
 
@@ -116,7 +116,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto::{X25519_PUBLIC_KEY_BYTES, XCHACHA20_POLY1305_NONCE_BYTES};
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::key_wrap::author::admit_key_wrap_fact;
         use crate::protocol::auth::key_wrap::encode;
         use crate::protocol::auth::key_wrap::fact::{
@@ -224,7 +224,7 @@ pub mod adapt {
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret;
 use crate::protocol::auth::local_key_secret;

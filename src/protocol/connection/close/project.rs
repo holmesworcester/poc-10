@@ -74,7 +74,7 @@ pub mod authenticate {
     //! context proof are interpretation the projector owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ConnectionCloseFact;
 
@@ -102,7 +102,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::connection::close::encode;
         use crate::protocol::connection::close::fact::ConnectionCloseFact;
 
@@ -194,7 +194,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::connection::connection;
 

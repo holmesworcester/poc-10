@@ -103,7 +103,7 @@ pub mod authenticate {
     //! other facts, also in the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ContentFileSliceFact;
 
@@ -127,7 +127,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::file_slice::author::authored_file_slice_fact;
         use crate::protocol::content::file_slice::fact::{ContentFileSliceFact, FileSliceProof};
 
@@ -230,7 +230,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::TableInsert;
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::file;
@@ -375,7 +375,7 @@ impl ContentFileSliceProjector {
         if parent_message.workspace_id != slice.workspace_id {
             return Err("file slice message parent workspace does not match slice".to_string());
         }
-        let file_deletion_need = crate::core::pipeline::fact_purged_need(
+        let file_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope.clone(),
             message_project::fact_purged_key(
@@ -384,7 +384,7 @@ impl ContentFileSliceProjector {
                 parent.id,
             ),
         );
-        let parent_deletion_need = crate::core::pipeline::fact_purged_need(
+        let parent_deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope,
             message_project::fact_purged_key(

@@ -76,7 +76,7 @@ pub mod authenticate {
     //! owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::LocalKeySecretFact;
 
@@ -100,7 +100,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::local_key_secret::encode;
         use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 
@@ -190,7 +190,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
 };

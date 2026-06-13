@@ -1020,21 +1020,21 @@ fn cutover_content_read_models_have_normal_sqlite_tables() {
 #[test]
 fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically() {
     let root = root();
-    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
+    let project_fact = source_text(&root.join("src/core/project_fact.rs"));
     let core_daemon = source_text(&root.join("src/core/daemon.rs"));
     let send_network_frame =
         source_text(&root.join("src/protocol/connection/send_network_frame.rs"));
 
     let mut offenders = Vec::new();
-    if pipeline.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
+    if project_fact.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
         offenders.push(
-            "src/core/pipeline.rs applies protocol row writes after the projector run instead of inside one durable step"
+            "src/core/project_fact.rs applies protocol row writes after the projector run instead of inside one durable step"
                 .to_string(),
         );
     }
-    if pipeline.contains("fn apply_atomic_row_intents(") {
+    if project_fact.contains("fn apply_atomic_row_intents(") {
         offenders.push(
-            "src/core/pipeline.rs still has a separate atomic-row-intent transaction path"
+            "src/core/project_fact.rs still has a separate atomic-row-intent transaction path"
                 .to_string(),
         );
     }
@@ -1122,7 +1122,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 #[test]
 fn cutover_network_io_intents_are_ephemeral_queue_work() {
     let root = root();
-    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
+    let handle_intent = source_text(&root.join("src/core/handle_intent.rs"));
     let core_schema = source_text(&root.join("src/core/schema.rs"));
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
     let send_facts_handler =
@@ -1159,12 +1159,12 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
         offenders
             .push("daemon inbound network frames are not submitted as local intents".to_string());
     }
-    if !pipeline.contains("LOCAL_INTENTS")
+    if !handle_intent.contains("LOCAL_INTENTS")
         || !core_schema.contains("CREATE TEMP TABLE IF NOT EXISTS local_intents")
-        || !pipeline.contains("submit_local_intent_to_store")
+        || !handle_intent.contains("submit_local_intent_to_store")
     {
         offenders.push(
-            "core pipeline does not visibly route ephemeral intents to a TEMP local intent queue"
+            "core intent worker does not visibly route ephemeral intents to a TEMP local intent queue"
                 .to_string(),
         );
     }

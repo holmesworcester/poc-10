@@ -1,5 +1,10 @@
 # Poc-10 Runtime Cutover Plan
 
+Status: implemented in this worktree. The active runtime no longer has a
+`pipeline.rs` facade; `project_fact.rs` and `handle_intent.rs` own the n=1 work
+items, and incoming network frames enter as candidate facts that can be retained
+while waiting on context.
+
 ## Goal
 
 Replace the current pipeline abstraction with a smaller runtime model:
@@ -162,8 +167,10 @@ fn submit_incoming_fact(fact: Fact) -> Result<(), String> {
 }
 ```
 
-Candidate facts may be lost before projection. Projectors decide whether a
-candidate should become retained.
+Candidate facts may be lost before projection. Once projected, a projector
+decides whether a candidate should become retained, dropped, or retained while
+parked on standing context needs. Network frame candidates use that last path
+when observation, connection, or key material context has not arrived yet.
 
 ## Projection
 
@@ -432,7 +439,7 @@ time-wake subscriptions emitted by projectors.
 
 ## Definition Of Done
 
-- `pipeline.rs` is gone or reduced to no active runtime abstraction.
+- `pipeline.rs` is gone.
 - `project_fact.rs` and `handle_intent.rs` are the readable work-item files.
 - Commands return authored facts plus receipts and never call commands.
 - Commands query pre-command state only through owning `queries.rs` helpers.

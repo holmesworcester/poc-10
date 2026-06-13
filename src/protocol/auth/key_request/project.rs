@@ -74,7 +74,7 @@ pub mod authenticate {
     //! the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::KeyRequestFact;
 
@@ -99,7 +99,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto;
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::key_request::encode;
         use crate::protocol::auth::key_request::fact::KeyRequestFact;
         use crate::protocol::auth::workspace;
@@ -196,7 +196,7 @@ pub mod adapt {
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{

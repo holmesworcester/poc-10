@@ -87,7 +87,7 @@ pub mod authenticate {
     //! in the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ContentMessageDeletionFact;
 
@@ -113,7 +113,7 @@ pub mod authenticate {
         use crate::core::command_context::LocalSigningCapability;
         use crate::core::crypto;
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::message_deletion::author::delete_message;
         use crate::protocol::content::message_deletion::fact::ContentMessageDeletionFact;
 
@@ -223,7 +223,7 @@ pub mod adapt {
 
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -383,7 +383,7 @@ impl ContentMessageDeletionProjector {
                 Some(target_need),
                 Some(author_need),
             ])
-            .offer(crate::core::pipeline::fact_purged_offer(
+            .offer(crate::core::project_fact::fact_purged_offer(
                 fact.id,
                 scope,
                 project::fact_purged_key(
@@ -504,7 +504,7 @@ mod projector_tests {
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactId, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector};
+    use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
     use topo::protocol::auth;
     use topo::protocol::auth::endpoint_shared::{
         encode as endpoint_shared_layout,

@@ -73,7 +73,7 @@ pub mod authenticate {
     //! policy through their existing context checks.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::SignatureFact;
 
@@ -106,7 +106,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
 
         const PRIVATE_KEY: [u8; 32] = [7; 32];
 
@@ -203,7 +203,7 @@ pub mod adapt {
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
 use super::fact::SignatureFact;
@@ -357,7 +357,7 @@ pub fn signature_proof_ready(
 #[cfg(test)]
 mod tests {
     use crate::core::facts::FactScope;
-    use crate::core::pipeline::{ProjectionContext, Projector};
+    use crate::core::project_fact::{ProjectionContext, Projector};
 
     use super::*;
 

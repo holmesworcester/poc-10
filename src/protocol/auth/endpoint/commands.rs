@@ -73,7 +73,7 @@ mod tests {
                 .expect("open store");
         let endpoint = create_local_endpoint();
         let fact = super::super::author::endpoint_fact(10, endpoint).expect("endpoint fact");
-        crate::core::pipeline::submit_fact_to_store(&store, fact).expect("submit fact");
+        crate::core::project_fact::submit_fact_to_store(&store, fact).expect("submit fact");
 
         let output = local_or_create(&store, 20).expect("reuse endpoint");
 

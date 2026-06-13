@@ -28,10 +28,9 @@
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
+use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet};
 use crate::core::network::{INBOUND_TABLE, OUTBOUND_TABLE};
-use crate::core::pipeline::{
-    FactAdmissionFn, HandlerRoute, HandlerSet, IntentAdmissionPolicy, PipelineEngine, Projector,
-};
+use crate::core::project_fact::{self, FactAdmissionFn, IntentAdmissionPolicy, Projector};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
@@ -232,12 +231,12 @@ pub fn run_replay(
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
-            drive.pipeline.enqueue_retained_facts_for_replay()?;
+            project_fact::enqueue_retained_facts_for_replay(store)?;
             drive.fixpoint(&mut counters)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(store, order)? {
-                drive.pipeline.enqueue_retained_fact_for_replay(fact_id)?;
+                project_fact::enqueue_retained_fact_for_replay(store, fact_id)?;
                 drive.fixpoint(&mut counters)?;
             }
             // A final fixpoint settles any work left after the last admission.
@@ -315,7 +314,10 @@ struct ReplayCounters {
 /// replay-allowed dispatch run to a fixpoint together because each can produce
 /// inputs for the others.
 struct ReplayDrive<'a> {
-    pipeline: PipelineEngine<'a>,
+    store: &'a Store,
+    projector: &'a dyn Projector,
+    allowed_tables: &'a [TableName],
+    fact_admission: Option<FactAdmissionFn>,
     replay_time_wakes: &'a [DaemonTimeWake],
     handlers: HandlerSet,
     kinds: Vec<&'static str>,
@@ -333,13 +335,10 @@ impl<'a> ReplayDrive<'a> {
         let handlers = HandlerSet::new_replay(routes);
         let kinds = handlers.intent_kinds();
         Self {
-            pipeline: PipelineEngine::with_handler_routes(
-                store,
-                projector,
-                allowed_tables,
-                fact_admission,
-                routes,
-            ),
+            store,
+            projector,
+            allowed_tables,
+            fact_admission,
             replay_time_wakes,
             handlers,
             kinds,
@@ -363,7 +362,13 @@ impl<'a> ReplayDrive<'a> {
     fn project_to_idle(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let mut progressed = false;
         loop {
-            let progress = self.pipeline.drain_projection(REPLAY_WORK_LIMIT)?;
+            let progress = project_fact::drain_projection(
+                self.store,
+                self.projector,
+                self.allowed_tables,
+                self.fact_admission,
+                REPLAY_WORK_LIMIT,
+            )?;
             counters.projected_facts += progress.projected;
             counters.suppressed_live_only_work += progress.suppressed_intents;
             if progress.projected == 0 {
@@ -377,10 +382,11 @@ impl<'a> ReplayDrive<'a> {
     fn admit_time_wakes(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let mut admitted = 0;
         for wake in self.replay_time_wakes {
-            let Some(end_inclusive) = (wake.end_inclusive)(self.pipeline.store())? else {
+            let Some(end_inclusive) = (wake.end_inclusive)(self.store)? else {
                 continue;
             };
-            admitted += self.pipeline.process_due_time_range_for_replay(
+            admitted += project_fact::process_due_time_range_for_replay(
+                self.store,
                 (wake.timeline)(),
                 None,
                 end_inclusive,
@@ -395,8 +401,11 @@ impl<'a> ReplayDrive<'a> {
         if self.kinds.is_empty() {
             return Ok(false);
         }
-        let progress = self.pipeline.dispatch_intents(
+        let progress = dispatch_intents(
+            self.store,
             &self.handlers,
+            self.allowed_tables,
+            self.fact_admission,
             REPLAY_WORK_LIMIT,
             IntentAdmissionPolicy::AllowKinds(&self.kinds),
         )?;

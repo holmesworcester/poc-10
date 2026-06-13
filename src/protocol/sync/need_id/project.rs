@@ -71,7 +71,7 @@ pub mod authenticate {
     //! projector and its intents own.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::SyncNeedIdFact;
 
@@ -92,7 +92,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::sync::need_id::author::fact as need_id_fact;
         use crate::protocol::sync::need_id::fact::SyncNeedIdFact;
 
@@ -186,7 +186,7 @@ pub mod adapt {
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::sync::send_requested_fact::{send_requested_fact_intent, SendRequestedFact};
 
 use super::sync_need_id_row;
@@ -240,7 +240,7 @@ impl SyncNeedIdProjector {
 mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::ProjectionMode;
+    use crate::core::project_fact::ProjectionMode;
     use crate::protocol::sync::send_requested_fact::SEND_REQUESTED_FACT;
 
     #[test]

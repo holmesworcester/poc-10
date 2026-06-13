@@ -10,8 +10,8 @@
 //! connection framing belongs to `send_facts_on_connection`; callers use this
 //! file to ask what a peer is allowed to learn.
 
-use crate::core::fact_store::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::store::persisted_fact;
 use crate::core::store::{Store, TableName, TableRow};
 use crate::protocol::{
     auth, connection,
@@ -734,8 +734,8 @@ mod tests {
         let owner = fact(workspace_id, 20, 2);
         store
             .write_transaction(|tx| {
-                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &context)?;
-                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &owner)?;
+                crate::core::store::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::store::insert_fact_and_pending_in_tx(tx, &owner)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -812,9 +812,9 @@ mod tests {
 
         store
             .write_transaction(|tx| {
-                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
-                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &request_fact)?;
-                crate::core::fact_store::insert_fact_and_pending_in_tx(tx, &shareable)?;
+                crate::core::store::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
+                crate::core::store::insert_fact_and_pending_in_tx(tx, &request_fact)?;
+                crate::core::store::insert_fact_and_pending_in_tx(tx, &shareable)?;
                 Ok(())
             })
             .expect("persist facts");

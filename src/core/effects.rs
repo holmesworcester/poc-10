@@ -1,9 +1,9 @@
 //! Shared side-effect language committed by runtime work.
 //!
 //! Projection and intent handlers reduce to this structure before the SQL
-//! pipeline commits their output. The structure is intentionally mechanical: it
+//! runtime workers commit their output. The structure is intentionally mechanical: it
 //! names facts to admit, facts to purge, row mutations, durable intents,
-//! ephemeral intents, and ephemeral projection inputs. It does not contain
+//! ephemeral intents, and candidate facts. It does not contain
 //! callbacks, open sockets, command receipts, or protocol-specific execution
 //! state.
 //!
@@ -20,7 +20,7 @@ pub struct PipelineEffects {
     /// New facts to admit and mark pending for projection.
     pub facts: Vec<Fact>,
     /// Runtime-local projectable inputs that should not enter durable facts.
-    pub ephemeral_facts: Vec<Fact>,
+    pub candidate_facts: Vec<Fact>,
     /// Existing facts to remove with their derived core-owned rows.
     pub purged_facts: Vec<FactId>,
     /// Protocol or core table mutations validated against the runtime allowlist.
@@ -41,8 +41,8 @@ impl PipelineEffects {
         self
     }
 
-    pub fn ephemeral_fact(mut self, fact: Fact) -> Self {
-        self.ephemeral_facts.push(fact);
+    pub fn candidate_fact(mut self, fact: Fact) -> Self {
+        self.candidate_facts.push(fact);
         self
     }
 

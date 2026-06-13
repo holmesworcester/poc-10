@@ -84,7 +84,7 @@ pub mod authenticate {
 
     use crate::core::crypto;
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ConnectionEphemeralSecretFact;
 
@@ -113,7 +113,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto;
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::connection::ephemeral_secret::encode;
         use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 
@@ -223,7 +223,7 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::{
     connection_ephemeral_secret_key, connection_ephemeral_secret_row,

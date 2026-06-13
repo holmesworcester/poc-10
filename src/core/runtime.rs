@@ -17,23 +17,22 @@
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. Runtime holds the concrete store, projector, and protocol
-//! description; `pipeline` owns the reusable ordering of projection, due-time
-//! admission, and intent dispatch. Change runtime when host-facing APIs or
-//! protocol declarations change; change pipeline when queue scheduling or commit
-//! ordering changes.
+//! description, and composes the one-item projection and intent workers into
+//! command, daemon, and replay ordering.
 
 use crate::core::command_context::{CommandClock, CommandContext, CommandOutput, IdentityVault};
-use crate::core::fact_store::persisted_facts;
 use crate::core::facts::Fact;
+use crate::core::handle_intent::{dispatch_intents, HandlerSet};
 use crate::core::intents::Intent;
-use crate::core::pipeline::{
-    FactAdmissionFn, FactRoute, HandlerSet, PipelineEngine, Projector, Timeline,
+use crate::core::project_fact::{
+    self, FactAdmissionFn, FactRoute, IntentAdmissionPolicy, Projector, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
+use crate::core::store::persisted_facts;
 use crate::core::store::{SchemaSource, Store, TableName};
 use std::path::Path;
 
-pub use crate::core::pipeline::{
+pub use crate::core::handle_intent::{
     HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, RecurringIntentSpec, WorkStatus,
 };
 
@@ -107,16 +106,6 @@ impl Runtime {
         })
     }
 
-    fn pipeline(&self) -> PipelineEngine<'_> {
-        PipelineEngine::with_handler_routes(
-            &self.store,
-            self.projector.as_ref(),
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            self.description.handlers,
-        )
-    }
-
     /// Borrow the runtime's store handle.
     ///
     /// This exposes the concrete SQLite-backed store for query helpers and
@@ -136,7 +125,7 @@ impl Runtime {
 
     /// Count facts currently queued for projection.
     pub fn pending_fact_count(&self) -> usize {
-        self.pipeline().pending_fact_count()
+        project_fact::pending_fact_count(&self.store)
     }
 
     /// Count durable plus ephemeral queued intents.
@@ -177,20 +166,22 @@ impl Runtime {
 
     /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
-        self.pipeline()
-            .submit_fact(fact)
+        project_fact::submit_fact_with_admission(&self.store, fact, self.description.fact_admission)
             .expect("runtime fact submission should persist")
     }
 
     /// Admit many facts in one transaction.
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
-        self.pipeline().submit_facts(facts)
+        project_fact::submit_facts_with_admission(
+            &self.store,
+            facts,
+            self.description.fact_admission,
+        )
     }
 
     /// Remove one fact and its core-owned derived rows.
     pub fn purge_fact(&mut self, fact_id: crate::core::facts::FactId) -> bool {
-        self.pipeline()
-            .purge_fact(fact_id)
+        project_fact::purge_fact_from_store(&self.store, fact_id)
             .expect("runtime fact purge should persist")
     }
 
@@ -200,22 +191,27 @@ impl Runtime {
     /// command-safe drain pass. Use `submit_local_intent` for work that is only
     /// valid on this process and should disappear on restart.
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        self.pipeline().submit_intent(intent)
+        crate::core::handle_intent::submit_intent_to_table(&self.store, INTENTS, intent)
     }
 
     /// Queue ephemeral work for this runtime connection.
     pub fn submit_local_intent(&mut self, intent: Intent) -> Result<bool, String> {
-        self.pipeline().submit_local_intent(intent)
+        crate::core::handle_intent::submit_local_intent_to_store(&self.store, intent)
     }
 
     /// Commit the facts returned by a user-facing command and return its receipt.
     ///
-    /// Command receipts are not pipeline state. They return directly to the CLI
+    /// Command receipts are not runtime queue state. They return directly to the CLI
     /// caller after the command's authored facts have been retained and queued
     /// for projection.
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
-        self.pipeline()
-            .submit_command_output(output, "submit command output")
+        project_fact::submit_command_output_to_store(
+            &self.store,
+            output,
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            "submit command output",
+        )
     }
 
     /// Drain pending projection until no projection work remains or rounds expire.
@@ -228,8 +224,14 @@ impl Runtime {
         max_rounds: usize,
         limit_per_round: usize,
     ) -> Result<WorkStatus, String> {
-        self.pipeline()
-            .process_projection_until_idle(max_rounds, limit_per_round)
+        project_fact::process_projection_until_idle(
+            &self.store,
+            self.projector.as_ref(),
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            max_rounds,
+            limit_per_round,
+        )
     }
 
     /// Run one daemon tick's queue order after IO and time wakes have been handled.
@@ -237,8 +239,35 @@ impl Runtime {
     /// Projection runs before and after intent dispatch because handlers often
     /// emit facts that should become visible before the next quiet sleep.
     pub fn drain_daemon_queues_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
-        self.pipeline()
-            .drain_daemon_queues_once(&self.handlers, limit)
+        let mut total = WorkStatus::idle();
+        total.merge(project_fact::process_projection_until_idle(
+            &self.store,
+            self.projector.as_ref(),
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            4,
+            limit,
+        )?);
+        total.merge(
+            dispatch_intents(
+                &self.store,
+                &self.handlers,
+                self.description.row_mutation_tables,
+                self.description.fact_admission,
+                limit,
+                IntentAdmissionPolicy::All,
+            )?
+            .status,
+        );
+        total.merge(project_fact::process_projection_until_idle(
+            &self.store,
+            self.projector.as_ref(),
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            4,
+            limit,
+        )?);
+        Ok(total)
     }
 
     /// Settle all projection and intent work using the protocol's full handler
@@ -259,8 +288,51 @@ impl Runtime {
         limit_per_round: usize,
         handlers: &HandlerSet,
     ) -> Result<WorkStatus, String> {
-        self.pipeline()
-            .process_work_until_idle(handlers, max_rounds, limit_per_round)
+        let mut total = WorkStatus::idle();
+        for _ in 0..max_rounds {
+            total.merge(crate::core::perf_profile::measure_result(
+                "projection",
+                || {
+                    project_fact::process_projection_until_idle(
+                        &self.store,
+                        self.projector.as_ref(),
+                        self.description.row_mutation_tables,
+                        self.description.fact_admission,
+                        8,
+                        limit_per_round,
+                    )
+                },
+            )?);
+            let dispatched = crate::core::perf_profile::measure_result("intent_dispatch", || {
+                dispatch_intents(
+                    &self.store,
+                    handlers,
+                    self.description.row_mutation_tables,
+                    self.description.fact_admission,
+                    limit_per_round,
+                    IntentAdmissionPolicy::All,
+                )
+                .map(|progress| progress.status)
+            })?;
+            total.merge(dispatched);
+            if dispatched.is_idle() {
+                total.merge(crate::core::perf_profile::measure_result(
+                    "projection",
+                    || {
+                        project_fact::process_projection_until_idle(
+                            &self.store,
+                            self.projector.as_ref(),
+                            self.description.row_mutation_tables,
+                            self.description.fact_admission,
+                            8,
+                            limit_per_round,
+                        )
+                    },
+                )?);
+                return Ok(total);
+            }
+        }
+        Ok(total)
     }
 
     /// Settle work that a synchronous CLI command should be allowed to observe.
@@ -288,8 +360,13 @@ impl Runtime {
         end_inclusive: u64,
         limit: usize,
     ) -> Result<usize, String> {
-        self.pipeline()
-            .process_due_time_range(timeline, start_exclusive, end_inclusive, limit)
+        project_fact::process_due_time_range(
+            &self.store,
+            timeline,
+            start_exclusive,
+            end_inclusive,
+            limit,
+        )
     }
 
     /// Run the replay entry point against this runtime's store.
@@ -385,7 +462,7 @@ fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource>
 mod tests {
     use super::*;
     use crate::core::facts::{Fact, FactScope};
-    use crate::core::pipeline::{ProjectionContext, ProjectionOutput};
+    use crate::core::project_fact::{ProjectionContext, ProjectionOutput};
 
     struct NoopProjector;
 

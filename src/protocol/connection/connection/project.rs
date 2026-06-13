@@ -261,7 +261,7 @@ pub mod authenticate {
 
     use crate::core::context::ContextNeed;
     use crate::core::facts::{Fact, FactId, FactScope};
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
     use crate::protocol::auth::endpoint;
     use crate::protocol::connection::ephemeral_secret;
     use crate::protocol::connection::request;
@@ -624,7 +624,7 @@ pub mod authenticate {
     mod tests {
         use crate::core::crypto;
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::connection::connection::encode;
         use crate::protocol::connection::connection::fact::ConnectionFact;
 
@@ -738,7 +738,7 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 use crate::protocol::connection::close;
 use crate::protocol::connection::connection::{
     connection_key, connection_row, ConnectionRowFields, CONNECTION_ROWS,
@@ -1036,7 +1036,7 @@ impl ConnectionNeeds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::pipeline::ProjectionMode;
+    use crate::core::project_fact::ProjectionMode;
     use crate::protocol::connection::send_network_frame::SEND_NETWORK_FRAME;
     use crate::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 

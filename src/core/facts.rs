@@ -51,7 +51,7 @@ impl ScopeKind {
 /// Local visibility attached to fact bytes at admission time.
 ///
 /// Scope is not part of the hash. The same bytes admitted twice with different
-/// scopes still identify the same fact; `fact_store` keeps the first local
+/// scopes still identify the same fact; `store` keeps the first local
 /// admission record that made those bytes visible in this store.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactScope {

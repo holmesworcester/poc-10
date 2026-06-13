@@ -124,7 +124,7 @@ pub mod authenticate {
     //! deletion, retention, and secret context and materializes rows.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ContentMessageFact;
 
@@ -148,7 +148,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::message::encode;
         use crate::protocol::content::message::fact::{
             ContentMessageFact, MessageCiphertext, NONCE_BYTES,
@@ -261,7 +261,7 @@ use crate::core::context::{ContextKey, ContextKeyPart, ContextNeed};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
-use crate::core::pipeline::{
+use crate::core::project_fact::{
     FactPipeline, ProjectionContext, ProjectionOutput, Projector, TimeWake,
 };
 use crate::protocol::auth;
@@ -320,8 +320,8 @@ struct OpenedMessageRow {
     text: String,
 }
 
-pub fn expiration_timeline() -> crate::core::pipeline::Timeline {
-    crate::core::pipeline::Timeline::new("content_message_expiry")
+pub fn expiration_timeline() -> crate::core::project_fact::Timeline {
+    crate::core::project_fact::Timeline::new("content_message_expiry")
         .expect("valid content-message expiry timeline")
 }
 
@@ -469,7 +469,7 @@ impl ContentMessageProjector {
             message.signer_id,
             message.signer_id,
         );
-        let deletion_need = crate::core::pipeline::fact_purged_need(
+        let deletion_need = crate::core::project_fact::fact_purged_need(
             fact.id,
             scope.clone(),
             fact_purged_key(message.frontier_id, message.minute, fact.id),
@@ -1025,7 +1025,7 @@ mod projector_tests {
     use topo::core::crypto;
     use topo::core::facts::{Fact, FactScope};
     use topo::core::intents::RowMutation;
-    use topo::core::pipeline::{MatchedContext, ProjectionContext, Projector, TimeRange};
+    use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector, TimeRange};
     use topo::protocol::auth::endpoint_shared::{
         encode as endpoint_shared_layout,
         fact::{EndpointRole, EndpointSharedFact},
@@ -1144,24 +1144,24 @@ mod projector_tests {
         let owner = [1; 32];
         let frontier_id = [7; 32];
         let message_id = [9; 32];
-        let message_need = topo::core::pipeline::fact_purged_need(
+        let message_need = topo::core::project_fact::fact_purged_need(
             owner,
             scope.clone(),
             project::fact_purged_key(frontier_id, 10, message_id),
         );
-        let exact_offer = topo::core::pipeline::fact_purged_offer(
+        let exact_offer = topo::core::project_fact::fact_purged_offer(
             [2; 32],
             scope.clone(),
             project::fact_purged_key(frontier_id, 10, message_id),
         );
         let (range_start, range_end) = project::fact_purged_minute_range_keys(frontier_id, 9, 11);
-        let range_offer = topo::core::pipeline::fact_purged_range_offer(
+        let range_offer = topo::core::project_fact::fact_purged_range_offer(
             [3; 32],
             scope.clone(),
             range_start,
             range_end,
         );
-        let other_frontier_need = topo::core::pipeline::fact_purged_need(
+        let other_frontier_need = topo::core::project_fact::fact_purged_need(
             owner,
             scope,
             project::fact_purged_key([8; 32], 10, message_id),
@@ -1626,12 +1626,12 @@ mod projector_tests {
     ) -> MatchedContext {
         let scope = crate::protocol::auth::workspace::scope(message.workspace_id);
         MatchedContext {
-            need: crate::core::pipeline::fact_purged_need(
+            need: crate::core::project_fact::fact_purged_need(
                 message_fact.id,
                 scope.clone(),
                 project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),
             ),
-            offer: crate::core::pipeline::fact_purged_offer(
+            offer: crate::core::project_fact::fact_purged_offer(
                 deletion_fact.id,
                 scope,
                 project::fact_purged_key(message.frontier_id, message.minute, message_fact.id),

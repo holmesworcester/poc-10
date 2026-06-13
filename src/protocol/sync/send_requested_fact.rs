@@ -74,7 +74,7 @@ impl IntentHandler for SendRequestedFactHandler {
         let input = decode_send_requested_fact(raw)?;
         let need_fact = context.require_fact(&input.need_fact_id)?;
         let need = need_id::project::decode::decode_fact(&need_fact.bytes)?;
-        let Some(fact) = crate::core::fact_store::persisted_fact(context.store()?, &need.fact_id)?
+        let Some(fact) = crate::core::store::persisted_fact(context.store()?, &need.fact_id)?
         else {
             return Ok(PipelineEffects::new());
         };

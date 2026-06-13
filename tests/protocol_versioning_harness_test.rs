@@ -8,8 +8,8 @@
 
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{RowMutation, Value};
-use topo::core::pipeline::{verify_fact_id, FactRoute};
-use topo::core::pipeline::{ProjectionContext, ProjectionOutput};
+use topo::core::project_fact::{verify_fact_id, FactRoute};
+use topo::core::project_fact::{ProjectionContext, ProjectionOutput};
 use topo::core::store::TableName;
 use topo::core::versioning::{
     active_from_protocol_for_tag, bundle_for_protocol, classify_received_fact, compute_ceiling,

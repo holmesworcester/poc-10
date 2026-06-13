@@ -122,7 +122,7 @@ pub mod authenticate {
     //! projector owns.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
     use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
 
     use super::super::fact::InviteAcceptedFact;
@@ -160,7 +160,7 @@ pub mod authenticate {
     #[cfg(test)]
     mod tests {
         use crate::core::facts::{Fact, FactScope};
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
         use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
         use crate::protocol::auth::invite_accepted::encode;
@@ -262,7 +262,7 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use super::{derived_invite_secret_fact_id, invite_accepted_row};
 

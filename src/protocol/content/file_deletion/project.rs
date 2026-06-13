@@ -83,7 +83,7 @@ pub mod authenticate {
     //! the projector.
 
     use crate::core::facts::Fact;
-    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+    use crate::core::project_fact::{verify_fact_id, ProjectionContext};
 
     use super::super::fact::ContentFileDeletionFact;
 
@@ -109,7 +109,7 @@ pub mod authenticate {
         use crate::core::command_context::LocalSigningCapability;
         use crate::core::crypto;
         use crate::core::facts::Fact;
-        use crate::core::pipeline::ProjectionContext;
+        use crate::core::project_fact::ProjectionContext;
         use crate::protocol::content::file_deletion::author::delete_file;
         use crate::protocol::content::file_deletion::fact::ContentFileDeletionFact;
 
@@ -209,7 +209,7 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableInsert, Value};
-use crate::core::pipeline::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -392,7 +392,7 @@ impl ContentFileDeletionProjector {
                 Some(parent_need),
                 Some(author_need),
             ])
-            .offer(crate::core::pipeline::fact_purged_offer(
+            .offer(crate::core::project_fact::fact_purged_offer(
                 fact.id,
                 scope,
                 project::fact_purged_key(

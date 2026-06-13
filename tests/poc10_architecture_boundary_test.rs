@@ -255,7 +255,7 @@ fn poc10_core_contract_files_are_present() {
         "src/core/intents.rs",
         "src/core/project_fact.rs",
         "src/core/handle_intent.rs",
-        "src/core/pipeline.rs",
+        "src/core/store.rs",
     ];
 
     let missing = required
@@ -273,16 +273,13 @@ fn poc10_core_contract_files_are_present() {
 #[test]
 fn poc10_pipeline_work_items_live_in_named_core_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
     let project_fact = source_text(&root.join("src/core/project_fact.rs"));
     let handle_intent = source_text(&root.join("src/core/handle_intent.rs"));
 
-    for retired_inline_module in ["mod pipeline_one", "mod dispatch"] {
-        assert!(
-            !pipeline.contains(retired_inline_module),
-            "src/core/pipeline.rs must not own the active work-item module {retired_inline_module:?}"
-        );
-    }
+    assert!(
+        !root.join("src/core/pipeline.rs").exists(),
+        "src/core/pipeline.rs is retired; keep projection and intent workers in named core files"
+    );
 
     for required in [
         "Run and commit one queued projection item",
@@ -378,13 +375,15 @@ fn poc10_has_no_product_demo_or_smoke_command_surface() {
 
 #[test]
 fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
-    let topo::core::pipeline::ProjectionOutput {
+    let topo::core::project_fact::ProjectionOutput {
+        retain_self,
         needs,
         offers,
         time_wakes,
         effects,
-    } = topo::core::pipeline::ProjectionOutput::default();
+    } = topo::core::project_fact::ProjectionOutput::default();
 
+    assert!(retain_self);
     assert!(needs.is_empty());
     assert!(offers.is_empty());
     assert!(time_wakes.is_empty());
@@ -397,7 +396,7 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 fn poc10_pipeline_effects_names_the_common_commit_shape() {
     let topo::core::effects::PipelineEffects {
         facts,
-        ephemeral_facts,
+        candidate_facts,
         purged_facts,
         row_mutations,
         intents,
@@ -405,7 +404,7 @@ fn poc10_pipeline_effects_names_the_common_commit_shape() {
     } = topo::core::effects::PipelineEffects::new();
 
     assert!(facts.is_empty());
-    assert!(ephemeral_facts.is_empty());
+    assert!(candidate_facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
@@ -455,15 +454,17 @@ fn poc10_command_output_is_authored_receipt_plus_facts_only() {
 }
 
 #[test]
-fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
+fn poc10_core_workers_expose_protocol_neutral_vocabulary() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let pipeline_path = root.join("src/core/pipeline.rs");
-    assert!(
-        pipeline_path.is_file(),
-        "missing src/core/pipeline.rs; it must expose protocol-neutral terms for pending projection, context wake fanout, and intent output"
-    );
-
-    let text = source_text(&pipeline_path);
+    let worker_paths = vec![
+        root.join("src/core/project_fact.rs"),
+        root.join("src/core/handle_intent.rs"),
+    ];
+    let text = worker_paths
+        .iter()
+        .map(|path| source_text(path))
+        .collect::<Vec<_>>()
+        .join("\n");
     let required_terms = [
         (
             "pending projection",
@@ -485,7 +486,11 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         ),
         (
             "intent output",
-            &["IntentOutput", "intent_output", "intent output"][..],
+            &[
+                "handler output",
+                "IntentDispatchProgress",
+                "commit_handler_output",
+            ][..],
         ),
     ];
     let missing = required_terms
@@ -496,7 +501,7 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "src/core/pipeline.rs must expose protocol-neutral pipeline vocabulary:\n{}",
+        "core projection/intent workers must expose protocol-neutral runtime vocabulary:\n{}",
         missing.join("\n")
     );
 
@@ -534,10 +539,10 @@ fn poc10_core_pipeline_exposes_protocol_neutral_vocabulary() {
         "pending_connection_attempts",
         "pending_connections",
     ];
-    let offenders = source_matches_in_paths(root, vec![pipeline_path], &forbidden);
+    let offenders = source_matches_in_paths(root, worker_paths, &forbidden);
     assert!(
         offenders.is_empty(),
-        "src/core/pipeline.rs must not expose old worker queue or event status vocabulary:\n{}",
+        "core projection/intent workers must not expose old worker queue or event status vocabulary:\n{}",
         offenders.join("\n")
     );
 }
