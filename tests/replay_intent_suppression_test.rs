@@ -4,7 +4,7 @@
 //! assertion is about core behavior: projectors own replay-mode emissions, and
 //! replay dispatch still filters live-only follow-up work from handlers.
 
-use topo::core::effects::PipelineEffects;
+use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
 use topo::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
@@ -85,7 +85,7 @@ impl ReplayHandler {
 
 impl IntentHandler for ReplayHandler {
     fn handle(&self, intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-        Ok(PipelineEffects::new().intent(Intent::new(
+        Ok(RuntimeEffects::new().intent(Intent::new(
             IntentKind::new(LIVE_FROM_HANDLER).expect("valid test intent kind"),
             intent.key.clone(),
             vec![1],
@@ -104,7 +104,7 @@ impl LiveOnlyHandler {
 
 impl IntentHandler for LiveOnlyHandler {
     fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-        Ok(PipelineEffects::new())
+        Ok(RuntimeEffects::new())
     }
 }
 

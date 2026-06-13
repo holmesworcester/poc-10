@@ -252,12 +252,12 @@ fn route_metadata_can_describe_deprecated_and_current_fact_versions() {
         FactRoute {
             tag: TYPE_FIXTURE_V1,
             projector: project_fixture_v1,
-            pipeline: FIXTURE_V1_PROJECTOR.pipeline(),
+            projector_info: FIXTURE_V1_PROJECTOR.projector_info(),
         },
         FactRoute {
             tag: TYPE_FIXTURE_V2,
             projector: project_fixture_v2,
-            pipeline: FIXTURE_V2_PROJECTOR.pipeline(),
+            projector_info: FIXTURE_V2_PROJECTOR.projector_info(),
         },
     ];
     let route_manifest = routes.map(FactVersionRoute::from_fact_route);

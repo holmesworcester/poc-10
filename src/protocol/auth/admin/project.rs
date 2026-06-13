@@ -231,7 +231,9 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::admin::fact::AdminFact;
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -243,7 +245,8 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 use super::admin_row;
 
 /// Projector route metadata for the admin-grant fact.
-pub const PIPELINE: FactPipeline = FactPipeline::projector("auth::admin::project::AdminProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::admin::project::AdminProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct AdminProjector;

@@ -186,14 +186,16 @@ pub mod adapt {
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::sync::send_requested_fact::{send_requested_fact_intent, SendRequestedFact};
 
 use super::sync_need_id_row;
 
 /// Projector route metadata for the need_id fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("sync::need_id::project::SyncNeedIdProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("sync::need_id::project::SyncNeedIdProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncNeedIdProjector;

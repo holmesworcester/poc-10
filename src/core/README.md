@@ -14,7 +14,7 @@ applies core, network, and protocol schemas, builds the command registry, and
 constructs a `Runtime` from the declared projector, handler registry, row
 allowlist, schema sources, and daemon hooks. From that point on, core does not
 ask what a protocol fact means. It only moves facts, context, rows, intents,
-time wakes, and opaque network bytes through the declared pipeline.
+time wakes, and opaque network bytes through the declared runtime workers.
 
 A normal command is a serialized runtime turn. Core opens the store, passes the
 store and command clock to protocol command code, and commits the command's
@@ -71,12 +71,12 @@ Protocol code enters core through declarations and effect values:
   and semantic projection helpers inside their owning `project.rs`.
 - `intents::IntentHandler` receives one idempotent `Intent` plus a
   `HandlerContext` containing only declared input facts and returns
-  `PipelineEffects`.
+  `RuntimeEffects`.
 - `command` defines the protocol-neutral command clock, local capability value
   types, and authored command output. User-facing commands receive `Store` and
   `CommandClock` directly, then query protocol-owned state before authoring
   facts.
-- `effects::PipelineEffects` is the shared language for projector and handler
+- `effects::RuntimeEffects` is the shared language for projector and handler
   facts to admit, candidate facts, purges, row mutations, durable intents, and
   local intents.
 - `store::SchemaSource` lets core, network IO, and protocol registry code
@@ -92,13 +92,13 @@ opaque outbound rows from `network`.
 
 ```text
 CLI command / daemon / handler
-  -> authored facts or PipelineEffects
+  -> authored facts or RuntimeEffects
   -> fact admission and pending_projection
   -> projector
   -> context needs/offers, time wakes, rows, intents
   -> intent queue
   -> handler
-  -> PipelineEffects
+  -> RuntimeEffects
 ```
 
 Facts can enter through commands, handlers, sync, or incoming daemon input.
@@ -204,7 +204,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   drain loop. The protocol declaration decides how inbound bytes become local
   intents and which time-wake timelines are active.
 - `effects.rs`: shared effect language for projectors and handlers.
-  `PipelineEffects` names facts to admit, candidate facts, exact purges, row
+  `RuntimeEffects` names facts to admit, candidate facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
   this mechanical description atomically inside the caller's transaction;
   commands use `AuthoredCommand` facts plus a receipt instead.
@@ -215,7 +215,7 @@ use core syntax and contracts, but core must not import their semantic rules.
 - `intents.rs`: queued work and handler contract types. It defines durable and
   local intent identity, opaque payloads, row mutation values, handler input
   declarations, retry/fatal handler errors, and the rule that handlers return
-  `PipelineEffects` instead of mutating runtime state directly.
+  `RuntimeEffects` instead of mutating runtime state directly.
 - `network.rs`: opaque network IO boundary. It owns memory-local inbound and
   outbound queue rows, deterministic route+bytes row keys, listener setup,
   length-prefixed TCP frame reading/writing, and cleanup. It does not classify
@@ -271,9 +271,9 @@ mode.
   processed.
 - `project_fact.rs::effects`: `ProjectionOutput`, time wakes, and due time
   ranges. Projection output is the complete need/time-wake replacement, new
-  append-only offers, plus shared `PipelineEffects` for one fact.
+  append-only offers, plus shared `RuntimeEffects` for one fact.
 - `project_fact.rs::commit_effects`: shared atomic commit path for
-  `PipelineEffects`. It validates duplicate or conflicting effects, purges exact
+  `RuntimeEffects`. It validates duplicate or conflicting effects, purges exact
   facts, admits durable facts, candidate facts, row mutations, and queues
   follow-up intents inside the caller's transaction.
 - `project_fact.rs::context_store`: SQL implementation of standing context. It
@@ -346,14 +346,14 @@ clear due time range rows for this owner
 delete old needs and time wakes owned by fact
 insert new needs, append new offers, and insert new time wakes
 wake owners whose needs match newly added offers and record their matched context
-apply PipelineEffects through commit_effects
+apply RuntimeEffects through commit_effects
 ```
 
 For a retained candidate fact, the commit moves the candidate into `facts` and
 `local_fact_admissions`, then applies the same context/time/effect commit as a
 durable fact. For a dropped candidate fact, the commit validates that no durable
 offers or time wakes remain, deletes any old context for that input id, deletes
-the candidate fact row, and applies `PipelineEffects` through `commit_effects`.
+the candidate fact row, and applies `RuntimeEffects` through `commit_effects`.
 
 Before that boundary, projector runs are calculation. Durable pending items
 start with the matched context already attached to their queue row. Newly

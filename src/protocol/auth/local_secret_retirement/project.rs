@@ -199,7 +199,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::{local_history_node_secret, local_key_secret};
 
 use super::fact::LocalSecretRetirementFact;
@@ -237,7 +239,7 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
 }
 
 /// Projector route metadata for the local_secret_retirement fact.
-pub const PIPELINE: FactPipeline = FactPipeline::projector(
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
     "auth::local_secret_retirement::project::LocalSecretRetirementProjector",
 );
 

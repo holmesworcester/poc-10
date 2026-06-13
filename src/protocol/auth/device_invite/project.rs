@@ -229,7 +229,9 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::device_invite::fact::DeviceInviteFact;
 use crate::protocol::auth::{endpoint_shared, signature, user, user_invite, workspace};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
@@ -237,8 +239,8 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 use super::device_invite_row;
 
 /// Projector route metadata for the device_invite fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::device_invite::project::DeviceInviteProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::device_invite::project::DeviceInviteProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct DeviceInviteProjector;

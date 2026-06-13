@@ -201,12 +201,14 @@ pub mod adapt {
 
 use crate::core::context::ContextOffer;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use super::fact::ConnectionFrameObservationFact;
 
 /// Projector route metadata for the frame_observation fact.
-pub const PIPELINE: FactPipeline = FactPipeline::projector(
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
     "connection::frame_observation::project::ConnectionFrameObservationProjector",
 );
 

@@ -59,7 +59,7 @@ impl<F: Fn() -> u64> CommandClock for FnClock<F> {
 /// later commands can chain from. Display data comes from `queries.rs` after the
 /// runtime has processed the output.
 ///
-/// This bundle is deliberately narrower than `PipelineEffects`: commands cannot
+/// This bundle is deliberately narrower than `RuntimeEffects`: commands cannot
 /// emit row mutations, purges, durable intents, local intents, handler callbacks,
 /// worker handles, or registry references. Runtime submission turns these facts
 /// into retained pending facts atomically.

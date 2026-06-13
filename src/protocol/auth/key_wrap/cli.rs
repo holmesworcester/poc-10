@@ -8,7 +8,7 @@ use crate::core::cli::{decode_hex_32_named as core_decode_hex_32, encode_hex, Cl
 use crate::core::command::{CommandClock, CommandOutput};
 use crate::core::store::Store;
 
-use super::commands;
+use super::{commands, queries};
 
 pub const KEY_RECIPIENT_USAGE: &str = "key-recipient WORKSPACE_ID_HEX";
 pub const KEY_ROTATE_RECIPIENT_USAGE: &str = "key-rotate-recipient WORKSPACE_ID_HEX";
@@ -123,9 +123,9 @@ pub fn key_frontier_output(receipt: &commands::CreateKeyFrontierReceipt) -> CliO
     ])
 }
 
-pub fn key_wrap_args(args: CliArgs<'_>) -> Result<commands::KeyWrapQuery, String> {
+pub fn key_wrap_args(args: CliArgs<'_>) -> Result<queries::KeyWrapQuery, String> {
     args.require_len(3, KEY_WRAP_USAGE)?;
-    Ok(commands::KeyWrapQuery {
+    Ok(queries::KeyWrapQuery {
         workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
         removal_frontier_id: decode_hex_32(args.get(1).expect("length checked"))?,
         recipient_key_id: decode_hex_32(args.get(2).expect("length checked"))?,
@@ -146,7 +146,7 @@ pub fn key_wrap_output(
     ])
 }
 
-pub fn key_wrap_lookup_output(lookup: &commands::KeyWrapLookup) -> CliOutput {
+pub fn key_wrap_lookup_output(lookup: &queries::KeyWrapLookup) -> CliOutput {
     key_wrap_output(
         &lookup.workspace_id,
         &lookup.removal_frontier_id,
@@ -155,15 +155,15 @@ pub fn key_wrap_lookup_output(lookup: &commands::KeyWrapLookup) -> CliOutput {
     )
 }
 
-pub fn key_access_args(args: CliArgs<'_>) -> Result<commands::KeyAccessQuery, String> {
+pub fn key_access_args(args: CliArgs<'_>) -> Result<queries::KeyAccessQuery, String> {
     args.require_len(2, KEY_ACCESS_USAGE)?;
-    Ok(commands::KeyAccessQuery {
+    Ok(queries::KeyAccessQuery {
         workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
         removal_frontier_id: decode_hex_32(args.get(1).expect("length checked"))?,
     })
 }
 
-pub fn key_access_status_output(status: &commands::KeyAccessStatus) -> CliOutput {
+pub fn key_access_status_output(status: &queries::KeyAccessStatus) -> CliOutput {
     key_access_output(
         &status.workspace_id,
         &status.removal_frontier_id,
@@ -305,7 +305,7 @@ pub fn chop_now_output(receipt: &commands::ChopNowReceipt) -> CliOutput {
     ])
 }
 
-pub fn keys_output(report: &commands::KeyStatusReport) -> CliOutput {
+pub fn keys_output(report: &queries::KeyStatusReport) -> CliOutput {
     let mut lines = vec![
         format!("recipient_keys: {}", report.recipient_keys),
         "recipient_key_tombstones: 0".to_string(),

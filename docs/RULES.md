@@ -8,7 +8,7 @@ in `src/core` or `src/protocol`.
 - The durable graph is made of facts. Fact ids are deterministic hashes of
   canonical fact bytes.
 - Persistence and replay are independent axes. A fact is durable (on disk) or
-  ephemeral (transient pipeline input). A from-scratch rebuild queues every
+  ephemeral (transient runtime input). A from-scratch rebuild queues every
   retained durable fact for projection in replay mode. Durable protocol *truth*
   — identities, membership, content, key wraps, learned addresses — rebuilds
   deterministically. A durable fact whose projection materializes live
@@ -21,9 +21,9 @@ in `src/core` or `src/protocol`.
 - Context is explicit. Needs and offers describe relationships that should wake
   projection when matched by a context matcher. Core stores and matches them;
   projectors decide what they mean.
-- Core runtime and pipeline code own admission, pending projection, context
-  matching, projection drain, row mutations, deferred intent queueing, handler
-  dispatch, and persistence.
+- Core runtime workers own admission, pending projection, context matching,
+  projection drain, row mutations, deferred intent queueing, handler dispatch,
+  and persistence.
 - Intent handlers own bounded stateful work. They consume intents and exact
   declared fact inputs, then return facts, purged fact ids, and follow-up
   intents. They must not own protocol fact layouts or read-model projection
@@ -70,9 +70,10 @@ in `src/core` or `src/protocol`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
-- Shared command context/output types live in `src/core/command_context.rs`.
+- Shared command output and clock primitives live in `src/core/command.rs`.
   Concrete command constructors live in the fact module that owns the emitted
-  fact.
+  fact, receive `Store` and `CommandClock` directly, and use protocol-owned
+  query helpers for pre-command state.
 - There is no `mod.rs`. Root manifest files such as `src/core.rs`,
   `src/protocol.rs`, and `src/protocol/<scope>.rs` are declaration-only.
 - Schema declarations live beside their owners in `src/core/schema.rs`,
@@ -267,7 +268,7 @@ Patterns to avoid in projector files:
 Handlers are the only place for bounded stateful protocol work. A handler
 decodes its own intent payload, asks core for exact input fact ids through
 `input_fact_ids`, reads those facts through `HandlerContext`, performs one
-bounded effect, and returns `PipelineEffects`. It must be retry-safe: transient
+bounded effect, and returns `RuntimeEffects`. It must be retry-safe: transient
 absence of required input or external IO returns `retry_intent`, leaving the
 queue row in place.
 
@@ -367,8 +368,8 @@ keys already observed before retirement.
 - Commands may query allowed local capabilities such as signer or encryption
   secrets from protocol-owned state. They must not mint capabilities unless the
   owning auth fact module explicitly owns that command.
-- Commands do not write the store, drive the runtime pipeline, dispatch
-  handlers, call workers, parse CLI argv, or format user output.
+- Commands do not write the store, drive runtime workers, dispatch handlers,
+  call projection/intent drains, parse CLI argv, or format user output.
 - Any invariant required for accepting received/shared facts must be enforced by
   layout decoding, projector validation, context matching, or handler
   validation, not only by command preflight checks.
@@ -389,10 +390,9 @@ keys already observed before retirement.
 Production work is represented with immutable facts, standing context,
 time-wake schedules, pending projection, durable intents, and ephemeral intents.
 Protocol progress is visible through those mechanisms and through schema-owned
-rows. The declared runtime pipeline is the complete work surface: production
-state enters that pipeline as facts, context, time wakes, intents, or
-schema-owned rows. If a new file shape or import is correct, update the
-boundary test with the rule that makes it correct.
+rows. The declared runtime work surface is complete: production state enters as
+facts, context, time wakes, intents, or schema-owned rows. If a new file shape or
+import is correct, update the boundary test with the rule that makes it correct.
 
 ## In-Line Documentation
 

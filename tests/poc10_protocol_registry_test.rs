@@ -62,7 +62,7 @@ fn assert_projector_route(tag: u8, expected_project: &str) {
         .find(|route| route.tag == tag)
         .expect("model route");
 
-    assert_eq!(route.pipeline.project, expected_project);
+    assert_eq!(route.projector_info.project, expected_project);
 }
 
 #[test]

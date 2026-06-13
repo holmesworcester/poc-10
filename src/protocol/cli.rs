@@ -241,7 +241,7 @@ pub(crate) fn key_recipient_rotation(
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
     ctx.settle_local_command_work()?;
     let previous =
-        auth::key_wrap::commands::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
+        auth::key_wrap::queries::recipient_key_for_rotation(ctx.runtime(), workspace_id)?
             .ok_or_else(|| "no existing local recipient key to rotate".to_string())?;
     let output = ctx.with_command_inputs(|store, clock| {
         auth::key_wrap::cli::key_recipient_rotation(store, clock, args, previous)
@@ -266,7 +266,7 @@ pub(crate) fn key_frontier(
 pub(crate) fn key_wrap(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let query = auth::key_wrap::cli::key_wrap_args(args)?;
     ctx.settle_local_command_work()?;
-    let lookup = auth::key_wrap::commands::lookup_key_wrap(ctx.runtime(), query)?;
+    let lookup = auth::key_wrap::queries::lookup_key_wrap(ctx.runtime(), query)?;
     Ok(auth::key_wrap::cli::key_wrap_lookup_output(&lookup))
 }
 
@@ -276,7 +276,7 @@ pub(crate) fn key_access(
 ) -> Result<CliOutput, String> {
     let query = auth::key_wrap::cli::key_access_args(args)?;
     ctx.settle_local_command_work()?;
-    let status = auth::key_wrap::commands::key_access(ctx.runtime(), query)?;
+    let status = auth::key_wrap::queries::key_access(ctx.runtime(), query)?;
     Ok(auth::key_wrap::cli::key_access_status_output(&status))
 }
 
@@ -285,11 +285,11 @@ pub(crate) fn key_derive(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let limit = auth::key_wrap::cli::key_derive_limit(args)?;
-    let before = auth::key_wrap::commands::local_key_secret_count(ctx.runtime());
-    let scanned_key_wraps = auth::key_wrap::commands::key_wrap_count(ctx.runtime())?;
+    let before = auth::key_wrap::queries::local_key_secret_count(ctx.runtime());
+    let scanned_key_wraps = auth::key_wrap::queries::key_wrap_count(ctx.runtime())?;
     ctx.runtime_mut()
         .process_command_work_until_idle(4, limit)?;
-    let after = auth::key_wrap::commands::local_key_secret_count(ctx.runtime());
+    let after = auth::key_wrap::queries::local_key_secret_count(ctx.runtime());
     Ok(CliOutput::lines(vec![
         format!("scanned_key_wraps: {scanned_key_wraps}"),
         format!("derived_key_secrets: {}", after.saturating_sub(before)),
@@ -319,7 +319,7 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
 pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let workspace_id = auth::key_wrap::cli::keys_workspace_id(args)?;
     ctx.settle_local_command_work()?;
-    let report = auth::key_wrap::commands::key_status_report(ctx.runtime(), workspace_id)?;
+    let report = auth::key_wrap::queries::key_status_report(ctx.runtime(), workspace_id)?;
     Ok(auth::key_wrap::cli::keys_output(&report))
 }
 
@@ -374,7 +374,7 @@ pub(crate) fn disappearing_status(
     ctx.settle_local_command_work()?;
     settle_due_message_time_wakes(ctx)?;
     let report =
-        content::retention_policy::commands::status_report(ctx.runtime().store(), workspace_id)?;
+        content::retention_policy::queries::status_report(ctx.runtime().store(), workspace_id)?;
     Ok(content::retention_policy::cli::status_output(&report))
 }
 
@@ -382,7 +382,7 @@ fn settle_due_message_time_wakes(ctx: &mut MatchCliContext) -> Result<(), String
     let Some(now_ms) = clock::logical_time(ctx.runtime().store())? else {
         return Ok(());
     };
-    let now_minute = now_ms / content::retention_policy::commands::UNIX_MINUTE_MS;
+    let now_minute = now_ms / content::message::fact::UNIX_MINUTE_MS;
     for _ in 0..COMMAND_SETTLE_ROUNDS {
         let due = ctx.runtime_mut().process_due_time_range(
             content::message::expiration_timeline(),

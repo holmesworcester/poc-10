@@ -10,7 +10,7 @@
 //! read-model rows, time wakes, purges, and follow-up work. For a durable fact,
 //! the commit consumes the pending row, clears queued matches and due ranges for
 //! the owner, replaces owned needs/time wakes, appends offers, records wake
-//! matches for dependents, and applies `PipelineEffects` atomically. Candidate
+//! matches for dependents, and applies `RuntimeEffects` atomically. Candidate
 //! facts use the same boundary after either being retained into `facts` or
 //! dropped from `candidate_facts`.
 //!
@@ -25,14 +25,14 @@
 //! Runtime later drains that work like any other queued fact.
 
 use self::commit_effects::{
-    commit_pipeline_effects_in_tx, sqlite_string_error, validate_pipeline_effects_for_admission,
+    commit_runtime_effects_in_tx, sqlite_string_error, validate_runtime_effects_for_admission,
 };
 use self::context_store::{
     insert_context_need_in_tx, insert_context_offer_in_tx, pending_matching_context_for_owner,
     stored_context_for_owner, wake_context_matches_in_tx,
 };
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::{
     candidate_fact_by_id, delete_candidate_fact_in_tx, move_candidate_to_retained_in_tx,
@@ -196,7 +196,7 @@ fn prepare_projection_effects(
         run_projection_with_context(projector, &fact, &previous_context, projection_context)
     })?;
     crate::core::perf_profile::measure_result("projection_validate_effects", || {
-        validate_pipeline_effects_for_admission(&run.pipeline, allowed_tables, fact_admission)
+        validate_runtime_effects_for_admission(&run.effects, allowed_tables, fact_admission)
     })?;
     Ok(ProjectionEffects {
         source,
@@ -207,7 +207,7 @@ fn prepare_projection_effects(
         next_context: run.context,
         next_time_wakes: run.time_wakes,
         context_delta: run.context_delta,
-        pipeline: run.pipeline,
+        effects: run.effects,
     })
 }
 
@@ -221,7 +221,7 @@ struct ProjectionEffects {
     next_context: ContextSet,
     next_time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
-    pipeline: PipelineEffects,
+    effects: RuntimeEffects,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,7 +276,7 @@ fn commit_projection_effects_in_tx(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<usize> {
-    let purges_self = effects.pipeline.purged_facts.contains(&effects.fact_id);
+    let purges_self = effects.effects.purged_facts.contains(&effects.fact_id);
     let keep_projection_state = match effects.source {
         ProjectionSource::Durable => !purges_self,
         ProjectionSource::Candidate => effects.retain_self && !purges_self,
@@ -327,10 +327,10 @@ fn commit_projection_effects_in_tx(
         })?;
     }
 
-    crate::core::perf_profile::measure_result("projection_commit_pipeline_effects", || {
-        commit_pipeline_effects_in_tx(
+    crate::core::perf_profile::measure_result("projection_commit_runtime_effects", || {
+        commit_runtime_effects_in_tx(
             tx,
-            &effects.pipeline,
+            &effects.effects,
             allowed_tables,
             fact_admission,
             effects.mode,
@@ -346,7 +346,7 @@ fn validate_dropped_candidate_projection(effects: &ProjectionEffects) -> Result<
     if !effects.next_time_wakes.is_empty() {
         return Err("dropped candidate fact cannot emit time wakes".to_string());
     }
-    if !effects.next_context.needs.is_empty() && !pipeline_effects_are_empty(&effects.pipeline) {
+    if !effects.next_context.needs.is_empty() && !runtime_effects_are_empty(&effects.effects) {
         return Err(
             "dropped candidate fact cannot emit effects while transient needs remain".to_string(),
         );
@@ -354,7 +354,7 @@ fn validate_dropped_candidate_projection(effects: &ProjectionEffects) -> Result<
     Ok(())
 }
 
-fn pipeline_effects_are_empty(effects: &PipelineEffects) -> bool {
+fn runtime_effects_are_empty(effects: &RuntimeEffects) -> bool {
     effects.facts.is_empty()
         && effects.candidate_facts.is_empty()
         && effects.purged_facts.is_empty()
@@ -568,10 +568,10 @@ struct ProjectionRun {
     context: ContextSet,
     context_delta: ContextSetDelta,
     time_wakes: Vec<TimeWake>,
-    pipeline: PipelineEffects,
+    effects: RuntimeEffects,
 }
 
-/// Call the protocol projector and normalize the output for the SQL pipeline.
+/// Call the protocol projector and normalize the output for SQL commit.
 ///
 /// Projection output replaces current needs and appends durable offers for this
 /// fact. This helper enforces that projectors only own their own context/time
@@ -592,7 +592,7 @@ fn run_projection_with_context(
         context,
         context_delta,
         time_wakes: output.time_wakes,
-        pipeline: output.effects,
+        effects: output.effects,
     })
 }
 
@@ -737,7 +737,7 @@ mod contract_tests {
         let run = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
             .expect("projection should allow self purge");
 
-        assert_eq!(run.pipeline.purged_facts, vec![fact.id]);
+        assert_eq!(run.effects.purged_facts, vec![fact.id]);
     }
 
     #[test]
@@ -756,7 +756,7 @@ mod contract_tests {
             run_projection(&projector, &fact, &first.context, Vec::new()).expect("second run");
         assert!(second.context_delta.is_empty());
         assert_eq!(second.context, first.context);
-        assert!(second.pipeline.intents.is_empty());
+        assert!(second.effects.intents.is_empty());
     }
 
     #[test]
@@ -786,8 +786,8 @@ mod contract_tests {
         assert!(next.context.needs.is_empty());
         assert_eq!(next.context_delta.removed_needs, previous.needs);
         assert_eq!(next.context_delta.added_needs.len(), 0);
-        assert_eq!(next.pipeline.intents.len(), 1);
-        assert_eq!(next.pipeline.intents[0].kind.as_str(), "followup");
+        assert_eq!(next.effects.intents.len(), 1);
+        assert_eq!(next.effects.intents[0].kind.as_str(), "followup");
     }
 
     #[test]
@@ -1843,7 +1843,7 @@ pub(crate) mod commit_effects {
     //! Core is built around a simple rule: runtime work describes what should
     //! change, then one commit boundary makes that description durable. Commands,
     //! projectors, and intent handlers do not directly mutate all of core state.
-    //! They return `PipelineEffects`: facts to admit, facts to purge, row
+    //! They return `RuntimeEffects`: facts to admit, facts to purge, row
     //! mutations, durable intents, and ephemeral intents. A commit is the
     //! moment those pending effects are validated, written to SQLite, and made
     //! visible together.
@@ -1854,7 +1854,7 @@ pub(crate) mod commit_effects {
     //! offers, then calls the shared commit helper to write the projector's
     //! effects. Intent dispatch owns a larger transaction that deletes the handled
     //! queue row, then calls the same helper to write the handler's effects. Those
-    //! callers own their surrounding pipeline work; this module owns the common
+    //! callers own their surrounding runtime work; this module owns the common
     //! effect language inside that work.
     //!
     //! Committing effects changes the runtime in four ways. Purged facts remove the
@@ -1864,7 +1864,7 @@ pub(crate) mod commit_effects {
     //! are recorded after the data they depend on, so later handler passes never see
     //! queued work for state that failed to commit.
     //!
-    //! The mechanism is deliberately split in two. `validate_pipeline_effects`
+    //! The mechanism is deliberately split in two. `validate_runtime_effects`
     //! checks failures that do not need SQL: conflicting duplicate intents inside a
     //! batch and row mutations aimed at tables outside the runtime allowlist. The
     //! commit functions then rely on the store for the state-dependent checks:
@@ -1899,7 +1899,7 @@ pub(crate) mod commit_effects {
     //! receipts, command-only output, and protocol policy belong in their owner
     //! modules.
 
-    use crate::core::effects::PipelineEffects;
+    use crate::core::effects::RuntimeEffects;
     use crate::core::intents::{
         Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert, Value as SqlValue,
     };
@@ -1945,7 +1945,7 @@ pub(crate) mod commit_effects {
 
     /// Remove intents that are not admissible in the current runtime mode.
     pub(crate) fn suppress_disallowed_intents(
-        effects: &mut PipelineEffects,
+        effects: &mut RuntimeEffects,
         policy: IntentAdmissionPolicy<'_>,
     ) -> usize {
         let durable_before = effects.intents.len();
@@ -1961,7 +1961,7 @@ pub(crate) mod commit_effects {
     /// idempotent duplicates are intentionally omitted because callers use this as
     /// a scheduling signal for new facts and intents, not as an audit log.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    pub(crate) struct PipelineEffectCounts {
+    pub(crate) struct RuntimeEffectCounts {
         /// Facts newly admitted.
         pub facts: usize,
         /// Durable intents newly queued.
@@ -1975,8 +1975,8 @@ pub(crate) mod commit_effects {
     /// This catches pure conflicts first, so callers fail with a useful error before
     /// any SQL writes are attempted. Existing-row conflicts are still checked at
     /// write time because they depend on the transaction's current view of SQLite.
-    pub(crate) fn validate_pipeline_effects(
-        effects: &PipelineEffects,
+    pub(crate) fn validate_runtime_effects(
+        effects: &RuntimeEffects,
         allowed_tables: &[TableName],
     ) -> Result<(), String> {
         validate_intents(&effects.intents)?;
@@ -1985,18 +1985,18 @@ pub(crate) mod commit_effects {
         Ok(())
     }
 
-    pub(crate) fn validate_pipeline_effects_for_admission(
-        effects: &PipelineEffects,
+    pub(crate) fn validate_runtime_effects_for_admission(
+        effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
     ) -> Result<(), String> {
-        validate_pipeline_effects(effects, allowed_tables)?;
+        validate_runtime_effects(effects, allowed_tables)?;
         validate_fact_admissions(effects, fact_admission)?;
         Ok(())
     }
 
     fn validate_fact_admissions(
-        effects: &PipelineEffects,
+        effects: &RuntimeEffects,
         fact_admission: Option<FactAdmissionFn>,
     ) -> Result<(), String> {
         let Some(fact_admission) = fact_admission else {
@@ -2021,7 +2021,7 @@ pub(crate) mod commit_effects {
             if let Some(existing) = proposed.insert(key, intent) {
                 if existing != intent {
                     return Err(format!(
-                        "pipeline emitted conflicting intents for {}",
+                        "runtime effects emitted conflicting intents for {}",
                         intent.kind.as_str()
                     ));
                 }
@@ -2111,19 +2111,19 @@ pub(crate) mod commit_effects {
     ///
     /// Use this for command submission and other callers that do not already have a
     /// larger atomic unit. Projection and intent dispatch usually call
-    /// `commit_pipeline_effects_in_tx` instead so their own queue/context changes
+    /// `commit_runtime_effects_in_tx` instead so their own queue/context changes
     /// commit with the shared effects.
-    pub(crate) fn commit_pipeline_effects_to_store(
+    pub(crate) fn commit_runtime_effects_to_store(
         store: &Store,
-        effects: &PipelineEffects,
+        effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
         label: &str,
-    ) -> Result<PipelineEffectCounts, String> {
-        validate_pipeline_effects_for_admission(effects, allowed_tables, fact_admission)?;
+    ) -> Result<RuntimeEffectCounts, String> {
+        validate_runtime_effects_for_admission(effects, allowed_tables, fact_admission)?;
         store
             .write_transaction(|tx| {
-                commit_pipeline_effects_in_tx(
+                commit_runtime_effects_in_tx(
                     tx,
                     effects,
                     allowed_tables,
@@ -2144,13 +2144,13 @@ pub(crate) mod commit_effects {
     /// larger atomic boundary, which is why projection can update context and time
     /// wakes before committing these effects, and dispatch can delete the handled
     /// intent row in the same SQL unit.
-    pub(crate) fn commit_pipeline_effects_in_tx(
+    pub(crate) fn commit_runtime_effects_in_tx(
         tx: &Store,
-        effects: &PipelineEffects,
+        effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
         pending_mode: ProjectionMode,
-    ) -> rusqlite::Result<PipelineEffectCounts> {
+    ) -> rusqlite::Result<RuntimeEffectCounts> {
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
         for purged in &effects.purged_facts {
             purge_fact_in_tx(tx, *purged)?;
@@ -2201,7 +2201,7 @@ pub(crate) mod commit_effects {
             }
         }
 
-        Ok(PipelineEffectCounts {
+        Ok(RuntimeEffectCounts {
             facts,
             intents,
             local_intents,
@@ -2526,7 +2526,7 @@ pub(crate) mod context_store {
     //!
     //! This module is where that model becomes SQL. The public vocabulary lives in
     //! `core::context`: needs, offers, roles, keys, scopes, and normalized
-    //! `ContextSet`s. Protocol pipeline projectors produce those sets. The
+    //! `ContextSet`s. Protocol projectors produce those sets. The
     //! projection step calls this file to load previous standing context, assemble
     //! matched `ProjectionContext`, replace stored needs, append stored offers, and
     //! fan out wakeups to facts that may now make progress.
@@ -3067,10 +3067,10 @@ pub(crate) mod context_store {
     }
 }
 pub mod effects {
-    //! Projection effects and time-wake output for fact pipeline stages.
+    //! Projection effects and time-wake output for fact projectors.
 
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSet, Role};
-    use crate::core::effects::PipelineEffects;
+    use crate::core::effects::RuntimeEffects;
     use crate::core::facts::{Fact, FactId};
     use crate::core::intents::{Intent, RowMutation};
 
@@ -3221,7 +3221,7 @@ pub mod effects {
         /// Complete replacement time wakes for the projected fact.
         pub time_wakes: Vec<TimeWake>,
         /// Child facts, self-purge, row mutations, and intents to commit with this projection.
-        pub effects: PipelineEffects,
+        pub effects: RuntimeEffects,
     }
 
     impl Default for ProjectionOutput {
@@ -3231,7 +3231,7 @@ pub mod effects {
                 needs: Vec::new(),
                 offers: Vec::new(),
                 time_wakes: Vec::new(),
-                effects: PipelineEffects::default(),
+                effects: RuntimeEffects::default(),
             }
         }
     }
@@ -3380,12 +3380,12 @@ pub mod route {
 
     /// Human-readable projector declaration for a fact route.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct FactPipeline {
+    pub struct FactProjectorInfo {
         /// Projector implementation that owns this tag's local fact semantics.
         pub project: &'static str,
     }
 
-    impl FactPipeline {
+    impl FactProjectorInfo {
         pub const fn projector(project: &'static str) -> Self {
             Self { project }
         }
@@ -3398,7 +3398,7 @@ pub mod route {
         pub tag: u8,
         pub projector: ProjectorFn,
         /// Projector metadata for this route.
-        pub pipeline: FactPipeline,
+        pub projector_info: FactProjectorInfo,
     }
 
     /// The protocol-facing projection entry point.
@@ -3474,7 +3474,7 @@ pub use effects::{
     fact_purged_role, ProjectionOutput, TimeRange, TimeWake, Timeline,
 };
 pub use route::{
-    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactPipeline, FactRoute, Projector,
+    EffectiveTagFn, EnvelopeRoute, FactAdmissionFn, FactProjectorInfo, FactRoute, Projector,
     ProjectorFn, RouterProjector,
 };
 
@@ -3559,9 +3559,9 @@ pub(crate) fn submit_command_output_to_store<T>(
     label: &str,
 ) -> Result<T, String> {
     let (receipt, facts) = output.into_parts();
-    let mut effects = PipelineEffects::new();
+    let mut effects = RuntimeEffects::new();
     effects.facts = facts;
-    commit_pipeline_effects_to_store(store, &effects, allowed_tables, fact_admission, label)?;
+    commit_runtime_effects_to_store(store, &effects, allowed_tables, fact_admission, label)?;
     Ok(receipt)
 }
 
@@ -4002,7 +4002,7 @@ fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
     })
 }
 
-pub(crate) use commit_effects::commit_pipeline_effects_to_store;
+pub(crate) use commit_effects::commit_runtime_effects_to_store;
 
 #[cfg(test)]
 mod tests {
@@ -4102,10 +4102,10 @@ mod tests {
         let route = FactRoute {
             tag: 200,
             projector: model_projector,
-            pipeline: FactPipeline::projector("ModelProjector"),
+            projector_info: FactProjectorInfo::projector("ModelProjector"),
         };
 
-        assert_eq!(route.pipeline.project, "ModelProjector");
+        assert_eq!(route.projector_info.project, "ModelProjector");
         let output = (route.projector)(
             &Fact::new(FactScope::Global, 1, vec![200, 5]),
             &ProjectionContext::default(),
@@ -4165,7 +4165,7 @@ mod tests {
 
     impl IntentHandler for NoopIntentHandler {
         fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-            Ok(crate::core::effects::PipelineEffects::new())
+            Ok(crate::core::effects::RuntimeEffects::new())
         }
     }
 

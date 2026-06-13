@@ -286,7 +286,9 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
 use crate::protocol::{auth, connection, content, sync};
@@ -294,7 +296,7 @@ use crate::protocol::{auth, connection, content, sync};
 use super::fact::ConnectionFrameFileSliceFact;
 
 /// Projector route metadata for the frame_file_slice fact.
-pub const PIPELINE: FactPipeline = FactPipeline::projector(
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
     "connection::frame_file_slice::project::ConnectionFrameFileSliceProjector",
 );
 

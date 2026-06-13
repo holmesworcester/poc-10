@@ -223,7 +223,9 @@ pub mod adapt {
 
 use crate::core::facts::Fact;
 use crate::core::intents::{RowMutation, TableInsert, Value};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -237,8 +239,9 @@ use crate::protocol::sync::shared_fact::project::{
 use super::queries::MessageDeletionRow;
 
 /// Projector route metadata for the message_deletion fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::message_deletion::project::ContentMessageDeletionProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
+    "content::message_deletion::project::ContentMessageDeletionProjector",
+);
 
 fn message_deletion_row(input: MessageDeletionRow) -> TableInsert {
     read_models::MESSAGE_DELETIONS.insert(vec![

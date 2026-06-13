@@ -193,15 +193,17 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
 use crate::protocol::auth::recipient_key;
 
 use super::fact::LocalRecipientKeyFact;
 
 /// Projector route metadata for the local_recipient_key fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::local_recipient_key::project::LocalRecipientKeyProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::local_recipient_key::project::LocalRecipientKeyProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalRecipientKeyProjector;

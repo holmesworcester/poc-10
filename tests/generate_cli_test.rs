@@ -43,7 +43,7 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
 }
 
 #[test]
-fn generate_cli_can_profile_pipeline_phases_to_stderr() {
+fn generate_cli_can_profile_runtime_phases_to_stderr() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "profiled-generate.db");
     let workspace_id = create_workspace(&db);

@@ -11,7 +11,7 @@
 //! as sending network bytes, materializing a follow-up fact, or purging derived
 //! state. Commands can also emit intents when user input should enqueue
 //! asynchronous work. Dispatch later loads the handler, builds its narrow
-//! context, and commits the handler's `PipelineEffects` atomically with queue
+//! context, and commits the handler's `RuntimeEffects` atomically with queue
 //! consumption.
 //!
 //! Durable and ephemeral intents share identity and payload rules. Durable
@@ -23,11 +23,11 @@
 //!
 //! Handlers are reactive runtime code, not user-facing commands. They may ask
 //! core to load specific facts and may use query helpers through `Store`, then
-//! return `PipelineEffects` for the pipeline to commit atomically. If a handler
+//! return `RuntimeEffects` for runtime workers to commit atomically. If a handler
 //! needs to wait for missing input, return `retry_intent`; if it observes a
 //! semantic violation that should not be retried, return a fatal error.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::{Store, TableName, TableRow};
 use rusqlite::types::Value as SqliteValue;
@@ -37,7 +37,7 @@ use std::fmt;
 /// SQLite value carried by typed-table row mutations and internal SQL helpers.
 ///
 /// Protocol row builders choose these values from their fact layout and table
-/// schema. Core also uses the same representation for checked pipeline
+/// schema. Core also uses the same representation for checked runtime
 /// insert-select parameters. Conversion into SQLite bind parameters is
 /// mechanical; core does not interpret what a column or parameter means.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +99,7 @@ impl IntentKind {
 ///
 /// `(kind, key)` is the queue identity. Re-emitting the same payload is a
 /// no-op; re-emitting a different payload for the same identity is rejected by
-/// the pipeline because it would make retries ambiguous.
+/// runtime effect validation because it would make retries ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Intent {
     /// Handler routing key.
@@ -276,7 +276,7 @@ impl From<&str> for HandlerError {
 }
 
 /// Result returned by an intent handler before core commits its effects.
-pub type HandlerResult = Result<PipelineEffects, HandlerError>;
+pub type HandlerResult = Result<RuntimeEffects, HandlerError>;
 
 /// Mark a handler failure as transient so dispatch leaves the intent queued.
 pub fn retry_intent(reason: impl Into<String>) -> HandlerError {
@@ -296,7 +296,7 @@ pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
 /// Durable and local queue dispatch both build this immediately before
 /// `handle`.
 /// The handler gets only the facts it requested plus the store for explicit
-/// query helpers; it cannot reach the runtime pipelines directly.
+/// query helpers; it cannot reach runtime workers directly.
 #[derive(Clone, Default)]
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_effects_track_row_mutations_separately_from_intents() {
+    fn runtime_effects_track_row_mutations_separately_from_intents() {
         let row_a = TableRow {
             table: TEST_TABLE,
             key: b"row-key".to_vec(),
@@ -419,7 +419,7 @@ mod tests {
             key: b"row-key".to_vec(),
         };
 
-        let output = PipelineEffects::new()
+        let output = RuntimeEffects::new()
             .row_mutation(RowMutation::PutRow(row_a.clone()))
             .row_mutation(RowMutation::DeleteRow(delete.clone()))
             .intent(Intent::new(

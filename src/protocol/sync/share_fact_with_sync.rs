@@ -222,7 +222,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                             )
                         })
                     } else {
-                        Ok(crate::core::effects::PipelineEffects::new())
+                        Ok(crate::core::effects::RuntimeEffects::new())
                     }
                 }
                 SyncShareState::Retract => {
@@ -236,7 +236,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                             )?)
                         },
                     )?;
-                    Ok(crate::core::effects::PipelineEffects::new())
+                    Ok(crate::core::effects::RuntimeEffects::new())
                 }
             }
         })

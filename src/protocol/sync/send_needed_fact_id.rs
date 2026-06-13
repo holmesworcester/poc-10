@@ -6,7 +6,7 @@
 //! exact-id sync fallback; it does not decide whether the peer may later send
 //! the requested payload.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
@@ -76,14 +76,14 @@ impl IntentHandler for SendNeededFactIdHandler {
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::project::decode::decode_fact(&have_fact.bytes)?;
         if crate::core::store::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
-            return Ok(PipelineEffects::new());
+            return Ok(RuntimeEffects::new());
         }
         let need = need_id::fact::SyncNeedIdFact {
             connection_id: have.connection_id,
             fact_id: have.fact_id,
         };
         let need_fact = need_id::author::fact(need, have_fact.timestamp)?;
-        Ok(PipelineEffects::new()
+        Ok(RuntimeEffects::new()
             .fact(need_fact.clone())
             .intent(send_facts_on_connection_intent(SendFactsOnConnection {
                 connection_id: have.connection_id,

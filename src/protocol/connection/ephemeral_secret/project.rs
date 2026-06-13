@@ -223,7 +223,9 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use super::{
     connection_ephemeral_secret_key, connection_ephemeral_secret_row,
@@ -232,7 +234,7 @@ use super::{
 use crate::protocol::connection::close;
 
 /// Projector route metadata for the ephemeral_secret fact.
-pub const PIPELINE: FactPipeline = FactPipeline::projector(
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
     "connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector",
 );
 

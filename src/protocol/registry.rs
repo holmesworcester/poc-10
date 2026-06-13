@@ -891,11 +891,11 @@ impl Projector for ProtocolProjector {
     }
 }
 
-// Every fact route is staged: the generated route fn calls the family projector,
-// whose `project` routes through the protocol-local projector
-// (decode -> authenticate -> adapt -> project). The route's staged pipeline
-// labels come from the family's `project::PIPELINE` const so a reviewer can line
-// up the route declaration with the role files.
+// Every fact route is explicit: the generated route fn calls the family
+// projector, whose `project` routes through the protocol-local projector
+// (decode -> authenticate -> adapt -> project). The route metadata comes from
+// the family's `project::PROJECTOR_INFO` const so a reviewer can line up the
+// route declaration with the role files.
 macro_rules! projector_route {
     ($name:ident, $projector:path) => {
         fn $name(fact: &Fact, context: &ProjectionContext) -> Result<ProjectionOutput, String> {
@@ -906,63 +906,63 @@ macro_rules! projector_route {
 
 // Projection replay policy is owned by each projector through
 // `ProjectionContext::is_replay()`. The route table only names tag routing and
-// the first-class staged pipeline labels.
+// first-class projector metadata.
 macro_rules! projector_routes {
-    ($($name:ident => $tag:path, $projector:path, $pipeline:path ;)+) => {
+    ($($name:ident => $tag:path, $projector:path, $projector_info:path ;)+) => {
         $(projector_route!($name, $projector);)+
 
         pub(crate) const FACT_ROUTES: &[FactRoute] = &[
             $(FactRoute {
                 tag: $tag,
                 projector: $name,
-                pipeline: $pipeline,
+                projector_info: $projector_info,
             },)+
         ];
     };
 }
 
 projector_routes! {
-    project_connection_close => connection::close::encode::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector, connection::close::project::PIPELINE;
-    project_connection_ephemeral_secret => connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector, connection::ephemeral_secret::project::PIPELINE;
-    project_connection_request => connection::request::encode::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, connection::request::project::PIPELINE;
-    project_connection => connection::connection::encode::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, connection::connection::project::PIPELINE;
-    project_content_file => content::file::encode::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector, content::file::project::PIPELINE;
-    project_content_file_deletion => content::file_deletion::encode::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector, content::file_deletion::project::PIPELINE;
-    project_content_file_slice => content::file_slice::encode::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector, content::file_slice::project::PIPELINE;
-    project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, content::message::project::PIPELINE;
-    project_content_message_deletion => content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector, content::message_deletion::project::PIPELINE;
-    project_content_reaction => content::reaction::encode::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector, content::reaction::project::PIPELINE;
-    project_auth_signature => auth::signature::encode::TYPE_SIGNATURE, auth::signature::project::SignatureProjector, auth::signature::project::PIPELINE;
-    project_auth_recipient_key => auth::recipient_key::encode::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector, auth::recipient_key::project::PIPELINE;
-    project_auth_removal_frontier => auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector, auth::removal_frontier::project::PIPELINE;
-    project_auth_local_key_secret => auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector, auth::local_key_secret::project::PIPELINE;
-    project_auth_local_history_node_secret => auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET, auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector, auth::local_history_node_secret::project::PIPELINE;
-    project_auth_local_secret_retirement => auth::local_secret_retirement::encode::TYPE_LOCAL_SECRET_RETIREMENT, auth::local_secret_retirement::project::LocalSecretRetirementProjector, auth::local_secret_retirement::project::PIPELINE;
-    project_auth_key_request => auth::key_request::encode::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector, auth::key_request::project::PIPELINE;
-    project_auth_key_wrap => auth::key_wrap::encode::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector, auth::key_wrap::project::PIPELINE;
-    project_auth_local_recipient_key => auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector, auth::local_recipient_key::project::PIPELINE;
-    project_endpoint => auth::endpoint::encode::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector, auth::endpoint::project::PIPELINE;
-    project_invite => auth::invite::encode::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector, auth::invite::project::PIPELINE;
-    project_workspace => auth::workspace::encode::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector, auth::workspace::project::PIPELINE;
-    project_auth_local_signer_secret => auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector, auth::local_signer_secret::project::PIPELINE;
-    project_device_invite => auth::device_invite::encode::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector, auth::device_invite::project::PIPELINE;
-    project_endpoint_shared => auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector, auth::endpoint_shared::project::PIPELINE;
-    project_invite_server => auth::invite_server::encode::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector, auth::invite_server::project::PIPELINE;
-    project_admin => auth::admin::encode::TYPE_ADMIN, auth::admin::project::AdminProjector, auth::admin::project::PIPELINE;
-    project_invite_accepted => auth::invite_accepted::encode::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector, auth::invite_accepted::project::PIPELINE;
-    project_retention_policy => content::retention_policy::encode::TYPE_RETENTION_POLICY, content::retention_policy::project::RetentionPolicyProjector, content::retention_policy::project::PIPELINE;
-    project_sync_range_request => sync::range_request::encode::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector, sync::range_request::project::PIPELINE;
-    project_sync_shared_fact => sync::shared_fact::encode::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector, sync::shared_fact::project::PIPELINE;
-    project_sync_compare => sync::compare::encode::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector, sync::compare::project::PIPELINE;
-    project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PIPELINE;
-    project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PIPELINE;
-    project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PIPELINE;
-    project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PIPELINE;
-    project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PIPELINE;
-    project_connection_frame_observation => connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector, connection::frame_observation::project::PIPELINE;
-    project_connection_fact_receipt => connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector, connection::fact_receipt::project::PIPELINE;
-    project_user_invite => auth::user_invite::encode::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector, auth::user_invite::project::PIPELINE;
-    project_user => auth::user::encode::TYPE_USER, auth::user::project::UserProjector, auth::user::project::PIPELINE;
+    project_connection_close => connection::close::encode::TYPE_CONNECTION_CLOSE, connection::close::project::ConnectionCloseProjector, connection::close::project::PROJECTOR_INFO;
+    project_connection_ephemeral_secret => connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET, connection::ephemeral_secret::project::ConnectionEphemeralSecretProjector, connection::ephemeral_secret::project::PROJECTOR_INFO;
+    project_connection_request => connection::request::encode::TYPE_CONNECTION_REQUEST, connection::request::project::ConnectionRequestProjector, connection::request::project::PROJECTOR_INFO;
+    project_connection => connection::connection::encode::TYPE_CONNECTION, connection::connection::project::ConnectionProjector, connection::connection::project::PROJECTOR_INFO;
+    project_content_file => content::file::encode::TYPE_CONTENT_FILE, content::file::project::ContentFileProjector, content::file::project::PROJECTOR_INFO;
+    project_content_file_deletion => content::file_deletion::encode::TYPE_CONTENT_FILE_DELETION, content::file_deletion::project::ContentFileDeletionProjector, content::file_deletion::project::PROJECTOR_INFO;
+    project_content_file_slice => content::file_slice::encode::TYPE_CONTENT_FILE_SLICE, content::file_slice::project::ContentFileSliceProjector, content::file_slice::project::PROJECTOR_INFO;
+    project_content_message => content::message::encode::TYPE_CONTENT_MESSAGE, content::message::project::ContentMessageProjector, content::message::project::PROJECTOR_INFO;
+    project_content_message_deletion => content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION, content::message_deletion::project::ContentMessageDeletionProjector, content::message_deletion::project::PROJECTOR_INFO;
+    project_content_reaction => content::reaction::encode::TYPE_CONTENT_REACTION, content::reaction::project::ContentReactionProjector, content::reaction::project::PROJECTOR_INFO;
+    project_auth_signature => auth::signature::encode::TYPE_SIGNATURE, auth::signature::project::SignatureProjector, auth::signature::project::PROJECTOR_INFO;
+    project_auth_recipient_key => auth::recipient_key::encode::TYPE_RECIPIENT_KEY, auth::recipient_key::project::RecipientKeyProjector, auth::recipient_key::project::PROJECTOR_INFO;
+    project_auth_removal_frontier => auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER, auth::removal_frontier::project::RemovalFrontierProjector, auth::removal_frontier::project::PROJECTOR_INFO;
+    project_auth_local_key_secret => auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET, auth::local_key_secret::project::LocalKeySecretProjector, auth::local_key_secret::project::PROJECTOR_INFO;
+    project_auth_local_history_node_secret => auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET, auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector, auth::local_history_node_secret::project::PROJECTOR_INFO;
+    project_auth_local_secret_retirement => auth::local_secret_retirement::encode::TYPE_LOCAL_SECRET_RETIREMENT, auth::local_secret_retirement::project::LocalSecretRetirementProjector, auth::local_secret_retirement::project::PROJECTOR_INFO;
+    project_auth_key_request => auth::key_request::encode::TYPE_KEY_REQUEST, auth::key_request::project::KeyRequestProjector, auth::key_request::project::PROJECTOR_INFO;
+    project_auth_key_wrap => auth::key_wrap::encode::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector, auth::key_wrap::project::PROJECTOR_INFO;
+    project_auth_local_recipient_key => auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector, auth::local_recipient_key::project::PROJECTOR_INFO;
+    project_endpoint => auth::endpoint::encode::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector, auth::endpoint::project::PROJECTOR_INFO;
+    project_invite => auth::invite::encode::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector, auth::invite::project::PROJECTOR_INFO;
+    project_workspace => auth::workspace::encode::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector, auth::workspace::project::PROJECTOR_INFO;
+    project_auth_local_signer_secret => auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector, auth::local_signer_secret::project::PROJECTOR_INFO;
+    project_device_invite => auth::device_invite::encode::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector, auth::device_invite::project::PROJECTOR_INFO;
+    project_endpoint_shared => auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED, auth::endpoint_shared::project::EndpointSharedProjector, auth::endpoint_shared::project::PROJECTOR_INFO;
+    project_invite_server => auth::invite_server::encode::TYPE_INVITE_SERVER, auth::invite_server::project::InviteServerProjector, auth::invite_server::project::PROJECTOR_INFO;
+    project_admin => auth::admin::encode::TYPE_ADMIN, auth::admin::project::AdminProjector, auth::admin::project::PROJECTOR_INFO;
+    project_invite_accepted => auth::invite_accepted::encode::TYPE_INVITE_ACCEPTED, auth::invite_accepted::project::InviteAcceptedProjector, auth::invite_accepted::project::PROJECTOR_INFO;
+    project_retention_policy => content::retention_policy::encode::TYPE_RETENTION_POLICY, content::retention_policy::project::RetentionPolicyProjector, content::retention_policy::project::PROJECTOR_INFO;
+    project_sync_range_request => sync::range_request::encode::TYPE_SYNC_RANGE_REQUEST, sync::range_request::project::SyncRangeRequestProjector, sync::range_request::project::PROJECTOR_INFO;
+    project_sync_shared_fact => sync::shared_fact::encode::TYPE_SHARED_FACT, sync::shared_fact::project::SyncSharedFactProjector, sync::shared_fact::project::PROJECTOR_INFO;
+    project_sync_compare => sync::compare::encode::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector, sync::compare::project::PROJECTOR_INFO;
+    project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PROJECTOR_INFO;
+    project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PROJECTOR_INFO;
+    project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PROJECTOR_INFO;
+    project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PROJECTOR_INFO;
+    project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PROJECTOR_INFO;
+    project_connection_frame_observation => connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION, connection::frame_observation::project::ConnectionFrameObservationProjector, connection::frame_observation::project::PROJECTOR_INFO;
+    project_connection_fact_receipt => connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT, connection::fact_receipt::project::ConnectionFactReceiptProjector, connection::fact_receipt::project::PROJECTOR_INFO;
+    project_user_invite => auth::user_invite::encode::TYPE_USER_INVITE, auth::user_invite::project::UserInviteProjector, auth::user_invite::project::PROJECTOR_INFO;
+    project_user => auth::user::encode::TYPE_USER, auth::user::project::UserProjector, auth::user::project::PROJECTOR_INFO;
 }
 
 // Every route must declare `replay = <bool>`: whether core may dispatch this

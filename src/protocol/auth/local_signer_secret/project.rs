@@ -192,13 +192,15 @@ pub mod adapt {
 //      scope and emits no rows, facts, intents, or shareable context.
 
 use crate::core::facts::{Fact, FactScope, ScopeKind};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use super::fact::LocalSignerSecretFact;
 
 /// Projector route metadata for the local_signer_secret fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::local_signer_secret::project::LocalSignerSecretProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::local_signer_secret::project::LocalSignerSecretProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalSignerSecretProjector;

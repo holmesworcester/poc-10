@@ -329,7 +329,9 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 pub fn connection_fact_receipt_for_path(
     input: super::fact::ReceiptPathInput<'_>,
@@ -361,8 +363,9 @@ pub(crate) fn validate_local_receipt_scope(fact: &Fact) -> Result<(), String> {
 }
 
 /// Projector route metadata for the fact_receipt fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("connection::fact_receipt::project::ConnectionFactReceiptProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
+    "connection::fact_receipt::project::ConnectionFactReceiptProjector",
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFactReceiptProjector;

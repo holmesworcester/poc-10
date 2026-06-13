@@ -209,7 +209,9 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableInsert, Value};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::auth::signature;
 use crate::protocol::auth::user;
@@ -234,8 +236,8 @@ fn file_deletion_row(input: FileDeletionRow) -> TableInsert {
 }
 
 /// Projector route metadata for the file_deletion fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::file_deletion::project::ContentFileDeletionProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("content::file_deletion::project::ContentFileDeletionProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileDeletionProjector;

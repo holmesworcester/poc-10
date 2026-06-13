@@ -216,13 +216,15 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::{invite_accepted, signature};
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
 /// Projector route metadata for the workspace fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::workspace::project::WorkspaceProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::workspace::project::WorkspaceProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceProjector;

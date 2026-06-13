@@ -217,7 +217,9 @@ pub mod adapt {
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -250,8 +252,8 @@ pub fn reaction_row(input: ReactionRow) -> Result<TableInsert, String> {
 }
 
 /// Projector route metadata for the reaction fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::reaction::project::ContentReactionProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("content::reaction::project::ContentReactionProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentReactionProjector;

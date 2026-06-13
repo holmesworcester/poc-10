@@ -393,7 +393,11 @@ runtime.
 
 ## Replay
 
-Daemon owns when replay happens. Replay is wipe and rebuild:
+Daemon/runtime owns when replay happens. `replay.rs` may remain as the
+orchestration and diagnostics wrapper around the simple replay operation:
+wipe derived state, move retained facts back to pending projection in replay
+mode, drain `project_fact`, and compare state summaries. It must not grow its
+own projection or store policy.
 
 ```rust
 fn run_replay() -> Result<(), String> {
@@ -425,12 +429,17 @@ fn wipe_derived_state(tx: &Store, schema: &ProtocolSchema) -> Result<()> {
 }
 ```
 
-Retained facts, source metadata, local secrets/config, and schema/replay
-metadata survive replay. Candidate facts, pending queues, context edges, time
-wakes, intent queues, and derived protocol rows are wiped.
+Retained facts are the durable protocol truth and survive replay. Candidate
+facts, pending queues, context edges, time wakes, intent queues, and derived
+protocol rows are wiped. Local runtime metadata needed to run the database,
+such as schema and replay lifecycle rows, may also survive, but it is not
+protocol truth.
 
 Projectors receive replay mode in `ProjectionContext` and decide protocol-local
-replay behavior.
+replay behavior. Intent handlers only run during replay when their
+`HandlerRoute` explicitly declares replay support; live-only handler output is
+kept out of replay by the handler route and projector decisions, not by a broad
+post-hoc intent filter.
 
 ## Daemon
 
@@ -456,7 +465,8 @@ time-wake subscriptions emitted by projectors.
   projector.
 - Need/offer matching occurs only during projection commit.
 - Same-drain context probing is removed.
-- Replay is a daemon-owned wipe/rebuild over retained facts.
+- Replay is a daemon/runtime-owned wipe/rebuild over retained facts, with
+  `replay.rs` limited to orchestration and diagnostics.
 - Store contains storage primitives, not workflow policy.
 - All fact projectors absorb decode/authenticate/adapt helpers into `project.rs`
   and document local context/replay/retention decisions.

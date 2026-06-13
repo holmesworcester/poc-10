@@ -1,11 +1,12 @@
-//! User-facing auth key-material commands and status assembly.
+//! User-facing auth key-material command authors and chop workflow.
 //!
 //! These commands are the local entry points for creating recipient keys,
-//! removal frontiers, history nodes, key wraps, and retention chops. They read
-//! projected auth state, construct facts or local effects,
-//! and return receipts suitable for CLI output.
+//! removal frontiers, history nodes, key wraps, and retention chops. Simple
+//! commands read projected auth state, construct facts, and return receipts
+//! suitable for CLI output. The `chop_now` entry point is a multi-phase runtime
+//! workflow and should move out of this file when workflow hosts get their own
+//! module.
 
-use crate::core::clock;
 use crate::core::command::CommandOutput;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
@@ -13,16 +14,10 @@ use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
-use crate::protocol::auth::recipient_key::project::decode as recipient_key_layout;
-use crate::protocol::auth::removal_frontier::project::decode as removal_frontier_decode;
 use crate::protocol::content;
-use rusqlite::params;
-use std::collections::BTreeSet;
 
-use super::encode;
 use crate::protocol::auth::local_history_node_secret::project::decode as local_history_layout_decode;
 use crate::protocol::auth::local_key_secret::project::decode as local_key_secret_layout_decode;
-use crate::protocol::auth::local_recipient_key::project::decode as local_recipient_layout_decode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateRecipientKey {
@@ -50,34 +45,6 @@ pub struct CreateKeyFrontierReceipt {
     pub removal_frontier_id: FactId,
     pub local_key_secret_id: FactId,
     pub local_signer_secret_id: FactId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyWrapQuery {
-    pub workspace_id: FactId,
-    pub removal_frontier_id: FactId,
-    pub recipient_key_id: FactId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyWrapLookup {
-    pub workspace_id: FactId,
-    pub removal_frontier_id: FactId,
-    pub recipient_key_id: FactId,
-    pub key_wrap_id: FactId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyAccessQuery {
-    pub workspace_id: FactId,
-    pub removal_frontier_id: FactId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyAccessStatus {
-    pub workspace_id: FactId,
-    pub removal_frontier_id: FactId,
-    pub access: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,35 +86,6 @@ pub struct ChopNowReceipt {
     pub purged_secret_bytes: usize,
     pub subsumed_message_tombstones_gcd: usize,
     pub subsumed_leaf_tombstones_gcd: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyStatusReport {
-    pub recipient_keys: usize,
-    pub local_recipient_keys: usize,
-    pub removal_frontiers: Vec<RemovalFrontierAccess>,
-    pub key_wraps: usize,
-    pub local_key_secrets: usize,
-    pub local_history_node_secrets: usize,
-    pub local_history_leaves: usize,
-    pub local_history_node_tombstones: usize,
-    pub message_tombstones: usize,
-    pub cover_summary: [u8; 32],
-    pub history_leaves: Vec<HistoryLeafRow>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RemovalFrontierAccess {
-    pub frontier_id: FactId,
-    pub access: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HistoryLeafRow {
-    pub node_id: FactId,
-    pub frontier_id: FactId,
-    pub minute: u64,
-    pub fact_id_in_minute: FactId,
 }
 
 pub fn create_recipient_key(
@@ -245,238 +183,6 @@ pub fn create_key_frontier(
         local_secret_fact,
         signer_fact,
     ]))
-}
-
-pub fn latest_local_recipient_key(
-    runtime: &Runtime,
-    workspace_id: FactId,
-) -> Result<Option<FactId>, String> {
-    let mut latest = None;
-    for fact in runtime.facts() {
-        let Ok(local) = local_recipient_layout_decode::decode_local_recipient_key(fact.body())
-        else {
-            continue;
-        };
-        if local.workspace_id != workspace_id {
-            continue;
-        }
-        match latest {
-            None => latest = Some((fact.timestamp, local.recipient_key_id)),
-            Some((timestamp, id)) if (fact.timestamp, local.recipient_key_id) > (timestamp, id) => {
-                latest = Some((fact.timestamp, local.recipient_key_id));
-            }
-            _ => {}
-        }
-    }
-    Ok(latest.map(|(_, id)| id))
-}
-
-pub fn recipient_key_for_rotation(
-    runtime: &Runtime,
-    workspace_id: FactId,
-) -> Result<Option<FactId>, String> {
-    latest_local_recipient_key(runtime, workspace_id)
-}
-
-pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrapLookup, String> {
-    if recipient_key_is_superseded(runtime, query.workspace_id, query.recipient_key_id)? {
-        return Err("recipient key is missing or superseded".to_string());
-    }
-    let key = encode::frontier_root_key_wrap_coordinate_key(
-        query.workspace_id,
-        query.removal_frontier_id,
-        query.recipient_key_id,
-    );
-    let value = runtime
-        .store()
-        .table_row(super::KEY_WRAP_ROWS, &key)
-        .map_err(|err| format!("load key wrap row: {err}"))?
-        .ok_or_else(|| "key wrap is not available yet".to_string())?;
-    let row = super::queries::decode_key_wrap_row(&key, &value)?;
-    Ok(KeyWrapLookup {
-        workspace_id: query.workspace_id,
-        removal_frontier_id: query.removal_frontier_id,
-        recipient_key_id: query.recipient_key_id,
-        key_wrap_id: row.key_wrap_id,
-    })
-}
-
-pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessStatus, String> {
-    let access = runtime.facts().any(|fact| {
-        local_key_secret_layout_decode::decode_local_key_secret(fact.body())
-            .map(|secret| {
-                secret.workspace_id == query.workspace_id
-                    && secret.frontier_id == query.removal_frontier_id
-            })
-            .unwrap_or(false)
-    }) && !workspace_retired_from_access(runtime, query.workspace_id)?;
-    Ok(KeyAccessStatus {
-        workspace_id: query.workspace_id,
-        removal_frontier_id: query.removal_frontier_id,
-        access,
-    })
-}
-
-pub fn local_key_secret_count(runtime: &Runtime) -> usize {
-    runtime
-        .facts()
-        .filter(|fact| local_key_secret_layout_decode::decode_local_key_secret(fact.body()).is_ok())
-        .count()
-}
-
-pub fn local_key_secret_frontiers(runtime: &Runtime, workspace_id: FactId) -> Vec<FactId> {
-    runtime
-        .facts()
-        .filter_map(|fact| {
-            local_key_secret_layout_decode::decode_local_key_secret(fact.body()).ok()
-        })
-        .filter(|secret| secret.workspace_id == workspace_id)
-        .map(|secret| secret.frontier_id)
-        .collect()
-}
-
-pub fn key_wrap_count(runtime: &Runtime) -> Result<usize, String> {
-    runtime
-        .store()
-        .table_rows(super::KEY_WRAP_ROWS)
-        .map(|rows| rows.len())
-        .map_err(|err| format!("load key wraps: {err}"))
-}
-
-pub fn workspace_key_wrap_count(runtime: &Runtime, workspace_id: FactId) -> Result<usize, String> {
-    Ok(runtime
-        .store()
-        .table_rows(super::KEY_WRAP_ROWS)
-        .map_err(|err| format!("load key wraps: {err}"))?
-        .into_iter()
-        .filter_map(|(key, value)| super::queries::decode_key_wrap_row(&key, &value).ok())
-        .filter(|row| row.wrap.workspace_id == workspace_id)
-        .count())
-}
-
-pub fn key_status_report(
-    runtime: &Runtime,
-    workspace_id: FactId,
-) -> Result<KeyStatusReport, String> {
-    let store = runtime.store();
-    let leaves = history_leaf_rows(store, workspace_id)?;
-    let message_tombstones =
-        content::message::queries::message_tombstone_count(store, workspace_id)?;
-    let file_tombstones = store
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM file_deletion_rows WHERE workspace_id = ?1",
-            params![workspace_id],
-            |row| row.get::<_, i64>(0).map(|value| value as usize),
-        )
-        .map_err(|err| format!("load file deletion rows: {err}"))?;
-    let local_key_secret_frontiers = local_key_secret_frontiers(runtime, workspace_id);
-    let recipient_keys = runtime
-        .facts()
-        .filter_map(|fact| recipient_key_layout::decode_recipient_key(&fact.bytes).ok())
-        .filter(|key| key.workspace_id == workspace_id)
-        .count();
-    let local_recipient_keys = runtime
-        .facts()
-        .filter_map(|fact| {
-            local_recipient_layout_decode::decode_local_recipient_key(&fact.bytes).ok()
-        })
-        .filter(|key| key.workspace_id == workspace_id)
-        .count();
-    let removal_frontiers = runtime
-        .facts()
-        .filter_map(|fact| {
-            removal_frontier_decode::decode_removal_frontier(&fact.bytes)
-                .ok()
-                .map(|frontier| (fact.id, frontier))
-        })
-        .filter(|(_, frontier)| frontier.workspace_id == workspace_id)
-        .map(|(frontier_id, _)| RemovalFrontierAccess {
-            frontier_id,
-            access: local_key_secret_frontiers.contains(&frontier_id),
-        })
-        .collect::<Vec<_>>();
-    let key_wraps = workspace_key_wrap_count(runtime, workspace_id)?;
-    let cover_summary = cover_summary(&leaves);
-
-    Ok(KeyStatusReport {
-        recipient_keys,
-        local_recipient_keys,
-        removal_frontiers,
-        key_wraps,
-        local_key_secrets: local_key_secret_frontiers.len(),
-        local_history_node_secrets: leaves.len(),
-        local_history_leaves: leaves.len(),
-        local_history_node_tombstones: message_tombstones + file_tombstones,
-        message_tombstones,
-        cover_summary,
-        history_leaves: leaves,
-    })
-}
-
-fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Result<bool, String> {
-    if content::message::queries::message_tombstone_count(runtime.store(), workspace_id)? > 0 {
-        return Ok(true);
-    }
-    let live_messages =
-        content::message::queries::content_message_rows(runtime.store(), workspace_id)?;
-    let horizon_floor = clock::logical_time(runtime.store())?
-        .map(|ms| (ms / 60_000).saturating_sub(30 * 24 * 60))
-        .unwrap_or(0);
-    if horizon_floor > 0
-        && live_messages
-            .iter()
-            .all(|message| message.minute < horizon_floor)
-    {
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn history_leaf_rows(
-    store: &crate::core::store::Store,
-    workspace_id: FactId,
-) -> Result<Vec<HistoryLeafRow>, String> {
-    let messages = content::message::queries::content_message_rows(store, workspace_id)?;
-    let live_message_ids = messages
-        .iter()
-        .map(|message| message.message_id)
-        .collect::<BTreeSet<_>>();
-    let mut leaves = messages
-        .into_iter()
-        .map(|message| HistoryLeafRow {
-            node_id: message.message_id,
-            frontier_id: message.frontier_id,
-            minute: message.minute,
-            fact_id_in_minute: message.message_id,
-        })
-        .collect::<Vec<_>>();
-    for file in content::file::queries::content_file_rows(store, workspace_id)? {
-        if !live_message_ids.contains(&file.message_id) {
-            continue;
-        }
-        let parent =
-            content::message::queries::content_message_row(store, workspace_id, file.message_id)?
-                .ok_or_else(|| "file row parent message is not live".to_string())?;
-        leaves.push(HistoryLeafRow {
-            node_id: file.file_fact_id,
-            frontier_id: parent.frontier_id,
-            minute: file.created_at_ms / content::message::fact::UNIX_MINUTE_MS,
-            fact_id_in_minute: file.file_fact_id,
-        });
-    }
-    leaves.sort_by_key(|leaf| (leaf.minute, leaf.node_id));
-    Ok(leaves)
-}
-
-fn cover_summary(leaves: &[HistoryLeafRow]) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    for leaf in leaves {
-        hash.update(&leaf.node_id);
-        hash.update(&leaf.minute.to_be_bytes());
-        hash.update(&leaf.fact_id_in_minute);
-    }
-    *hash.finalize().as_bytes()
 }
 
 pub fn create_history_node(
@@ -597,7 +303,8 @@ fn apply_retention_floor(runtime: &mut Runtime, input: ChopNow) -> Result<(), St
 }
 
 fn rotate_recipient_for_chop(runtime: &mut Runtime, input: ChopNow) -> Result<(), String> {
-    if let Some(previous) = latest_local_recipient_key(runtime, input.workspace_id)? {
+    if let Some(previous) = super::queries::recipient_key_for_rotation(runtime, input.workspace_id)?
+    {
         let output = create_recipient_key(
             runtime.store(),
             CreateRecipientKey {
@@ -610,38 +317,6 @@ fn rotate_recipient_for_chop(runtime: &mut Runtime, input: ChopNow) -> Result<()
         runtime.process_all_work_until_idle(4, 512)?;
     }
     Ok(())
-}
-
-fn recipient_key_is_superseded(
-    runtime: &Runtime,
-    workspace_id: FactId,
-    recipient_key_id: FactId,
-) -> Result<bool, String> {
-    let mut target_endpoint = None;
-    for fact in runtime.facts() {
-        if fact.id != recipient_key_id {
-            continue;
-        }
-        let recipient = recipient_key_layout::decode_recipient_key(fact.body())?;
-        if recipient.workspace_id == workspace_id {
-            target_endpoint = Some(recipient.endpoint_id);
-        }
-    }
-    let Some(endpoint_id) = target_endpoint else {
-        return Ok(false);
-    };
-    for fact in runtime.facts() {
-        let Ok(recipient) = recipient_key_layout::decode_recipient_key(fact.body()) else {
-            continue;
-        };
-        if recipient.workspace_id == workspace_id
-            && recipient.endpoint_id == endpoint_id
-            && recipient.previous_recipient_key_id == recipient_key_id
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn history_source_material(

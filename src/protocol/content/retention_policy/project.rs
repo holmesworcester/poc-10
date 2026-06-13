@@ -262,7 +262,9 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth;
 use crate::protocol::content::message;
 use crate::protocol::sync::shared_fact::project::{
@@ -273,8 +275,8 @@ use super::fact::RetentionPolicyFact;
 use super::policy_row;
 
 /// Projector route metadata for the retention_policy fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::retention_policy::project::RetentionPolicyProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("content::retention_policy::project::RetentionPolicyProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct RetentionPolicyProjector;

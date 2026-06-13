@@ -102,7 +102,7 @@ context offers
 projectors
 intents
 intent handlers
-runtime pipelines
+runtime work queues
 protocol scopes
 ```
 
@@ -133,7 +133,7 @@ The current architecture is described by these boundaries:
 - **Handler output.** Intent handlers return facts, purged facts, row
   mutations, and intents. Purge output remains a bounded core-owned escape
   hatch for exact fact removal, not a broad storage API.
-- **Pipeline isolation.** No fact module, intent handler, command, schema, or
+- **Runtime isolation.** No fact module, intent handler, command, schema, or
   wire layout reaches around core to call another stage directly.
 - **Durable queues.** Runtime coordination is explicit and durable where it
   needs to survive restart: pending facts, time wakes, durable intents, and
@@ -174,7 +174,7 @@ command output
   -> replacement needs + append-only offers + row mutations + follow-up intents
   -> durable or ephemeral intent queue
   -> registered handler
-  -> committed PipelineEffects
+  -> committed RuntimeEffects
 ```
 
 Network input is staged as core-owned opaque bytes, converted by the daemon
@@ -236,7 +236,7 @@ purge only itself.
 
 Intent handlers are the bounded stateful work path. They decode one queued
 intent, name exact fact inputs for core to load, perform one effect, and return
-`PipelineEffects`. They are separate from projectors so network sends,
+`RuntimeEffects`. They are separate from projectors so network sends,
 key-wrap creation, sync responses, and other retryable work have an idempotent
 queue identity and an atomic commit boundary with queue consumption.
 
@@ -280,9 +280,8 @@ receipts.
 Production work is represented with immutable facts, standing context,
 time-wake schedules, pending projection, durable intents, and ephemeral intents.
 Protocol progress is visible through those mechanisms and through schema-owned
-rows. The declared runtime pipeline is the complete work surface: production
-state enters that pipeline as facts, context, time wakes, intents, or
-schema-owned rows.
+rows. The declared runtime work surface is complete: production state enters as
+facts, context, time wakes, intents, or schema-owned rows.
 
 ## Documentation
 

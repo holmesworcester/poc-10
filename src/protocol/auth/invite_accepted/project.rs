@@ -262,13 +262,15 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use super::{derived_invite_secret_fact_id, invite_accepted_row};
 
 /// Projector route metadata for the invite_accepted fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::invite_accepted::project::InviteAcceptedProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::invite_accepted::project::InviteAcceptedProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct InviteAcceptedProjector;

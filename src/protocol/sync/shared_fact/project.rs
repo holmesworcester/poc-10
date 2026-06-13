@@ -174,14 +174,16 @@ pub mod adapt {
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use std::collections::BTreeSet;
 
 use crate::protocol::sync::share_fact_with_sync as share_sync;
 
 /// Projector route metadata for the shared_fact fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("sync::shared_fact::project::SyncSharedFactProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("sync::shared_fact::project::SyncSharedFactProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncSharedFactProjector;

@@ -40,9 +40,10 @@ The role boundaries remain useful even without core-owned stages:
   wakes, emitted facts, intents, deletion, retention, and purge.
 - `author.rs` owns local construction: assembly, signing, encryption,
   deterministic nonce use, and calls to `encode.rs`.
-- `commands.rs` owns runtime gathering and command receipts. It gathers the
-  authoring snapshot, calls `author.rs`, and lets runtime admission route the
-  authored bytes through protocol-local checks before storage.
+- `commands.rs` owns command snapshots and receipts. It queries pre-command
+  state through protocol-owned query helpers, reads the injected command clock,
+  calls `author.rs`, and lets runtime submission route the authored bytes
+  through protocol-local checks before storage.
 
 Why keep this split:
 
@@ -133,12 +134,13 @@ compatibility.
 Creation is the write-side twin of projection:
 
 ```text
-cli args -> command run fn -> author -> encode -> protocol self-check -> admit/submit
+cli args -> command args -> command fn -> queries -> author -> encode -> protocol self-check -> AuthoredCommand -> submit
 ```
 
-The command run fn is the runtime boundary: parse CLI input, load the needed
-store/context/key snapshot, enforce blocked-mode and ceiling-selection policy,
-and call the selected author. It should not handcraft wire bytes.
+The command function is the authoring boundary: load the needed store/key
+snapshot through query helpers, enforce command-local preflight policy, read the
+command clock, and call the selected author. It should not parse CLI argv,
+handcraft wire bytes, enqueue work, or drive projection/intent drains.
 
 `author.rs` performs local semantic construction: it signs, encrypts, assembles
 the typed fact, and returns the authored value plus scope/timestamp/admission

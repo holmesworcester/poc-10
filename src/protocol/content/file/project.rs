@@ -296,7 +296,9 @@ pub mod adapt {
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::message::project::{self, FactSigner};
@@ -310,8 +312,8 @@ use super::fact::ContentFileFact;
 use super::{FILE_KEY_COLUMNS, FILE_ROWS};
 
 /// Projector route metadata for the file fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::file::project::ContentFileProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("content::file::project::ContentFileProjector");
 
 fn content_file_row(file_fact_id: FactId, fact: &ContentFileFact) -> TableInsert {
     read_models::CONTENT_FILES.insert(vec![

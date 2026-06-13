@@ -262,7 +262,7 @@ use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 use crate::core::project_fact::{
-    FactPipeline, ProjectionContext, ProjectionOutput, Projector, TimeWake,
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector, TimeWake,
 };
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::project as coverage;
@@ -276,8 +276,8 @@ use crate::protocol::sync::shared_fact::project::{
 use super::fact::{AuthorId, ContentMessageFact, SignerId, WorkspaceId, UNIX_MINUTE_MS};
 
 /// Projector route metadata for the content-message fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::message::project::ContentMessageProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("content::message::project::ContentMessageProjector");
 
 /// Content's key shape for the generic core `fact_purged` context role.
 ///

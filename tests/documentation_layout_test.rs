@@ -198,7 +198,7 @@ fn root_readme_describes_context_project_aims() {
         "**Handler work.**",
         "**Projector output.**",
         "**Handler output.**",
-        "**Pipeline isolation.**",
+        "**Runtime isolation.**",
         "**Durable queues.**",
         "**Explicit schemas.**",
         "**Fixed layouts.**",
@@ -367,9 +367,9 @@ fn fact_authenticator_research_docs_record_authentication_boundary() {
         "`author.rs`",
         "Context payload facts are loaded by core through matched needs/offers",
         "raw fact -> tag route -> projector -> ProjectionOutput -> commit",
-        "`commands.rs` owns runtime gathering and command receipts",
+        "`commands.rs` owns command snapshots and receipts",
         "Write-Side Twin",
-        "cli args -> command run fn -> author -> encode -> protocol self-check -> admit/submit",
+        "cli args -> command args -> command fn -> queries -> author -> encode -> protocol self-check -> AuthoredCommand -> submit",
         "`encode.rs` owns canonical bytes",
         "Before a command reports success or returns a fact id",
         "Required Tests And Checks",
@@ -468,7 +468,7 @@ fn repo_instructions_point_at_live_documentation_style_rules() {
 }
 
 #[test]
-fn core_readmes_document_runtime_and_pipeline_boundaries() {
+fn core_readmes_document_runtime_boundaries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core = source_text(&root.join("src/core/README.md"));
     let normalized_core = normalize_whitespace(&core);

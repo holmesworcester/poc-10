@@ -221,7 +221,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::key_wrap::project::{
     history_node_wrap_source_offers, require_local_scope,
 };
@@ -420,7 +422,7 @@ fn prefix_matches(value: &FactId, prefix: &FactId, prefix_bytes: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Projector route metadata for the local_history_node_secret fact.
-pub const PIPELINE: FactPipeline = FactPipeline::projector(
+pub const PROJECTOR_INFO: FactProjectorInfo = FactProjectorInfo::projector(
     "auth::local_history_node_secret::project::LocalHistoryNodeSecretProjector",
 );
 

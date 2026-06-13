@@ -738,7 +738,9 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::{RowMutation, TableDelete};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::connection::close;
 use crate::protocol::connection::connection::{
     connection_key, connection_row, ConnectionRowFields, CONNECTION_ROWS,
@@ -779,8 +781,8 @@ pub fn connection_offer(owner: FactId, connection_id: FactId) -> ContextOffer {
 }
 
 /// Projector route metadata for the connection fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("connection::connection::project::ConnectionProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("connection::connection::project::ConnectionProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionProjector;

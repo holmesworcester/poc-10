@@ -1054,7 +1054,7 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
     }
     if send_network_frame.contains("tcp::send_once")
         && send_network_frame.contains(".is_err()")
-        && send_network_frame.contains("return Ok(PipelineEffects::new())")
+        && send_network_frame.contains("return Ok(RuntimeEffects::new())")
     {
         offenders.push(
             "src/protocol/connection/send_network_frame.rs swallows TCP send failures as an empty successful handler output"

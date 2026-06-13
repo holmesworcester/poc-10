@@ -14,9 +14,9 @@ below.
 Most machinery described here is unbuilt today. What already exists, and what
 the plan reuses:
 
-- Tag-routed facts: `FactRoute { tag, projector, pipeline }` and the
+- Tag-routed facts: `FactRoute { tag, projector, projector_info }` and the
   `projector_routes!` table in `src/protocol/registry.rs`; dispatch in
-  `core::pipeline::RouterProjector`.
+  `core::project_fact::RouterProjector`.
 - Per-family authenticators: each routed family has `authenticate.rs`, and its
   projector calls the family decode/validation/adapt helpers directly.
 - Replay runtime: `replay`, `state-summary`, `replay-check`,
@@ -1326,10 +1326,10 @@ existing `auth::local_*` family, e.g. `auth::local_signer_secret`,
 `auth::local_secret_retirement`), and ceiling checks gate command construction
 and fact admission. These tests therefore define the behavior the manifest layer
 must exhibit and bind each assertion to the real entities it must touch:
-`FACT_ROUTES` / `RouterProjector::project` (`src/core/projectors.rs:448-459`,
-unknown-tag `Err` at line 456), `Runtime::submit_fact` /
-`submit_fact_to_store` (`src/core/runtime.rs:268`,
-`src/core/pipeline.rs`), the `con` CLI (`MATCH_COMMANDS`),
+`FACT_ROUTES` / `RouterProjector::project` (`src/core/project_fact.rs`,
+unknown-tag `Err` path), `Runtime::submit_fact` / `submit_fact_to_store`
+(`src/core/runtime.rs`, `src/core/project_fact.rs`), the `con` CLI
+(`MATCH_COMMANDS`),
 and the wipe+replay path. Invariants referenced are the consolidated set:
 (1) VISIBILITY, (2) RENDERING UNIFORMITY, (3) CEILING MONOTONICITY,
 (4) REPLAY DETERMINISM, (5) READERS FOREVER / TRANSPORT IN [floor,head],
@@ -1576,7 +1576,7 @@ per scope where the scope changes the answer.
 
 These tests defend the model's admission/pending/routing rules. Today's code has
 two remaining structural gaps these tests are written to drive out and then
-lock: (a) `FactRoute { tag, projector, pipeline }` carries no
+lock: (a) `FactRoute { tag, projector, projector_info }` carries no
 `intro_version`; (b) `RouterProjector` is not ceiling-filtered — it dispatches
 every registered tag unconditionally. The projector-local route model exists
 now for converted families. Versioning adds an admission gate ahead of
@@ -2923,7 +2923,7 @@ Verified grounding from `/home/holmes/poc-10/src`:
 
 ### PROJ-22 — projector path carries no replay-mode branch (replay-blind today) `guardrail`
 - **Setup:** Current binary. The brief claims `HandlerRoute` carries `runs_during_replay`; verified ABSENT in this checkout (`HandlerRoute{name,intent_kind,factory}`, runtime.rs:71).
-- **Action:** Grep `src/protocol/**/project.rs` and `src/core/projectors.rs` / `src/core/pipeline.rs` for any `replay`/`is_replay`/`during_replay` conditional reachable from a projector.
+- **Action:** Grep `src/protocol/**/project.rs` and `src/core/project_fact.rs` for any `replay`/`is_replay`/`during_replay` conditional reachable from a projector.
 - **Expect:** No projector branches on a replay flag — projection output is identical whether the pass is live admission or wipe+replay, because the projector cannot see the mode. (If `runs_during_replay` is later added, it must live on HANDLER routes, NOT bleed into the pure projector path.)
 - **Defends:** "projectors stay replay-blind across versions"; flags absence of the planned field.
 - **Refs:** `HandlerRoute` (runtime.rs:71), `ProjectorFn` (projectors.rs:396).
@@ -3041,7 +3041,7 @@ connection, sync) is enumerated as separate tests where it changes the assertion
 - **Action:** `con replay --reverse` (admit retained facts newest-first), then `con state-summary`.
 - **Expect:** `state_hash == Hc`. Reverse admission order produces byte-identical derived state across all per-area hashes; the dependency cascade (reactions need their target message; file_slice needs its file) resolves via context match wakeups regardless of admission order.
 - **Defends:** Invariant (4) — order-independent rebuild with mixed versions.
-- **Refs:** `con replay --reverse`; `con replay --scramble --seed N`; context match wakeups (`core::pipeline::context`).
+- **Refs:** `con replay --reverse`; `con replay --scramble --seed N`; context match wakeups (`core::project_fact::context_store`).
 
 ### REPLAY-05 — Order-independent: scramble seeds yield same state_hash (replay-check) with mixed versions `replay-cli`
 - **Setup:** Node retains mixed v1+v2 message facts + reactions + file + slices. 
@@ -3305,7 +3305,7 @@ Grounding notes for this cluster (verified against `/home/holmes/poc-10/src`):
 ### CONN-05 — Still-usable older peer's vN bootstrap request answered vN (request-version mirroring across the wire layer)  `handler-unit`
 - **Setup:** Construct a `connection::request` fact and matching initiator `ephemeral_secret`; seal at the in-floor recognizer (`frame[0]=46, frame[1]=1`). Build a `HandlerContext::with_facts([request_fact, ephemeral_fact])`. Open path validated by an `EndpointFact` for the responder.
 - **Action:** Run `CreateConnectionResponseHandler::handle` on the resulting `create_connection_response` intent (request_id, invite_secret_id, receive_id).
-- **Expect:** The handler returns `PipelineEffects` carrying exactly the responder `ephemeral_secret` fact (tag 43) and the built `response` fact (tag 44); the sealed response staged through `network::send` has header `[47, 1]`. The responder NEVER upgrades the answer version above the request version it opened.
+- **Expect:** The handler returns `RuntimeEffects` carrying exactly the responder `ephemeral_secret` fact (tag 43) and the built `response` fact (tag 44); the sealed response staged through `network::send` has header `[47, 1]`. The responder NEVER upgrades the answer version above the request version it opened.
 - **Defends:** TRANSPORT request-version mirroring; (5) READERS/responders honor the peer's in-floor version.
 - **Refs:** `connection/create_connection_response.rs` (handler body :187-265, `build_responder_response`), `bootstrap_response::seal_connection_response`.
 
@@ -3326,14 +3326,14 @@ Grounding notes for this cluster (verified against `/home/holmes/poc-10/src`):
 ### CONN-08 — Sub-floor / unknown ESTABLISHED frame version byte is OUT: classify yields no child facts  `handler-unit`
 - **Setup:** An established connection exists. Craft a TRNS frame with a wrong internal version: `tag=b"TRNS"`, byte at `VERSION_OFFSET=4` set to `2` (not `CONNECTION_FRAME_VERSION=1`), valid `SIZE_CLASS_SMALL=0`.
 - **Action:** Submit via `receive_network_frame`; handler reaches `connection_frame::classify_frame` then the per-class `fact_from_wire` open.
-- **Expect:** The open path rejects at `connection_frame_wire.rs:301` / `:412` (`version != CONNECTION_FRAME_VERSION`); no child facts and no receipts are emitted; the handler returns empty `PipelineEffects` (the `None` arm or an open error that does not admit facts). An out-of-version established frame is OUT.
+- **Expect:** The open path rejects at `connection_frame_wire.rs:301` / `:412` (`version != CONNECTION_FRAME_VERSION`); no child facts and no receipts are emitted; the handler returns empty `RuntimeEffects` (the `None` arm or an open error that does not admit facts). An out-of-version established frame is OUT.
 - **Defends:** (5) transport in `[floor,head]`; (1) only in-floor frame versions are projectable.
 - **Refs:** `connection_frame_wire.rs:300-304` & `:411-414` (version check), `connection/receive_network_frame.rs:142-159`, `connection_frame.rs` (`classify_frame`:95).
 
 ### CONN-09 — Established frame with an unknown SIZE-CLASS byte (future carrier tag) classifies to None and admits nothing  `handler-unit`
 - **Setup:** Established connection. Craft a TRNS frame with `version=1` but `size_class=3` (none of SMALL=0 / FILE_SLICE=1 / BUNDLE=2 — simulating a not-yet-active future carrier tag).
 - **Action:** Submit via `receive_network_frame`.
-- **Expect:** `connection_frame::classify_frame` returns `None` (the match on `header.size_class` has no arm for 3); handler hits the `None => PipelineEffects::new()` arm: no child facts, no receipts, frame retained as opaque local-receive bytes only. A peer's above-ceiling carrier is NOT projected (pending-shaped behavior at the carrier-class level).
+- **Expect:** `connection_frame::classify_frame` returns `None` (the match on `header.size_class` has no arm for 3); handler hits the `None => RuntimeEffects::new()` arm: no child facts, no receipts, frame retained as opaque local-receive bytes only. A peer's above-ceiling carrier is NOT projected (pending-shaped behavior at the carrier-class level).
 - **Defends:** ADMISSION (received above-ceiling carrier not projected, not error-cascaded); (3) CEILING MONOTONICITY.
 - **Refs:** `connection_frame.rs:95-102` (`classify_frame` match), `connection/receive_network_frame.rs:142-159` (`None` arm).
 
@@ -3604,7 +3604,7 @@ socket/stream recognizer only, NOT a routed-fact version byte.
 - **Action:** `ReceiveNetworkFrameHandler::handle` on that intent.
 - **Expect:** `is_bootstrap_request_frame` false, `is_bootstrap_response_frame`
   false, `classify_frame` returns `None` -> handler returns an EMPTY
-  `PipelineEffects`. No `frame_*` fact, no observation, no fact routing at all.
+  `RuntimeEffects`. No `frame_*` fact, no observation, no fact routing at all.
 - **Defends:** "TRNS 4-byte magic rejects a garbage/non-protocol stream before any
   fact routing" — the stream recognizer is the size-class/`decode_frame_parts`
   gate, not a routed-fact path.
@@ -3659,7 +3659,7 @@ socket/stream recognizer only, NOT a routed-fact version byte.
 - **Expect:** `is_bootstrap_request_frame` is true (frame[0]==46), but
   `copy_sealed_connection_request_frame` -> `validate_sealed_connection_request_frame`
   fails the `frame[1] == VERSION` check ("sealed connection request has unsupported
-  header"). The `Ok(None)`/`Err` path yields an EMPTY `PipelineEffects`: no
+  header"). The `Ok(None)`/`Err` path yields an EMPTY `RuntimeEffects`: no
   bootstrap_request fact (171) is staged, no error propagates to the socket. Clean
   rejection pre-session.
 - **Defends:** "A sealed bootstrap request at an unsupported VERSION byte rejected
@@ -3685,7 +3685,7 @@ socket/stream recognizer only, NOT a routed-fact version byte.
 - **Setup:** A valid sealed-request frame (frame[0]==46, frame[1]==1) and a peer
   origin address + receive timestamp.
 - **Action:** Call `received_bootstrap_request_frame_effect(frame, origin, ts)`.
-- **Expect:** Returns `Some(PipelineEffects)` containing one EPHEMERAL local fact
+- **Expect:** Returns `Some(RuntimeEffects)` containing one EPHEMERAL local fact
   whose first byte is `TYPE_CONNECTION_BOOTSTRAP_REQUEST (171)`, encoded by
   `bootstrap_request::layout::encode_fact`: tag(171) + u64be received_at +
   OriginAddr slot + the sealed frame. `decode_fact` round-trips it back to the
@@ -4075,7 +4075,7 @@ Reference files:
 ### SYNC-17 — send_needed_fact_id is a no-op when the advertised id is already retained (any version)  `handler-unit`
 - **Setup:** Store already holds fact `X` (retained and ceiling-active when admitted). A `sync::have_id` advertising `X` arrives.
 - **Action:** Submit to `SendNeededFactIdHandler::handle`.
-- **Expect:** `persisted_fact(store, &have.fact_id)?.is_some()` is true -> returns empty `PipelineEffects::new()`; no `need_id` emitted. Retention suppresses re-request because we already hold the bytes.
+- **Expect:** `persisted_fact(store, &have.fact_id)?.is_some()` is true -> returns empty `RuntimeEffects::new()`; no `need_id` emitted. Retention suppresses re-request because we already hold the bytes.
 - **Defends:** ADMISSION/idempotence: retained facts are not re-fetched.
 - **Refs:** `send_needed_fact_id.rs` early-return on `persisted_fact(...).is_some()`.
 
@@ -4096,9 +4096,9 @@ Reference files:
 ### SYNC-20 — send_requested_fact is a no-op when the requested id is not retained locally  `handler-unit`
 - **Setup:** Store with connection `C`. `sync::need_id{C, Z}` where local store does NOT hold `Z`.
 - **Action:** Submit to `SendRequestedFactHandler::handle`.
-- **Expect:** `persisted_fact(store,&Z)?` is None -> `Ok(PipelineEffects::new())` (empty). No error, no send. Missing-id is silently skipped (it may be a fact a peer needs from a third node).
+- **Expect:** `persisted_fact(store,&Z)?` is None -> `Ok(RuntimeEffects::new())` (empty). No error, no send. Missing-id is silently skipped (it may be a fact a peer needs from a third node).
 - **Defends:** Invariant 4/5: graceful absence; no responder for facts we lack.
-- **Refs:** `send_requested_fact.rs` early `else { return Ok(PipelineEffects::new()) }`.
+- **Refs:** `send_requested_fact.rs` early `else { return Ok(RuntimeEffects::new()) }`.
 
 ### SYNC-21 — share_fact_with_sync REBUILDS shareable + negentropy rows from retained facts during replay  `replay-cli`
 - **Setup:** A store that previously indexed several mixed-version facts (v1 + v2 content). Wipe the derived state (shareable rows, negentropy leaves/context-have, read models) leaving only the retained fact log.
@@ -5778,7 +5778,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Refs:** `sync/send_compare_response.rs` `SendSyncCompareResponseHandler::handle`; `sync/shared_fact/rows.rs:953` `shareable_facts_for_connection_range` (include_deps BFS over `negentropy_context_have_for_leaf` :1285) and `expand_fact_ids_with_context_for_connection` :1018; `sync/compare/create.rs` child-split (`MAX_HAVE_IDS_PER_RANGE`, `TimestampRange::split`); `sync/send_needed_fact_id.rs` no-op on already-retained id; `content::message_v2` intro_version 7 / `content::message:1` 50; E2EX-07 (ceiling 6->7), SYNC-11 (pending-then-activate at rest, the at-rest analog).
 ### REPLAY-GAP13a — In BLOCKED MODE, replay-dispatched `create_key_wrap` re-emits its workspace-scoped `key_wrap` (155) as a deterministic rebuild, NOT refused as new shared production  `handler-unit`
 - **Setup:** Runtime opened from `MATCH_RUNTIME` in BLOCKED MODE (trusted-time staleness window S elapsed without manifest refresh, or backward clock rollback beyond tolerance). The store retains the wrap inputs for a `FrontierRoot` source: `recipient_key` (150), source `local_key_secret` (152), `local_signer_secret` (133), plus `removal_frontier` (151) and the `workspace` (131) the scope keys to. The `key_wrap` (155) fact K was produced by an earlier `create_key_wrap` dispatch and is still retained. Wipe derived state. The `create_key_wrap` route is `runs_during_replay = true`.
-- **Action:** Run the wipe+replay path; projection re-emits the `create_key_wrap` intent and `CreateKeyWrapHandler::handle` runs over the retained inputs. `create::create_validated_key_wrap_fact` returns `PipelineEffects::new().fact(wrap)` where `wrap = Fact::new(auth::workspace::scope(workspace_id), ...)` (a WORKSPACE-scoped, therefore shareable, fact — `create.rs:94-96`).
+- **Action:** Run the wipe+replay path; projection re-emits the `create_key_wrap` intent and `CreateKeyWrapHandler::handle` runs over the retained inputs. `create::create_validated_key_wrap_fact` returns `RuntimeEffects::new().fact(wrap)` where `wrap = Fact::new(auth::workspace::scope(workspace_id), ...)` (a WORKSPACE-scoped, therefore shareable, fact — `create.rs:94-96`).
 - **Expect:** The handler's `.fact(wrap)` effect is COMMITTED during replay (deterministic rebuild), even though the recreated `key_wrap` is workspace-scoped/shareable. Blocked mode does NOT refuse this emission and does NOT reclassify the replay-recreated 155 as "new shared production" to be withheld. `create_key_wrap_key` over identical inputs equals the prior intent key, so the rebuilt fact id == K and re-submission dedupes to exactly one `key_wrap` (KEY_WRAPS rows unchanged, no duplicate). RED if blocked mode gates the `runs_during_replay=true` handler's `fact()` effect on the shared-production switch — that would silently drop the recreated key material and corrupt the rebuild.
 - **Defends:** model "in blocked mode … local reads + replay still run" + invariant (4) "recreates only deterministic facts"; the seam where "blocked mode withholds shared production" must NOT swallow a deterministic replay-rebuild of a workspace-scoped fact. Distinguishes fact CREATION (allowed in replay) from sync ADVERTISEMENT (withheld — see 13b).
 - **Refs:** `auth/create_key_wrap.rs` (`CreateKeyWrapHandler::handle`, `create_key_wrap_key`); `auth/key_wrap/create.rs::create_validated_key_wrap_fact` → `Fact::new(workspace::scope(...))` (create.rs:94-96); HANDLER_ROUTES `create_key_wrap` (inventory §3, #8); planned `runs_during_replay=true`; cross-ref TIME-28, CLI-25, KEYS-05, REPLAY-10.
@@ -5792,7 +5792,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 
 ### REPLAY-GAP13c — In BLOCKED MODE, replay-dispatched `unwrap_key_wrap` recreates its `FactScope::Local` opened secret (152/153) and is never gated by the shared-production switch  `handler-unit`
 - **Setup:** Runtime in BLOCKED MODE retains the `key_wrap` (155), `local_recipient_key` (156), `recipient_key` (150), and `removal_frontier` (151) facts an earlier `unwrap_key_wrap` consumed to produce a local opened secret (`local_key_secret` 152 for a root wrap, or `local_history_node_secret` 153 for a node wrap). The opened secret is still retained (not purged). Wipe derived state. The `unwrap_key_wrap` route is `runs_during_replay = true`.
-- **Action:** Run the wipe+replay path; projection re-emits the `unwrap_key_wrap` intent and `UnwrapKeyWrapHandler::handle` runs over the retained inputs. `create::unwrap_key_wrap_fact` returns `PipelineEffects::new().fact(secret)` where `secret = Fact::new(FactScope::Local, ...)` (create.rs:301-302 / 318-319).
+- **Action:** Run the wipe+replay path; projection re-emits the `unwrap_key_wrap` intent and `UnwrapKeyWrapHandler::handle` runs over the retained inputs. `create::unwrap_key_wrap_fact` returns `RuntimeEffects::new().fact(secret)` where `secret = Fact::new(FactScope::Local, ...)` (create.rs:301-302 / 318-319).
 - **Expect:** The local secret fact is COMMITTED during the blocked replay — its emission is never routed through the shared-production gate (it is `FactScope::Local`, and `require_non_local_fact_bytes` would in fact REFUSE it from any sync/outbound path — intents.rs:362-369). The rebuilt secret is bit-identical to the original (same fact id via `unwrap_key` idempotence key + deterministic open), so re-submission dedupes to exactly one local secret (no duplicate local secret rows). RED if blocked mode refuses or skips the `runs_during_replay=true` unwrap handler's local-fact emission — that silently drops the opened key material and leaves the node unable to decrypt its own content after a blocked-mode replay.
 - **Defends:** model "in blocked mode … replay still run[s]" + invariant (4); local key material recreation is a deterministic rebuild that the shared-production withholding must never touch. Pins that `FactScope::Local` outputs of replay handlers are categorically outside "shared production".
 - **Refs:** `auth/unwrap_key_wrap.rs` (`UnwrapKeyWrapHandler::handle`, `unwrap_key`); `auth/key_wrap/create.rs::unwrap_key_wrap_fact` → `Fact::new(FactScope::Local, ...)` (create.rs:301/318); `core/intents.rs::require_non_local_fact_bytes` (refuses Local for outbound, 362-369); HANDLER_ROUTES `unwrap_key_wrap` (#9); planned `runs_during_replay=true`; cross-ref REPLAY-14, KEYS-05.
@@ -5826,7 +5826,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 ### E2E-GAP15b — handler-unit: alice's shareable index for a pending owner advertises to a SECOND connection without decoding, and re-request is suppressed by retention  `handler-unit`
 - **Setup:** Single store (`CORE_SCHEMA_SOURCE` + `FACTS_SCHEMA_SOURCE`). Seed two distinct connections rooted at alice: `C_bob` (alice<->bob) and `C_carol` (alice<->carol), each with the endpoint/endpoint_shared facts the existing `share_fact_with_sync` / `seed_connection` unit tests construct. Insert an owner fact `U` with first byte tag 56 (`content::message:2`) that is RETAINED-but-pending on this node (no projector ran for it; it is opaque bytes in `persisted_fact`). Build a `ShareFactWithSync{ owner_fact_id: U.id, context_have: [], state: SyncShareState::Upsert }` whose `record_sync_contribution` makes `U` shareable for BOTH `C_bob` and `C_carol`. Mark `C_bob` as `U`'s origin connection (via the `fact_receipt` origin set) so it is the EXCLUDED connection.
 - **Action:** (1) Submit the upsert intent to `ShareFactWithSyncHandler::handle`. (2) Independently, construct a `sync::have_id` advertising `U.id` arriving on `C_carol`, and submit `send_needed_fact_id_intent(SendNeededFactId{ have_fact_id })` to `SendNeededFactIdHandler::handle`.
-- **Expect:** (1) The share handler succeeds even though `U` is undecodable: `context.require_fact(&U.id)` + `require_non_local_fact_bytes(&U.id)` pass on opaque bytes (tag 56 is non-local), `record_sync_contribution` returns `changed=true`, and `advertise_indexed_fact_to_connections_except` emits a `send_facts_on_connection` intent for `C_carol` but NOT `C_bob` (origin excluded). The owner body is never decoded — no projector for tag 56 is invoked, no "no target projector registered for fact tag 56" error. (2) Because `U` is already retained, `persisted_fact(store,&U.id)?.is_some()` is true -> `SendNeededFactIdHandler::handle` returns empty `PipelineEffects::new()`; no `sync::need_id` is emitted (SYNC-17 echo suppression holds for a pending owner exactly as for a normal one). Together: alice can relay a pending owner's INDEX to a non-origin connection and will NOT re-fetch the same opaque owner it already holds.
+- **Expect:** (1) The share handler succeeds even though `U` is undecodable: `context.require_fact(&U.id)` + `require_non_local_fact_bytes(&U.id)` pass on opaque bytes (tag 56 is non-local), `record_sync_contribution` returns `changed=true`, and `advertise_indexed_fact_to_connections_except` emits a `send_facts_on_connection` intent for `C_carol` but NOT `C_bob` (origin excluded). The owner body is never decoded — no projector for tag 56 is invoked, no "no target projector registered for fact tag 56" error. (2) Because `U` is already retained, `persisted_fact(store,&U.id)?.is_some()` is true -> `SendNeededFactIdHandler::handle` returns empty `RuntimeEffects::new()`; no `sync::need_id` is emitted (SYNC-17 echo suppression holds for a pending owner exactly as for a normal one). Together: alice can relay a pending owner's INDEX to a non-origin connection and will NOT re-fetch the same opaque owner it already holds.
 - **Defends:** ADMISSION/SUBSTANCE: the shareable-index + advertise relay layer is version-agnostic and decoupled from owner projectability (extends SYNC-29 from one index-projection to the multi-connection relay write path); SYNC-16/17 retention-suppression for pending bytes; no-echo guarantee underpinning the E2E across three ceilings.
 - **Refs:** `share_fact_with_sync.rs:178` `ShareFactWithSyncHandler::handle` (`require_fact` / `require_non_local_fact_bytes`, `record_sync_contribution`, `advertise_indexed_fact_to_connections_except` lines 200-223); `shared_fact/rows.rs:213` `record_sync_contribution`, `:1088` `connection_ids_for_shareable_fact`, `:1047` `shareable_fact_for_connection`; `seed_connection.rs:116`; `send_needed_fact_id.rs` early-return on `persisted_fact(...).is_some()`; `connection::fact_receipt::origin_connection_ids_for_fact`; tag 56 = `content::message:2`.
 
@@ -5915,7 +5915,7 @@ Concrete tests closing intersection gaps the completeness pass found across clus
 - **Action:** Run `con replay` canonical, then `con replay --reverse`, then `con replay --scramble --seed N` (equivalently `con replay-check`) on the own-expired node; capture `con state-summary` after each pass.
 - **Expect:** On every pass the pending `file:2` + `file_slice:2` and the pending auth fact ACTIVATE: each routes to its OWN-tag kept-forever adapter, the file's slices resolve against their now-activated `file:2` parent via context-match wakeups regardless of admission order, the auth fact materializes its row, and the cross-scope dependency cascade converges. The post-replay `state_hash` is IDENTICAL across canonical / reverse / scramble passes (order-independent activation), and includes the newly-activated content AND auth rows. Own-expiry never selectively gates one scope's activation over another, and never aborts the replay. `con send` remains refused on every pass (production stays blocked). No fact is mis-routed (a v2 fact never hits a v1 projector).
 - **Defends:** The own-expiry × pending-activation independence (TIME-26 output-not-input) holds across SCOPES (content container+slice, auth) and across MULTI-FACT dependency cascades, and is order-independent (Invariant (4) REPLAY DETERMINISM, REPLAY-04/05 reverse+scramble equivalence). Confirms an expired node does not strand whole scopes of received data; activation is uniformly an admission/ceiling concern, not a per-scope production gate. Defends Invariant (1) VISIBILITY (a now-ceiling-active fact becomes projectable/displayable) under the awkward own-expired state.
-- **Refs:** MAN-GAP19a/b; REPLAY-02/04/05 (mixed-version + reverse/scramble determinism), REPLAY-07/08 (pending survive+activate); `content::file` `TYPE_CONTENT_FILE = 54` + `content::file_slice` `TYPE_CONTENT_FILE_SLICE = 55` (the file_slice→file parent cascade, inventory §1); proposed `auth::user_profile_v2` new tag (inventory §1 notes this family is NOT-yet-existing — RED until it lands); sibling `_v2/` projector dirs in `FACT_ROUTES`; context-match wakeups (`core::pipeline::context`); `con replay`/`--reverse`/`--scramble`/`replay-check`/`state-summary`/`files`/`users`; design rule 8.
+- **Refs:** MAN-GAP19a/b; REPLAY-02/04/05 (mixed-version + reverse/scramble determinism), REPLAY-07/08 (pending survive+activate); `content::file` `TYPE_CONTENT_FILE = 54` + `content::file_slice` `TYPE_CONTENT_FILE_SLICE = 55` (the file_slice→file parent cascade, inventory §1); proposed `auth::user_profile_v2` new tag (inventory §1 notes this family is NOT-yet-existing — RED until it lands); sibling `_v2/` projector dirs in `FACT_ROUTES`; context-match wakeups (`core::project_fact::context_store`); `con replay`/`--reverse`/`--scramble`/`replay-check`/`state-summary`/`files`/`users`; design rule 8.
 ### TIME-GAP110a — staleness timer ignores a flood of inbound `frame_observation` receives (no false freshness refresh)  `guardrail`
 - **Setup:** (proposed, once trusted_time/staleness exist) `con` daemon with last *signed* observation at `T_last`; staleness window `S`; local time advanced to `now > T_last + S` so the node has crossed into staleness block BLOCKED MODE per TIME-16. No fresh signed registry fact, canary, or embedded-metadata bump has arrived. The store is otherwise healthy and an established connection exists.
 - **Action:** deliver a sustained flood of inbound established-connection frames over the `receive_network_frame` intent path (`connection::receive_network_frame::ReceiveNetworkFrameHandler::handle`), each carrying a large/recent `received_at_local_ms` (e.g. `now`, far above `T_last`). Each classifies via `connection_frame::classify_frame` and produces a `connection::frame_observation` fact (`connection_frame::observed_frame_effect` → `frame_observation::create::fact_from_observation`, tag 173) whose `received_at_local_ms` is the attacker/socket-supplied receive time. Re-evaluate the staleness gate after the flood projects.

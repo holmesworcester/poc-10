@@ -135,7 +135,7 @@ projection_context_sound(ctx, graph)
 standing_context_sound(graph)
 row_mutations_bounded(output)
 purges_are_self_only(output, current_fact_id)
-atomic_pipeline_effects_sound(output, graph)
+atomic_runtime_effects_sound(output, graph)
 ```
 
 Core lemmas:
@@ -242,7 +242,7 @@ consumer validates module-specific cross-checks
   -> consumer output predicate holds
 ```
 
-For the runtime pipeline:
+For runtime work:
 
 ```text
 standing_context_sound(before)

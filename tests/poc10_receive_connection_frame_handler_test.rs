@@ -2,7 +2,7 @@
 
 use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
-use topo::core::effects::PipelineEffects;
+use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
@@ -99,7 +99,7 @@ fn connection_frame_bundle_fact(frame: Vec<u8>) -> Fact {
 }
 
 fn assert_observation_fact(
-    output: &PipelineEffects,
+    output: &RuntimeEffects,
     frame_fact_id: [u8; 32],
 ) -> topo::protocol::connection::frame_observation::fact::ConnectionFrameObservationFact {
     assert!(output.intents.is_empty());

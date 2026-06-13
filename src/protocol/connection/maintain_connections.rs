@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind, RowMutation,
 };
@@ -129,7 +129,7 @@ impl IntentHandler for MaintainConnectionsHandler {
         }
         let input = decode_maintain_connections(intent).map_err(HandlerError::fatal)?;
         let store = context.store()?;
-        let mut effects = PipelineEffects::new();
+        let mut effects = RuntimeEffects::new();
 
         for pending in pending_connection_requests(store)? {
             effects = effects.local_intent(send_network_frame_intent(SendNetworkFrame {

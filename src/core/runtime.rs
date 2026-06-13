@@ -331,7 +331,7 @@ impl Runtime {
     /// Protocols declare effectful daemon/network handlers as command-excluded
     /// routes. The command host can then ask runtime to finish local projection
     /// and non-effect intent work without knowing the pending-fact, context
-    /// change, or intent pipeline schedule.
+    /// change, or intent queue schedule.
     pub fn process_command_work_until_idle(
         &mut self,
         max_rounds: usize,

@@ -190,7 +190,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::key_wrap::project::{
     frontier_root_wrap_source_offers, require_local_scope,
 };
@@ -201,8 +203,8 @@ use crate::protocol::auth::removal_frontier;
 use super::fact::LocalKeySecretFact;
 
 /// Projector route metadata for the local_key_secret fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::local_key_secret::project::LocalKeySecretProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::local_key_secret::project::LocalKeySecretProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct LocalKeySecretProjector;

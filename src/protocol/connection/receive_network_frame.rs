@@ -105,7 +105,7 @@ fn payload_error(err: PayloadError) -> String {
 // child projectors still own semantic validation and retention.
 
 use crate::core;
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::protocol::connection::{
     connection, frame_bundle, frame_file_slice, frame_observation, frame_small, request,
@@ -128,17 +128,16 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
 
     fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
-        let observed_candidate =
-            |frame_fact: core::facts::Fact| -> Result<PipelineEffects, String> {
-                let observation = frame_observation::author::fact_from_observation(
-                    frame_fact.id,
-                    &input.origin_addr,
-                    input.received_at_local_ms,
-                )?;
-                Ok(PipelineEffects::new()
-                    .fact(observation)
-                    .candidate_fact(frame_fact))
-            };
+        let observed_candidate = |frame_fact: core::facts::Fact| -> Result<RuntimeEffects, String> {
+            let observation = frame_observation::author::fact_from_observation(
+                frame_fact.id,
+                &input.origin_addr,
+                input.received_at_local_ms,
+            )?;
+            Ok(RuntimeEffects::new()
+                .fact(observation)
+                .candidate_fact(frame_fact))
+        };
 
         // A sealed handshake frame is admitted as its own local fact (whose
         // type tag is the sealed type) plus a frame observation. Its projector
@@ -173,7 +172,7 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
                 input.received_at_local_ms,
             )?)?
         } else {
-            PipelineEffects::new()
+            RuntimeEffects::new()
         })
     }
 }

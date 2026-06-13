@@ -397,15 +397,15 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 }
 
 #[test]
-fn poc10_pipeline_effects_names_the_common_commit_shape() {
-    let topo::core::effects::PipelineEffects {
+fn poc10_runtime_effects_names_the_common_commit_shape() {
+    let topo::core::effects::RuntimeEffects {
         facts,
         candidate_facts,
         purged_facts,
         row_mutations,
         intents,
         local_intents,
-    } = topo::core::effects::PipelineEffects::new();
+    } = topo::core::effects::RuntimeEffects::new();
 
     assert!(facts.is_empty());
     assert!(candidate_facts.is_empty());
@@ -442,7 +442,7 @@ fn poc10_command_output_is_authored_receipt_plus_facts_only() {
         root,
         vec![command],
         &[
-            "PipelineEffects",
+            "RuntimeEffects",
             "pub effects:",
             "row_mutations",
             "purged_facts",
@@ -452,7 +452,104 @@ fn poc10_command_output_is_authored_receipt_plus_facts_only() {
     );
     assert!(
         offenders.is_empty(),
-        "commands must author only facts plus receipts, not full pipeline effects:\n{}",
+        "commands must author only facts plus receipts, not full runtime effects:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn poc10_protocol_commands_do_not_hide_runtime_work_or_read_models() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let command_files = rust_files(&root.join("src/protocol"))
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
+        .collect::<Vec<_>>();
+    let key_wrap_workflow = root.join("src/protocol/auth/key_wrap/commands.rs");
+    let simple_command_files = command_files
+        .iter()
+        .filter(|path| *path != &key_wrap_workflow)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let runtime_offenders = source_code_matches_in_paths(
+        root,
+        simple_command_files,
+        &[
+            "use crate::core::runtime::Runtime",
+            "RuntimeEffects",
+            "RowMutation",
+            "Intent::new",
+            "submit_",
+            "process_all_work",
+            "drain_",
+            "write_transaction",
+            "commit_runtime_effects",
+        ],
+    );
+    assert!(
+        runtime_offenders.is_empty(),
+        "simple protocol commands must only query, author facts, and return receipts; runtime work belongs in Runtime, daemon, handlers, projectors, or explicit workflows:\n{}",
+        runtime_offenders.join("\n")
+    );
+
+    let read_model_offenders = source_code_matches_in_paths(
+        root,
+        command_files,
+        &[
+            "pub struct KeyWrapQuery",
+            "pub struct KeyAccessQuery",
+            "pub struct KeyAccessStatus",
+            "pub struct KeyStatusReport",
+            "pub struct StatusReport",
+            "pub fn lookup_",
+            "pub fn key_access",
+            "pub fn key_status_report",
+            "pub fn status_report",
+            "pub fn key_wrap_count",
+            "pub fn local_key_secret_count",
+            "pub fn count_messages_below_minute",
+        ],
+    );
+    assert!(
+        read_model_offenders.is_empty(),
+        "command modules must not expose read-model lookup/status/count APIs; put those in the owning queries.rs:\n{}",
+        read_model_offenders.join("\n")
+    );
+
+    let workflow_text = source_text(&key_wrap_workflow)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "multi-phase runtime",
+        "workflow and should move out of this file",
+    ] {
+        assert!(
+            workflow_text.contains(required),
+            "the key_wrap chop workflow exception must remain explicit until it moves to a workflow host: missing {required:?}"
+        );
+    }
+}
+
+#[test]
+fn poc10_runtime_route_vocabulary_has_no_old_pipeline_dto_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let offenders = source_code_matches_in_paths(
+        root,
+        rust_files(&root.join("src")),
+        &[
+            "PipelineEffects",
+            "FactPipeline",
+            "pipeline_effects",
+            "commit_pipeline_effects",
+            "validate_pipeline_effects",
+            "from_pipeline",
+        ],
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "live source should use RuntimeEffects and FactProjectorInfo, not retired pipeline DTO names:\n{}",
         offenders.join("\n")
     );
 }
@@ -696,8 +793,8 @@ fn poc10_architecture_docs_describe_required_runtime_work_surfaces() {
         "pending projection",
         "durable intents",
         "ephemeral intents",
-        "The declared runtime pipeline is the complete work surface",
-        "production state enters that pipeline",
+        "The declared runtime work surface is complete",
+        "production state enters as facts, context, time wakes, intents, or schema-owned rows",
         "facts, context, time wakes, intents, or schema-owned rows",
     ] {
         assert!(

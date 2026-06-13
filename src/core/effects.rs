@@ -16,7 +16,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::{Intent, RowMutation};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PipelineEffects {
+pub struct RuntimeEffects {
     /// New facts to admit and mark pending for projection.
     pub facts: Vec<Fact>,
     /// Runtime-local projectable inputs that should not enter durable facts.
@@ -31,7 +31,7 @@ pub struct PipelineEffects {
     pub local_intents: Vec<Intent>,
 }
 
-impl PipelineEffects {
+impl RuntimeEffects {
     pub fn new() -> Self {
         Self::default()
     }

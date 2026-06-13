@@ -187,11 +187,13 @@ pub mod adapt {
 //      progressive send own transfer for this protocol slice.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 /// Projector route metadata for the range_request fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("sync::range_request::project::SyncRangeRequestProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("sync::range_request::project::SyncRangeRequestProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncRangeRequestProjector;

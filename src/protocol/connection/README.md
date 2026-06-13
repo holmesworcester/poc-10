@@ -87,7 +87,7 @@ wire construction in `encode.rs`, projector-local decode/auth/adapt helpers in
 `project.rs`, construction and sealing in `author.rs`, and receive-side
 opening/admission in `project.rs`. There is no shared `connection/frame.rs` or
 `connection/frame_wire.rs` layer; duplicated byte handling is preferred over
-hiding the pipeline behind a generic helper.
+hiding projector-specific receive semantics behind a generic helper.
 
 Established frames received from the network are candidate projection inputs.
 Their projectors can emit `connection_frame_observation`, `connection`,

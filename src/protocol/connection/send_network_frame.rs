@@ -11,7 +11,7 @@
 //! behavior, or outbound network queue interaction. Change the concrete
 //! connection frame fact families for frame byte semantics.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{Intent, IntentKind};
 use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
@@ -117,7 +117,7 @@ impl IntentHandler for SendNetworkFrameHandler {
             OutboundFrame { bytes: input.frame },
         )
         .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
-        Ok(PipelineEffects::new())
+        Ok(RuntimeEffects::new())
     }
 }
 

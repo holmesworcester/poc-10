@@ -194,7 +194,9 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::connection::connection;
 
@@ -240,8 +242,8 @@ fn exact_local_offer(owner: FactId, role: &'static str, key: FactId) -> ContextO
 }
 
 /// Projector route metadata for the close fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("connection::close::project::ConnectionCloseProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("connection::close::project::ConnectionCloseProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionCloseProjector;

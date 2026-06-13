@@ -1,4 +1,4 @@
-use topo::core::effects::PipelineEffects;
+use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, HandlerResult, IntentHandler};
 use topo::core::intents::{Intent, IntentKind};
@@ -14,12 +14,12 @@ impl IntentHandler for EmitsFactAndFollowup {
             b"followup-payload".to_vec(),
         );
 
-        Ok(PipelineEffects::new().fact(fact).intent(followup))
+        Ok(RuntimeEffects::new().fact(fact).intent(followup))
     }
 }
 
 #[test]
-fn intent_pipeline_output_boundary_is_facts_and_followup_intents_only() {
+fn intent_runtime_output_boundary_is_facts_and_followup_intents_only() {
     let input = Intent::new(
         IntentKind::new("incoming_work").unwrap(),
         b"idempotence-key",
@@ -30,7 +30,7 @@ fn intent_pipeline_output_boundary_is_facts_and_followup_intents_only() {
         .handle(&input, &HandlerContext::new())
         .expect("handler output");
 
-    let PipelineEffects {
+    let RuntimeEffects {
         facts,
         candidate_facts,
         purged_facts,

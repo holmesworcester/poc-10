@@ -4,19 +4,15 @@
 //! a proposed retention policy fact. Projection and purge execution stay in the
 //! target runtime.
 
-use crate::core::clock;
 use crate::core::command::CommandOutput;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::FactId;
 use crate::core::store::Store;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 use crate::protocol::{auth, content};
-use std::collections::BTreeSet;
 
 use super::fact::SCOPE_KIND_WORKSPACE;
 use super::{author, queries};
-
-pub const UNIX_MINUTE_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorPolicy {
@@ -68,20 +64,6 @@ pub struct AuthorCompactReport {
     pub new_floor_minute: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StatusReport {
-    pub workspace_id: FactId,
-    pub policy_fact_id: Option<FactId>,
-    pub ttl_minutes: Option<u32>,
-    pub policy_floor_minute: u64,
-    pub last_chopped_floor: Option<u64>,
-    pub now_minute: Option<u64>,
-    pub horizon_floor: u64,
-    pub effective_floor: u64,
-    pub live_messages: usize,
-    pub message_tombstones: usize,
-}
-
 pub fn author_set_with_auto_floor(
     store: &Store,
     input: AuthorPolicy,
@@ -93,7 +75,7 @@ pub fn author_set_with_auto_floor(
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
     let previous_policy_id = previous.as_ref().map(|row| row.policy_id);
     let previous_floor = previous.as_ref().map(|row| row.retire_minute).unwrap_or(0);
-    let now_minute = input.now_ms / UNIX_MINUTE_MS;
+    let now_minute = input.now_ms / content::message::fact::UNIX_MINUTE_MS;
     let auto_floor = previous_floor.max(now_minute.saturating_sub(u64::from(input.ttl_minutes)));
     let new_floor = match input.explicit_floor {
         Some(floor) if floor < previous_floor => {
@@ -127,7 +109,7 @@ pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, 
     let _author_user_id = local_admin_user_id(store, input.workspace_id)?;
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
     let previous_floor = previous.as_ref().map(|row| row.retire_minute).unwrap_or(0);
-    let now_minute = input.now_ms / UNIX_MINUTE_MS;
+    let now_minute = input.now_ms / content::message::fact::UNIX_MINUTE_MS;
     let target_floor = now_minute.saturating_sub(u64::from(input.ttl_minutes));
     if target_floor < previous_floor {
         return Err(
@@ -139,7 +121,11 @@ pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, 
     Ok(TightenPlan {
         previous_floor_minute: previous_floor,
         target_floor_minute: target_floor,
-        messages_below_floor: count_messages_below_minute(store, input.workspace_id, target_floor)?,
+        messages_below_floor: queries::count_messages_below_minute(
+            store,
+            input.workspace_id,
+            target_floor,
+        )?,
     })
 }
 
@@ -151,7 +137,7 @@ pub fn author_tighten(
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
     let previous_policy_id = previous.as_ref().map(|row| row.policy_id);
     let previous_floor = previous.as_ref().map(|row| row.retire_minute).unwrap_or(0);
-    let now_minute = input.now_ms / UNIX_MINUTE_MS;
+    let now_minute = input.now_ms / content::message::fact::UNIX_MINUTE_MS;
     let target_floor = now_minute.saturating_sub(u64::from(input.ttl_minutes));
     if target_floor < previous_floor {
         return Err(
@@ -184,7 +170,7 @@ pub fn author_compact(
     let active = queries::active_for_workspace(store, input.workspace_id)?
         .ok_or_else(|| "no active retention policy; use disappearing-set first".to_string())?;
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
-    let now_minute = input.now_ms / UNIX_MINUTE_MS;
+    let now_minute = input.now_ms / content::message::fact::UNIX_MINUTE_MS;
     let target_floor = active
         .retire_minute
         .max(now_minute.saturating_sub(u64::from(active.ttl_minutes)));
@@ -204,63 +190,6 @@ pub fn author_compact(
         new_floor_minute: target_floor,
     })
     .with_facts(authored.into_facts().to_vec()))
-}
-
-pub fn count_messages_below_minute(
-    store: &Store,
-    workspace_id: FactId,
-    floor_minute: u64,
-) -> Result<usize, String> {
-    let mut message_ids = BTreeSet::new();
-
-    for row in content::message::queries::content_message_rows(store, workspace_id)? {
-        if row.minute < floor_minute {
-            message_ids.insert(row.message_id);
-        }
-    }
-    for message_id in
-        content::message::queries::message_tombstone_ids_below(store, workspace_id, floor_minute)?
-    {
-        message_ids.insert(message_id);
-    }
-
-    Ok(message_ids.len())
-}
-
-pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport, String> {
-    let active = queries::active_for_workspace(store, workspace_id)?;
-    let policy_fact_id = active.as_ref().map(|row| row.policy_id);
-    let ttl_minutes = active.as_ref().map(|row| row.ttl_minutes);
-    let policy_floor_minute = active.as_ref().map(|row| row.retire_minute).unwrap_or(0);
-    let now_minute = clock::logical_time(store)?.map(|ms| ms / UNIX_MINUTE_MS);
-    let horizon_floor = now_minute
-        .map(|minute| minute.saturating_sub(30 * 24 * 60))
-        .unwrap_or(0);
-    let effective_floor = policy_floor_minute.max(horizon_floor);
-    let message_tombstones = content::message::queries::message_tombstone_count_at_or_after(
-        store,
-        workspace_id,
-        horizon_floor,
-    )?;
-    let live_messages = content::message::queries::content_message_rows(store, workspace_id)?
-        .into_iter()
-        .filter(|row| row.minute >= horizon_floor)
-        .count();
-    let last_chopped_floor =
-        (horizon_floor > policy_floor_minute && horizon_floor > 0).then_some(horizon_floor);
-
-    Ok(StatusReport {
-        workspace_id,
-        policy_fact_id,
-        ttl_minutes,
-        policy_floor_minute,
-        last_chopped_floor,
-        now_minute,
-        horizon_floor,
-        effective_floor,
-        live_messages,
-        message_tombstones,
-    })
 }
 
 fn policy_fact(

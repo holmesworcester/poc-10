@@ -284,7 +284,9 @@ pub mod adapt {
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::device_invite;
 use crate::protocol::auth::invite_server;
 use crate::protocol::auth::signature;
@@ -294,8 +296,8 @@ use super::endpoint_shared_row;
 use super::fact::EndpointRole;
 
 /// Projector route metadata for the endpoint_shared fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::endpoint_shared::project::EndpointSharedProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::endpoint_shared::project::EndpointSharedProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct EndpointSharedProjector;

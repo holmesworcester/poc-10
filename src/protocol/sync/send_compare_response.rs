@@ -6,7 +6,7 @@
 //! child compares or exact ids, persists any generated compare facts, and queues
 //! connection sends when there is something to send.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
@@ -77,7 +77,7 @@ impl IntentHandler for SendSyncCompareResponseHandler {
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
         let compare =
             crate::protocol::sync::compare::project::decode::decode_fact(&compare_fact.bytes)?;
-        let mut output = PipelineEffects::new();
+        let mut output = RuntimeEffects::new();
         let (plan, expanded_send_fact_ids) = if let Ok(store) = context.store() {
             let available_facts =
                 crate::protocol::sync::shared_fact::shareable_facts_for_connection(

@@ -224,7 +224,9 @@ pub mod adapt {
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret;
 use crate::protocol::auth::local_key_secret;
@@ -731,8 +733,8 @@ fn validate_wrap_source_payload(
 // ---------------------------------------------------------------------------
 
 /// Projector route metadata for the key_wrap fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::key_wrap::project::KeyWrapProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::key_wrap::project::KeyWrapProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyWrapProjector;

@@ -827,7 +827,9 @@ use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::auth::{endpoint_shared, workspace};
 use crate::protocol::connection::create_connection::{create_connection_intent, CreateConnection};
@@ -883,8 +885,8 @@ pub fn connection_for_request_offer(owner: FactId, request_id: FactId) -> Contex
 }
 
 /// Projector route metadata for the connection-request fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("connection::request::project::ConnectionRequestProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("connection::request::project::ConnectionRequestProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionRequestProjector;

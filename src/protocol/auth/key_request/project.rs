@@ -196,7 +196,9 @@ pub mod adapt {
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::auth::create_key_wrap::create_key_wrap_intent;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::auth::key_wrap::project::{
@@ -211,8 +213,8 @@ use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share
 use super::fact::KeyRequestFact;
 
 /// Projector route metadata for the key_request fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::key_request::project::KeyRequestProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::key_request::project::KeyRequestProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyRequestProjector;

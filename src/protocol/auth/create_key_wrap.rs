@@ -5,7 +5,7 @@
 //! module to build the deterministic raw wrap. The intent payload, idempotence key, and
 //! constructor live here so the handler is self-contained.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind,
 };
@@ -182,6 +182,6 @@ impl IntentHandler for CreateKeyWrapHandler {
         let signer_secret = context.require_fact(&input.signer_secret_fact_id)?;
         let wrap =
             author::create_validated_key_wrap_fact(&input, recipient, source, signer_secret)?;
-        Ok(PipelineEffects::new().fact(wrap))
+        Ok(RuntimeEffects::new().fact(wrap))
     }
 }

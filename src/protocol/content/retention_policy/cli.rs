@@ -7,7 +7,7 @@
 
 use crate::core::cli::{decode_hex_32_named, encode_hex_32, CliArgs, CliOutput};
 
-use super::commands::StatusReport;
+use super::queries::StatusReport;
 
 pub const DISAPPEARING_SET_USAGE: &str =
     "disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]";

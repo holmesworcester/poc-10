@@ -233,7 +233,9 @@ pub mod adapt {
 
 use crate::core::facts::Fact;
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::sync::send_compare_response::{
     send_sync_compare_response_intent, SendSyncCompareResponse,
 };
@@ -241,8 +243,8 @@ use crate::protocol::sync::send_compare_response::{
 use super::sync_compare_row;
 
 /// Projector route metadata for the compare fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("sync::compare::project::SyncCompareProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("sync::compare::project::SyncCompareProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncCompareProjector;

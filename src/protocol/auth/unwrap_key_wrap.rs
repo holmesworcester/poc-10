@@ -5,7 +5,7 @@
 //! chosen by projection. The intent payload, idempotence key, and constructor
 //! live here so the handler is self-contained.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{
     HandlerContext, HandlerFactId, HandlerResult, Intent, IntentHandler, IntentKind,
 };
@@ -111,6 +111,6 @@ impl IntentHandler for UnwrapKeyWrapHandler {
             recipient,
             frontier,
         )?;
-        Ok(PipelineEffects::new().fact(secret))
+        Ok(RuntimeEffects::new().fact(secret))
     }
 }

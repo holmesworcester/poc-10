@@ -11,7 +11,7 @@
 //! Dispatch owns the lifecycle of one queued intent row. It chooses the next
 //! row for a registered kind, loads only the facts requested by the handler,
 //! and calls the handler. On success it opens the transaction that deletes the
-//! handled row, then delegates the handler's `PipelineEffects` to
+//! handled row, then delegates the handler's `RuntimeEffects` to
 //! `commit_effects` inside that same transaction. Retry errors deliberately
 //! leave the row queued.
 //!
@@ -26,7 +26,7 @@
 //! duplicate local row with the same identity so ephemeral retries do not
 //! repeat work already accepted durably.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler, IntentKind};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::persisted_fact;
@@ -34,8 +34,8 @@ use crate::core::store::{Store, TableName};
 use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use crate::core::project_fact::commit_effects::{
-    commit_pipeline_effects_in_tx, suppress_disallowed_intents,
-    validate_pipeline_effects_for_admission, IntentAdmissionPolicy,
+    commit_runtime_effects_in_tx, suppress_disallowed_intents,
+    validate_runtime_effects_for_admission, IntentAdmissionPolicy,
 };
 use crate::core::project_fact::route::FactAdmissionFn;
 use std::collections::BTreeSet;
@@ -288,7 +288,7 @@ pub(crate) fn dispatch_queued_intent_with_policy(
         });
     };
     let mut suppressed_intents = suppress_disallowed_intents(&mut output, intent_policy);
-    validate_pipeline_effects_for_admission(&output, allowed_tables, fact_admission)?;
+    validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
     status.progressed = commit_handler_output(
         store,
         queued.table,
@@ -432,7 +432,7 @@ fn run_handler(
     intent: &Intent,
     context: &HandlerContext<'_>,
     status: &mut WorkStatus,
-) -> Result<Option<PipelineEffects>, String> {
+) -> Result<Option<RuntimeEffects>, String> {
     match handler.handle(intent, context) {
         Ok(output) => Ok(Some(output)),
         Err(err) => {
@@ -462,7 +462,7 @@ fn commit_handler_output(
     table: TableName,
     kind: &str,
     idempotence_key: &[u8],
-    effects: &PipelineEffects,
+    effects: &RuntimeEffects,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     pending_mode: crate::core::project_fact::ProjectionMode,
@@ -476,7 +476,7 @@ fn commit_handler_output(
                 delete_intent_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
             }
 
-            commit_pipeline_effects_in_tx(
+            commit_runtime_effects_in_tx(
                 tx,
                 effects,
                 allowed_tables,

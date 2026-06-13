@@ -4,7 +4,7 @@
 //! request, completes with a local response fact, and then carries encrypted
 //! frame bytes for sync and application facts. This scope owns the handshake
 //! facts, receive receipts, established-frame facts, and the network-facing
-//! intents that turn opaque socket bytes into pipeline input or socket writes.
+//! intents that turn opaque socket bytes into candidate facts or socket writes.
 //!
 //! The mechanism is fact-driven. Requests, responses, receipts, and frames all
 //! enter projection through typed facts; projectors wait on explicit context

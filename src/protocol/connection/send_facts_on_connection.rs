@@ -18,7 +18,7 @@ use crate::core::intents::{Intent, IntentKind};
 use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
 };
-use crate::core::{effects::PipelineEffects, facts::Fact};
+use crate::core::{effects::RuntimeEffects, facts::Fact};
 use crate::protocol::auth::endpoint;
 use crate::protocol::connection::connection as connection_fact;
 use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
@@ -269,7 +269,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
                 },
             )?
         else {
-            return Ok(PipelineEffects::new());
+            return Ok(RuntimeEffects::new());
         };
         let batches = fact_batches(facts_for_work(work, context)?)?;
 
@@ -287,7 +287,7 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             return Err("send_facts_on_connection local endpoint is not part of connection".into());
         };
 
-        let mut output = PipelineEffects::new();
+        let mut output = RuntimeEffects::new();
         for batch in batches {
             let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
             let payloads = batch

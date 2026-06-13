@@ -5,7 +5,7 @@
 //! connection, rejects private or unsendable payloads, and queues connection
 //! work for the fact bytes. Authorization remains in the shareable-fact index.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
 use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
@@ -76,7 +76,7 @@ impl IntentHandler for SendRequestedFactHandler {
         let need = need_id::project::decode::decode_fact(&need_fact.bytes)?;
         let Some(fact) = crate::core::store::persisted_fact(context.store()?, &need.fact_id)?
         else {
-            return Ok(PipelineEffects::new());
+            return Ok(RuntimeEffects::new());
         };
         if crate::protocol::sync::shared_fact::shareable_fact_for_connection(
             context.store()?,
@@ -85,11 +85,11 @@ impl IntentHandler for SendRequestedFactHandler {
         )?
         .is_none()
         {
-            return Ok(PipelineEffects::new());
+            return Ok(RuntimeEffects::new());
         }
         crate::protocol::connection::connection::queries::sendable_fact_body(&fact)?;
         Ok(
-            PipelineEffects::new().intent(send_facts_on_connection_intent(SendFactsOnConnection {
+            RuntimeEffects::new().intent(send_facts_on_connection_intent(SendFactsOnConnection {
                 connection_id: need.connection_id,
                 fact_ids: vec![need.fact_id],
             })),

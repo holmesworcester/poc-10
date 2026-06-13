@@ -5,7 +5,7 @@
 //! negentropy compare for the initial round, and coalesces newly shareable
 //! facts into timestamp-bucket tail sends.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::{
     facts::{Fact, FactId},
     intents::{
@@ -88,7 +88,7 @@ impl IntentHandler for SeedConnectionSyncHandler {
                     HandlerError::fatal(format!("seed_connection_sync connection row: {err}"))
                 })?
         else {
-            return Ok(PipelineEffects::new());
+            return Ok(RuntimeEffects::new());
         };
         advertise_connection_shareable_facts(store, input.connection_id)
     }
@@ -101,7 +101,7 @@ pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId
         sync::compare::fact::TimestampRange::ROOT,
     )?;
     let compare = sync::compare::author::start_compare_fact_with_summary(connection_id, summary)?;
-    Ok(PipelineEffects::new()
+    Ok(RuntimeEffects::new()
         .fact(compare.clone())
         .intent(send_facts_on_connection_intent(SendFactsOnConnection {
             connection_id,
@@ -118,7 +118,7 @@ pub fn advertise_indexed_fact_to_connections_except(
     fact: &Fact,
     excluded_connection_ids: &BTreeSet<FactId>,
 ) -> HandlerResult {
-    let mut output = PipelineEffects::new();
+    let mut output = RuntimeEffects::new();
     for connection_id in sync::shared_fact::connection_ids_for_shareable_fact(store, fact)? {
         if excluded_connection_ids.contains(&connection_id) {
             continue;
@@ -129,7 +129,7 @@ pub fn advertise_indexed_fact_to_connections_except(
 }
 
 fn append_live_tail_send(
-    output: PipelineEffects,
+    output: RuntimeEffects,
     store: &Store,
     connection_id: FactId,
     fact: &Fact,
@@ -332,7 +332,7 @@ mod tests {
         record_share(&store, workspace_id, &owner_fact, vec![context_fact.id]);
 
         let output =
-            append_live_tail_send(PipelineEffects::new(), &store, connection_id, &owner_fact)
+            append_live_tail_send(RuntimeEffects::new(), &store, connection_id, &owner_fact)
                 .expect("tail");
 
         assert_eq!(output.intents.len(), 1);

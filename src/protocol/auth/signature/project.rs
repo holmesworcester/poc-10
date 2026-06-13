@@ -203,15 +203,17 @@ pub mod adapt {
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 use crate::protocol::sync::shared_fact::project::share_fact_with_sync;
 
 use super::fact::SignatureFact;
 
 pub const SIGNATURE_PROOF_ROLE: &str = "signature_proof";
 
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::signature::project::SignatureProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::signature::project::SignatureProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct SignatureProjector;

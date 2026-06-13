@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::project_fact::{FactPipeline, FactRoute};
+use crate::core::project_fact::{FactProjectorInfo, FactRoute};
 
 /// Fleet-wide protocol version.
 pub type ProtocolVersion = u32;
@@ -121,14 +121,14 @@ impl FactVersionProjector {
         Self { project }
     }
 
-    pub const fn from_pipeline(pipeline: FactPipeline) -> Self {
+    pub const fn from_projector_info(projector_info: FactProjectorInfo) -> Self {
         Self {
-            project: pipeline.project,
+            project: projector_info.project,
         }
     }
 
-    pub const fn pipeline(self) -> FactPipeline {
-        FactPipeline::projector(self.project)
+    pub const fn projector_info(self) -> FactProjectorInfo {
+        FactProjectorInfo::projector(self.project)
     }
 }
 
@@ -151,7 +151,7 @@ impl FactVersionRoute {
     pub const fn from_fact_route(route: FactRoute) -> Self {
         Self {
             tag: route.tag,
-            projector: FactVersionProjector::from_pipeline(route.pipeline),
+            projector: FactVersionProjector::from_projector_info(route.projector_info),
         }
     }
 }

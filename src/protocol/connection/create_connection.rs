@@ -8,7 +8,7 @@
 //! The payload is three fixed 32-byte ids in order: request id, initiator
 //! endpoint_shared id, and fact-receipt id.
 
-use crate::core::effects::PipelineEffects;
+use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{Intent, IntentKind};
 
 pub type FactId = [u8; 32];
@@ -239,7 +239,7 @@ impl IntentHandler for CreateConnectionHandler {
             created_at_ms: received.received_at_local_ms,
         })?;
 
-        Ok(PipelineEffects::new()
+        Ok(RuntimeEffects::new()
             .fact(responder_ephemeral_fact)
             .fact(built.fact))
     }

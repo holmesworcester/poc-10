@@ -230,7 +230,9 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::intents::TableInsert;
 use crate::core::intents::Value;
 use crate::core::intents::{RowMutation, TableDeleteWhere};
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use crate::protocol::auth::signature;
 use crate::protocol::content::file;
@@ -265,8 +267,8 @@ pub fn content_file_slice_row(
 }
 
 /// Projector route metadata for the file_slice fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("content::file_slice::project::ContentFileSliceProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("content::file_slice::project::ContentFileSliceProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentFileSliceProjector;

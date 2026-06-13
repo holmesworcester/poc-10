@@ -211,13 +211,15 @@ pub mod adapt {
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
-use crate::core::project_fact::{FactPipeline, ProjectionContext, ProjectionOutput, Projector};
+use crate::core::project_fact::{
+    FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
+};
 
 use super::endpoint_rows;
 
 /// Projector route metadata for the endpoint fact.
-pub const PIPELINE: FactPipeline =
-    FactPipeline::projector("auth::endpoint::project::EndpointProjector");
+pub const PROJECTOR_INFO: FactProjectorInfo =
+    FactProjectorInfo::projector("auth::endpoint::project::EndpointProjector");
 
 const DAEMON_ENDPOINT_ROLE: &str = "auth_daemon_endpoint";
 const DAEMON_ENDPOINT_KEY: &[u8] = b"daemon_endpoint";
