@@ -5,11 +5,8 @@
 //! projection context. These facts are local authority, not shared identity
 //! proofs. Shared endpoint visibility lives in `endpoint_shared`.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -22,7 +19,7 @@ pub const TYPE_LOCAL_ENDPOINT: u8 = encode::TYPE_LOCAL_ENDPOINT;
 pub use project::{daemon_endpoint_need, daemon_endpoint_offer};
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::EndpointFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 // ---------------------------------------------------------------------------

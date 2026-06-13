@@ -5,10 +5,7 @@
 //! `signature_proof` context offer and validate authority through their normal
 //! signer/user/workspace context.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -16,5 +13,5 @@ pub mod project;
 pub const TYPE_SIGNATURE: u8 = encode::TYPE_SIGNATURE;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SignatureFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

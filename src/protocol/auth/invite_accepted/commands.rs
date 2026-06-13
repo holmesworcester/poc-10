@@ -91,13 +91,10 @@ mod tests {
         })
         .expect("accept");
 
-        assert_eq!(output.effects.facts.len(), 1);
-        assert_eq!(
-            output.receipt.invite_accepted_fact_id,
-            output.effects.facts[0].id
-        );
-        let accepted = super::super::decode_fact_payload(output.effects.facts[0].body())
-            .expect("decode accepted");
+        assert_eq!(output.facts.len(), 1);
+        assert_eq!(output.receipt.invite_accepted_fact_id, output.facts[0].id);
+        let accepted =
+            super::super::decode_fact_payload(output.facts[0].body()).expect("decode accepted");
         assert_eq!(accepted.workspace_id, [1; 32]);
         assert_eq!(accepted.invite_fact_id, [2; 32]);
         assert_eq!(accepted.bootstrap_secret, [7; 32]);

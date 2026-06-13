@@ -10,12 +10,12 @@ use topo::protocol::auth::endpoint as endpoint_rows;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite::encode as invite_layout;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
-use topo::protocol::connection::connection::decode as connection_layout;
+use topo::protocol::connection::connection::project::decode as connection_layout;
 use topo::protocol::connection::create_connection::{
     create_connection_intent, CreateConnection, CreateConnectionHandler,
 };
-use topo::protocol::connection::ephemeral_secret::decode as ephemeral_layout_decode;
 use topo::protocol::connection::ephemeral_secret::encode as ephemeral_layout_encode;
+use topo::protocol::connection::ephemeral_secret::project::decode as ephemeral_layout_decode;
 use topo::protocol::connection::fact_receipt::encode as received_layout;
 use topo::protocol::connection::fact_receipt::fact::{
     ConnectionFactReceipt, RECEIVE_PATH_CONNECTION_REQUEST,

@@ -10,10 +10,7 @@
 //! this family for receipt bytes, receive-path vocabulary, or receipt context
 //! offers.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -69,5 +66,5 @@ pub fn connection_fact_receipt_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionFactReceipt, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

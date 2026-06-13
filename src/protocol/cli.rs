@@ -3,9 +3,9 @@
 //! Fact-scope `cli.rs` modules own argv parsing, text formatting, and command
 //! output construction. Core owns runtime opening and final printing. These
 //! host functions add the protocol-specific runtime context between those two:
-//! they borrow read-only command context, submit fact/intent output when a
-//! command authors work, and drain only local projection/intent work that the
-//! CLI command itself is responsible for observing.
+//! they borrow read-only command context, submit authored facts when a command
+//! authors work, and drain only local projection/intent work that the CLI
+//! command itself is responsible for observing.
 //!
 //! This file is a command router, not a domain model. Each function should stay
 //! thin: parse through the owning fact module, build a `CommandContext` or use

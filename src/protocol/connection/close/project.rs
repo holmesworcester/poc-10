@@ -1,14 +1,196 @@
-//! Connection-close projector.
-//!
-//! Close projection validates that a local close fact names a materialized
-//! established connection. It then publishes close context keyed by the
-//! connection id and by both ephemeral-secret fact ids carried by that state.
-//!
-//! POLICY. A connection_close is admitted iff:
-//!   1. STRUCTURAL. The fact is local and names a non-empty connection id.
-//!   2. CONTEXT. The exact local connection context for that id is present.
-//!   3. MATERIALIZE. Publish close offers only; target facts own their own row
-//!      deletion and self-purge when those offers wake them.
+pub mod decode {
+    //! Byte decoding for connection-close facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id
+    //! checks and context validation live in the local `authenticate` module and `project.rs`.
+
+    use crate::core::wire;
+
+    use super::super::encode::{FACT_BYTES, TYPE_CONNECTION_CLOSE};
+    use super::super::fact::ConnectionCloseFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionCloseFact, String> {
+        wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
+        let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+        if tag != TYPE_CONNECTION_CLOSE {
+            return Err("expected connection close fact".to_string());
+        }
+        let mut connection_id = [0; 32];
+        connection_id.copy_from_slice(&bytes[1..33]);
+        let closed_at_ms = wire::take_u64be(&bytes[33..41]).map_err(wire_err)?;
+        Ok(ConnectionCloseFact {
+            connection_id,
+            closed_at_ms,
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::connection::close::encode::{
+            encode_fact, FACT_BYTES, TYPE_CONNECTION_CLOSE,
+        };
+
+        fn fact() -> ConnectionCloseFact {
+            ConnectionCloseFact {
+                connection_id: [1; 32],
+                closed_at_ms: 2,
+            }
+        }
+
+        #[test]
+        fn connection_close_roundtrips_fixed_width() {
+            let bytes = encode_fact(&fact()).expect("encode");
+            assert_eq!(bytes.len(), FACT_BYTES);
+            assert_eq!(decode_fact(&bytes).expect("decode"), fact());
+        }
+
+        #[test]
+        fn rejects_wrong_tag_or_length() {
+            let mut bytes = encode_fact(&fact()).expect("encode");
+            bytes[0] = TYPE_CONNECTION_CLOSE.wrapping_add(1);
+            assert!(decode_fact(&bytes).is_err());
+
+            let mut short = encode_fact(&fact()).expect("encode");
+            short.pop();
+            assert!(decode_fact(&short).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Connection-close authenticator.
+    //!
+    //! POLICY. Authenticating a `connection_close` fact proves, over its bytes
+    //! alone:
+    //!   1. LAYOUT. The bytes decode to a canonical connection-close fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   FIELDS. The named connection id is non-empty.
+    //!
+    //! It proves nothing else. Admission scope (`Local`) and the connection
+    //! context proof are interpretation the projector owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::ConnectionCloseFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        close: ConnectionCloseFact,
+        _context: &ProjectionContext,
+    ) -> Result<ConnectionCloseFact, String> {
+        prove_decoded_close(fact, close)
+    }
+
+    fn prove_decoded_close(
+        fact: &Fact,
+        close: ConnectionCloseFact,
+    ) -> Result<ConnectionCloseFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        // Intrinsic fields.
+        if close.connection_id == [0; 32] {
+            return Err("connection close connection_id cannot be empty".to_string());
+        }
+        Ok(close)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::{Fact, FactScope};
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::connection::close::encode;
+        use crate::protocol::connection::close::fact::ConnectionCloseFact;
+
+        fn canonical_fact() -> Fact {
+            let close = ConnectionCloseFact {
+                connection_id: [1; 32],
+                closed_at_ms: 2,
+            };
+            let bytes = encode::encode_fact(&close).expect("encode connection_close fact");
+            Fact::new(FactScope::Local, 100, bytes)
+        }
+
+        fn authenticate(fact: &Fact) -> Result<ConnectionCloseFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Connection-close semantic adapter.
+    //!
+    //! The current close wire shape is already the active semantic shape. This
+    //! identity adapter keeps the protocol-local conversion point available for future versioned
+    //! facts.
+
+    use super::super::fact::ConnectionCloseFact;
+
+    pub(crate) fn adapt(source: ConnectionCloseFact) -> Result<ConnectionCloseFact, String> {
+        Ok(source)
+    }
+}
+
+// Connection-close projector.
+//
+// Close projection validates that a local close fact names a materialized
+// established connection. It then publishes close context keyed by the
+// connection id and by both ephemeral-secret fact ids carried by that state.
+//
+// POLICY. A connection_close is admitted iff:
+//   1. STRUCTURAL. The fact is local and names a non-empty connection id.
+//   2. CONTEXT. The exact local connection context for that id is present.
+//   3. MATERIALIZE. Publish close offers only; target facts own their own row
+//      deletion and self-purge when those offers wake them.
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -76,9 +258,9 @@ impl Projector for ConnectionCloseProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }
@@ -90,7 +272,7 @@ impl ConnectionCloseProjector {
         close: super::fact::ConnectionCloseFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // Authentication (see the local authenticate module) proved canonical bytes and the
         // non-empty connection id. Scope is interpretation.
         // 1. Scope.
         if fact.scope != FactScope::Local {

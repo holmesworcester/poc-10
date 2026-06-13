@@ -9,12 +9,14 @@ behavior, and transaction boundaries.
 
 ## Interface To Core And Protocol
 
-The public facade and work driver is `src/core/pipeline.rs`. Runtime code calls
-it to:
+The public contract and bounded queue driver is `src/core/pipeline.rs`; the
+readable n=1 work items live in `src/core/project_fact.rs` and
+`src/core/handle_intent.rs`. Runtime code calls the pipeline surface to:
 
 - submit durable facts to `facts`, `local_fact_admissions`, and
   `pending_projection`.
-- commit `PipelineEffects` from commands, projectors, and handlers.
+- commit command-authored facts.
+- commit `PipelineEffects` from projectors and handlers.
 - record ephemeral projection inputs in `ephemeral_projection_inputs`.
 - submit durable intents to `intents`.
 - submit local (ephemeral, not-replayed) intents to `local_intents`.
@@ -69,17 +71,18 @@ giving projectors a storage handle or a clock read.
 The write-side shape is:
 
 ```text
-command -> author -> encode -> protocol self-check -> admit -> read pipeline
+command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> read pipeline
 ```
 
 Commands own user intent, argument parsing, local capability lookup, receipts,
-and the decision to author a fact. Family `author.rs` owns construction crypto:
-signing, encryption, and typed assembly. Family `encode.rs` owns canonical byte
-encoding only. Before storage, the runtime may call the protocol-owned
-`FactAdmissionFn`; poc-10 installs one that dispatches by fact tag to
-protocol-local decode and validation helpers. After admission the fact is queued
-for projection like any other durable fact. The self-check rejects byte, id,
-signature, or construction drift before local facts are emitted.
+and the decision to author facts. They return `AuthoredCommand` facts plus a
+receipt, not row mutations, purges, or intents. Family `author.rs` owns
+construction crypto: signing, encryption, and typed assembly. Family `encode.rs`
+owns canonical byte encoding only. Before storage, the runtime may call the
+protocol-owned `FactAdmissionFn`; poc-10 installs one that dispatches by fact
+tag to protocol-local decode and validation helpers. After admission each fact
+is queued for projection like any other durable fact. The self-check rejects
+byte, id, signature, or construction drift before local facts are emitted.
 
 ## Data Flow
 
@@ -157,11 +160,12 @@ the scheduling mechanism that enqueues due work.
   supplied column; changing typed projection state is expressed as
   `DeleteWhere` followed by `InsertValues`.
 
-## Inline Sections
+## Runtime Work Files
 
-`src/core/pipeline.rs` is intentionally the single implementation file for the
-pipeline. Its inline modules keep the runtime responsibilities readable without
-spreading the work loop across a directory.
+`src/core/pipeline.rs` is intentionally limited to the protocol-neutral
+contracts, route metadata, shared context/effect helpers, and bounded queue
+driver. The active transaction bodies are split into named files so the n=1
+work boundaries stay readable.
 
 - the top-level of `pipeline.rs` owns `WorkStatus`, handler route metadata,
   handler sets, and `PipelineEngine`, the generic state machine that admits
@@ -178,7 +182,11 @@ spreading the work loop across a directory.
   boundary.
 - `context_store` owns persisted context edges, range-overlap matching,
   projection context assembly, and wake fanout.
-- `dispatch` owns intent queue claiming, handler input loading, retry
+- `project_fact.rs` owns one queued fact pipeline item: matched-context and due
+  time-range loading, routed projector execution, durable/ephemeral source
+  rules, rejection handling, context resolution, and the projection commit
+  boundary.
+- `handle_intent.rs` owns intent queue claiming, handler input loading, retry
   handling, and handler-output commit.
 - `commit_effects` owns shared effect validation and the ordered SQL commit
   of purges, admitted durable facts, ephemeral projection inputs, row

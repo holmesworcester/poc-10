@@ -9,7 +9,7 @@ use crate::core::facts::FactId;
 
 use super::encode;
 use super::fact::KeyWrapFact;
-use super::{decode, KEY_WRAP_ROW_SCHEMA};
+use super::{project::decode, KEY_WRAP_ROW_SCHEMA};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyWrapRow {

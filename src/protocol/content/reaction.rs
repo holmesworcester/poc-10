@@ -5,10 +5,7 @@
 //! publishing reaction rows. Keep reaction payload layout and admission here;
 //! message projection only provides the parent context that reactions require.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -21,7 +18,7 @@ pub const REACTION_ROWS: TableName = crate::protocol::registry::read_models::REA
 pub const TYPE_CONTENT_REACTION: u8 = encode::TYPE_CONTENT_REACTION;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentReactionFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 pub fn decode_any_fact(

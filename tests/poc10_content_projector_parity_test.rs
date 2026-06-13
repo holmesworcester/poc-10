@@ -486,27 +486,27 @@ fn content_fact_with_signer_key(
 fn sign_payload(private_key: [u8; 32], payload: Vec<u8>) -> Result<Vec<u8>, String> {
     match payload.first().copied() {
         Some(content::message::TYPE_CONTENT_MESSAGE) => {
-            let mut fact = content::message::decode::decode_fact(&payload)?;
+            let mut fact = content::message::project::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             content::message::encode::encode_fact(&fact)
         }
         Some(content::file::TYPE_CONTENT_FILE) => {
-            let mut fact = content::file::decode::decode_fact(&payload)?;
+            let mut fact = content::file::project::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             content::file::encode::encode_fact(&fact)
         }
         Some(content::reaction::TYPE_CONTENT_REACTION) => {
-            let mut fact = content::reaction::decode::decode_fact(&payload)?;
+            let mut fact = content::reaction::project::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             content::reaction::encode::encode_fact(&fact)
         }
         Some(content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION) => {
-            let mut fact = content::message_deletion::decode::decode_fact(&payload)?;
+            let mut fact = content::message_deletion::project::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             content::message_deletion::encode::encode_fact(&fact)
         }
         Some(content::file_deletion::TYPE_CONTENT_FILE_DELETION) => {
-            let mut fact = content::file_deletion::decode::decode_fact(&payload)?;
+            let mut fact = content::file_deletion::project::decode::decode_fact(&payload)?;
             fact.signer_public_key = crypto::ed25519_public_key(&private_key);
             content::file_deletion::encode::encode_fact(&fact)
         }

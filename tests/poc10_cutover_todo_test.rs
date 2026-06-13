@@ -690,9 +690,9 @@ fn cutover_imported_black_box_tests_have_no_extra_ignores() {
 #[test]
 fn cutover_auth_family_facade_delegates_to_named_fact_slices() {
     let root = root();
-    // Each auth key-material fact family is its own module: a `<family>.rs` manifest
-    // plus a `<family>/` directory that owns the family's byte codecs (decode.rs /
-    // encode.rs) and projector.
+    // Each auth key-material fact family is its own module: a `<family>.rs`
+    // manifest plus a `<family>/` directory that owns the family's canonical
+    // bytes (`encode.rs`) and projector-local decode/authenticate/adapt helpers.
     let required_families = [
         "recipient_key",
         "local_recipient_key",
@@ -708,11 +708,16 @@ fn cutover_auth_family_facade_delegates_to_named_fact_slices() {
         for path in [
             format!("src/protocol/auth/{family}.rs"),
             format!("src/protocol/auth/{family}/project.rs"),
-            format!("src/protocol/auth/{family}/decode.rs"),
             format!("src/protocol/auth/{family}/encode.rs"),
         ] {
             if !root.join(&path).exists() {
                 missing.push(path);
+            }
+        }
+        for removed in ["decode.rs", "authenticate.rs", "adapt.rs"] {
+            let path = format!("src/protocol/auth/{family}/{removed}");
+            if root.join(&path).exists() {
+                missing.push(format!("removed helper file still present: {path}"));
             }
         }
     }

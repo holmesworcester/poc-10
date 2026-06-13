@@ -14,8 +14,8 @@
 use crate::core::wire;
 use crate::core::wire::{FixedLayout, FixedSlot};
 
-use super::decode::validate_receive_path;
 use super::fact::{normalize_origin_addr_bytes, ConnectionFactReceipt, ORIGIN_ADDR_BYTES};
+use super::project::decode::validate_receive_path;
 
 pub const TYPE_CONNECTION_FACT_RECEIPT: u8 = 164;
 

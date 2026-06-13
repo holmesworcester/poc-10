@@ -18,7 +18,7 @@ use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecr
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 use super::queries::choose_connection_mode;
-use super::{authenticate as request_auth, author as request_create, encode};
+use super::{author as request_create, encode, project::authenticate as request_auth};
 
 pub const CONNECT_USAGE: &str = "connect ENDPOINT_ID_HEX ADDR";
 
@@ -251,16 +251,13 @@ mod tests {
         })
         .expect("create request");
 
-        assert_eq!(output.effects.facts.len(), 2);
+        assert_eq!(output.facts.len(), 2);
         assert_eq!(
             output.receipt.initiator_ephemeral_secret_id,
-            output.effects.facts[0].id
+            output.facts[0].id
         );
-        assert_eq!(output.receipt.request_id, output.effects.facts[1].id);
-        assert_eq!(
-            output.effects.facts[1].body()[0],
-            encode::TYPE_CONNECTION_REQUEST
-        );
+        assert_eq!(output.receipt.request_id, output.facts[1].id);
+        assert_eq!(output.facts[1].body()[0], encode::TYPE_CONNECTION_REQUEST);
     }
 
     #[test]
@@ -278,15 +275,12 @@ mod tests {
         })
         .expect("create request");
 
-        assert_eq!(output.effects.facts.len(), 3);
-        assert_eq!(
-            output.receipt.invite_secret_id,
-            Some(output.effects.facts[0].id)
-        );
+        assert_eq!(output.facts.len(), 3);
+        assert_eq!(output.receipt.invite_secret_id, Some(output.facts[0].id));
         assert_eq!(
             output.receipt.initiator_ephemeral_secret_id,
-            output.effects.facts[1].id
+            output.facts[1].id
         );
-        assert_eq!(output.receipt.request_id, output.effects.facts[2].id);
+        assert_eq!(output.receipt.request_id, output.facts[2].id);
     }
 }

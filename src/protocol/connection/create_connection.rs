@@ -121,7 +121,6 @@ mod tests {
 // The handler proves the queued dependency ids still name the expected facts,
 // then delegates DH handshake construction to `connection::create`.
 
-use crate::core::facts::FactScope;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
@@ -132,9 +131,10 @@ use crate::protocol::connection::connection::author::{
 };
 use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 use crate::protocol::connection::fact_receipt;
-use crate::protocol::connection::request::authenticate as request_auth;
-use crate::protocol::connection::request::decode as request_layout;
+use crate::protocol::connection::fact_receipt::project as receipt_project;
 use crate::protocol::connection::request::fact::{REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
+use crate::protocol::connection::request::project::authenticate as request_auth;
+use crate::protocol::connection::request::project::decode as request_layout;
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Default)]
@@ -169,9 +169,8 @@ impl IntentHandler for CreateConnectionHandler {
         let received = fact_receipt::decode_fact_payload(receive_fact.body()).map_err(|_| {
             HandlerError::fatal("create_connection receive context is not connection fact receipt")
         })?;
-        if receive_fact.scope != FactScope::Local {
-            return Err("create_connection receive context must be local".into());
-        }
+        receipt_project::validate_local_receipt_scope(receive_fact)
+            .map_err(|_| "create_connection receive context must be local")?;
         validate_fact_receipt(input.request_id, &request, &received)?;
 
         if endpoint.endpoint != request.to_endpoint
@@ -184,9 +183,8 @@ impl IntentHandler for CreateConnectionHandler {
                 if authority_fact.id != request.invite_secret_fact_id {
                     return Err("create_connection invite id does not match request".into());
                 }
-                if authority_fact.scope != FactScope::Local {
-                    return Err("create_connection invite context must be local".into());
-                }
+                request_auth::validate_invite_context_scope(authority_fact)
+                    .map_err(|_| "create_connection invite context must be local")?;
                 let invite = request_auth::invite_secret_from_context_fact(
                     authority_fact,
                     request.invite_secret_fact_id,
@@ -203,9 +201,8 @@ impl IntentHandler for CreateConnectionHandler {
                         "create_connection endpoint_shared id does not match request".into(),
                     );
                 }
-                if authority_fact.scope != FactScope::Global {
-                    return Err("create_connection endpoint_shared context must be global".into());
-                }
+                request_auth::validate_endpoint_shared_context_scope(authority_fact)
+                    .map_err(|_| "create_connection endpoint_shared context must be global")?;
                 let initiator_shared = endpoint_shared::decode_fact_payload(authority_fact.body())
                     .map_err(|_| {
                         HandlerError::fatal("create_connection context is not endpoint_shared")

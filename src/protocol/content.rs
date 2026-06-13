@@ -13,7 +13,7 @@
 //! modules; they should not update content read models directly.
 //!
 //! To change how content is encoded or admitted, start in the leaf module's
-//! `encode.rs`, `decode.rs`, `authenticate.rs`, `adapt.rs`, and `project.rs`.
+//! `encode.rs` and `project.rs` local decode/auth/adapt helpers.
 //! To change what the CLI shows, start in `queries.rs` and the leaf `cli.rs`.
 
 pub mod file;

@@ -1,11 +1,218 @@
-//! Poc-10 workspace projector.
-//!
-//! POLICY. A workspace fact is admitted iff:
-//!   1. STRUCTURAL. The outer fact is global and the workspace payload decodes.
-//!   2. CONTEXT. A retained local invite_accepted fact must select this
-//!      workspace and publish accepted-workspace context.
-//!   3. MATERIALIZE. Write the workspace row, publish workspace context, and
-//!      mark the workspace fact shareable.
+pub mod decode {
+    //! Byte decoding for workspace facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, field order, and
+    //! canonical name padding. Id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+    use crate::core::wire::FixedText;
+
+    use super::super::encode::{FACT_BYTES, PAYLOAD_BYTES, TYPE_WORKSPACE};
+    use super::super::fact::{
+        WorkspaceFact, WorkspaceName, WorkspacePublicKey, WORKSPACE_NAME_BYTES,
+    };
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<WorkspaceFact, String> {
+        wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
+        let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+        if tag != TYPE_WORKSPACE {
+            return Err("expected workspace fact".to_string());
+        }
+        decode_payload_fields(&bytes[1..])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode_payload(value: &[u8]) -> Result<WorkspaceFact, String> {
+        decode_payload_fields(value)
+    }
+
+    fn decode_payload_fields(bytes: &[u8]) -> Result<WorkspaceFact, String> {
+        wire::expect_len(bytes, PAYLOAD_BYTES).map_err(wire_err)?;
+        let created_at_ms = wire::take_u64be(&bytes[0..8]).map_err(wire_err)?;
+        let mut public_key: WorkspacePublicKey = [0; 32];
+        public_key.copy_from_slice(&bytes[8..40]);
+        let name = decode_name(&bytes[40..40 + WORKSPACE_NAME_BYTES])?;
+        Ok(WorkspaceFact {
+            created_at_ms,
+            public_key,
+            name,
+        })
+    }
+
+    fn decode_name(bytes: &[u8]) -> Result<WorkspaceName, String> {
+        let padded: [u8; WORKSPACE_NAME_BYTES] = bytes
+            .try_into()
+            .map_err(|_| "workspace name slot has wrong length".to_string())?;
+        FixedText::from_padded(padded).map_err(wire_err)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn fact() -> WorkspaceFact {
+            WorkspaceFact {
+                created_at_ms: 42,
+                public_key: [7; 32],
+                name: WorkspaceName::new("Engineering").expect("name"),
+            }
+        }
+
+        #[test]
+        fn workspace_fact_roundtrips_fixed_width() {
+            let encoded =
+                crate::protocol::auth::workspace::encode::encode_fact(&fact()).expect("encode");
+
+            assert_eq!(encoded.len(), FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn workspace_payload_roundtrips_fixed_width() {
+            let value =
+                crate::protocol::auth::workspace::encode::encode_payload(&fact()).expect("payload");
+            let decoded = decode_payload(&value).expect("decode payload");
+
+            assert_eq!(value.len(), PAYLOAD_BYTES);
+            assert_eq!(decoded.created_at_ms, 42);
+            assert_eq!(decoded.name, "Engineering");
+        }
+
+        #[test]
+        fn rejects_non_canonical_name_padding() {
+            let mut encoded =
+                crate::protocol::auth::workspace::encode::encode_fact(&fact()).expect("encode");
+            let name_start = 1 + 8 + 32;
+            encoded[name_start + "Engineering".len() + 1] = b'x';
+
+            assert!(decode_fact(&encoded).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Workspace authenticator.
+    //!
+    //! POLICY. Authenticating a `workspace` fact proves, over its canonical bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical workspace fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!
+    //! Admission scope (`Global`) is unsigned local metadata, not part of these
+    //! bytes, so the projector checks it. Local workspace admission requires
+    //! retained invite acceptance context and materialization stays in the projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::WorkspaceFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        workspace: WorkspaceFact,
+        _context: &ProjectionContext,
+    ) -> Result<WorkspaceFact, String> {
+        prove_decoded_workspace(fact, workspace)
+    }
+
+    fn prove_decoded_workspace(
+        fact: &Fact,
+        workspace: WorkspaceFact,
+    ) -> Result<WorkspaceFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(workspace)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::workspace::author::create_workspace;
+        use crate::protocol::auth::workspace::fact::WorkspaceFact;
+
+        const SIGNER_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            create_workspace(100, SIGNER_KEY, "acme").expect("workspace fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<WorkspaceFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Workspace semantic adapter.
+    //!
+    //! The current workspace wire shape is already the active semantic shape. This
+    //! identity adapter exists as a protocol-local conversion point for
+    //! future versioned fact shapes.
+
+    use super::super::fact::WorkspaceFact;
+
+    pub(crate) fn adapt(source: WorkspaceFact) -> Result<WorkspaceFact, String> {
+        Ok(source)
+    }
+}
+
+// Poc-10 workspace projector.
+//
+// POLICY. A workspace fact is admitted iff:
+//   1. STRUCTURAL. The outer fact is global and the workspace payload decodes.
+//   2. CONTEXT. A retained local invite_accepted fact must select this
+//      workspace and publish accepted-workspace context.
+//   3. MATERIALIZE. Write the workspace row, publish workspace context, and
+//      mark the workspace fact shareable.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -32,9 +239,9 @@ impl Projector for WorkspaceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

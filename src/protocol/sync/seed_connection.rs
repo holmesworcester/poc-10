@@ -262,8 +262,8 @@ mod tests {
         let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
 
         assert_eq!(output.facts.len(), 1);
-        let compare =
-            sync::compare::decode::decode_fact(&output.facts[0].bytes).expect("compare fact");
+        let compare = sync::compare::project::decode::decode_fact(&output.facts[0].bytes)
+            .expect("compare fact");
         assert_eq!(compare.connection_id, connection_id);
         assert_eq!(compare.range, sync::compare::fact::TimestampRange::ROOT);
         assert!(compare.response_requested);

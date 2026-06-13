@@ -5,10 +5,7 @@
 //! work to send the fact when this store has it. The requested payload remains
 //! validated by its owning fact family after receipt.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -51,5 +48,5 @@ pub fn sync_need_id_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncNeedIdFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

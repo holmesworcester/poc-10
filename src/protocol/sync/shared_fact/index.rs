@@ -1268,7 +1268,7 @@ fn connection_workspaces(
         return Ok(workspace_ids);
     };
     if let Some(invite_secret) = persisted_fact(store, &invite_secret_id)? {
-        let invite = auth::invite::decode::decode_fact(&invite_secret.bytes)
+        let invite = auth::invite::project::decode::decode_fact(&invite_secret.bytes)
             .map_err(|_| "connection invite context is not an invite secret".to_string())?;
         if let Some(workspace_id) = invite.workspace_id {
             workspace_ids.insert(workspace_id);
@@ -1317,14 +1317,17 @@ fn open_unified_connection_request_for_sync(
         return Ok(None);
     };
     for bytes in &request_bytes {
-        if let Ok(request) = connection::request::decode::open_fact(bytes, &local_endpoint) {
+        if let Ok(request) = connection::request::project::decode::open_fact(bytes, &local_endpoint)
+        {
             return Ok(Some(request));
         }
     }
 
     for secret in connection_ephemeral_secrets(store)? {
         for bytes in &request_bytes {
-            if let Ok(request) = connection::request::decode::open_fact_as_sender(bytes, &secret) {
+            if let Ok(request) =
+                connection::request::project::decode::open_fact_as_sender(bytes, &secret)
+            {
                 return Ok(Some(request));
             }
         }

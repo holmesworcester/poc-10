@@ -1,13 +1,218 @@
-//! Poc-10 invite-server projector.
-//!
-//! POLICY. An invite_server grant is admitted iff:
-//!   1. STRUCTURAL. The fact is global, signed, contains an invite_server
-//!      payload, and all selector fields are non-zero.
-//!   2. AUTHORITY. Bootstrap grants require signature evidence from the workspace root;
-//!      delegated grants require signature evidence from an endpoint_shared fact whose user owns
-//!      the named admin grant in the same workspace.
-//!   3. MATERIALIZE. Once the authority path validates, write the invite_server
-//!      row, publish exact/key offers, and mark the fact shareable.
+pub mod decode {
+    //! Byte decoding for invite-server facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{FACT_BYTES, TYPE_INVITE_SERVER};
+    use super::super::fact::InviteServerFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<InviteServerFact, String> {
+        wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
+        let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+        if tag != TYPE_INVITE_SERVER {
+            return Err("expected invite_server fact".to_string());
+        }
+        let created_at_ms = wire::take_u64be(&bytes[1..9]).map_err(wire_err)?;
+        let mut public_key = [0; 32];
+        public_key.copy_from_slice(&bytes[9..41]);
+        let mut workspace_id = [0; 32];
+        workspace_id.copy_from_slice(&bytes[41..73]);
+        let mut authority_fact_id = [0; 32];
+        authority_fact_id.copy_from_slice(&bytes[73..105]);
+        let mut signer_id = [0; 32];
+        signer_id.copy_from_slice(&bytes[105..137]);
+        let mut signer_public_key = [0; 32];
+        signer_public_key.copy_from_slice(&bytes[137..169]);
+        Ok(InviteServerFact {
+            created_at_ms,
+            public_key,
+            workspace_id,
+            authority_fact_id,
+            signer_id,
+            signer_public_key,
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::invite_server::encode::{encode_fact, FACT_BYTES};
+
+        fn fact() -> InviteServerFact {
+            InviteServerFact {
+                created_at_ms: 9,
+                public_key: [1; 32],
+                workspace_id: [2; 32],
+                authority_fact_id: [3; 32],
+                signer_id: [3; 32],
+                signer_public_key: [4; 32],
+            }
+        }
+
+        #[test]
+        fn invite_server_fact_roundtrips_fixed_width() {
+            let encoded = encode_fact(&fact()).expect("encode");
+            assert_eq!(encoded.len(), FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[0] = 0;
+            assert!(decode_fact(&encoded).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Invite-server authenticator.
+    //!
+    //! POLICY. Authenticating an `invite_server` fact proves, over its bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical invite-server fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!   4. FIELDS. The workspace, authority, and public-key selectors are non-zero.
+    //!
+    //! Scope (`Global`) and the authority path (bootstrap vs delegated grant) are
+    //! interpretation the projector owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::InviteServerFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        invite_server: InviteServerFact,
+        _context: &ProjectionContext,
+    ) -> Result<InviteServerFact, String> {
+        prove_decoded_invite_server(fact, invite_server)
+    }
+
+    fn prove_decoded_invite_server(
+        fact: &Fact,
+        invite_server: InviteServerFact,
+    ) -> Result<InviteServerFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        // 4. Non-zero selector fields.
+        if invite_server.workspace_id == [0; 32] {
+            return Err("invite_server fact has empty workspace_id".to_string());
+        }
+        if invite_server.authority_fact_id == [0; 32] {
+            return Err("invite_server fact has empty authority_fact_id".to_string());
+        }
+        if invite_server.public_key == [0; 32] {
+            return Err("invite_server fact has empty public_key".to_string());
+        }
+        Ok(invite_server)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::crypto;
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::invite_server::author::authored_invite_server_fact;
+        use crate::protocol::auth::invite_server::fact::InviteServerFact;
+
+        const SIGNER_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            authored_invite_server_fact(
+                100,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 32],
+                crypto::ed25519_public_key(&SIGNER_KEY),
+            )
+            .expect("authored invite_server fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<InviteServerFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Invite-server semantic adapter.
+    //!
+    //! The current invite_server wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::InviteServerFact;
+
+    pub(crate) fn adapt(source: InviteServerFact) -> Result<InviteServerFact, String> {
+        Ok(source)
+    }
+}
+
+// Poc-10 invite-server projector.
+//
+// POLICY. An invite_server grant is admitted iff:
+//   1. STRUCTURAL. The fact is global, signed, contains an invite_server
+//      payload, and all selector fields are non-zero.
+//   2. AUTHORITY. Bootstrap grants require signature evidence from the workspace root;
+//      delegated grants require signature evidence from an endpoint_shared fact whose user owns
+//      the named admin grant in the same workspace.
+//   3. MATERIALIZE. Once the authority path validates, write the invite_server
+//      row, publish exact/key offers, and mark the fact shareable.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -38,9 +243,9 @@ impl Projector for InviteServerProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

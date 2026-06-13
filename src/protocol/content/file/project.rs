@@ -1,13 +1,297 @@
-//! Content-file projector.
-//!
-//! POLICY. A content_file is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped, signed, has valid descriptor
-//!      fields, and contains a content_file payload.
-//!   2. CONTEXT. Projection waits for signer, parent content message, deletion,
-//!      parent deletion, and author context; deletion context removes the
-//!      descriptor row and purges this file fact.
-//!   3. MATERIALIZE. Live files publish file/exact-fact offers, write the
-//!      descriptor row, and share the fact. File bytes remain slice facts.
+pub mod decode {
+    //! Byte decoding for content-file facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{CONTENT_FILE_BYTES, TYPE_CONTENT_FILE};
+    use super::super::fact::{ContentFileFact, SEALED_METADATA_BYTES};
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileFact, String> {
+        let mut reader = wire::Reader::new(bytes);
+        reader.expect_len(CONTENT_FILE_BYTES).map_err(wire_err)?;
+        let tag = reader.u8().map_err(wire_err)?;
+        if tag != TYPE_CONTENT_FILE {
+            return Err("expected content file fact".to_string());
+        }
+        let workspace_id = reader.array().map_err(wire_err)?;
+        let created_at_ms = reader.u64be().map_err(wire_err)?;
+        let message_id = reader.array().map_err(wire_err)?;
+        let author_user_id = reader.array().map_err(wire_err)?;
+        let signer_id = reader.array().map_err(wire_err)?;
+        let signer_public_key = reader.array().map_err(wire_err)?;
+        let file_id = reader.array().map_err(wire_err)?;
+        let blob_bytes = reader.u64be().map_err(wire_err)?;
+        let total_slices = reader.u32be().map_err(wire_err)?;
+        let slice_bytes = reader.u32be().map_err(wire_err)?;
+        let root_hash = reader.array().map_err(wire_err)?;
+        let sealed_metadata = reader
+            .fixed_slot_value::<SEALED_METADATA_BYTES>()
+            .map_err(wire_err)?;
+        reader.finish().map_err(wire_err)?;
+        Ok(ContentFileFact {
+            workspace_id,
+            created_at_ms,
+            message_id,
+            author_user_id,
+            signer_id,
+            signer_public_key,
+            file_id,
+            blob_bytes,
+            total_slices,
+            slice_bytes,
+            root_hash,
+            sealed_metadata,
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::content::file::encode::{
+            encode_fact, CONTENT_FILE_BYTES, TYPE_CONTENT_FILE,
+        };
+        use crate::protocol::content::file::fact::FILE_ROOT_HASH_BYTES;
+
+        fn fact() -> ContentFileFact {
+            ContentFileFact {
+                workspace_id: [1; 32],
+                created_at_ms: 12345,
+                message_id: [2; 32],
+                author_user_id: [3; 32],
+                signer_id: [9; 32],
+                signer_public_key: [10; 32],
+                file_id: [4; 32],
+                blob_bytes: 1_048_576,
+                total_slices: 4,
+                slice_bytes: 262_144,
+                root_hash: [5; FILE_ROOT_HASH_BYTES],
+                sealed_metadata: crate::protocol::content::file::fact::SealedMetadata::new(
+                    b"sealed-filename-and-mime",
+                )
+                .expect("metadata"),
+            }
+        }
+
+        #[test]
+        fn content_file_roundtrips_with_sealed_metadata() {
+            let encoded = encode_fact(&fact()).expect("encode");
+            assert_eq!(encoded.len(), CONTENT_FILE_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[0] = TYPE_CONTENT_FILE.wrapping_add(1);
+            assert!(decode_fact(&encoded).is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_length() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded.pop();
+            assert!(decode_fact(&encoded).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Content-file authenticator.
+    //!
+    //! POLICY. Authenticating a `content_file` fact proves, over its canonical bytes
+    //! alone:
+    //!   1. LAYOUT. The bytes decode to a canonical content-file descriptor.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!   4. FIELDS. The selector ids are non-zero and the blob/slice descriptor is
+    //!      internally consistent: size within the limit, slice count and budget
+    //!      matching the fixed slot and the blob-bytes ceiling.
+    //!
+    //! Admission scope is unsigned local metadata, not part of these bytes, so the
+    //! workspace-scope check is interpretation the projector owns. The parent
+    //! message, deletion gates, and author are proven from other facts, also in the
+    //! projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::MAX_FILE_BYTES;
+    use crate::protocol::content::file_slice::fact::FILE_SLICE_PLAINTEXT_BYTES;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        file: super::super::fact::ContentFileFact,
+        _context: &ProjectionContext,
+    ) -> Result<super::super::fact::ContentFileFact, String> {
+        prove_decoded_file(fact, file)
+    }
+
+    fn prove_decoded_file(
+        fact: &Fact,
+        file: super::super::fact::ContentFileFact,
+    ) -> Result<super::super::fact::ContentFileFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        // 4. Intrinsic descriptor fields.
+        validate_file_fields(&file)?;
+        Ok(file)
+    }
+
+    pub(super) fn validate_file_fields(
+        file: &super::super::fact::ContentFileFact,
+    ) -> Result<(), String> {
+        validate_id("file workspace_id", &file.workspace_id)?;
+        validate_id("file message_id", &file.message_id)?;
+        validate_id("file author_user_id", &file.author_user_id)?;
+        validate_id("file file_id", &file.file_id)?;
+        if file.blob_bytes > MAX_FILE_BYTES {
+            return Err("file size exceeds the 10 GiB limit".to_string());
+        }
+        if file.blob_bytes == 0 {
+            if file.total_slices != 0 {
+                return Err("zero-byte file must declare zero slices".to_string());
+            }
+            return Ok(());
+        }
+        if file.total_slices == 0 {
+            return Err("non-empty file must declare at least one slice".to_string());
+        }
+        if file.slice_bytes == 0 {
+            return Err("non-empty file must declare a slice budget".to_string());
+        }
+        if file.slice_bytes != FILE_SLICE_PLAINTEXT_BYTES as u32 {
+            return Err("file slice budget must match the fixed file-slice slot".to_string());
+        }
+        let expected: u32 = file
+            .blob_bytes
+            .div_ceil(file.slice_bytes as u64)
+            .try_into()
+            .map_err(|_| "slice count overflows u32".to_string())?;
+        if file.total_slices != expected {
+            return Err(format!(
+                "total_slices {} does not match blob_bytes / slice_bytes ceiling {}",
+                file.total_slices, expected
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_id(name: &str, id: &[u8; 32]) -> Result<(), String> {
+        if id.iter().all(|byte| *byte == 0) {
+            return Err(format!("{name} cannot be empty"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::content::file::author::authored_file_fact;
+        use crate::protocol::content::file::fact::{ContentFileFact, SealedMetadata};
+
+        const PRIVATE_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            authored_file_fact(
+                [1; 32],
+                100,
+                [2; 32],
+                [3; 32],
+                [4; 32],
+                [5; 32],
+                1_048_576,
+                4,
+                262_144,
+                [6; 32],
+                SealedMetadata::new(b"sealed-filename-and-mime").expect("sealed metadata"),
+                PRIVATE_KEY,
+            )
+            .expect("authored content file fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<ContentFileFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Content-file semantic adapter.
+    //!
+    //! The current file wire shape is already the active semantic shape. This
+    //! identity adapter keeps the protocol-local conversion point available for future versioned
+    //! facts.
+
+    use super::super::fact::ContentFileFact;
+
+    pub(crate) fn adapt(source: ContentFileFact) -> Result<ContentFileFact, String> {
+        Ok(source)
+    }
+}
+
+// Content-file projector.
+//
+// POLICY. A content_file is admitted iff:
+//   1. STRUCTURAL. The fact is workspace-scoped, signed, has valid descriptor
+//      fields, and contains a content_file payload.
+//   2. CONTEXT. Projection waits for signer, parent content message, deletion,
+//      parent deletion, and author context; deletion context removes the
+//      descriptor row and purges this file fact.
+//   3. MATERIALIZE. Live files publish file/exact-fact offers, write the
+//      descriptor row, and share the fact. File bytes remain slice facts.
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::Value;
@@ -61,9 +345,9 @@ impl Projector for ContentFileProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }
@@ -447,7 +731,7 @@ mod tests {
         let mut file = valid_file();
         file.slice_bytes = 1_024;
 
-        let err = super::super::authenticate::validate_file_fields(&file)
+        let err = super::authenticate::validate_file_fields(&file)
             .expect_err("reject non-standard slice budget");
 
         assert!(

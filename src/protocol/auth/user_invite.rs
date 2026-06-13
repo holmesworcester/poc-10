@@ -5,11 +5,8 @@
 //! flows. This module owns user-invite bytes and admission; device invites and
 //! accepted membership are separate fact families.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -59,5 +56,5 @@ pub fn user_invite_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::UserInviteFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

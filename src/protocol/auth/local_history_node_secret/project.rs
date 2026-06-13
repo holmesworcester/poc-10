@@ -1,14 +1,223 @@
-//! Local history-node secret projector plus the secret-coverage scheme.
-//!
-//! POLICY. A local history-node secret is admitted iff it is local-scoped, ties
-//! cleanly to its frontier and source chain, and obeys parent/child addressing.
-//! Projection publishes wrap-source and secret-coverage offers while live, and
-//! self-purges when retirement context names this node. A tombstoning node
-//! publishes retirement context for the source path node it replaces.
-//!
-//! This module also owns the secret-coverage coordinate scheme: core only sees
-//! byte ranges, so the time/leaf-prefix layout for encrypted-message secret
-//! coverage lives here. Content-message projection consumes these helpers.
+pub mod decode {
+    //! Byte decoding for local history-node secret facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order, then
+    //! re-runs the canonical encode to reject non-canonical coordinates. Id checks
+    //! live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{
+        encode_local_history_node_secret, LOCAL_HISTORY_NODE_SECRET_BYTES,
+        TYPE_LOCAL_HISTORY_NODE_SECRET,
+    };
+    use super::super::fact::LocalHistoryNodeSecretFact;
+
+    pub fn decode_local_history_node_secret(
+        bytes: &[u8],
+    ) -> Result<LocalHistoryNodeSecretFact, String> {
+        wire::expect_len(bytes, LOCAL_HISTORY_NODE_SECRET_BYTES).map_err(wire_err)?;
+        if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_LOCAL_HISTORY_NODE_SECRET {
+            return Err("expected local history node secret".to_string());
+        }
+        let fact = LocalHistoryNodeSecretFact {
+            workspace_id: bytes[1..33].try_into().unwrap(),
+            frontier_id: bytes[33..65].try_into().unwrap(),
+            owner_endpoint_id: bytes[65..97].try_into().unwrap(),
+            source_secret_id: bytes[97..129].try_into().unwrap(),
+            range_start: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
+            range_width: wire::take_u64be(&bytes[137..145]).map_err(wire_err)?,
+            bit_depth: wire::take_u16be(&bytes[145..147]).map_err(wire_err)?,
+            fact_id_prefix: bytes[147..179].try_into().unwrap(),
+            tombstone_node_id: bytes[179..211].try_into().unwrap(),
+            node_secret: bytes[211..243].try_into().unwrap(),
+        };
+        encode_local_history_node_secret(&fact)?;
+        Ok(fact)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
+        use crate::protocol::auth::local_history_node_secret::encode::{
+            encode_local_history_node_secret, LOCAL_HISTORY_NODE_SECRET_BYTES,
+        };
+
+        fn sample_fact() -> LocalHistoryNodeSecretFact {
+            LocalHistoryNodeSecretFact {
+                workspace_id: [1; 32],
+                frontier_id: [2; 32],
+                owner_endpoint_id: [3; 32],
+                source_secret_id: [4; 32],
+                range_start: 0,
+                range_width: 1,
+                bit_depth: 256,
+                fact_id_prefix: [5; 32],
+                tombstone_node_id: [6; 32],
+                node_secret: [7; XCHACHA20_POLY1305_KEY_BYTES],
+            }
+        }
+
+        #[test]
+        fn local_history_node_secret_roundtrips_fixed_width() {
+            let fact = sample_fact();
+
+            let encoded =
+                encode_local_history_node_secret(&fact).expect("encode local history node secret");
+
+            assert_eq!(encoded.len(), LOCAL_HISTORY_NODE_SECRET_BYTES);
+            assert_eq!(
+                decode_local_history_node_secret(&encoded)
+                    .expect("decode local history node secret"),
+                fact
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Local history-node secret authenticator.
+    //!
+    //! POLICY. Authenticating a `local_history_node_secret` fact proves, over its
+    //! bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical local history-node secret fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!
+    //! These are local-only secrets, never signed envelopes, so there is no
+    //! fact-boundary signature. Admission scope (`Local`), the frontier and source
+    //! chain, parent/child addressing, retirement, and materialization are all
+    //! interpretation the projector owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::LocalHistoryNodeSecretFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        node: LocalHistoryNodeSecretFact,
+        _context: &ProjectionContext,
+    ) -> Result<LocalHistoryNodeSecretFact, String> {
+        prove_decoded_local_history_node_secret(fact, node)
+    }
+
+    fn prove_decoded_local_history_node_secret(
+        fact: &Fact,
+        node: LocalHistoryNodeSecretFact,
+    ) -> Result<LocalHistoryNodeSecretFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(node)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::crypto::XCHACHA20_POLY1305_KEY_BYTES;
+        use crate::core::facts::{Fact, FactScope};
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::local_history_node_secret::encode;
+        use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
+
+        fn canonical_fact() -> Fact {
+            let node = LocalHistoryNodeSecretFact {
+                workspace_id: [1; 32],
+                frontier_id: [2; 32],
+                owner_endpoint_id: [3; 32],
+                source_secret_id: [4; 32],
+                range_start: 0,
+                range_width: 1,
+                bit_depth: 256,
+                fact_id_prefix: [5; 32],
+                tombstone_node_id: [6; 32],
+                node_secret: [7; XCHACHA20_POLY1305_KEY_BYTES],
+            };
+            let bytes = encode::encode_local_history_node_secret(&node)
+                .expect("encode local history node secret");
+            Fact::new(FactScope::Local, 123, bytes)
+        }
+
+        fn authenticate(fact: &Fact) -> Result<LocalHistoryNodeSecretFact, String> {
+            let decoded = super::super::decode::decode_local_history_node_secret(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Local history-node secret semantic adapter.
+    //!
+    //! The current local_history_node_secret wire shape is already the active
+    //! semantic shape. This identity adapter keeps the staged route explicit and
+    //! gives future versioned facts a dedicated conversion point.
+
+    use super::super::fact::LocalHistoryNodeSecretFact;
+
+    pub(crate) fn adapt(
+        source: LocalHistoryNodeSecretFact,
+    ) -> Result<LocalHistoryNodeSecretFact, String> {
+        Ok(source)
+    }
+}
+
+// Local history-node secret projector plus the secret-coverage scheme.
+//
+// POLICY. A local history-node secret is admitted iff it is local-scoped, ties
+// cleanly to its frontier and source chain, and obeys parent/child addressing.
+// Projection publishes wrap-source and secret-coverage offers while live, and
+// self-purges when retirement context names this node. A tombstoning node
+// publishes retirement context for the source path node it replaces.
+//
+// This module also owns the secret-coverage coordinate scheme: core only sees
+// byte ranges, so the time/leaf-prefix layout for encrypted-message secret
+// coverage lives here. Content-message projection consumes these helpers.
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -230,9 +439,9 @@ impl Projector for LocalHistoryNodeSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_local_history_node_secret(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_local_history_node_secret(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

@@ -86,7 +86,7 @@ fn decode_maintain_connections(intent: &Intent) -> Result<MaintainConnections, S
         .fixed_slot::<ADDR_BLOCK_BYTES>()
         .map_err(payload_error)?;
     reader.finish().map_err(payload_error)?;
-    let local_addr = request::decode::decode_optional_addr(
+    let local_addr = request::project::decode::decode_optional_addr(
         addr_block
             .as_slice()
             .try_into()
@@ -291,8 +291,9 @@ mod tests {
         );
         let ephemeral =
             ephemeral_secret::decode_fact_payload(effects.facts[0].body()).expect("ephemeral");
-        let request = request::decode::open_fact_as_sender(effects.facts[1].body(), &ephemeral)
-            .expect("open request");
+        let request =
+            request::project::decode::open_fact_as_sender(effects.facts[1].body(), &ephemeral)
+                .expect("open request");
         assert_eq!(request.from_endpoint, local.endpoint);
         assert_eq!(request.to_endpoint, accepted.bootstrap_endpoint_id);
         assert_eq!(request.dialed_addr, Some(accepted.bootstrap_addr));

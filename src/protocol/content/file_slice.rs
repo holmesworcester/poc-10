@@ -6,10 +6,7 @@
 //! row materialization; higher-level file selection and output live in
 //! `content::file` queries and CLI helpers.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -21,5 +18,5 @@ pub const FILE_SLICE_ROWS: crate::core::store::TableName =
     crate::protocol::registry::read_models::FILE_SLICE_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileSliceFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

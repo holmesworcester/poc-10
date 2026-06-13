@@ -12,6 +12,7 @@ use crate::core::crypto::Ed25519Signature;
 use crate::core::facts::FactId;
 
 pub type EndpointId = [u8; 32];
+pub type ConnectionAddr = SocketAddr;
 
 pub const REQUEST_MODE_BOOTSTRAP: u8 = 1;
 pub const REQUEST_MODE_MEMBERSHIP: u8 = 2;
@@ -23,9 +24,9 @@ pub struct ConnectionRequestFact {
     pub to_endpoint: EndpointId,
     pub nonce: [u8; 32],
     /// Address the initiator actually dialed for this connection attempt.
-    pub dialed_addr: Option<SocketAddr>,
+    pub dialed_addr: Option<ConnectionAddr>,
     /// Address the initiator can receive the response on for this connection.
-    pub initiator_addr: Option<SocketAddr>,
+    pub initiator_addr: Option<ConnectionAddr>,
     /// Bootstrap-mode invite fact id. Zero in membership mode.
     pub invite_fact_id: FactId,
     /// Bootstrap-mode invite bootstrap hash. Zero in membership mode.

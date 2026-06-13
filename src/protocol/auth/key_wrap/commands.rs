@@ -16,16 +16,16 @@ use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
-use crate::protocol::auth::recipient_key::decode as recipient_key_layout;
-use crate::protocol::auth::removal_frontier::decode as removal_frontier_decode;
+use crate::protocol::auth::recipient_key::project::decode as recipient_key_layout;
+use crate::protocol::auth::removal_frontier::project::decode as removal_frontier_decode;
 use crate::protocol::content;
 use rusqlite::params;
 use std::collections::BTreeSet;
 
 use super::encode;
-use crate::protocol::auth::local_history_node_secret::decode as local_history_layout_decode;
-use crate::protocol::auth::local_key_secret::decode as local_key_secret_layout_decode;
-use crate::protocol::auth::local_recipient_key::decode as local_recipient_layout_decode;
+use crate::protocol::auth::local_history_node_secret::project::decode as local_history_layout_decode;
+use crate::protocol::auth::local_key_secret::project::decode as local_key_secret_layout_decode;
+use crate::protocol::auth::local_recipient_key::project::decode as local_recipient_layout_decode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateRecipientKey {

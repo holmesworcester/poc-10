@@ -6,10 +6,7 @@
 //! fact-id sends when a range is small enough. This module owns the negentropy
 //! planning surface for sync.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -62,5 +59,5 @@ pub fn sync_compare_row(fact_id: FactId, fact: &fact::SyncCompareFact) -> Result
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncCompareFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

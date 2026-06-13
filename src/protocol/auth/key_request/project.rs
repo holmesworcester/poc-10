@@ -1,9 +1,198 @@
-//! Key request projector.
-//!
-//! POLICY. A key request is admitted iff its scope matches the workspace.
-//! Projection validates requester/responder context, finds eligible wrap
-//! sources, and emits create-key-wrap intents once local signer material is
-//! available.
+pub mod decode {
+    //! Byte decoding for key request facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{KEY_REQUEST_BYTES, TYPE_KEY_REQUEST};
+    use super::super::fact::KeyRequestFact;
+
+    pub fn decode_key_request(bytes: &[u8]) -> Result<KeyRequestFact, String> {
+        wire::expect_len(bytes, KEY_REQUEST_BYTES).map_err(wire_err)?;
+        if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_KEY_REQUEST {
+            return Err("expected key request".to_string());
+        }
+        Ok(KeyRequestFact {
+            workspace_id: bytes[1..33].try_into().unwrap(),
+            requester_endpoint_id: bytes[33..65].try_into().unwrap(),
+            responder_endpoint_id: bytes[65..97].try_into().unwrap(),
+            frontier_id: bytes[97..129].try_into().unwrap(),
+            recipient_key_id: bytes[129..161].try_into().unwrap(),
+            created_at_ms: wire::take_u64be(&bytes[161..169]).map_err(wire_err)?,
+            signer_public_key: bytes[169..201].try_into().unwrap(),
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::key_request::encode::{encode_key_request, KEY_REQUEST_BYTES};
+
+        fn sample_fact() -> KeyRequestFact {
+            KeyRequestFact {
+                workspace_id: [1; 32],
+                requester_endpoint_id: [2; 32],
+                responder_endpoint_id: [3; 32],
+                frontier_id: [4; 32],
+                recipient_key_id: [5; 32],
+                created_at_ms: 123,
+                signer_public_key: [6; 32],
+            }
+        }
+
+        #[test]
+        fn key_request_roundtrips_fixed_width() {
+            let fact = sample_fact();
+
+            let encoded = encode_key_request(&fact).expect("encode key request");
+
+            assert_eq!(encoded.len(), KEY_REQUEST_BYTES);
+            assert_eq!(
+                decode_key_request(&encoded).expect("decode key request"),
+                fact
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Key-request authenticator.
+    //!
+    //! POLICY. Authenticating a `key_request` fact proves, over its bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical key-request fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!
+    //! Admission scope (the requester's workspace) is interpretation the projector
+    //! owns, and requester/responder relationships are proven from other facts in
+    //! the projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::KeyRequestFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        request: KeyRequestFact,
+        _context: &ProjectionContext,
+    ) -> Result<KeyRequestFact, String> {
+        prove_decoded_key_request(fact, request)
+    }
+
+    fn prove_decoded_key_request(
+        fact: &Fact,
+        request: KeyRequestFact,
+    ) -> Result<KeyRequestFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(request)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::crypto;
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::key_request::encode;
+        use crate::protocol::auth::key_request::fact::KeyRequestFact;
+        use crate::protocol::auth::workspace;
+
+        const SIGNER_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            let private_key = SIGNER_KEY;
+            let workspace_id = [1; 32];
+            let request = KeyRequestFact {
+                workspace_id,
+                requester_endpoint_id: [2; 32],
+                responder_endpoint_id: [3; 32],
+                frontier_id: [4; 32],
+                recipient_key_id: [5; 32],
+                created_at_ms: 100,
+                signer_public_key: crypto::ed25519_public_key(&private_key),
+            };
+            let bytes = encode::encode_key_request(&request).expect("encode key request");
+            Fact::new(workspace::scope(workspace_id), request.created_at_ms, bytes)
+        }
+
+        fn authenticate(fact: &Fact) -> Result<KeyRequestFact, String> {
+            let decoded = super::super::decode::decode_key_request(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Key-request semantic adapter.
+    //!
+    //! The current key_request wire shape is already the active semantic shape. This
+    //! identity adapter keeps the protocol-local conversion point available for future versioned
+    //! facts.
+
+    use super::super::fact::KeyRequestFact;
+
+    pub(crate) fn adapt(source: KeyRequestFact) -> Result<KeyRequestFact, String> {
+        Ok(source)
+    }
+}
+
+// Key request projector.
+//
+// POLICY. A key request is admitted iff its scope matches the workspace.
+// Projection validates requester/responder context, finds eligible wrap
+// sources, and emits create-key-wrap intents once local signer material is
+// available.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::Fact;
@@ -40,9 +229,9 @@ impl Projector for KeyRequestProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_key_request(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_key_request(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

@@ -10,21 +10,21 @@ use crate::core::facts::{Fact, FactScope};
 use crate::protocol::auth::create_key_wrap::CreateKeyWrapIntent;
 use crate::protocol::auth::local_history_node_secret::fact::LocalHistoryNodeSecretFact;
 use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
-use crate::protocol::auth::local_recipient_key::decode as local_recipient_layout;
 use crate::protocol::auth::local_recipient_key::fact::LocalRecipientKeyFact;
-use crate::protocol::auth::local_signer_secret::decode as local_signer_secret_layout;
-use crate::protocol::auth::recipient_key::decode as recipient_key_layout;
+use crate::protocol::auth::local_recipient_key::project::decode as local_recipient_layout;
+use crate::protocol::auth::local_signer_secret::project::decode as local_signer_secret_layout;
 use crate::protocol::auth::recipient_key::fact::RecipientKeyFact;
-use crate::protocol::auth::removal_frontier::decode as removal_frontier_decode;
+use crate::protocol::auth::recipient_key::project::decode as recipient_key_layout;
+use crate::protocol::auth::removal_frontier::project::decode as removal_frontier_decode;
 use crate::protocol::auth::unwrap_key_wrap::UnwrapKeyWrapIntent;
 
 use super::fact::{KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES};
 use super::project::WrapSourceKind;
-use super::{decode, encode};
-use crate::protocol::auth::local_history_node_secret::decode as local_history_layout_decode;
+use super::{encode, project::decode};
 use crate::protocol::auth::local_history_node_secret::encode as local_history_layout_encode;
-use crate::protocol::auth::local_key_secret::decode as local_key_secret_layout_decode;
+use crate::protocol::auth::local_history_node_secret::project::decode as local_history_layout_decode;
 use crate::protocol::auth::local_key_secret::encode as local_key_secret_layout_encode;
+use crate::protocol::auth::local_key_secret::project::decode as local_key_secret_layout_decode;
 
 pub const KEY_WRAP_PURPOSE: &[u8] = b"topo key wrap v1";
 

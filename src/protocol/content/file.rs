@@ -6,10 +6,7 @@
 //! signer, deletion, and auth key-material context before publishing file rows used by
 //! file queries and save flows.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -23,7 +20,7 @@ pub(crate) const FILE_KEY_COLUMNS: &[&str] =
     crate::protocol::registry::read_models::CONTENT_FILES.key_columns;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentFileFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<fact::ContentFileFact, String> {

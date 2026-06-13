@@ -168,14 +168,19 @@ fn build_message_facts_from_authoring(
 }
 
 fn authenticate_content_message_fact(fact: &Fact) -> Result<(), String> {
-    let decoded = super::decode::decode_fact(fact.body())?;
-    super::authenticate::authenticate(fact, decoded, &ProjectionContext::default()).map(|_| ())
+    let decoded = super::project::decode::decode_fact(fact.body())?;
+    super::project::authenticate::authenticate(fact, decoded, &ProjectionContext::default())
+        .map(|_| ())
 }
 
 fn authenticate_signature_fact(fact: &Fact) -> Result<(), String> {
-    let decoded = auth::signature::decode::decode_fact(fact.body())?;
-    auth::signature::authenticate::authenticate(fact, decoded, &ProjectionContext::default())
-        .map(|_| ())
+    let decoded = auth::signature::project::decode::decode_fact(fact.body())?;
+    auth::signature::project::authenticate::authenticate(
+        fact,
+        decoded,
+        &ProjectionContext::default(),
+    )
+    .map(|_| ())
 }
 
 fn deterministic_generated_text(
@@ -291,7 +296,7 @@ fn latest_local_key_secret(
     runtime
         .facts()
         .filter_map(|fact| {
-            auth::local_key_secret::decode::decode_local_key_secret(fact.body())
+            auth::local_key_secret::project::decode::decode_local_key_secret(fact.body())
                 .ok()
                 .filter(|secret| secret.workspace_id == workspace_id)
         })
@@ -360,7 +365,7 @@ impl RetentionMessageView for MessageRetentionFact {
 }
 
 pub fn decode_message_fact(fact: &Fact) -> Result<MessageRetentionFact, String> {
-    let message = super::decode::decode_fact(fact.body())?;
+    let message = super::project::decode::decode_fact(fact.body())?;
     content_message_retention(message)
 }
 
@@ -450,21 +455,25 @@ mod tests {
 
         assert_eq!(vault.signing_calls.get(), 1);
         assert_eq!(vault.encryption_calls.get(), 1);
-        assert_eq!(output.effects.facts.len(), 8);
-        for (index, facts) in output.effects.facts.chunks_exact(2).enumerate() {
+        assert_eq!(output.facts.len(), 8);
+        for (index, facts) in output.facts.chunks_exact(2).enumerate() {
             let message_fact = &facts[0];
             let signature_fact = &facts[1];
             assert_eq!(message_fact.timestamp, 10_000 + index as u64);
             assert_eq!(signature_fact.timestamp, message_fact.timestamp);
-            let message =
-                crate::protocol::content::message::decode::decode_fact(message_fact.body())
-                    .expect("decode message");
-            let signature =
-                crate::protocol::auth::signature::decode::decode_fact(signature_fact.body())
-                    .expect("decode signature");
+            let message = crate::protocol::content::message::project::decode::decode_fact(
+                message_fact.body(),
+            )
+            .expect("decode message");
+            let signature = crate::protocol::auth::signature::project::decode::decode_fact(
+                signature_fact.body(),
+            )
+            .expect("decode signature");
             assert_eq!(signature.target_fact_id, message_fact.id);
-            crate::protocol::auth::signature::authenticate::verify_signature(&signature)
-                .expect("valid signature evidence");
+            crate::protocol::auth::signature::project::authenticate::prove_signature_evidence(
+                &signature,
+            )
+            .expect("valid signature evidence");
             assert_eq!(message.workspace_id, workspace_id);
             assert_eq!(message.author_user_id, vault.signer_id);
             assert_eq!(message.signer_id, vault.signer_id);

@@ -14,7 +14,7 @@ use crate::core::crypto::{
     XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,
 };
 use crate::core::wire;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
 
@@ -72,6 +72,39 @@ pub fn encode_optional_addr(addr: Option<SocketAddr>) -> Result<[u8; ADDR_BLOCK_
         },
     }
     Ok(out)
+}
+
+pub fn decode_optional_addr(bytes: &[u8; ADDR_BLOCK_BYTES]) -> Result<Option<SocketAddr>, String> {
+    let family = bytes[0];
+    let raw = &bytes[1..17];
+    let port = wire::take_u16be(&bytes[17..19]).map_err(addr_wire_err)?;
+    match family {
+        ADDR_FAMILY_NONE => {
+            if raw.iter().any(|byte| *byte != 0) || port != 0 {
+                return Err("absent connection addr must zero its address bytes".to_string());
+            }
+            Ok(None)
+        }
+        ADDR_FAMILY_V4 => {
+            if raw[4..].iter().any(|byte| *byte != 0) {
+                return Err("ipv4 connection addr must zero its trailing bytes".to_string());
+            }
+            let octets = [raw[0], raw[1], raw[2], raw[3]];
+            Ok(Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::from(octets)),
+                port,
+            )))
+        }
+        ADDR_FAMILY_V6 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(raw);
+            Ok(Some(SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::from(octets)),
+                port,
+            )))
+        }
+        other => Err(format!("unknown connection addr family {other}")),
+    }
 }
 
 pub fn encode_fact(fact: &ConnectionRequestFact) -> Result<Vec<u8>, String> {

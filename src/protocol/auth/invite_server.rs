@@ -5,10 +5,7 @@
 //! context, and exposed as invite-server rows plus context for connection
 //! handshakes. Keep server advertisement policy here, not in network send handlers.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -61,5 +58,5 @@ pub fn invite_server_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteServerFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

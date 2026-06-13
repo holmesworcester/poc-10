@@ -27,19 +27,17 @@ A non-trivial projector should make three boundaries obvious:
 3. **MATERIALIZE** - read-model rows, context offers, time wakes, intents, and
    self-purge.
 
-The role files remain useful even without core-owned stages:
+The role boundaries remain useful even without core-owned stages:
 
 - `encode.rs` owns canonical bytes.
-- `decode.rs` parses bytes and rejects wrong tags, lengths, padding, enum
-  values, and malformed fixed slots.
-- `authenticate.rs` proves fact id, signature or container proof, and intrinsic
-  single-fact rules. When proof needs context, it exposes protocol-local helper
-  functions that the projector calls after asking for precise context.
-- `adapt.rs` maps source values to the active semantic shape. It is an identity
-  helper until a version split needs real conversion.
-- `project.rs` calls those helpers directly and owns scope, context,
-  authority, rows, offers, needs, time wakes, emitted facts, intents, deletion,
-  retention, and purge.
+- `project.rs` owns projector-local `decode`, `authenticate`, and `adapt`
+  modules. `decode` parses bytes and rejects wrong tags, lengths, padding, enum
+  values, and malformed fixed slots. `authenticate` proves fact id, signature or
+  container proof, and intrinsic single-fact rules. `adapt` maps source values to
+  the active semantic shape and is an identity helper until a version split needs
+  real conversion.
+- `project.rs` also owns scope, context, authority, rows, offers, needs, time
+  wakes, emitted facts, intents, deletion, retention, and purge.
 - `author.rs` owns local construction: assembly, signing, encryption,
   deterministic nonce use, and calls to `encode.rs`.
 - `commands.rs` owns runtime gathering and command receipts. It gathers the
@@ -179,9 +177,9 @@ Add or update tests while converting:
 
 Success means all of the following are true:
 
-- every routed fact family has reviewable `decode.rs`, `authenticate.rs`,
-  `adapt.rs`, and `project.rs` role files, plus `encode.rs` / `author.rs` where
-  facts are locally authored;
+- every routed fact family has reviewable projector-local `decode`,
+  `authenticate`, and `adapt` modules inside `project.rs`, plus `encode.rs` /
+  `author.rs` where facts are locally authored;
 - every route points to a projector and exposes no decode/auth/adapt metadata to
   core route declarations;
 - projectors call plain protocol-local helpers directly and do not hide the old

@@ -54,17 +54,19 @@ in `src/core` or `src/protocol`.
   matchers, projection contracts, intents, handler dispatch, store, wire,
   crypto, network queues, TCP, clock, and schema declarations.
 - `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
-  fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), byte parsing
-  (`decode.rs`), primary-fact authentication (`authenticate.rs`), semantic
-  adaptation (`adapt.rs`), local authoring (`author.rs`), commands
-  (`commands.rs`), projection, schema-backed row materialization, queries, CLI
-  adapters, and context helpers as applicable.
+  fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), local authoring
+  (`author.rs`), commands (`commands.rs`), projection, schema-backed row
+  materialization, queries, CLI adapters, and context helpers as applicable.
+  Primary byte parsing, primary-fact authentication, and semantic adaptation
+  live as local `decode`, `authenticate`, and `adapt` modules inside
+  `project.rs`.
 - Routed fact families do not use `layout.rs`, `create.rs`, or handwritten
-  fact-family `rows.rs` files. Byte rules live in `encode.rs` and `decode.rs`;
-  pure fact construction, signing, encryption, and assembly live in
-  `author.rs`; runtime gathering remains in `commands.rs`; row shape is declared
-  through schema metadata or clearly named non-family modules such as sync
-  `index.rs` / `staging.rs`.
+  fact-family `rows.rs` files. Byte construction rules live in `encode.rs`;
+  byte parsing rules live in the projector-local `decode` module; pure fact
+  construction, signing, encryption, and assembly live in `author.rs`; runtime
+  gathering remains in `commands.rs`; row shape is declared through schema
+  metadata or clearly named non-family modules such as sync `index.rs` /
+  `staging.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
@@ -117,7 +119,7 @@ explicitly archived or the user asks for history.
   validate the fact boundary, adapt if needed, then project semantic meaning.
   They still do not do IO. Primary decode, the fact-id check, the fact-boundary
   signature, and intrinsic single-fact field rules belong to the owning
-  `decode.rs` and `authenticate.rs` helpers, called directly by the projector.
+  projector-local `decode` and `authenticate` modules.
 - Projectors do not verify signatures. The primary fact's signature is proven by
   its authenticator, and any fact reached through context was authenticated
   before it could offer that context, so its authenticity is guaranteed. A
@@ -147,19 +149,21 @@ explicitly archived or the user asks for history.
 
 Non-trivial projectors should make their proof shape obvious to a reviewer:
 
-1. Keep byte parsing in `decode.rs`: it should reject wrong tags, lengths,
-   padding, enum values, and non-canonical field shapes.
-2. Keep fact-boundary validation in `authenticate.rs`: it should check the fact
-   id, signature or container proof, intrinsic field rules, and any
-   context-dependent proof helper. Missing context is represented as projector
-   needs, not as a core auth stage.
+1. Keep byte parsing in the local `decode` module inside `project.rs`: it should
+   reject wrong tags, lengths, padding, enum values, and non-canonical field
+   shapes.
+2. Keep fact-boundary validation in the local `authenticate` module inside
+   `project.rs`: it should check the fact id, signature or container proof,
+   intrinsic field rules, and any context-dependent proof helper. Missing
+   context is represented as projector needs, not as a core auth stage.
 3. Implement `Projector::project()` as the readable local flow for that fact:
    decode the raw body, validate/authenticate, adapt if needed, then call the
    typed semantic body. The route metadata names only the projector.
 4. Put semantic proof in a local `project_semantic` function. Body comments
    should explain the block they guard; do not require numbered references back
    to the module policy. The top-of-file policy still names the projector's
-   proof shape, while structural validation lives in `authenticate.rs`.
+   proof shape, while structural validation lives in the local `authenticate`
+   module.
 5. Name every security-sensitive context need in a small struct or local
    binding. Avoid positional `needs[0]` contracts.
 6. Split real authority branches into path-specific functions whose names say
@@ -200,10 +204,11 @@ through the `ProjectionContext` helper anchored to the need they emitted.
 ### Typed Facts And Foreign Context
 
 Core persists facts as opaque bytes. The owning fact module supplies a small
-`decode.rs`; its `authenticate.rs` checks the id and signature and enforces
-intrinsic rules. The projector calls those helpers directly, runs `adapt.rs`
-when a compatibility step exists, and then enters the typed semantic body. Do
-not parse the primary fact with another module's raw layout helper.
+projector-local `decode` module; its local `authenticate` module checks the id
+and signature and enforces intrinsic rules. The projector calls those helpers
+directly, runs the local `adapt` module when a compatibility step exists, and
+then enters the typed semantic body. Do not parse the primary fact with another
+module's raw layout helper.
 
 Foreign context fact bytes are different. A projector should not import another
 fact module's raw layout codec. It should call a module-owned typed helper that
@@ -284,15 +289,21 @@ projection rows directly, run projectors, or become a second command layer.
 ### Wire And Codec Style
 
 Wire layouts are protocol contracts. In converted families, `encode.rs` owns
-canonical bytes only, while `decode.rs` owns tag checks, byte lengths, enum
-validation, and canonical padding. `author.rs` owns actual signing, encryption,
-assembly, and calls to `encode.rs`. Core wire primitives supply syntax; the
-fact module supplies meaning.
+canonical bytes only, while the projector-local `decode` module owns tag
+checks, byte lengths, enum validation, and canonical padding. `author.rs` owns
+actual signing, encryption, assembly, and calls to `encode.rs`. Core wire
+primitives supply syntax; the fact module supplies meaning.
 
 ## Sync And Connection Frames
 
 - Connection frames are opaque fixed-size envelopes until opened by the
   connection-frame projector with exact connection context.
+- Established frame facts received from the network are ephemeral projection
+  inputs. Their context needs are transient probes: if the needed observation,
+  connection, endpoint, or ephemeral-secret context is not available during that
+  drain, core drops the input without parking a durable need. Replay restores
+  retained handshake facts, opened child facts, and receipts, not unopened
+  ephemeral frame inputs.
 - A connection fact receipt is a local fact plus context offer about the
   recovered shared fact. It is not a projector argument side channel.
 - Sync is event-layer protocol work. Missing keys are represented by facts,

@@ -6,12 +6,9 @@
 //! authorization in this module; downstream modules should ask for admin
 //! context rather than rechecking grant history.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod cli;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -57,7 +54,7 @@ pub(crate) fn admin_row(admin_id: FactId, fact: &fact::AdminFact) -> Result<Tabl
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::AdminFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 pub fn encode_fact_payload(fact: &fact::AdminFact) -> Result<Vec<u8>, String> {

@@ -6,11 +6,8 @@
 //! here create the local facts needed to accept an invite; invite creation stays
 //! in `auth::invite`.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -93,7 +90,7 @@ pub fn derived_invite_secret_fact_id(fact: &fact::InviteAcceptedFact) -> Result<
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteAcceptedFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 pub fn workspace_accepted_need(

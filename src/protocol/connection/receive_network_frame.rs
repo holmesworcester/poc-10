@@ -2,10 +2,10 @@
 //!
 //! The daemon turns each accepted TCP frame into this local intent with the raw
 //! bytes, observed origin address, and local receive time. The handler decodes
-//! and validates that boundary metadata, stages sealed handshake request or
-//! response facts (bootstrap and membership alike), then delegates durable fact
-//! admission to fact projectors; it does not open frames or validate child
-//! facts itself.
+//! and validates that boundary metadata, admits sealed handshake request,
+//! response, or established-frame bytes into the appropriate fact queue, then
+//! delegates fact admission to projectors; it does not open frames or validate
+//! child facts itself.
 //!
 //! The intent key is deterministic over origin, receive time, and frame bytes
 //! so duplicate local submissions collapse while distinct observations remain
@@ -95,15 +95,15 @@ fn payload_error(err: PayloadError) -> String {
 }
 
 // The handler is the incoming socket boundary. It has no input facts because
-// raw network bytes are not authorized by durable context until projection.
-// Sealed handshake frames carry no separate envelope fact: the handler admits
-// the sealed bytes as their own ephemeral fact (whose type tag is the sealed
-// type) plus a frame observation, and does no unsealing itself. That fact's
-// projector opens it with the local endpoint secret drawn from
-// `auth_local_endpoint` context and emits the recovered request/connection fact
-// plus its receive receipt. Opening is transport decoding, not protocol
-// validation; the request and connection projectors still own
-// invite/membership/handshake validation.
+// raw network bytes are not authorized by context until projection. Sealed
+// handshake frames carry no separate envelope fact: the handler admits the
+// bytes as their own durable local fact (whose type tag selects the owning
+// projector) plus a frame observation. Established connection frames are
+// one-shot ephemeral projection inputs with the same observation intent. The
+// boundary does no unsealing itself. The selected projector opens bytes with
+// context and emits recovered child facts plus receive receipts. Opening is
+// transport decoding, not protocol validation; the child projectors still own
+// semantic validation.
 
 use crate::core::effects::PipelineEffects;
 use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentHandler};
@@ -130,11 +130,11 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
     fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
 
-        // A sealed handshake frame is admitted as its own ephemeral fact (whose
+        // A sealed handshake frame is admitted as its own local fact (whose
         // type tag is the sealed type) plus a frame observation. Its projector
         // unseals it with the local endpoint secret from `auth_local_endpoint`
         // context — the boundary does no unsealing itself.
-        if request::decode::is_sealed_fact(&input.frame) {
+        if request::project::decode::is_sealed_fact(&input.frame) {
             let fact =
                 request::author::fact_from_sealed_wire(&input.frame, input.received_at_local_ms)?;
             return Ok(observed_frame_effect(
@@ -144,7 +144,7 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
                 false,
             )?);
         }
-        if connection::decode::is_sealed_fact(&input.frame) {
+        if connection::project::decode::is_sealed_fact(&input.frame) {
             let fact = connection::author::fact_from_sealed_wire(
                 &input.frame,
                 input.received_at_local_ms,
@@ -157,21 +157,21 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
             )?);
         }
 
-        Ok(if frame_small::decode::is_frame(&input.frame) {
+        Ok(if frame_small::project::decode::is_frame(&input.frame) {
             observed_frame_effect(
                 frame_small::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
                 true,
             )?
-        } else if frame_file_slice::decode::is_frame(&input.frame) {
+        } else if frame_file_slice::project::decode::is_frame(&input.frame) {
             observed_frame_effect(
                 frame_file_slice::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,
                 input.received_at_local_ms,
                 true,
             )?
-        } else if frame_bundle::decode::is_frame(&input.frame) {
+        } else if frame_bundle::project::decode::is_frame(&input.frame) {
             observed_frame_effect(
                 frame_bundle::author::fact_from_wire(&input.frame, input.received_at_local_ms)?,
                 &input.origin_addr,

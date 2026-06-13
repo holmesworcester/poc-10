@@ -9,7 +9,7 @@ use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::request::fact::ConnectionRequestFact;
 
 use super::fact::ConnectionFact;
-use super::{decode, encode};
+use super::{encode, project::decode};
 
 pub struct BuildResponderConnection<'a> {
     pub request_id: [u8; 32],

@@ -75,7 +75,8 @@ impl IntentHandler for SendSyncCompareResponseHandler {
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_sync_compare_response(raw)?;
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
-        let compare = crate::protocol::sync::compare::decode::decode_fact(&compare_fact.bytes)?;
+        let compare =
+            crate::protocol::sync::compare::project::decode::decode_fact(&compare_fact.bytes)?;
         let mut output = PipelineEffects::new();
         let (plan, expanded_send_fact_ids) = if let Ok(store) = context.store() {
             let available_facts =

@@ -16,37 +16,37 @@ use topo::protocol::auth::key_wrap::fact::{
     KeyWrapFact, WrappedSecretKind, KEY_WRAP_CIPHERTEXT_BYTES,
 };
 use topo::protocol::connection;
-use topo::protocol::connection::connection::decode as connection_layout_decode;
 use topo::protocol::connection::connection::encode as connection_layout_encode;
 use topo::protocol::connection::connection::fact::ConnectionFact;
+use topo::protocol::connection::connection::project::decode as connection_layout_decode;
 use topo::protocol::connection::create_frame_observation::{
     decode_create_frame_observation, CREATE_FRAME_OBSERVATION,
 };
-use topo::protocol::connection::frame_bundle::decode as frame_bundle_layout_decode;
 use topo::protocol::connection::frame_bundle::encode::{
     self as frame_bundle_layout_encode, CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
 };
 use topo::protocol::connection::frame_bundle::fact::ConnectionFrameBundleFact;
+use topo::protocol::connection::frame_bundle::project::decode as frame_bundle_layout_decode;
 use topo::protocol::connection::frame_bundle::project::ConnectionFrameBundleProjector;
-use topo::protocol::connection::frame_file_slice::decode as frame_file_slice_layout_decode;
 use topo::protocol::connection::frame_file_slice::encode::{
     self as frame_file_slice_layout_encode, CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
 };
+use topo::protocol::connection::frame_file_slice::project::decode as frame_file_slice_layout_decode;
 use topo::protocol::connection::frame_observation::author as frame_observation_create;
 use topo::protocol::connection::frame_small::author as frame_small_author;
-use topo::protocol::connection::frame_small::decode as frame_small_layout_decode;
 use topo::protocol::connection::frame_small::encode::{
     self as frame_small_layout_encode, CONNECTION_FRAME_SMALL_WIRE_BYTES,
 };
 use topo::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
+use topo::protocol::connection::frame_small::project::decode as frame_small_layout_decode;
 use topo::protocol::connection::frame_small::project::ConnectionFrameSmallProjector;
 use topo::protocol::connection::receive_network_frame::{
     receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
     RECEIVE_NETWORK_FRAME,
 };
-use topo::protocol::connection::request::decode as connection_request_layout_decode;
 use topo::protocol::connection::request::encode as connection_request_layout_encode;
 use topo::protocol::connection::request::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP};
+use topo::protocol::connection::request::project::decode as connection_request_layout_decode;
 use topo::protocol::sync::compare::encode as sync_compare_layout;
 use topo::protocol::sync::compare::fact::{RangeSummary, SyncCompareFact, TimestampRange};
 
@@ -455,8 +455,8 @@ fn well_formed_frame_opens_key_wrap_and_records_fact_receipt() {
         .iter()
         .find(|fact| fact.scope == FactScope::Local && fact.id != admitted_wrap.id)
         .expect("local receipt fact");
-    let receipt =
-        connection::fact_receipt::decode::decode_fact(&receipt_fact.bytes).expect("decode receipt");
+    let receipt = connection::fact_receipt::project::decode::decode_fact(&receipt_fact.bytes)
+        .expect("decode receipt");
     assert_eq!(receipt.received_fact_id, admitted_wrap.id);
     assert_eq!(receipt.origin_addr, ORIGIN);
     assert_eq!(receipt.local_endpoint_id, connection.to_endpoint);
@@ -516,8 +516,8 @@ fn well_formed_frame_admits_sync_compare_and_records_fact_receipt() {
         .iter()
         .find(|fact| fact.scope == FactScope::Local)
         .expect("local receipt fact");
-    let receipt =
-        connection::fact_receipt::decode::decode_fact(&receipt_fact.bytes).expect("decode receipt");
+    let receipt = connection::fact_receipt::project::decode::decode_fact(&receipt_fact.bytes)
+        .expect("decode receipt");
     assert_eq!(receipt.received_fact_id, admitted.id);
 }
 

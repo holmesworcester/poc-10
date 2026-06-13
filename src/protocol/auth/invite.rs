@@ -5,12 +5,9 @@
 //! connection requests and acceptance flows. Keep secret layout and invite
 //! command helpers here; accepted membership facts live in `invite_accepted`.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod cli;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -51,5 +48,5 @@ pub fn invite_secret_row(fact: &fact::InviteSecretFact) -> Result<TableRow, Stri
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteSecretFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

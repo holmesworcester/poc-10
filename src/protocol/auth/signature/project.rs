@@ -1,13 +1,204 @@
-//! Signature evidence projector.
-//!
-//! POLICY. A signature evidence fact is admitted iff:
-//!   1. STRUCTURAL. The outer fact scope matches the workspace id carried in
-//!      the signature evidence body.
-//!   2. CONTEXT. No incoming context is required; authentication already proved
-//!      the embedded public key signed the workspace-bound target fact id.
-//!   3. MATERIALIZE. Publish a `signature_proof` offer keyed by target fact id
-//!      and signer public key, then mark the evidence fact shareable in that
-//!      workspace.
+pub mod decode {
+    //! Byte decoding for signature evidence facts.
+
+    use crate::core::wire;
+
+    use super::super::encode::{SIGNATURE_FACT_BYTES, TYPE_SIGNATURE};
+    use super::super::fact::SignatureFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<SignatureFact, String> {
+        let mut reader = wire::Reader::new(bytes);
+        reader.expect_len(SIGNATURE_FACT_BYTES).map_err(wire_err)?;
+        let tag = reader.u8().map_err(wire_err)?;
+        if tag != TYPE_SIGNATURE {
+            return Err("expected signature fact".to_string());
+        }
+        let fact = SignatureFact {
+            workspace_id: reader.array().map_err(wire_err)?,
+            created_at_ms: reader.u64be().map_err(wire_err)?,
+            target_fact_id: reader.array().map_err(wire_err)?,
+            signer_public_key: reader.array().map_err(wire_err)?,
+            signature: reader.array().map_err(wire_err)?,
+        };
+        reader.finish().map_err(wire_err)?;
+        Ok(fact)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn signature_fact() -> SignatureFact {
+            SignatureFact {
+                workspace_id: [4; 32],
+                created_at_ms: 123,
+                target_fact_id: [1; 32],
+                signer_public_key: [2; 32],
+                signature: [3; crate::core::crypto::ED25519_SIGNATURE_BYTES],
+            }
+        }
+
+        #[test]
+        fn signature_fact_roundtrips_fixed_width() {
+            let encoded =
+                super::super::super::encode::encode_fact(&signature_fact()).expect("encode");
+            assert_eq!(encoded.len(), SIGNATURE_FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), signature_fact());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded =
+                super::super::super::encode::encode_fact(&signature_fact()).expect("encode");
+            encoded[0] = TYPE_SIGNATURE.wrapping_add(1);
+            assert!(decode_fact(&encoded).is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_length() {
+            assert!(decode_fact(&[TYPE_SIGNATURE; 8]).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Signature evidence authenticator.
+    //!
+    //! Authenticating a signature fact proves the evidence fact is canonically
+    //! addressed and that its embedded public key signed the target fact id. It does
+    //! not prove the signer has authority over the target; claim projectors own that
+    //! policy through their existing context checks.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::SignatureFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        signature: SignatureFact,
+        _context: &ProjectionContext,
+    ) -> Result<SignatureFact, String> {
+        prove_decoded_signature(fact, signature)
+    }
+
+    fn prove_decoded_signature(
+        fact: &Fact,
+        signature: SignatureFact,
+    ) -> Result<SignatureFact, String> {
+        verify_fact_id(fact)?;
+        prove_signature_evidence(&signature)?;
+        Ok(signature)
+    }
+
+    pub fn prove_signature_evidence(fact: &SignatureFact) -> Result<(), String> {
+        crate::core::crypto::ed25519_verify_canonical(
+            &fact.signer_public_key,
+            &super::super::encode::signature_message(fact.workspace_id, fact.target_fact_id),
+            &fact.signature,
+            "signature evidence",
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+
+        const PRIVATE_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            super::super::super::author::create_signature([3; 32], [9; 32], &PRIVATE_KEY, 123)
+                .expect("signature fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<super::super::super::fact::SignatureFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_signature_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_tampered_target_id() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[41] ^= 0x01;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_tampered_signature() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Signature evidence semantic adapter.
+
+    use super::super::fact::SignatureFact;
+
+    pub(crate) fn adapt(source: SignatureFact) -> Result<SignatureFact, String> {
+        Ok(source)
+    }
+}
+
+// Signature evidence projector.
+//
+// POLICY. A signature evidence fact is admitted iff:
+//   1. STRUCTURAL. The outer fact scope matches the workspace id carried in
+//      the signature evidence body.
+//   2. CONTEXT. No incoming context is required; authentication already proved
+//      the embedded public key signed the workspace-bound target fact id.
+//   3. MATERIALIZE. Publish a `signature_proof` offer keyed by target fact id
+//      and signer public key, then mark the evidence fact shareable in that
+//      workspace.
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::crypto::Ed25519PublicKey;
@@ -37,9 +228,9 @@ impl Projector for SignatureProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

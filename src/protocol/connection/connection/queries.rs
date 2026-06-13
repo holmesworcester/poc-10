@@ -11,7 +11,7 @@ use crate::core::store::Store;
 
 use crate::protocol::auth;
 use crate::protocol::connection::request::{
-    decode::decode_optional_addr, encode::ADDR_BLOCK_BYTES,
+    encode::ADDR_BLOCK_BYTES, project::decode::decode_optional_addr,
 };
 use crate::protocol::connection::{
     close, ephemeral_secret, fact_receipt, frame_bundle, frame_file_slice, frame_observation,

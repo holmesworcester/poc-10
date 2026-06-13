@@ -1,14 +1,287 @@
-//! File-slice connection-frame projector.
-//!
-//! POLICY. A `connection_frame_file_slice` fact is admitted iff:
-//!   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
-//!      exactly one file-slice encrypted connection frame.
-//!   2. CONTEXT. The frame fact has exact local `connection_frame_observation`
-//!      context, and its header names an exact local `connection`
-//!      context. Missing context emits only a transient need for the fixed-point
-//!      pass; malformed and undecryptable frames produce no durable output.
-//!   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
-//!      each with a durable `connection::fact_receipt`.
+pub mod decode {
+    //! Byte decoding for file-slice connection-frame wire facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and the embedded frame
+    //! shape. Id checks live in the local `authenticate` module.
+
+    use crate::core::facts::FactId;
+    use crate::core::wire::{self, FixedLayout, Id32, Nonce24, Tag, WireError};
+
+    use super::super::encode::{
+        wire_err, ConnectionFrameFileSliceV1, CIPHERTEXT_OFFSET,
+        CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES, CONNECTION_FRAME_FILE_SLICE_FACT_BYTES,
+        CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES, CONNECTION_FRAME_HEADER_BYTES,
+        CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE, CONNECTION_FRAME_TAG, CONNECTION_FRAME_VERSION,
+        TYPE_CONNECTION_FRAME_FILE_SLICE,
+    };
+    use super::super::fact::ConnectionFrameFileSliceFact;
+
+    /// Public header view recovered without decrypting the payload.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ConnectionFrameHeader {
+        pub connection_id: Id32,
+        pub nonce: Nonce24,
+    }
+
+    /// Borrowed file-slice frame payload recovered without materializing a large fixed
+    /// slot value on the stack.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ConnectionFrameParts<'a> {
+        pub header: ConnectionFrameHeader,
+        pub ciphertext: &'a [u8],
+    }
+
+    const VERSION_OFFSET: usize = Tag::<4>::LEN;
+    const SIZE_CLASS_OFFSET: usize = VERSION_OFFSET + wire::U8_BYTES;
+    const CONNECTION_OFFSET: usize = SIZE_CLASS_OFFSET + wire::U8_BYTES;
+    const NONCE_OFFSET: usize = CONNECTION_OFFSET + Id32::LEN;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<ConnectionFrameFileSliceFact, String> {
+        if bytes.len() != CONNECTION_FRAME_FILE_SLICE_FACT_BYTES {
+            return Err("connection frame file-slice fact has wrong length".to_string());
+        }
+        let mut reader = wire::Reader::new(bytes);
+        reader
+            .expect_len(CONNECTION_FRAME_FILE_SLICE_FACT_BYTES)
+            .map_err(wire_err)?;
+        reader
+            .expect_u8(TYPE_CONNECTION_FRAME_FILE_SLICE)
+            .map_err(wire_err)?;
+        let frame = reader
+            .fixed_slot_value::<CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES>()
+            .map_err(wire_err)?;
+        reader.finish().map_err(wire_err)?;
+        ConnectionFrameFileSliceV1::decode(frame.bytes()).map_err(wire_err)?;
+        Ok(ConnectionFrameFileSliceFact { frame })
+    }
+
+    pub fn is_frame(bytes: &[u8]) -> bool {
+        decode_frame_parts(bytes).is_ok()
+    }
+
+    pub fn received_connection_fact_id(frame: &[u8]) -> Result<FactId, String> {
+        Ok(decode_frame_parts(frame)
+            .map_err(wire_err)?
+            .header
+            .connection_id
+            .0)
+    }
+
+    /// Inspect the public header of a file-slice connection frame.
+    pub fn peek_frame_header(bytes: &[u8]) -> Result<ConnectionFrameHeader, WireError> {
+        if bytes.len() < CONNECTION_FRAME_HEADER_BYTES {
+            return Err(WireError::WrongLength {
+                expected: CONNECTION_FRAME_HEADER_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        let tag = Tag::<4>::decode(&bytes[..VERSION_OFFSET])?;
+        if tag != CONNECTION_FRAME_TAG {
+            return Err(WireError::NonZeroPadding { index: 0 });
+        }
+        let version = wire::take_u8(&bytes[VERSION_OFFSET..SIZE_CLASS_OFFSET])?;
+        if version != CONNECTION_FRAME_VERSION {
+            return Err(WireError::InvalidBool { actual: version });
+        }
+        let size_class = wire::take_u8(&bytes[SIZE_CLASS_OFFSET..CONNECTION_OFFSET])?;
+        if size_class != CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE {
+            return Err(WireError::InvalidBool { actual: size_class });
+        }
+        let connection_id = Id32::decode(&bytes[CONNECTION_OFFSET..NONCE_OFFSET])?;
+        let nonce = Nonce24::decode(&bytes[NONCE_OFFSET..CIPHERTEXT_OFFSET])?;
+        Ok(ConnectionFrameHeader {
+            connection_id,
+            nonce,
+        })
+    }
+
+    /// Decode the public header and borrowed ciphertext slot for a file-slice frame.
+    pub fn decode_frame_parts(bytes: &[u8]) -> Result<ConnectionFrameParts<'_>, WireError> {
+        let header = peek_frame_header(bytes)?;
+        if bytes.len() != CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES {
+            return Err(WireError::WrongLength {
+                expected: CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        let slot = &bytes[CIPHERTEXT_OFFSET..];
+        let ciphertext_len = wire::take_u32be(&slot[..wire::U32_BYTES])? as usize;
+        if ciphertext_len > CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES {
+            return Err(WireError::ValueTooLarge {
+                max: CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES,
+                actual: ciphertext_len,
+            });
+        }
+        if let Some(offset) = slot[wire::U32_BYTES + ciphertext_len..]
+            .iter()
+            .position(|byte| *byte != 0)
+        {
+            return Err(WireError::NonZeroPadding {
+                index: CIPHERTEXT_OFFSET + wire::U32_BYTES + ciphertext_len + offset,
+            });
+        }
+        Ok(ConnectionFrameParts {
+            header,
+            ciphertext: &slot[wire::U32_BYTES..wire::U32_BYTES + ciphertext_len],
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::core::wire::{FixedBytes, FixedSlot};
+        use crate::protocol::connection::frame_file_slice::encode::{
+            encode_fact, encode_frame_bytes, CONNECTION_FRAME_FILE_SLICE_FACT_BYTES,
+        };
+
+        #[test]
+        fn connection_frame_file_slice_fact_roundtrips_fixed_width() {
+            let frame = encode_frame_bytes(FixedBytes([1; 32]), FixedBytes([2; 24]), &[3; 32])
+                .expect("frame");
+            let fact = ConnectionFrameFileSliceFact {
+                frame: FixedSlot::new(&frame).expect("frame slot"),
+            };
+
+            let encoded = encode_fact(&fact).expect("encode");
+
+            assert_eq!(encoded.len(), CONNECTION_FRAME_FILE_SLICE_FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact);
+        }
+    }
+}
+pub mod authenticate {
+    //! File-slice connection-frame authenticator.
+    //!
+    //! POLICY. Authenticating a `connection_frame_file_slice` fact proves, over its
+    //! bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical file-slice connection-frame
+    //!      payload.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!
+    //! Frame facts carry only wire bytes; there is no fact-boundary signature and no
+    //! intrinsic field rule. Admission scope, the observation and connection context,
+    //! decryption, and child materialization are all interpretation the projector
+    //! owns through `project.rs`.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::ConnectionFrameFileSliceFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        input: ConnectionFrameFileSliceFact,
+        _context: &ProjectionContext,
+    ) -> Result<ConnectionFrameFileSliceFact, String> {
+        prove_decoded_frame_file_slice(fact, input)
+    }
+
+    fn prove_decoded_frame_file_slice(
+        fact: &Fact,
+        input: ConnectionFrameFileSliceFact,
+    ) -> Result<ConnectionFrameFileSliceFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(input)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::core::wire::FixedBytes;
+        use crate::protocol::connection::frame_file_slice::author::fact_from_wire;
+        use crate::protocol::connection::frame_file_slice::encode as frame_encode;
+        use crate::protocol::connection::frame_file_slice::fact::ConnectionFrameFileSliceFact;
+
+        fn canonical_fact() -> Fact {
+            let frame = frame_encode::encode_frame_bytes(
+                FixedBytes([1; 32]),
+                FixedBytes([2; 24]),
+                &[3; 32],
+            )
+            .expect("frame bytes");
+            fact_from_wire(&frame, 100).expect("connection_frame_file_slice fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<ConnectionFrameFileSliceFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! File-slice connection-frame semantic adapter.
+    //!
+    //! The current frame_file_slice wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::ConnectionFrameFileSliceFact;
+
+    pub(crate) fn adapt(
+        source: ConnectionFrameFileSliceFact,
+    ) -> Result<ConnectionFrameFileSliceFact, String> {
+        Ok(source)
+    }
+}
+
+// File-slice connection-frame projector.
+//
+// POLICY. A `connection_frame_file_slice` fact is admitted iff:
+//   1. STRUCTURAL. The fact is local ephemeral input and its layout contains
+//      exactly one file-slice encrypted connection frame.
+//   2. CONTEXT. The frame fact has exact local `connection_frame_observation`
+//      context, and its header names an exact local `connection`
+//      context. Missing context emits only a transient need for the fixed-point
+//      pass; malformed and undecryptable frames produce no durable output.
+//   3. MATERIALIZE. Opened inner facts are admitted as durable child facts,
+//      each with a durable `connection::fact_receipt`.
 
 use crate::core::context::ContextNeed;
 use crate::core::crypto;
@@ -40,9 +313,9 @@ impl Projector for ConnectionFrameFileSliceProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }
@@ -70,7 +343,7 @@ pub fn project_observed_frame(
         return Err("connection frame receive fact must have local scope".to_string());
     }
 
-    let Ok(connection_id) = super::decode::received_connection_fact_id(frame) else {
+    let Ok(connection_id) = decode::received_connection_fact_id(frame) else {
         return Ok(ProjectionOutput::new());
     };
 
@@ -86,7 +359,8 @@ pub fn project_observed_frame(
     if observation_fact.scope != FactScope::Local {
         return Err("connection frame observation context must be local".to_string());
     }
-    let observation = connection::frame_observation::decode::decode_fact(observation_fact.body())?;
+    let observation =
+        connection::frame_observation::project::decode::decode_fact(observation_fact.body())?;
     if observation.frame_fact_id != fact.id {
         return Err("connection frame observation does not name frame fact".to_string());
     }
@@ -118,7 +392,7 @@ pub fn project_observed_frame(
         observation.origin_addr.bytes(),
         observation.received_at_local_ms,
     ) {
-        Ok(facts) => Ok(facts_output(facts)),
+        Ok(facts) => Ok(facts_output(fact.id, facts)),
         Err(_) => Ok(ProjectionOutput::new()),
     }
 }
@@ -127,8 +401,8 @@ fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 3
     ContextNeed::range(owner, role, scope, key, key)
 }
 
-fn facts_output(facts: Vec<Fact>) -> ProjectionOutput {
-    let mut output = ProjectionOutput::new();
+fn facts_output(frame_fact_id: FactId, facts: Vec<Fact>) -> ProjectionOutput {
+    let mut output = ProjectionOutput::new().purge_self(frame_fact_id);
     for fact in facts {
         output = output.fact(fact);
     }
@@ -186,7 +460,7 @@ pub fn open_connection_frame(
     frame: &[u8],
     connection_secret: &crypto::XChaCha20Poly1305Key,
 ) -> Result<OpenedConnectionFrame, String> {
-    let parts = super::decode::decode_frame_parts(frame).map_err(super::encode::wire_err)?;
+    let parts = decode::decode_frame_parts(frame).map_err(super::encode::wire_err)?;
     if parts.ciphertext.len() != super::encode::CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES {
         return Err(format!(
             "connection::frame frame ciphertext must fill fixed slot: expected {} got {}",
@@ -239,7 +513,7 @@ fn connection_material_from_context(
     context: &ProjectionContext,
     owner: FactId,
 ) -> ConnectionMaterialContext {
-    if connection::connection::decode::validate_sealed_fact(fact.body()).is_err() {
+    if connection::connection::project::decode::validate_sealed_fact(fact.body()).is_err() {
         return ConnectionMaterialContext::Invalid;
     }
     let endpoint_need = ContextNeed::range(
@@ -252,7 +526,7 @@ fn connection_material_from_context(
     for (_, endpoint_fact) in context.matched_payloads_for(&endpoint_need) {
         if let Ok(endpoint) = auth::endpoint::decode_fact_payload(endpoint_fact.body()) {
             if let Ok(connection) =
-                connection::connection::decode::open_fact(fact.body(), &endpoint)
+                connection::connection::project::decode::open_fact(fact.body(), &endpoint)
             {
                 return ConnectionMaterialContext::Open(material_from_connection_fact(
                     fact.id, connection,
@@ -269,9 +543,10 @@ fn connection_material_from_context(
     );
     for (_, secret_fact) in context.matched_payloads_for(&ephemeral_need) {
         if let Ok(secret) = connection::ephemeral_secret::decode_fact_payload(secret_fact.body()) {
-            if let Ok(connection) =
-                connection::connection::decode::open_fact_as_responder(fact.body(), &secret)
-            {
+            if let Ok(connection) = connection::connection::project::decode::open_fact_as_responder(
+                fact.body(),
+                &secret,
+            ) {
                 return ConnectionMaterialContext::Open(material_from_connection_fact(
                     fact.id, connection,
                 ));
@@ -300,11 +575,11 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         .copied()
         .ok_or_else(|| "received connection::frame fact bytes are empty".to_string())?;
     match tag {
-        auth::workspace::TYPE_WORKSPACE => {
-            admit_with_decoder(bytes, auth::workspace::decode::decode_fact, |workspace| {
-                Ok(Admission::global(workspace.created_at_ms))
-            })
-        }
+        auth::workspace::TYPE_WORKSPACE => admit_with_decoder(
+            bytes,
+            auth::workspace::project::decode::decode_fact,
+            |workspace| Ok(Admission::global(workspace.created_at_ms)),
+        ),
         auth::user_invite::TYPE_USER_INVITE => {
             admit_with_decoder(bytes, auth::user_invite::decode_fact_payload, |invite| {
                 Ok(Admission::global(invite.created_at_ms))
@@ -335,17 +610,19 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 Ok(Admission::global(server.created_at_ms))
             })
         }
-        auth::signature::TYPE_SIGNATURE => {
-            admit_with_decoder(bytes, auth::signature::decode::decode_fact, |signature| {
+        auth::signature::TYPE_SIGNATURE => admit_with_decoder(
+            bytes,
+            auth::signature::project::decode::decode_fact,
+            |signature| {
                 Ok(Admission::workspace(
                     signature.workspace_id,
                     signature.created_at_ms,
                 ))
-            })
-        }
+            },
+        ),
         content::retention_policy::TYPE_RETENTION_POLICY => admit_with_decoder(
             bytes,
-            content::retention_policy::decode::decode_fact,
+            content::retention_policy::project::decode::decode_fact,
             |policy| {
                 Ok(Admission::workspace(
                     policy.workspace_id,
@@ -353,38 +630,44 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
                 ))
             },
         ),
-        content::reaction::TYPE_CONTENT_REACTION => {
-            admit_with_decoder(bytes, content::reaction::decode::decode_fact, |reaction| {
+        content::reaction::TYPE_CONTENT_REACTION => admit_with_decoder(
+            bytes,
+            content::reaction::project::decode::decode_fact,
+            |reaction| {
                 Ok(Admission::workspace(
                     reaction.workspace_id,
                     reaction.created_at_ms,
                 ))
-            })
-        }
+            },
+        ),
         content::file::TYPE_CONTENT_FILE => {
-            admit_with_decoder(bytes, content::file::decode::decode_fact, |file| {
+            admit_with_decoder(bytes, content::file::project::decode::decode_fact, |file| {
                 Ok(Admission::workspace(file.workspace_id, file.created_at_ms))
             })
         }
-        content::file_slice::TYPE_CONTENT_FILE_SLICE => {
-            admit_with_decoder(bytes, content::file_slice::decode::decode_fact, |slice| {
+        content::file_slice::TYPE_CONTENT_FILE_SLICE => admit_with_decoder(
+            bytes,
+            content::file_slice::project::decode::decode_fact,
+            |slice| {
                 Ok(Admission::workspace(
                     slice.workspace_id,
                     slice.created_at_ms,
                 ))
-            })
-        }
-        content::message::TYPE_CONTENT_MESSAGE => {
-            admit_with_decoder(bytes, content::message::decode::decode_fact, |message| {
+            },
+        ),
+        content::message::TYPE_CONTENT_MESSAGE => admit_with_decoder(
+            bytes,
+            content::message::project::decode::decode_fact,
+            |message| {
                 Ok(Admission::workspace(
                     message.workspace_id,
                     message.created_at_ms,
                 ))
-            })
-        }
+            },
+        ),
         content::message_deletion::TYPE_CONTENT_MESSAGE_DELETION => admit_with_decoder(
             bytes,
-            content::message_deletion::decode::decode_fact,
+            content::message_deletion::project::decode::decode_fact,
             |deletion| {
                 Ok(Admission::workspace(
                     deletion.workspace_id,
@@ -394,7 +677,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         ),
         content::file_deletion::TYPE_CONTENT_FILE_DELETION => admit_with_decoder(
             bytes,
-            content::file_deletion::decode::decode_fact,
+            content::file_deletion::project::decode::decode_fact,
             |deletion| {
                 Ok(Admission::workspace(
                     deletion.workspace_id,
@@ -404,7 +687,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         ),
         auth::recipient_key::encode::TYPE_RECIPIENT_KEY => admit_with_decoder(
             bytes,
-            auth::recipient_key::decode::decode_recipient_key,
+            auth::recipient_key::project::decode::decode_recipient_key,
             |recipient| {
                 Ok(Admission::workspace(
                     recipient.workspace_id,
@@ -414,7 +697,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         ),
         auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER => admit_with_decoder(
             bytes,
-            auth::removal_frontier::decode::decode_removal_frontier,
+            auth::removal_frontier::project::decode::decode_removal_frontier,
             |frontier| {
                 Ok(Admission::workspace(
                     frontier.workspace_id,
@@ -424,7 +707,7 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
         ),
         auth::key_request::encode::TYPE_KEY_REQUEST => admit_with_decoder(
             bytes,
-            auth::key_request::decode::decode_key_request,
+            auth::key_request::project::decode::decode_key_request,
             |request| {
                 Ok(Admission::workspace(
                     request.workspace_id,
@@ -436,25 +719,25 @@ fn admit_received_fact_bytes(bytes: Vec<u8>) -> Result<Fact, String> {
             Err("received connection::frame payload is local history-node secret".to_string())
         }
         sync::compare::TYPE_SYNC_COMPARE => {
-            admit_with_decoder(bytes, sync::compare::decode::decode_fact, |_| {
+            admit_with_decoder(bytes, sync::compare::project::decode::decode_fact, |_| {
                 Ok(Admission::global(0))
             })
         }
         sync::have_id::TYPE_SYNC_HAVE_ID => {
-            admit_with_decoder(bytes, sync::have_id::decode::decode_fact, |_| {
+            admit_with_decoder(bytes, sync::have_id::project::decode::decode_fact, |_| {
                 Ok(Admission::global(0))
             })
         }
         sync::need_id::TYPE_SYNC_NEED_ID => {
-            admit_with_decoder(bytes, sync::need_id::decode::decode_fact, |_| {
+            admit_with_decoder(bytes, sync::need_id::project::decode::decode_fact, |_| {
                 Ok(Admission::global(0))
             })
         }
-        auth::key_wrap::encode::TYPE_KEY_WRAP => {
-            admit_with_decoder(bytes, auth::key_wrap::decode::decode_key_wrap, |wrap| {
-                Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms))
-            })
-        }
+        auth::key_wrap::encode::TYPE_KEY_WRAP => admit_with_decoder(
+            bytes,
+            auth::key_wrap::project::decode::decode_key_wrap,
+            |wrap| Ok(Admission::workspace(wrap.workspace_id, wrap.created_at_ms)),
+        ),
         _ => Err(format!(
             "unsupported received connection::frame fact type {tag}"
         )),

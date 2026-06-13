@@ -6,11 +6,8 @@
 //! signer context that content, admin, connection, and auth projectors
 //! rely on.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod cli;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -67,5 +64,5 @@ pub fn endpoint_shared_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::EndpointSharedFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

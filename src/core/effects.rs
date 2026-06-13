@@ -1,11 +1,11 @@
 //! Shared side-effect language committed by runtime work.
 //!
-//! Commands, projection, and intent handlers all reduce to this structure
-//! before the SQL pipeline commits their output. The structure is intentionally
-//! mechanical: it names facts to admit, facts to purge, row mutations, durable
-//! intents, ephemeral intents, and ephemeral projection inputs. It does not
-//! contain callbacks, open sockets, command receipts, or protocol-specific
-//! execution state.
+//! Projection and intent handlers reduce to this structure before the SQL
+//! pipeline commits their output. The structure is intentionally mechanical: it
+//! names facts to admit, facts to purge, row mutations, durable intents,
+//! ephemeral intents, and ephemeral projection inputs. It does not contain
+//! callbacks, open sockets, command receipts, or protocol-specific execution
+//! state.
 //!
 //! If a new kind of runtime effect needs atomic commit with projection or
 //! intent dispatch, add it here and teach `pipeline::commit_effects` how to

@@ -4,10 +4,7 @@
 //! endpoint. Projection validates owner authority and publishes frontier context
 //! that local secrets, key requests, and key wraps depend on.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -15,5 +12,5 @@ pub mod project;
 pub const TYPE_REMOVAL_FRONTIER: u8 = encode::TYPE_REMOVAL_FRONTIER;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::RemovalFrontierFact, String> {
-    decode::decode_removal_frontier(bytes)
+    project::decode::decode_removal_frontier(bytes)
 }

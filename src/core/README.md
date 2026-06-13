@@ -18,10 +18,11 @@ time wakes, and opaque network bytes through the declared pipeline.
 
 A normal command is a serialized runtime turn. Core opens the store, builds a
 `CommandContext`, calls the protocol command, and commits the command's
-`PipelineEffects`. If the command emitted facts, core stores their immutable
-bytes, records local admission metadata, and marks them pending for projection.
-The command can return human-readable `CliOutput`, but durable protocol state
-must enter through facts, row mutations, or intents.
+authored facts. Core stores their immutable bytes, records local admission
+metadata, and marks them pending for projection. The command can return
+human-readable `CliOutput`, but command-authored durable protocol state must
+enter through facts; rows, purges, and intents come from projection or handler
+work.
 
 Projection is core's deterministic reaction step. Core drains
 `pending_projection`, loads one fact and the matched context attached to that
@@ -73,8 +74,9 @@ Protocol code enters core through declarations and effect values:
   `PipelineEffects`.
 - `command_context::CommandContext` gives user-facing commands read-only store
   access, a monotonic timestamp source, and identity-owned local capabilities.
-- `effects::PipelineEffects` is the shared language for facts to admit,
-  ephemeral facts, purges, row mutations, durable intents, and local intents.
+- `effects::PipelineEffects` is the shared language for projector and handler
+  facts to admit, ephemeral facts, purges, row mutations, durable intents, and
+  local intents.
 - `store::SchemaSource` lets core, network IO, and protocol registry code
   declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
   protected, resettable, and state-summary tables.
@@ -88,7 +90,7 @@ opaque outbound rows from `network`.
 
 ```text
 CLI command / daemon / handler
-  -> PipelineEffects
+  -> authored facts or PipelineEffects
   -> fact admission and pending_projection
   -> projector
   -> context needs/offers, time wakes, rows, intents
@@ -177,10 +179,11 @@ use core syntax and contracts, but core must not import their semantic rules.
   staging, due time-wake admission, and bounded projection/intent/projection
   drain loop. The protocol declaration decides how inbound bytes become local
   intents and which time-wake timelines are active.
-- `effects.rs`: shared effect language for commands, projectors, and handlers.
+- `effects.rs`: shared effect language for projectors and handlers.
   `PipelineEffects` names facts to admit, ephemeral facts, exact purges, row
   mutations, durable intents, and local intents. The pipeline commits this
-  mechanical description atomically; display-only command data stays outside it.
+  mechanical description atomically; commands use `AuthoredCommand` facts plus
+  a receipt instead.
 - `fact_store.rs`: immutable fact storage and local admission metadata. It
   inserts content-addressed fact bytes, records local scope/timestamp/admission
   ordering, marks facts pending for projection, reads facts back with their
@@ -197,18 +200,27 @@ use core syntax and contracts, but core must not import their semantic rules.
   outbound queue rows, deterministic route+bytes row keys, listener setup,
   length-prefixed TCP frame reading/writing, and cleanup. It does not classify
   bootstrap frames, connection frames, auth facts, sync facts, or content facts.
-- `pipeline.rs`: public facade for fact lifecycle contracts and SQL-backed
-  queue workers. Runtime calls it to submit facts and intents, admit due time
-  wakes, drain pending projection, dispatch queued intents, and purge exact
-  facts. Protocol projectors own raw decoding, validation, adaptation, and
-  semantic projection; core owns queueing, matched context, needs/offers,
-  effect commits, and replay mode.
+- `handle_intent.rs`: one queued intent transaction. It claims one durable or
+  local intent, loads only handler-declared fact inputs, calls the registered
+  handler, handles retry/fatal outcomes, and commits handler output atomically
+  with queue-row deletion.
+- `pipeline.rs`: public facade for fact lifecycle contracts, route metadata,
+  projection context/output types, standing-context storage, shared effect
+  commits, and the bounded queue driver. Runtime calls it to submit facts and
+  intents, admit due time wakes, drain pending projection, dispatch queued
+  intents, and purge exact facts. Protocol projectors own raw decoding,
+  validation, adaptation, and semantic projection; core owns queueing, matched
+  context, needs/offers, effect commits, and replay mode.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal command output by default. It is for runtime profiling, not protocol
   measurement semantics.
+- `project_fact.rs`: one queued fact projection transaction. It loads matched
+  context and due time ranges, runs the routed projector, applies
+  durable/ephemeral source rules, replaces the owner's needs/time wakes,
+  appends offers, wakes matched owners, and commits emitted effects.
 - `runtime.rs`: executable engine for one selected protocol description. It
-  opens stores, applies declared schemas, submits command effects, drains
+  opens stores, applies declared schemas, submits command-authored facts, drains
   projection and intent queues, admits due time wakes, filters command-safe
   handlers, and composes the pipeline pieces into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
@@ -227,8 +239,10 @@ use core syntax and contracts, but core must not import their semantic rules.
 
 ### Pipeline Sections
 
-The following sections are inline modules inside `pipeline.rs`; they are not
-separate files.
+The pipeline contract is split by ownership: `pipeline.rs` keeps protocol-neutral
+contract types, route metadata, shared commit/context helpers, and the queue
+driver, while the readable n=1 work items live in `project_fact.rs` and
+`handle_intent.rs`.
 
 - `pipeline.rs::route`: tag route declarations, projector route metadata, and
   the protocol-owned fact admission hook type.
@@ -245,12 +259,12 @@ separate files.
   need/offer edges, assembles projection context with matched payload facts,
   computes replacement-need and append-only-offer deltas by owner, and fans out
   pending projection rows when new needs and offers overlap.
-- `pipeline.rs::dispatch`: intent queue worker. It claims one durable or local
+- `handle_intent.rs`: intent queue worker. It claims one durable or local
   intent, loads only the handler-declared fact inputs, calls the registered
   handler, handles retry/fatal outcomes, and commits handler output atomically
   with queue-row deletion.
-- `pipeline.rs::pipeline_one`: one queued fact pipeline item. It loads matched
-  context and due time ranges, runs the routed projector, replaces the owner's
+- `project_fact.rs`: one queued fact pipeline item. It loads matched context
+  and due time ranges, runs the routed projector, replaces the owner's
   needs/time wakes, appends offers, and commits emitted effects.
 - `pipeline.rs` state machine: pending projection queue drain. It
   admits facts and due time wakes, selects durable and ephemeral projection

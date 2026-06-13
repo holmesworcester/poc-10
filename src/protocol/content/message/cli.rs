@@ -239,7 +239,7 @@ pub fn send_file(
     };
     let descriptor = authored_file_fact(ctx, parsed.workspace_id, created_at_ms, descriptor)?;
     let descriptor_fact_id = descriptor.fact.id;
-    let mut facts = message_output.effects.facts;
+    let mut facts = message_output.facts;
     facts.extend(descriptor.into_facts());
     for encrypted in encrypted_slices {
         let slice = file_slice::fact::ContentFileSliceFact {
@@ -307,7 +307,7 @@ pub fn delete_message(
         deletion_fact_id: receipt.deletion_fact_id,
         target_message_id: target.message_id,
     })
-    .with_facts(output.effects.facts))
+    .with_facts(output.facts))
 }
 
 pub fn delete_message_output(receipt: &DeleteMessageReceipt) -> CliOutput {
@@ -1071,7 +1071,9 @@ fn local_content_key(
 ) -> Result<XChaCha20Poly1305Key, String> {
     let facts = persisted_facts(store)?;
     for fact in &facts {
-        if let Ok(secret) = auth::local_key_secret::decode::decode_local_key_secret(fact.body()) {
+        if let Ok(secret) =
+            auth::local_key_secret::project::decode::decode_local_key_secret(fact.body())
+        {
             if secret.workspace_id == workspace_id && secret.frontier_id == frontier_id {
                 return Ok(secret.key_secret);
             }
@@ -1079,7 +1081,9 @@ fn local_content_key(
     }
     for fact in facts {
         if let Ok(secret) =
-            auth::local_history_node_secret::decode::decode_local_history_node_secret(fact.body())
+            auth::local_history_node_secret::project::decode::decode_local_history_node_secret(
+                fact.body(),
+            )
         {
             let end_minute = secret
                 .range_start

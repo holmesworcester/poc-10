@@ -1,12 +1,227 @@
-//! Poc-10 invite-secret projector.
-//!
-//! POLICY. An invite_secret fact is admitted iff:
-//!   1. STRUCTURAL. The fact is local-only and the invite-secret payload
-//!      decodes with internally consistent hash/scope fields.
-//!   2. CONTEXT. No remote context is accepted; this is local bootstrap secret
-//!      material.
-//!   3. MATERIALIZE. Write the invite_secret row and publish both auth and
-//!      connection invite-secret context offers.
+pub mod decode {
+    //! Byte decoding for invite-secret facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, field order, and the
+    //! internally consistent hash/scope fields. Id checks live in
+    //! the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{FACT_BYTES, TYPE_INVITE_SECRET};
+    use super::super::fact::InviteSecretFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<InviteSecretFact, String> {
+        wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
+        let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+        if tag != TYPE_INVITE_SECRET {
+            return Err("expected invite_secret fact".to_string());
+        }
+        let mut bootstrap_hash = [0; 32];
+        bootstrap_hash.copy_from_slice(&bytes[1..33]);
+        let mut bootstrap_secret = [0; 32];
+        bootstrap_secret.copy_from_slice(&bytes[33..65]);
+        let mut workspace_raw = [0; 32];
+        workspace_raw.copy_from_slice(&bytes[65..97]);
+        let mut invite_raw = [0; 32];
+        invite_raw.copy_from_slice(&bytes[97..129]);
+        let workspace_id = optional_id(workspace_raw);
+        let invite_fact_id = optional_id(invite_raw);
+        InviteSecretFact {
+            bootstrap_hash,
+            bootstrap_secret,
+            workspace_id,
+            invite_fact_id,
+        }
+        .validate()
+    }
+
+    fn optional_id(id: [u8; 32]) -> Option<[u8; 32]> {
+        if id == [0; 32] {
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::invite::encode::{encode_fact, FACT_BYTES};
+
+        #[test]
+        fn invite_secret_fact_roundtrips_fixed_width() {
+            let fact = InviteSecretFact::new([7; 32]);
+            let encoded = encode_fact(&fact).expect("encode");
+            assert_eq!(encoded.len(), FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact);
+        }
+
+        #[test]
+        fn invite_secret_fact_roundtrips_scoped() {
+            let fact = InviteSecretFact::scoped([7; 32], [1; 32], [2; 32]);
+            let encoded = encode_fact(&fact).expect("encode");
+            let decoded = decode_fact(&encoded).expect("decode");
+            assert_eq!(decoded.workspace_id, Some([1; 32]));
+            assert_eq!(decoded.invite_fact_id, Some([2; 32]));
+        }
+
+        #[test]
+        fn decode_rejects_incomplete_scope() {
+            let fact = InviteSecretFact {
+                workspace_id: Some([1; 32]),
+                ..InviteSecretFact::new([7; 32])
+            };
+            let encoded = encode_fact(&fact).expect("encode");
+            let err = decode_fact(&encoded).expect_err("incomplete scope must fail");
+            assert_eq!(err, "invite secret scope is incomplete");
+        }
+
+        #[test]
+        fn decode_rejects_hash_secret_mismatch() {
+            let fact = InviteSecretFact {
+                bootstrap_hash: [9; 32],
+                bootstrap_secret: [7; 32],
+                workspace_id: None,
+                invite_fact_id: None,
+            };
+            let encoded = encode_fact(&fact).expect("encode");
+            let err = decode_fact(&encoded).expect_err("mismatched hash must fail");
+            assert_eq!(err, "invite secret hash does not match secret");
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded = encode_fact(&InviteSecretFact::new([7; 32])).expect("encode");
+            encoded[0] = 0;
+            assert!(decode_fact(&encoded).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Invite-secret authenticator.
+    //!
+    //! POLICY. Authenticating an `invite_secret` fact proves, over its bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical invite-secret fact with
+    //!      internally consistent hash/scope fields.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!
+    //! These are local bootstrap secrets, not a signed shared proof, so there is no
+    //! fact-boundary signature. Admission scope (`Local`) is interpretation the
+    //! projector owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::InviteSecretFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        invite_secret: InviteSecretFact,
+        _context: &ProjectionContext,
+    ) -> Result<InviteSecretFact, String> {
+        prove_decoded_invite_secret(fact, invite_secret)
+    }
+
+    fn prove_decoded_invite_secret(
+        fact: &Fact,
+        invite_secret: InviteSecretFact,
+    ) -> Result<InviteSecretFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(invite_secret)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::{Fact, FactScope};
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::invite::encode;
+        use crate::protocol::auth::invite::fact::InviteSecretFact;
+
+        fn canonical_fact() -> Fact {
+            let invite_secret = InviteSecretFact::new([7; 32]);
+            let bytes = encode::encode_fact(&invite_secret).expect("encode invite_secret");
+            Fact::new(FactScope::Local, 100, bytes)
+        }
+
+        fn authenticate(fact: &Fact) -> Result<InviteSecretFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Invite-secret semantic adapter.
+    //!
+    //! The current invite wire shape is already the active semantic shape. This
+    //! identity adapter keeps the protocol-local conversion point available for future versioned
+    //! facts.
+
+    use super::super::fact::InviteSecretFact;
+
+    pub(crate) fn adapt(source: InviteSecretFact) -> Result<InviteSecretFact, String> {
+        Ok(source)
+    }
+}
+
+// Poc-10 invite-secret projector.
+//
+// POLICY. An invite_secret fact is admitted iff:
+//   1. STRUCTURAL. The fact is local-only and the invite-secret payload
+//      decodes with internally consistent hash/scope fields.
+//   2. CONTEXT. No remote context is accepted; this is local bootstrap secret
+//      material.
+//   3. MATERIALIZE. Write the invite_secret row and publish both auth and
+//      connection invite-secret context offers.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -33,9 +248,9 @@ impl Projector for InviteSecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

@@ -11,11 +11,8 @@
 //! close-context coordinates; change the target projectors for target-specific
 //! cleanup.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -26,5 +23,5 @@ pub use project::{
 };
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionCloseFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

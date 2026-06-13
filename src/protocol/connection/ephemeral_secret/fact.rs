@@ -6,8 +6,9 @@
 //! from the private key before offering the secret as context.
 //!
 //! Keep this file to the typed payload shape. Byte layout belongs in
-//! `encode.rs`/`decode.rs`, row storage belongs in the family manifest's row
-//! schema, and admission policy belongs in `project.rs`.
+//! `encode.rs` and the projector-local `decode` module, row storage belongs in
+//! the family manifest's row schema, and admission policy belongs in
+//! `project.rs`.
 
 use crate::core::crypto::{X25519PrivateKey, X25519PublicKey};
 

@@ -5,10 +5,7 @@
 //! the invite key for acceptance flows. This module owns device-invite layout
 //! and admission; accepting the invite is handled by `invite_accepted`.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -61,5 +58,5 @@ pub fn device_invite_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::DeviceInviteFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

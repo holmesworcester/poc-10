@@ -1,16 +1,261 @@
-//! Semantic content-message projector.
-//!
-//! POLICY. A content_message is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
-//!      message payload with encrypted text.
-//!   2. CONTEXT. The projector records sync liveness immediately, then waits
-//!      for signer, author, deletion, retention-floor, secret, and time
-//!      context. Once signer and author validate, it publishes metadata context
-//!      for deletion. It does not publish opened message context or rows until
-//!      the encrypted text opens. Deletion, expiry, or retention context removes
-//!      this message's rows and purges this message fact.
-//!   3. MATERIALIZE. Once opened, the projector writes read-model rows and
-//!      offers semantic message context.
+pub mod decode {
+    //! Byte decoding for content-message facts and opened plaintext slots.
+    //!
+    //! Fact decoding proves only the fixed layout: tag, length, field order, and
+    //! bounded ciphertext slot. Id checks live in the local `authenticate` module.
+    //! Plaintext recovery is here because projection decrypts to this fixed slot
+    //! and then needs a canonical UTF-8 string.
+
+    use crate::core::wire;
+
+    use super::super::encode::{CONTENT_MESSAGE_BYTES, TYPE_CONTENT_MESSAGE};
+    use super::super::fact::{
+        ContentMessageFact, CIPHERTEXT_BYTES, MAX_TEXT_BYTES, PLAINTEXT_SLOT_BYTES,
+        TEXT_LENGTH_PREFIX_BYTES,
+    };
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<ContentMessageFact, String> {
+        let mut reader = wire::Reader::new(bytes);
+        reader.expect_len(CONTENT_MESSAGE_BYTES).map_err(wire_err)?;
+        let tag = reader.u8().map_err(wire_err)?;
+        if tag != TYPE_CONTENT_MESSAGE {
+            return Err("expected content message fact".to_string());
+        }
+        let fact = ContentMessageFact {
+            workspace_id: reader.array().map_err(wire_err)?,
+            created_at_ms: reader.u64be().map_err(wire_err)?,
+            author_user_id: reader.array().map_err(wire_err)?,
+            signer_id: reader.array().map_err(wire_err)?,
+            signer_public_key: reader.array().map_err(wire_err)?,
+            frontier_id: reader.array().map_err(wire_err)?,
+            local_history_node_secret_id: reader.array().map_err(wire_err)?,
+            expires_at_minute: reader.u64be().map_err(wire_err)?,
+            retention_policy_id: reader.array().map_err(wire_err)?,
+            minute: reader.u64be().map_err(wire_err)?,
+            nonce: reader.array().map_err(wire_err)?,
+            ciphertext: reader
+                .fixed_slot_value::<CIPHERTEXT_BYTES>()
+                .map_err(wire_err)?,
+        };
+        reader.finish().map_err(wire_err)?;
+        Ok(fact)
+    }
+
+    pub fn recover_text(plaintext: &[u8]) -> Result<String, String> {
+        if plaintext.len() != PLAINTEXT_SLOT_BYTES {
+            return Err(format!(
+                "plaintext slot is {} bytes, expected {PLAINTEXT_SLOT_BYTES}",
+                plaintext.len()
+            ));
+        }
+        let len = wire::take_u32be(&plaintext[..TEXT_LENGTH_PREFIX_BYTES])
+            .map_err(|err| format!("{err:?}"))? as usize;
+        if len > MAX_TEXT_BYTES {
+            return Err("recovered text length out of range".to_string());
+        }
+        let bytes = &plaintext[TEXT_LENGTH_PREFIX_BYTES..TEXT_LENGTH_PREFIX_BYTES + len];
+        String::from_utf8(bytes.to_vec()).map_err(|err| format!("text was not utf-8: {err}"))
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::content::message::fact::{MessageCiphertext, NONCE_BYTES};
+
+        fn fact() -> ContentMessageFact {
+            ContentMessageFact {
+                workspace_id: [1; 32],
+                created_at_ms: 180_000,
+                author_user_id: [2; 32],
+                signer_id: [3; 32],
+                signer_public_key: [9; 32],
+                frontier_id: [4; 32],
+                local_history_node_secret_id: [5; 32],
+                expires_at_minute: u64::MAX,
+                retention_policy_id: [6; 32],
+                minute: 3,
+                nonce: [8; NONCE_BYTES],
+                ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
+            }
+        }
+
+        #[test]
+        fn content_message_roundtrips_fixed_width() {
+            let encoded =
+                crate::protocol::content::message::encode::encode_fact(&fact()).expect("encode");
+            assert_eq!(encoded.len(), CONTENT_MESSAGE_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded =
+                crate::protocol::content::message::encode::encode_fact(&fact()).expect("encode");
+            encoded[0] = TYPE_CONTENT_MESSAGE.wrapping_add(1);
+            assert!(decode_fact(&encoded).is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_length() {
+            assert!(decode_fact(&[TYPE_CONTENT_MESSAGE; 16]).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Content-message authenticator.
+    //!
+    //! POLICY. Authenticating a `content_message` fact proves, over its bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical content-message envelope — right
+    //!      tag, fixed width, valid fields — through the family codec.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!
+    //! It proves nothing else. Admission scope is unsigned local metadata, not part
+    //! of these bytes, so the workspace-scope check is interpretation the projector
+    //! owns — that keeps the workspace-id format, its type, and the rule itself
+    //! behind the lens and the single ceiling projector, free to evolve. Decryption
+    //! of the message text likewise stays in the projector: the text key is secret
+    //! context and decryption yields read-model meaning. Signature evidence is a
+    //! separate fact and context dependency. The authenticated payload is the
+    //! decoded fact; the projector proves scope, signature evidence, signer, author,
+    //! deletion, retention, and secret context and materializes rows.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::ContentMessageFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        message: ContentMessageFact,
+        _context: &ProjectionContext,
+    ) -> Result<ContentMessageFact, String> {
+        prove_decoded_message(fact, message)
+    }
+
+    fn prove_decoded_message(
+        fact: &Fact,
+        message: ContentMessageFact,
+    ) -> Result<ContentMessageFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(message)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::content::message::encode;
+        use crate::protocol::content::message::fact::{
+            ContentMessageFact, MessageCiphertext, NONCE_BYTES,
+        };
+
+        const WORKSPACE_ID: [u8; 32] = [1; 32];
+
+        fn canonical_fact() -> Fact {
+            let message = ContentMessageFact {
+                workspace_id: WORKSPACE_ID,
+                created_at_ms: 180_000,
+                author_user_id: [2; 32],
+                signer_id: [3; 32],
+                signer_public_key: [7; 32],
+                frontier_id: [4; 32],
+                local_history_node_secret_id: [5; 32],
+                expires_at_minute: u64::MAX,
+                retention_policy_id: [6; 32],
+                minute: 3,
+                nonce: [8; NONCE_BYTES],
+                ciphertext: MessageCiphertext::new(b"sealed").expect("ciphertext"),
+            };
+            Fact::new(
+                crate::protocol::auth::workspace::scope(WORKSPACE_ID),
+                message.created_at_ms,
+                encode::encode_fact(&message).expect("encode message"),
+            )
+        }
+
+        fn authenticate(fact: &Fact) -> Result<ContentMessageFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Content-message semantic adapter.
+    //!
+    //! The current content-message wire shape is already the active semantic
+    //! shape. This identity adapter keeps the staged route explicit and gives
+    //! future versioned facts a dedicated conversion point.
+
+    use super::super::fact::ContentMessageFact;
+
+    pub(crate) fn adapt(source: ContentMessageFact) -> Result<ContentMessageFact, String> {
+        Ok(source)
+    }
+}
+
+// Semantic content-message projector.
+//
+// POLICY. A content_message is admitted iff:
+//   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
+//      message payload with encrypted text.
+//   2. CONTEXT. The projector records sync liveness immediately, then waits
+//      for signer, author, deletion, retention-floor, secret, and time
+//      context. Once signer and author validate, it publishes metadata context
+//      for deletion. It does not publish opened message context or rows until
+//      the encrypted text opens. Deletion, expiry, or retention context removes
+//      this message's rows and purges this message fact.
+//   3. MATERIALIZE. Once opened, the projector writes read-model rows and
+//      offers semantic message context.
 
 use crate::core::context::{ContextKey, ContextKeyPart, ContextNeed};
 use crate::core::crypto;
@@ -186,9 +431,9 @@ impl Projector for ContentMessageProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }
@@ -200,7 +445,7 @@ impl ContentMessageProjector {
         message: super::fact::ContentMessageFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // Authentication (see authenticate.rs) proved canonical bytes. Scope is
+        // Authentication (see the local authenticate module) proved canonical bytes. Scope is
         // interpretation, not authentication — it gates on unsigned admission
         // metadata — so it is checked here, behind the lens and the single
         // ceiling projector, where the workspace-id shape and this rule can
@@ -495,8 +740,8 @@ fn matched_secret_payload<'a>(
         if !coverage::secret_coverage_offer_valid_for_need(need, offer) {
             return Err("content message secret context offer does not match need".to_string());
         }
-        if auth::local_key_secret::decode::decode_local_key_secret(payload.body()).is_ok()
-            || auth::local_history_node_secret::decode::decode_local_history_node_secret(
+        if auth::local_key_secret::project::decode::decode_local_key_secret(payload.body()).is_ok()
+            || auth::local_history_node_secret::project::decode::decode_local_history_node_secret(
                 payload.body(),
             )
             .is_ok()
@@ -512,7 +757,7 @@ fn decrypt_text(
     secret_payload: &Fact,
 ) -> Result<String, String> {
     let key = if let Ok(secret) =
-        auth::local_key_secret::decode::decode_local_key_secret(secret_payload.body())
+        auth::local_key_secret::project::decode::decode_local_key_secret(secret_payload.body())
     {
         if secret.workspace_id != message.workspace_id || secret.frontier_id != message.frontier_id
         {
@@ -520,10 +765,11 @@ fn decrypt_text(
         }
         secret.key_secret
     } else {
-        let node = auth::local_history_node_secret::decode::decode_local_history_node_secret(
-            secret_payload.body(),
-        )
-        .map_err(|_| "content message secret context is not local key material".to_string())?;
+        let node =
+            auth::local_history_node_secret::project::decode::decode_local_history_node_secret(
+                secret_payload.body(),
+            )
+            .map_err(|_| "content message secret context is not local key material".to_string())?;
         if node.workspace_id != message.workspace_id || node.frontier_id != message.frontier_id {
             return Err("content message history secret does not match message".to_string());
         }
@@ -539,7 +785,7 @@ fn decrypt_text(
         &message.nonce,
         &message.ciphertext,
     )?;
-    crate::protocol::content::message::decode::recover_text(&plaintext)
+    crate::protocol::content::message::project::decode::recover_text(&plaintext)
 }
 
 fn expiry_minute_reached(

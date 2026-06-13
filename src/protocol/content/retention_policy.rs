@@ -7,12 +7,9 @@
 //! here keep the `disappearing-*` CLI surface while message projection consumes
 //! the resulting policy and self-purges expired facts.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod cli;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -28,7 +25,7 @@ use fact::{PolicyId, RetentionPolicyFact, WorkspaceId};
 pub const TYPE_RETENTION_POLICY: u8 = encode::TYPE_RETENTION_POLICY;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::RetentionPolicyFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 /// Retention policy projection rows, keyed by

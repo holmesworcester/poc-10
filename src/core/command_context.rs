@@ -25,7 +25,6 @@
 //! `CommandContext` with a hand-built vault; production code wires identity's
 //! own vault implementation.
 
-use crate::core::effects::PipelineEffects;
 use crate::core::facts::{Fact, FactId};
 use crate::core::store::Store;
 
@@ -151,37 +150,42 @@ impl<'a> CommandContext<'a> {
     }
 }
 
-/// A small command output bundle.
+/// A user-facing command's authored output.
 ///
-/// Commands return zero or more proposed facts, zero or more durable/local
-/// intents, and a typed receipt. The receipt is intentionally limited to ids,
-/// scope ids, and deterministic timestamps that later commands can chain from.
-/// Display data comes from `queries.rs` after the runtime has processed the
-/// output. The bundle is intentionally narrow: it cannot carry handler
-/// callbacks, worker handles, or registry references.
+/// Commands return zero or more authored facts plus a typed receipt. The
+/// receipt is intentionally limited to ids, scope ids, and deterministic
+/// timestamps that later commands can chain from. Display data comes from
+/// `queries.rs` after the runtime has processed the output.
+///
+/// This bundle is deliberately narrower than `PipelineEffects`: commands cannot
+/// emit row mutations, purges, durable intents, local intents, handler
+/// callbacks, worker handles, or registry references. Runtime submission turns
+/// these facts into retained pending facts atomically.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandOutput<T> {
+pub struct AuthoredCommand<T> {
     pub receipt: T,
-    pub effects: PipelineEffects,
+    pub facts: Vec<Fact>,
 }
 
-impl<T> CommandOutput<T> {
+impl<T> AuthoredCommand<T> {
     pub fn new(receipt: T) -> Self {
         Self {
             receipt,
-            effects: PipelineEffects::new(),
+            facts: Vec::new(),
         }
     }
 
     pub fn with_facts(mut self, facts: Vec<Fact>) -> Self {
-        self.effects.facts = facts;
+        self.facts = facts;
         self
     }
 
-    pub fn into_parts(self) -> (T, PipelineEffects) {
-        (self.receipt, self.effects)
+    pub fn into_parts(self) -> (T, Vec<Fact>) {
+        (self.receipt, self.facts)
     }
 }
+
+pub type CommandOutput<T> = AuthoredCommand<T>;
 
 // Compile-time guard.
 //

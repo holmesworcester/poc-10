@@ -109,13 +109,13 @@ pub fn create_workspace_with_identity(
         device_name: identity.device_name,
         signer_id: device_invite.fact.id,
         signer_private_key: endpoint.signing_secret,
-        new_endpoint_fact: endpoint_output.effects.facts.first(),
+        new_endpoint_fact: endpoint_output.facts.first(),
         store: ctx.store(),
     })?;
     let user_id = user.fact.id;
     let mut facts = vec![workspace, workspace_signature];
     facts.extend(user_invite.into_facts());
-    facts.extend(accepted.effects.facts);
+    facts.extend(accepted.facts);
     facts.extend(user.into_facts());
     facts.extend(bootstrap_admin.into_facts());
     facts.extend(device_invite.into_facts());
@@ -133,7 +133,7 @@ pub fn create_workspace_with_identity(
             .into_facts(),
         );
     }
-    facts.extend(endpoint_output.effects.facts);
+    facts.extend(endpoint_output.facts);
     Ok(CommandOutput::new(CreateWorkspaceReceipt {
         workspace_fact_id: workspace_id,
         created_at_ms,
@@ -142,8 +142,9 @@ pub fn create_workspace_with_identity(
 }
 
 fn authenticate_workspace_fact(fact: &Fact) -> Result<(), String> {
-    let decoded = super::decode::decode_fact(fact.body())?;
-    super::authenticate::authenticate(fact, decoded, &ProjectionContext::default()).map(|_| ())
+    let decoded = super::project::decode::decode_fact(fact.body())?;
+    super::project::authenticate::authenticate(fact, decoded, &ProjectionContext::default())
+        .map(|_| ())
 }
 
 struct EndpointSharedFactInput<'a> {
@@ -162,7 +163,7 @@ fn endpoint_shared_fact(
     input: EndpointSharedFactInput<'_>,
 ) -> Result<AuthoredFactEvidence, String> {
     let endpoint_id = if let Some(endpoint_fact) = input.new_endpoint_fact {
-        auth::endpoint::decode::decode_fact(&endpoint_fact.bytes)?.endpoint
+        auth::endpoint::project::decode::decode_fact(&endpoint_fact.bytes)?.endpoint
     } else {
         let value = input
             .store

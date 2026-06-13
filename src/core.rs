@@ -13,11 +13,13 @@
 //! modules own byte layouts, authority checks, user-facing commands, and the
 //! meaning of projected rows.
 //!
-//! Start in `runtime` for the host-facing facade, `pipeline` for the queue
-//! engine and fact lifecycle, `schema` for core tables, and `store` for the
-//! SQLite substrate. Use `app`, `daemon`, and `cli` when working on process or
-//! command hosting. If a change requires knowing what a workspace, message,
-//! invite, key wrap, or sync range means, it belongs under `protocol`, not here.
+//! Start in `runtime` for the host-facing facade, `pipeline` for contract types
+//! and the bounded queue driver, `project_fact` for one fact projection
+//! transaction, `handle_intent` for one intent transaction, `schema` for core
+//! tables, and `store` for the SQLite substrate. Use `app`, `daemon`, and `cli`
+//! when working on process or command hosting. If a change requires knowing what
+//! a workspace, message, invite, key wrap, or sync range means, it belongs under
+//! `protocol`, not here.
 
 pub mod app;
 pub mod cli;
@@ -29,10 +31,12 @@ pub mod daemon;
 pub mod effects;
 pub(crate) mod fact_store;
 pub mod facts;
+pub(crate) mod handle_intent;
 pub mod intents;
 pub mod network;
 pub mod perf_profile;
 pub mod pipeline;
+pub(crate) mod project_fact;
 pub mod replay;
 pub mod row_schema;
 pub mod runtime;

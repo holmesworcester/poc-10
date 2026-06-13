@@ -12,7 +12,7 @@ use crate::protocol::auth::invite::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
-use super::{decode, encode};
+use super::{encode, project::decode};
 
 use std::net::SocketAddr;
 

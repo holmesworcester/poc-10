@@ -12,7 +12,7 @@ use crate::core::facts::{Fact, FactScope};
 use crate::core::store::Store;
 
 use super::fact::EndpointFact;
-use super::{decode, encode};
+use super::{encode, project::decode};
 
 pub fn create_local_endpoint() -> EndpointFact {
     let secret = crypto::random_x25519_private_key();

@@ -10,14 +10,14 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::{encode as endpoint_layout, fact::EndpointFact};
-use topo::protocol::auth::invite::decode as invite_layout;
+use topo::protocol::auth::invite::project::decode as invite_layout;
 use topo::protocol::connection::close::commands::close;
 use topo::protocol::connection::connection::{
     author::{build_responder_connection, BuildResponderConnection},
     CONNECTION_ROWS,
 };
-use topo::protocol::connection::ephemeral_secret::decode as ephemeral_layout_decode;
 use topo::protocol::connection::ephemeral_secret::encode as ephemeral_layout_encode;
+use topo::protocol::connection::ephemeral_secret::project::decode as ephemeral_layout_decode;
 use topo::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, CONNECTION_EPHEMERAL_SECRET_ROWS,
 };
@@ -25,7 +25,7 @@ use topo::protocol::connection::frame_observation;
 use topo::protocol::connection::request::commands::{
     create_bootstrap, CreateBootstrapConnectionRequest,
 };
-use topo::protocol::connection::request::decode as request_layout;
+use topo::protocol::connection::request::project::decode as request_layout;
 
 struct FixedClock(Cell<u64>);
 
@@ -79,9 +79,9 @@ fn closing_connection_purges_connection_fact_and_row() {
     .expect("create request");
     let initiator_ephemeral_id = request_output.receipt.initiator_ephemeral_secret_id;
     let request_id = request_output.receipt.request_id;
-    let invite_fact = request_output.effects.facts[0].clone();
-    let initiator_ephemeral_fact = request_output.effects.facts[1].clone();
-    let request_fact = request_output.effects.facts[2].clone();
+    let invite_fact = request_output.facts[0].clone();
+    let initiator_ephemeral_fact = request_output.facts[1].clone();
+    let request_fact = request_output.facts[2].clone();
     let invite = invite_layout::decode_fact(&invite_fact.bytes).expect("decode invite");
     let initiator_ephemeral = ephemeral_layout_decode::decode_fact(&initiator_ephemeral_fact.bytes)
         .expect("decode initiator ephemeral");

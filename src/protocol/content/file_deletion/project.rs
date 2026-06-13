@@ -1,12 +1,211 @@
-//! Poc-10 content-file-deletion projector.
-//!
-//! POLICY. A content_file_deletion is admitted iff:
-//!   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
-//!      deletion payload for one target file and author user.
-//!   2. AUTHORITY. The signer, target file, and author user contexts must all
-//!      validate against the same workspace and target.
-//!   3. MATERIALIZE. Once authorized, write the deletion row, publish the
-//!      fact_purged offer, and share the deletion fact.
+pub mod decode {
+    //! Byte decoding for content-file-deletion target facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{CONTENT_FILE_DELETION_BYTES, TYPE_CONTENT_FILE_DELETION};
+    use super::super::fact::ContentFileDeletionFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<ContentFileDeletionFact, String> {
+        let mut reader = wire::Reader::new(bytes);
+        reader
+            .expect_len(CONTENT_FILE_DELETION_BYTES)
+            .map_err(wire_err)?;
+        let tag = reader.u8().map_err(wire_err)?;
+        if tag != TYPE_CONTENT_FILE_DELETION {
+            return Err("expected content file deletion fact".to_string());
+        }
+        let fact = ContentFileDeletionFact {
+            workspace_id: reader.array().map_err(wire_err)?,
+            created_at_ms: reader.u64be().map_err(wire_err)?,
+            target_file_id: reader.array().map_err(wire_err)?,
+            author_user_id: reader.array().map_err(wire_err)?,
+            signer_id: reader.array().map_err(wire_err)?,
+            signer_public_key: reader.array().map_err(wire_err)?,
+        };
+        reader.finish().map_err(wire_err)?;
+        Ok(fact)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::content::file_deletion::encode::{
+            encode_fact, CONTENT_FILE_DELETION_BYTES, TYPE_CONTENT_FILE_DELETION,
+        };
+
+        fn fact() -> ContentFileDeletionFact {
+            ContentFileDeletionFact {
+                workspace_id: [1; 32],
+                created_at_ms: 9_000,
+                target_file_id: [2; 32],
+                author_user_id: [3; 32],
+                signer_id: [9; 32],
+                signer_public_key: [10; 32],
+            }
+        }
+
+        #[test]
+        fn content_file_deletion_roundtrips_fixed_width() {
+            let encoded = encode_fact(&fact()).expect("encode");
+            assert_eq!(encoded.len(), CONTENT_FILE_DELETION_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[0] = TYPE_CONTENT_FILE_DELETION.wrapping_add(1);
+            assert!(decode_fact(&encoded).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Content-file-deletion authenticator.
+    //!
+    //! POLICY. Authenticating a `content_file_deletion` fact proves, over its signed
+    //! bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical content-file-deletion fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!
+    //! Admission scope is unsigned local metadata, not part of these bytes, so the
+    //! workspace-scope check is interpretation the projector owns. The authority of
+    //! the signer, target file, and author user is proven from other facts, also in
+    //! the projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::ContentFileDeletionFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        deletion: ContentFileDeletionFact,
+        _context: &ProjectionContext,
+    ) -> Result<ContentFileDeletionFact, String> {
+        prove_decoded_file_deletion(fact, deletion)
+    }
+
+    fn prove_decoded_file_deletion(
+        fact: &Fact,
+        deletion: ContentFileDeletionFact,
+    ) -> Result<ContentFileDeletionFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(deletion)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::command_context::LocalSigningCapability;
+        use crate::core::crypto;
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::content::file_deletion::author::delete_file;
+        use crate::protocol::content::file_deletion::fact::ContentFileDeletionFact;
+
+        const PRIVATE_KEY: [u8; 32] = [7; 32];
+        const WORKSPACE_ID: [u8; 32] = [1; 32];
+
+        fn signing_capability() -> LocalSigningCapability {
+            LocalSigningCapability {
+                workspace_id: WORKSPACE_ID,
+                signer_id: [2; 32],
+                public_key: crypto::ed25519_public_key(&PRIVATE_KEY),
+                private_key: PRIVATE_KEY,
+            }
+        }
+
+        fn canonical_fact() -> Fact {
+            delete_file(&signing_capability(), WORKSPACE_ID, 100, [3; 32], [4; 32])
+                .expect("content file deletion fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<ContentFileDeletionFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Content-file-deletion semantic adapter.
+    //!
+    //! The current file_deletion wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::ContentFileDeletionFact;
+
+    pub(crate) fn adapt(
+        source: ContentFileDeletionFact,
+    ) -> Result<ContentFileDeletionFact, String> {
+        Ok(source)
+    }
+}
+
+// Poc-10 content-file-deletion projector.
+//
+// POLICY. A content_file_deletion is admitted iff:
+//   1. STRUCTURAL. The fact is workspace-scoped, signed, and contains a
+//      deletion payload for one target file and author user.
+//   2. AUTHORITY. The signer, target file, and author user contexts must all
+//      validate against the same workspace and target.
+//   3. MATERIALIZE. Once authorized, write the deletion row, publish the
+//      fact_purged offer, and share the deletion fact.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::{RowMutation, TableInsert, Value};
@@ -53,9 +252,9 @@ impl Projector for ContentFileDeletionProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

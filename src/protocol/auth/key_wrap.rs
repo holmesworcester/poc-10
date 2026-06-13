@@ -10,12 +10,9 @@
 //! signer/recipient/frontier context and emits unwrap work when local recipient
 //! material is present.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod cli;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;

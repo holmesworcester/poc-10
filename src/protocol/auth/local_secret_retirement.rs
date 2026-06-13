@@ -9,10 +9,7 @@
 //! coordinates. Change the target secret projectors for target-specific cleanup
 //! and validation.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -22,5 +19,5 @@ pub use project::{secret_retired_need, secret_retired_offer};
 pub const TYPE_LOCAL_SECRET_RETIREMENT: u8 = encode::TYPE_LOCAL_SECRET_RETIREMENT;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalSecretRetirementFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

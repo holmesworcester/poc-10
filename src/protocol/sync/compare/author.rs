@@ -80,7 +80,7 @@ fn response_plan_inner(
     available_facts: Vec<&Fact>,
     summarize: &mut dyn FnMut(TimestampRange, &[&Fact]) -> Result<RangeSummary, String>,
 ) -> Result<CompareResponsePlan, String> {
-    let compare = super::decode::decode_fact(&compare_fact.bytes)?;
+    let compare = super::project::decode::decode_fact(&compare_fact.bytes)?;
     let range_facts = local_range_facts(available_facts, compare_fact.id, compare.range);
     let local_summary = summarize(compare.range, &range_facts)?;
 
@@ -269,7 +269,8 @@ mod tests {
         let facts = [plain_fact(10, 1), plain_fact(20, 2)];
 
         let compare_fact = start_compare_fact([7; 32], facts.iter()).expect("start compare");
-        let compare = super::super::decode::decode_fact(&compare_fact.bytes).expect("decode");
+        let compare =
+            super::super::project::decode::decode_fact(&compare_fact.bytes).expect("decode");
 
         assert_eq!(compare.connection_id, [7; 32]);
         assert_eq!(compare.range, TimestampRange::ROOT);
@@ -298,7 +299,7 @@ mod tests {
             .iter()
             .all(|fact| fact.bytes.first() == Some(&super::super::encode::TYPE_SYNC_COMPARE)));
         assert!(output.iter().all(|fact| {
-            super::super::decode::decode_fact(&fact.bytes)
+            super::super::project::decode::decode_fact(&fact.bytes)
                 .expect("decode compare")
                 .response_requested
         }));
@@ -332,7 +333,8 @@ mod tests {
         let output = response_facts(&compare_fact, std::iter::empty()).expect("response facts");
 
         assert_eq!(output.len(), 1);
-        let compare = super::super::decode::decode_fact(&output[0].bytes).expect("decode compare");
+        let compare =
+            super::super::project::decode::decode_fact(&output[0].bytes).expect("decode compare");
         assert_eq!(compare.summary, RangeSummary::default());
         assert!(!compare.response_requested);
     }

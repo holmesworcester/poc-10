@@ -1,9 +1,207 @@
-//! Recipient key projector.
-//!
-//! POLICY. A recipient key is admitted iff its scope matches the workspace and
-//! supersession of any previous recipient key validates. Projection shares the
-//! fact, publishes recipient context, and emits proactive key-wrap work when
-//! eligible local wrap sources and signer secrets are available.
+pub mod decode {
+    //! Byte decoding for recipient key facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{RECIPIENT_KEY_BYTES, TYPE_RECIPIENT_KEY};
+    use super::super::fact::RecipientKeyFact;
+
+    pub fn decode_recipient_key(bytes: &[u8]) -> Result<RecipientKeyFact, String> {
+        wire::expect_len(bytes, RECIPIENT_KEY_BYTES).map_err(wire_err)?;
+        if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_RECIPIENT_KEY {
+            return Err("expected recipient key".to_string());
+        }
+        Ok(RecipientKeyFact {
+            workspace_id: bytes[1..33].try_into().unwrap(),
+            endpoint_id: bytes[33..65].try_into().unwrap(),
+            recipient_key: bytes[65..97].try_into().unwrap(),
+            previous_recipient_key_id: bytes[97..129].try_into().unwrap(),
+            created_at_ms: wire::take_u64be(&bytes[129..137]).map_err(wire_err)?,
+            signer_public_key: bytes[137..169].try_into().unwrap(),
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::recipient_key::encode::{
+            encode_recipient_key, RECIPIENT_KEY_BYTES,
+        };
+
+        fn sample_fact() -> RecipientKeyFact {
+            RecipientKeyFact {
+                workspace_id: [1; 32],
+                endpoint_id: [2; 32],
+                recipient_key: [3; 32],
+                previous_recipient_key_id: [4; 32],
+                created_at_ms: 123,
+                signer_public_key: [5; 32],
+            }
+        }
+
+        #[test]
+        fn recipient_key_roundtrips_fixed_width() {
+            let fact = sample_fact();
+
+            let encoded = encode_recipient_key(&fact).expect("encode recipient key");
+
+            assert_eq!(encoded.len(), RECIPIENT_KEY_BYTES);
+            assert_eq!(
+                decode_recipient_key(&encoded).expect("decode recipient key"),
+                fact
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Recipient-key authenticator.
+    //!
+    //! POLICY. Authenticating a `recipient_key` fact proves, over its canonical bytes
+    //! alone:
+    //!   1. LAYOUT. The bytes decode to a canonical recipient-key fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!   4. FIELDS. A recipient key cannot supersede itself
+    //!      (`previous_recipient_key_id != fact_id`).
+    //!
+    //! Admission scope is unsigned local metadata, so the workspace-scope check is
+    //! interpretation the projector owns. Supersession against an earlier key and
+    //! signer matching are proven from other facts, also in the projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::RecipientKeyFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        recipient: RecipientKeyFact,
+        _context: &ProjectionContext,
+    ) -> Result<RecipientKeyFact, String> {
+        prove_decoded_recipient_key(fact, recipient)
+    }
+
+    fn prove_decoded_recipient_key(
+        fact: &Fact,
+        recipient: RecipientKeyFact,
+    ) -> Result<RecipientKeyFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        // 4. A recipient key cannot supersede itself.
+        if recipient.previous_recipient_key_id == fact.id {
+            return Err(
+                "recipient key cannot supersede itself (previous_recipient_key_id == fact_id)"
+                    .to_string(),
+            );
+        }
+        Ok(recipient)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::crypto;
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::recipient_key::author::authored_recipient_key_fact;
+        use crate::protocol::auth::recipient_key::fact::{
+            RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY,
+        };
+
+        const SIGNER_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            let private_key = SIGNER_KEY;
+            let signer_public_key = crypto::ed25519_public_key(&private_key);
+            authored_recipient_key_fact(
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                NO_PREVIOUS_RECIPIENT_KEY,
+                100,
+                signer_public_key,
+            )
+            .expect("signed recipient_key fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<RecipientKeyFact, String> {
+            let decoded = super::super::decode::decode_recipient_key(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Recipient key semantic adapter.
+    //!
+    //! The current recipient_key wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::RecipientKeyFact;
+
+    pub(crate) fn adapt(source: RecipientKeyFact) -> Result<RecipientKeyFact, String> {
+        Ok(source)
+    }
+}
+
+// Recipient key projector.
+//
+// POLICY. A recipient key is admitted iff its scope matches the workspace and
+// supersession of any previous recipient key validates. Projection shares the
+// fact, publishes recipient context, and emits proactive key-wrap work when
+// eligible local wrap sources and signer secrets are available.
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
@@ -38,9 +236,9 @@ impl Projector for RecipientKeyProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_recipient_key(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_recipient_key(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

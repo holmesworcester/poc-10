@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use crate::core::store::Store;
 use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
 use crate::protocol::connection::request::{
-    decode::decode_optional_addr, encode::ADDR_BLOCK_BYTES,
+    encode::ADDR_BLOCK_BYTES, project::decode::decode_optional_addr,
 };
 
 use super::fact::{EndpointId, WorkspaceId};

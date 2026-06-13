@@ -1,14 +1,264 @@
-//! Disappearing-messages retention policy projector (poc-10 target tree).
-//!
-//! POLICY. A retention_policy is admitted iff:
-//!   1. STRUCTURAL. The body decodes, TTL/created time are non-zero, the
-//!      natural signature verifies, and workspace-scoped policies name the
-//!      workspace as their scope id.
-//!   2. AUTHORITY. The authority context is either root workspace bootstrap or
-//!      an admin grant for the author; predecessor context must match scope.
-//!   3. MATERIALIZE. Once monotonicity is validated, write the retention
-//!      policy row, publish exact-fact context, and share the fact with the
-//!      workspace.
+pub mod decode {
+    //! Byte decoding for retention policy facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{FACT_BYTES, NO_PREVIOUS_POLICY_ID, TYPE_RETENTION_POLICY};
+    use super::super::fact::RetentionPolicyFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<RetentionPolicyFact, String> {
+        wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
+        let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+        if tag != TYPE_RETENTION_POLICY {
+            return Err("expected content::retention_policy fact".to_string());
+        }
+        let created_at_ms = wire::take_u64be(&bytes[1..9]).map_err(wire_err)?;
+        let mut workspace_id = [0; 32];
+        workspace_id.copy_from_slice(&bytes[9..41]);
+        let scope_kind = wire::take_u8(&bytes[41..42]).map_err(wire_err)?;
+        let mut scope_id = [0; 32];
+        scope_id.copy_from_slice(&bytes[42..74]);
+        let mut author_user_id = [0; 32];
+        author_user_id.copy_from_slice(&bytes[74..106]);
+        let mut signer_id = [0; 32];
+        signer_id.copy_from_slice(&bytes[106..138]);
+        let mut signer_public_key = [0; 32];
+        signer_public_key.copy_from_slice(&bytes[138..170]);
+        let ttl_minutes = wire::take_u32be(&bytes[170..174]).map_err(wire_err)?;
+        let retire_minute = wire::take_u64be(&bytes[174..182]).map_err(wire_err)?;
+        let mut supersedes_raw = [0; 32];
+        supersedes_raw.copy_from_slice(&bytes[182..214]);
+        let supersedes_policy_id = if supersedes_raw == NO_PREVIOUS_POLICY_ID {
+            None
+        } else {
+            Some(supersedes_raw)
+        };
+        Ok(RetentionPolicyFact {
+            workspace_id,
+            supersedes_policy_id,
+            ttl_minutes,
+            retire_minute,
+            scope_kind,
+            scope_id,
+            author_user_id,
+            signer_id,
+            signer_public_key,
+            created_at_ms,
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::content::retention_policy::encode::{
+            encode_fact, FACT_BYTES, NO_PREVIOUS_POLICY_ID, TYPE_RETENTION_POLICY,
+        };
+
+        fn fact() -> RetentionPolicyFact {
+            RetentionPolicyFact {
+                workspace_id: [1; 32],
+                supersedes_policy_id: Some([7; 32]),
+                ttl_minutes: 60,
+                retire_minute: 12_345,
+                scope_kind: crate::protocol::content::retention_policy::fact::SCOPE_KIND_WORKSPACE,
+                scope_id: [1; 32],
+                author_user_id: [3; 32],
+                signer_id: [9; 32],
+                signer_public_key: [10; 32],
+                created_at_ms: 6_000_000,
+            }
+        }
+
+        #[test]
+        fn retention_policy_fact_roundtrips_fixed_width() {
+            let encoded = encode_fact(&fact()).expect("encode");
+            assert_eq!(encoded.len(), FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn none_supersedes_uses_zero_sentinel() {
+            let mut f = fact();
+            f.supersedes_policy_id = None;
+            let encoded = encode_fact(&f).expect("encode");
+            assert_eq!(&encoded[182..214], &NO_PREVIOUS_POLICY_ID);
+            assert_eq!(decode_fact(&encoded).expect("decode"), f);
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[0] = TYPE_RETENTION_POLICY.wrapping_add(1);
+            assert!(decode_fact(&encoded).is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_length() {
+            assert!(decode_fact(&[TYPE_RETENTION_POLICY; 16]).is_err());
+        }
+    }
+}
+pub mod authenticate {
+    //! Retention-policy authenticator.
+    //!
+    //! POLICY. Authenticating a `retention_policy` fact proves, over its signed
+    //! bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical retention-policy fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The natural signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!   4. FIELDS. TTL and created time are non-zero, and a workspace-scoped policy
+    //!      names the workspace as its scope id.
+    //!
+    //! The authority path (root workspace bootstrap vs admin grant), supersession,
+    //! and floor tightening are proven from other facts, so they stay in the
+    //! projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::RetentionPolicyFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        policy: RetentionPolicyFact,
+        _context: &ProjectionContext,
+    ) -> Result<RetentionPolicyFact, String> {
+        prove_decoded_retention_policy(fact, policy)
+    }
+
+    fn prove_decoded_retention_policy(
+        fact: &Fact,
+        policy: RetentionPolicyFact,
+    ) -> Result<RetentionPolicyFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        // 4. Intrinsic fields.
+        if policy.ttl_minutes == 0 {
+            return Err("retention policy ttl_minutes must be non-zero".to_string());
+        }
+        if policy.created_at_ms == 0 {
+            return Err("retention policy created_at_ms must be non-zero".to_string());
+        }
+        if policy.scope_kind == super::super::fact::SCOPE_KIND_WORKSPACE
+            && policy.scope_id != policy.workspace_id
+        {
+            return Err("retention policy workspace-scope id must match workspace_id".to_string());
+        }
+        Ok(policy)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::content::retention_policy::author::authored_retention_policy_fact;
+        use crate::protocol::content::retention_policy::fact::{
+            RetentionPolicyFact, SCOPE_KIND_WORKSPACE,
+        };
+
+        const PRIVATE_KEY: [u8; 32] = [7; 32];
+        const WORKSPACE_ID: [u8; 32] = [1; 32];
+
+        fn canonical_fact() -> Fact {
+            authored_retention_policy_fact(
+                WORKSPACE_ID,
+                None,
+                60,
+                10,
+                SCOPE_KIND_WORKSPACE,
+                WORKSPACE_ID,
+                [2; 32],
+                [3; 32],
+                100,
+                PRIVATE_KEY,
+            )
+            .expect("signed retention policy fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<RetentionPolicyFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Retention-policy semantic adapter.
+    //!
+    //! The current retention_policy wire shape is already the active semantic shape. This
+    //! identity adapter keeps the protocol-local conversion point available for future versioned
+    //! facts.
+
+    use super::super::fact::RetentionPolicyFact;
+
+    pub(crate) fn adapt(source: RetentionPolicyFact) -> Result<RetentionPolicyFact, String> {
+        Ok(source)
+    }
+}
+
+// Disappearing-messages retention policy projector (poc-10 target tree).
+//
+// POLICY. A retention_policy is admitted iff:
+//   1. STRUCTURAL. The body decodes, TTL/created time are non-zero, the
+//      natural signature verifies, and workspace-scoped policies name the
+//      workspace as their scope id.
+//   2. AUTHORITY. The authority context is either root workspace bootstrap or
+//      an admin grant for the author; predecessor context must match scope.
+//   3. MATERIALIZE. Once monotonicity is validated, write the retention
+//      policy row, publish exact-fact context, and share the fact with the
+//      workspace.
 
 use crate::core::facts::{Fact, FactScope};
 use crate::core::intents::RowMutation;
@@ -41,9 +291,9 @@ impl Projector for RetentionPolicyProjector {
         fact: &Fact,
         projection_context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, projection_context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, projection_context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, projection_context)
     }
 }

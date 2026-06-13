@@ -10,10 +10,10 @@ use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::{
     admin, endpoint, invite_accepted,
-    signature::{authenticate as signature_authenticate, decode as signature_decode},
+    signature::project::{authenticate as signature_authenticate, decode as signature_decode},
     user, user_invite,
     workspace::commands::{create_workspace_with_identity, BootstrapIdentity},
-    workspace::decode as workspace_decode,
+    workspace::project::decode as workspace_decode,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -63,25 +63,21 @@ fn create_workspace_emits_decodable_workspace_fact() {
         },
     )
     .expect("create_workspace");
-
-    assert!(output.effects.intents.is_empty());
     assert_eq!(output.receipt.created_at_ms, 60_000);
 
     let workspace_fact = output
-        .effects
         .facts
         .iter()
         .find(|fact| fact.id == output.receipt.workspace_fact_id)
         .expect("workspace fact emitted");
     let decoded = workspace_decode::decode_fact(&workspace_fact.bytes).expect("decode fact");
     let signature = output
-        .effects
         .facts
         .iter()
         .filter_map(|fact| signature_decode::decode_fact(&fact.bytes).ok())
         .find(|signature| signature.target_fact_id == workspace_fact.id)
         .expect("workspace signature evidence emitted");
-    signature_authenticate::verify_signature(&signature).expect("workspace signature");
+    signature_authenticate::prove_signature_evidence(&signature).expect("workspace signature");
     assert_eq!(decoded.name, "Research");
     assert_eq!(decoded.created_at_ms, 60_000);
 }
@@ -107,7 +103,6 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     let workspace_id = output.receipt.workspace_fact_id;
     let workspace = workspace_decode::decode_fact(
         output
-            .effects
             .facts
             .iter()
             .find(|fact| fact.id == workspace_id)
@@ -117,7 +112,6 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     .expect("decode workspace");
 
     let user_invite_fact = output
-        .effects
         .facts
         .iter()
         .find(|fact| fact.body().first() == Some(&user_invite::TYPE_USER_INVITE))
@@ -130,7 +124,6 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     assert_eq!(first_invite.signer_public_key, workspace.public_key);
 
     let accepted_fact = output
-        .effects
         .facts
         .iter()
         .find(|fact| fact.body().first() == Some(&invite_accepted::TYPE_INVITE_ACCEPTED))
@@ -141,7 +134,6 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     assert_eq!(accepted.invite_fact_id, user_invite_fact.id);
 
     let endpoint_fact = output
-        .effects
         .facts
         .iter()
         .find(|fact| fact.body().first() == Some(&endpoint::TYPE_LOCAL_ENDPOINT))
@@ -159,7 +151,6 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     );
 
     let user_fact = output
-        .effects
         .facts
         .iter()
         .find(|fact| fact.body().first() == Some(&user::TYPE_USER))
@@ -170,7 +161,6 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     assert_eq!(created_user.signer_public_key, first_invite.public_key);
 
     let admins = output
-        .effects
         .facts
         .iter()
         .filter(|fact| fact.body().first() == Some(&admin::TYPE_ADMIN))

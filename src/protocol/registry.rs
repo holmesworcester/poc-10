@@ -209,228 +209,228 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
     match tag {
         connection::close::encode::TYPE_CONNECTION_CLOSE => authenticate_admission_arm!(
             fact,
-            connection::close::decode::decode_fact,
-            connection::close::authenticate::authenticate
+            connection::close::project::decode::decode_fact,
+            connection::close::project::authenticate::authenticate
         ),
         connection::ephemeral_secret::encode::TYPE_CONNECTION_EPHEMERAL_SECRET => {
             authenticate_admission_arm!(
                 fact,
-                connection::ephemeral_secret::decode::decode_fact,
-                connection::ephemeral_secret::authenticate::authenticate
+                connection::ephemeral_secret::project::decode::decode_fact,
+                connection::ephemeral_secret::project::authenticate::authenticate
             )
         }
         connection::request::encode::TYPE_CONNECTION_REQUEST => authenticate_sealed_admission_arm!(
             fact,
-            connection::request::decode::validate_sealed_fact,
-            connection::request::authenticate::authenticate
+            connection::request::project::decode::validate_sealed_fact,
+            connection::request::project::authenticate::authenticate
         ),
         connection::connection::encode::TYPE_CONNECTION => authenticate_sealed_admission_arm!(
             fact,
-            connection::connection::decode::validate_sealed_fact,
-            connection::connection::authenticate::authenticate
+            connection::connection::project::decode::validate_sealed_fact,
+            connection::connection::project::authenticate::authenticate
         ),
         content::file::encode::TYPE_CONTENT_FILE => authenticate_admission_arm!(
             fact,
-            content::file::decode::decode_fact,
-            content::file::authenticate::authenticate
+            content::file::project::decode::decode_fact,
+            content::file::project::authenticate::authenticate
         ),
         content::file_deletion::encode::TYPE_CONTENT_FILE_DELETION => authenticate_admission_arm!(
             fact,
-            content::file_deletion::decode::decode_fact,
-            content::file_deletion::authenticate::authenticate
+            content::file_deletion::project::decode::decode_fact,
+            content::file_deletion::project::authenticate::authenticate
         ),
         content::file_slice::encode::TYPE_CONTENT_FILE_SLICE => authenticate_admission_arm!(
             fact,
-            content::file_slice::decode::decode_fact,
-            content::file_slice::authenticate::authenticate
+            content::file_slice::project::decode::decode_fact,
+            content::file_slice::project::authenticate::authenticate
         ),
         content::message::encode::TYPE_CONTENT_MESSAGE => authenticate_admission_arm!(
             fact,
-            content::message::decode::decode_fact,
-            content::message::authenticate::authenticate
+            content::message::project::decode::decode_fact,
+            content::message::project::authenticate::authenticate
         ),
         content::message_deletion::encode::TYPE_CONTENT_MESSAGE_DELETION => {
             authenticate_admission_arm!(
                 fact,
-                content::message_deletion::decode::decode_fact,
-                content::message_deletion::authenticate::authenticate
+                content::message_deletion::project::decode::decode_fact,
+                content::message_deletion::project::authenticate::authenticate
             )
         }
         content::reaction::encode::TYPE_CONTENT_REACTION => authenticate_admission_arm!(
             fact,
-            content::reaction::decode::decode_fact,
-            content::reaction::authenticate::authenticate
+            content::reaction::project::decode::decode_fact,
+            content::reaction::project::authenticate::authenticate
         ),
         auth::signature::encode::TYPE_SIGNATURE => authenticate_admission_arm!(
             fact,
-            auth::signature::decode::decode_fact,
-            auth::signature::authenticate::authenticate
+            auth::signature::project::decode::decode_fact,
+            auth::signature::project::authenticate::authenticate
         ),
         auth::recipient_key::encode::TYPE_RECIPIENT_KEY => authenticate_admission_arm!(
             fact,
-            auth::recipient_key::decode::decode_recipient_key,
-            auth::recipient_key::authenticate::authenticate
+            auth::recipient_key::project::decode::decode_recipient_key,
+            auth::recipient_key::project::authenticate::authenticate
         ),
         auth::removal_frontier::encode::TYPE_REMOVAL_FRONTIER => authenticate_admission_arm!(
             fact,
-            auth::removal_frontier::decode::decode_removal_frontier,
-            auth::removal_frontier::authenticate::authenticate
+            auth::removal_frontier::project::decode::decode_removal_frontier,
+            auth::removal_frontier::project::authenticate::authenticate
         ),
         auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET => authenticate_admission_arm!(
             fact,
-            auth::local_key_secret::decode::decode_local_key_secret,
-            auth::local_key_secret::authenticate::authenticate
+            auth::local_key_secret::project::decode::decode_local_key_secret,
+            auth::local_key_secret::project::authenticate::authenticate
         ),
         auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET => {
             authenticate_admission_arm!(
                 fact,
-                auth::local_history_node_secret::decode::decode_local_history_node_secret,
-                auth::local_history_node_secret::authenticate::authenticate
+                auth::local_history_node_secret::project::decode::decode_local_history_node_secret,
+                auth::local_history_node_secret::project::authenticate::authenticate
             )
         }
         auth::local_secret_retirement::encode::TYPE_LOCAL_SECRET_RETIREMENT => {
             authenticate_admission_arm!(
                 fact,
-                auth::local_secret_retirement::decode::decode_fact,
-                auth::local_secret_retirement::authenticate::authenticate
+                auth::local_secret_retirement::project::decode::decode_fact,
+                auth::local_secret_retirement::project::authenticate::authenticate
             )
         }
         auth::key_request::encode::TYPE_KEY_REQUEST => authenticate_admission_arm!(
             fact,
-            auth::key_request::decode::decode_key_request,
-            auth::key_request::authenticate::authenticate
+            auth::key_request::project::decode::decode_key_request,
+            auth::key_request::project::authenticate::authenticate
         ),
         auth::key_wrap::encode::TYPE_KEY_WRAP => authenticate_admission_arm!(
             fact,
-            auth::key_wrap::decode::decode_key_wrap,
-            auth::key_wrap::authenticate::authenticate
+            auth::key_wrap::project::decode::decode_key_wrap,
+            auth::key_wrap::project::authenticate::authenticate
         ),
         auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY => {
             authenticate_admission_arm!(
                 fact,
-                auth::local_recipient_key::decode::decode_local_recipient_key,
-                auth::local_recipient_key::authenticate::authenticate
+                auth::local_recipient_key::project::decode::decode_local_recipient_key,
+                auth::local_recipient_key::project::authenticate::authenticate
             )
         }
         auth::endpoint::encode::TYPE_LOCAL_ENDPOINT => authenticate_admission_arm!(
             fact,
-            auth::endpoint::decode::decode_fact,
-            auth::endpoint::authenticate::authenticate
+            auth::endpoint::project::decode::decode_fact,
+            auth::endpoint::project::authenticate::authenticate
         ),
         auth::invite::encode::TYPE_INVITE_SECRET => authenticate_admission_arm!(
             fact,
-            auth::invite::decode::decode_fact,
-            auth::invite::authenticate::authenticate
+            auth::invite::project::decode::decode_fact,
+            auth::invite::project::authenticate::authenticate
         ),
         auth::workspace::encode::TYPE_WORKSPACE => authenticate_admission_arm!(
             fact,
-            auth::workspace::decode::decode_fact,
-            auth::workspace::authenticate::authenticate
+            auth::workspace::project::decode::decode_fact,
+            auth::workspace::project::authenticate::authenticate
         ),
         auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET => authenticate_admission_arm!(
             fact,
-            auth::local_signer_secret::decode::decode_fact,
-            auth::local_signer_secret::authenticate::authenticate
+            auth::local_signer_secret::project::decode::decode_fact,
+            auth::local_signer_secret::project::authenticate::authenticate
         ),
         auth::device_invite::encode::TYPE_DEVICE_INVITE => authenticate_admission_arm!(
             fact,
-            auth::device_invite::decode::decode_fact,
-            auth::device_invite::authenticate::authenticate
+            auth::device_invite::project::decode::decode_fact,
+            auth::device_invite::project::authenticate::authenticate
         ),
         auth::endpoint_shared::encode::TYPE_ENDPOINT_SHARED => authenticate_admission_arm!(
             fact,
-            auth::endpoint_shared::decode::decode_fact,
-            auth::endpoint_shared::authenticate::authenticate
+            auth::endpoint_shared::project::decode::decode_fact,
+            auth::endpoint_shared::project::authenticate::authenticate
         ),
         auth::invite_server::encode::TYPE_INVITE_SERVER => authenticate_admission_arm!(
             fact,
-            auth::invite_server::decode::decode_fact,
-            auth::invite_server::authenticate::authenticate
+            auth::invite_server::project::decode::decode_fact,
+            auth::invite_server::project::authenticate::authenticate
         ),
         auth::admin::encode::TYPE_ADMIN => authenticate_admission_arm!(
             fact,
-            auth::admin::decode::decode_fact,
-            auth::admin::authenticate::authenticate
+            auth::admin::project::decode::decode_fact,
+            auth::admin::project::authenticate::authenticate
         ),
         auth::invite_accepted::encode::TYPE_INVITE_ACCEPTED => authenticate_admission_arm!(
             fact,
-            auth::invite_accepted::decode::decode_fact,
-            auth::invite_accepted::authenticate::authenticate
+            auth::invite_accepted::project::decode::decode_fact,
+            auth::invite_accepted::project::authenticate::authenticate
         ),
         content::retention_policy::encode::TYPE_RETENTION_POLICY => authenticate_admission_arm!(
             fact,
-            content::retention_policy::decode::decode_fact,
-            content::retention_policy::authenticate::authenticate
+            content::retention_policy::project::decode::decode_fact,
+            content::retention_policy::project::authenticate::authenticate
         ),
         sync::range_request::encode::TYPE_SYNC_RANGE_REQUEST => authenticate_admission_arm!(
             fact,
-            sync::range_request::decode::decode_fact,
-            sync::range_request::authenticate::authenticate
+            sync::range_request::project::decode::decode_fact,
+            sync::range_request::project::authenticate::authenticate
         ),
         sync::shared_fact::encode::TYPE_SHARED_FACT => authenticate_admission_arm!(
             fact,
-            sync::shared_fact::decode::decode_fact,
-            sync::shared_fact::authenticate::authenticate
+            sync::shared_fact::project::decode::decode_fact,
+            sync::shared_fact::project::authenticate::authenticate
         ),
         sync::compare::encode::TYPE_SYNC_COMPARE => authenticate_admission_arm!(
             fact,
-            sync::compare::decode::decode_fact,
-            sync::compare::authenticate::authenticate
+            sync::compare::project::decode::decode_fact,
+            sync::compare::project::authenticate::authenticate
         ),
         sync::have_id::encode::TYPE_SYNC_HAVE_ID => authenticate_admission_arm!(
             fact,
-            sync::have_id::decode::decode_fact,
-            sync::have_id::authenticate::authenticate
+            sync::have_id::project::decode::decode_fact,
+            sync::have_id::project::authenticate::authenticate
         ),
         sync::need_id::encode::TYPE_SYNC_NEED_ID => authenticate_admission_arm!(
             fact,
-            sync::need_id::decode::decode_fact,
-            sync::need_id::authenticate::authenticate
+            sync::need_id::project::decode::decode_fact,
+            sync::need_id::project::authenticate::authenticate
         ),
         connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL => {
             authenticate_admission_arm!(
                 fact,
-                connection::frame_small::decode::decode_fact,
-                connection::frame_small::authenticate::authenticate
+                connection::frame_small::project::decode::decode_fact,
+                connection::frame_small::project::authenticate::authenticate
             )
         }
         connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE => {
             authenticate_admission_arm!(
                 fact,
-                connection::frame_file_slice::decode::decode_fact,
-                connection::frame_file_slice::authenticate::authenticate
+                connection::frame_file_slice::project::decode::decode_fact,
+                connection::frame_file_slice::project::authenticate::authenticate
             )
         }
         connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE => {
             authenticate_admission_arm!(
                 fact,
-                connection::frame_bundle::decode::decode_fact,
-                connection::frame_bundle::authenticate::authenticate
+                connection::frame_bundle::project::decode::decode_fact,
+                connection::frame_bundle::project::authenticate::authenticate
             )
         }
         connection::frame_observation::encode::TYPE_CONNECTION_FRAME_OBSERVATION => {
             authenticate_admission_arm!(
                 fact,
-                connection::frame_observation::decode::decode_fact,
-                connection::frame_observation::authenticate::authenticate
+                connection::frame_observation::project::decode::decode_fact,
+                connection::frame_observation::project::authenticate::authenticate
             )
         }
         connection::fact_receipt::encode::TYPE_CONNECTION_FACT_RECEIPT => {
             authenticate_admission_arm!(
                 fact,
-                connection::fact_receipt::decode::decode_fact,
-                connection::fact_receipt::authenticate::authenticate
+                connection::fact_receipt::project::decode::decode_fact,
+                connection::fact_receipt::project::authenticate::authenticate
             )
         }
         auth::user_invite::encode::TYPE_USER_INVITE => authenticate_admission_arm!(
             fact,
-            auth::user_invite::decode::decode_fact,
-            auth::user_invite::authenticate::authenticate
+            auth::user_invite::project::decode::decode_fact,
+            auth::user_invite::project::authenticate::authenticate
         ),
         auth::user::encode::TYPE_USER => authenticate_admission_arm!(
             fact,
-            auth::user::decode::decode_fact,
-            auth::user::authenticate::authenticate
+            auth::user::project::decode::decode_fact,
+            auth::user::project::authenticate::authenticate
         ),
         _ => Err(format!("no admission route registered for fact tag {tag}")),
     }

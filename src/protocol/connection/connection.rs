@@ -5,10 +5,7 @@
 //! the connection id and projection writes the live connection row used by frame
 //! and sync routing.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;

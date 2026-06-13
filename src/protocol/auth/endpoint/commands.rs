@@ -42,7 +42,7 @@ mod tests {
     use crate::core::facts::FactScope;
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
-    use crate::protocol::auth::endpoint::decode;
+    use crate::protocol::auth::endpoint::project::decode;
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
 
     use super::super::author::create_local_endpoint;
@@ -57,11 +57,11 @@ mod tests {
         let output = local_or_create(&store, 10).expect("create endpoint");
 
         assert!(output.receipt.created);
-        assert_eq!(output.effects.facts.len(), 1);
-        assert_eq!(output.effects.facts[0].scope, FactScope::Local);
-        assert_eq!(output.effects.facts[0].timestamp, 10);
+        assert_eq!(output.facts.len(), 1);
+        assert_eq!(output.facts[0].scope, FactScope::Local);
+        assert_eq!(output.facts[0].timestamp, 10);
         assert_eq!(
-            decode::decode_fact(&output.effects.facts[0].bytes).expect("decode"),
+            decode::decode_fact(&output.facts[0].bytes).expect("decode"),
             output.receipt.endpoint
         );
     }
@@ -78,7 +78,7 @@ mod tests {
         let output = local_or_create(&store, 20).expect("reuse endpoint");
 
         assert!(!output.receipt.created);
-        assert!(output.effects.facts.is_empty());
+        assert!(output.facts.is_empty());
         assert_eq!(output.receipt.endpoint, endpoint);
     }
 }

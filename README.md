@@ -167,8 +167,8 @@ along with the database and daemon lock files.
 Runtime work moves through these core-owned queues:
 
 ```text
-command or handler output
-  -> facts / intents / row mutations
+command output
+  -> authored facts
   -> pending_projection
   -> projector
   -> replacement needs + append-only offers + row mutations + follow-up intents

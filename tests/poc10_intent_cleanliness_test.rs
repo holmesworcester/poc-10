@@ -66,10 +66,37 @@ fn declared_modules_in(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn production_text_before_unit_tests(text: &str) -> &str {
-    text.find("#[cfg(test)]")
-        .map(|index| &text[..index])
-        .unwrap_or(text)
+fn production_text_before_unit_tests(text: &str) -> String {
+    let mut production = String::new();
+    let mut cursor = 0;
+    while let Some(relative_attr) = text[cursor..].find("#[cfg(test)]") {
+        let attr_start = cursor + relative_attr;
+        production.push_str(&text[cursor..attr_start]);
+        let after_attr = attr_start + "#[cfg(test)]".len();
+        let Some(relative_open) = text[after_attr..].find('{') else {
+            cursor = after_attr;
+            break;
+        };
+        let open = after_attr + relative_open;
+        let mut depth = 0i32;
+        let mut end = open;
+        for (offset, ch) in text[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + offset + ch.len_utf8();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        cursor = end;
+    }
+    production.push_str(&text[cursor..]);
+    production
 }
 
 fn strip_line_comments(text: &str) -> String {
@@ -233,7 +260,7 @@ fn projector_implementation_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn contains_legacy_custom_context_matcher_api(text: &str) -> bool {
-    let production = strip_line_comments(production_text_before_unit_tests(text));
+    let production = strip_line_comments(&production_text_before_unit_tests(text));
     [
         "impl ContextMatcher for",
         "ContextMatch {",
@@ -321,7 +348,7 @@ fn target_projectors_use_typed_context_lookups_not_direct_match_scans() {
     for path in projector_implementation_files(root) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         if !production.contains("matched_context") {
             continue;
         }
@@ -360,7 +387,7 @@ fn target_projectors_use_named_needs_not_positional_authority_flows() {
     for path in projector_implementation_files(root) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         for marker in forbidden {
             if production.contains(marker) {
                 offenders.push(format!("{relative} contains {marker:?}"));
@@ -384,7 +411,7 @@ fn target_projectors_do_not_read_raw_context_offer_storage_fields() {
     for path in projector_implementation_files(root) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         for marker in forbidden {
             if production.contains(marker) {
                 offenders.push(format!("{relative} contains {marker:?}"));
@@ -413,14 +440,14 @@ fn target_projectors_document_policy_narratives() {
         }
 
         let mut missing = Vec::new();
-        if !production.contains("//! POLICY.") {
-            missing.push("`//! POLICY.`");
+        if !production.contains("//! POLICY.") && !production.contains("// POLICY.") {
+            missing.push("`POLICY.`");
         }
-        // With primary authentication in `authenticate.rs`, a projector body
-        // starts at whatever section it actually owns: scope/context (`// 2.`)
-        // or, for a minimal projector that only writes rows, materialize
-        // (`// 3.`). Any numbered body marker satisfies "policy mirrored in the
-        // body"; require at least one.
+        // With primary helpers local to `project.rs`, a projector body starts at
+        // whatever section it actually owns: scope/context (`// 2.`) or, for a
+        // minimal projector that only writes rows, materialize (`// 3.`). Any
+        // numbered body marker satisfies "policy mirrored in the body"; require
+        // at least one.
         if !production.contains("// 1.")
             && !production.contains("// 2.")
             && !production.contains("// 3.")
@@ -449,7 +476,7 @@ fn target_projectors_decode_validate_and_adapt_before_projecting() {
     for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         if !production.contains("impl Projector for") {
             // A project.rs that owns no projector (shared coordinate helpers) is
             // not a routed fact family. Helper directories under protocol scopes
@@ -458,10 +485,10 @@ fn target_projectors_decode_validate_and_adapt_before_projecting() {
             continue;
         }
 
-        let decodes_or_validates = production.contains("super::decode::")
+        let decodes_or_validates = production.contains("decode::")
             && (production.contains("decode_") || production.contains("validate_sealed_fact"));
-        let validates = production.contains("super::authenticate::authenticate(");
-        let adapts = production.contains("super::adapt::adapt(");
+        let validates = production.contains("authenticate::authenticate(");
+        let adapts = production.contains("adapt::adapt(");
         if !(decodes_or_validates && validates && adapts) {
             missing_delegation.push(relative.clone());
         }
@@ -481,8 +508,30 @@ fn target_projectors_decode_validate_and_adapt_before_projecting() {
             }
         }
 
-        // The family authenticator it delegates to must actually exist.
-        if !path.with_file_name("authenticate.rs").is_file() {
+        for module in [
+            "pub mod decode {",
+            "pub mod authenticate {",
+            "pub mod adapt {",
+        ] {
+            if !text.contains(module) {
+                missing_module.push(format!("{relative} missing local {module:?}"));
+            }
+        }
+        for removed_file in ["decode.rs", "authenticate.rs", "adapt.rs"] {
+            if path.with_file_name(removed_file).is_file() {
+                legacy_surface.push(format!(
+                    "{} still has sibling {removed_file}",
+                    path.with_file_name(removed_file)
+                        .strip_prefix(root)
+                        .unwrap()
+                        .display()
+                ));
+            }
+        }
+        if text.contains("pub mod decode;")
+            || text.contains("pub mod authenticate;")
+            || text.contains("pub mod adapt;")
+        {
             missing_module.push(relative);
         }
     }
@@ -501,8 +550,8 @@ fn target_projectors_decode_validate_and_adapt_before_projecting() {
     );
     assert!(
         missing_module.is_empty(),
-        "every routed fact family must own an authenticate.rs (decode + id-check + signature + \
-         intrinsic field rules) beside its project.rs:\n{}",
+        "every routed fact family must own projector-local decode/authenticate/adapt modules \
+         and must not re-export them as sibling role files:\n{}",
         missing_module.join("\n")
     );
 }
@@ -514,7 +563,7 @@ fn target_projectors_do_not_verify_signatures() {
 
     for path in fact_family_files_named(root, "project.rs") {
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         if production.contains("verify_signature") {
             offenders.push(path.strip_prefix(root).unwrap().display().to_string());
         }
@@ -523,7 +572,7 @@ fn target_projectors_do_not_verify_signatures() {
     assert!(
         offenders.is_empty(),
         "projectors must not verify signatures. The primary fact's signature is proven by the \
-         family authenticate.rs, and any fact a projector reads from context was authenticated \
+         family projector-local authenticate module, and any fact a projector reads from context was authenticated \
          before it could offer that context — so its authenticity is guaranteed. A projector \
          decodes context facts for their fields and proves relationships, but never re-verifies \
          a signature:\n{}",
@@ -536,11 +585,11 @@ fn target_read_stages_do_not_import_author_role_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
 
-    for name in ["authenticate.rs", "project.rs"] {
+    for name in ["project.rs"] {
         for path in fact_family_files_named(root, name) {
             let relative = path.strip_prefix(root).unwrap().display().to_string();
             let text = source_text(&path);
-            let production = strip_line_comments(production_text_before_unit_tests(&text));
+            let production = strip_line_comments(&production_text_before_unit_tests(&text));
             for marker in [
                 "use super::author",
                 "super::{author",
@@ -556,9 +605,9 @@ fn target_read_stages_do_not_import_author_role_files() {
 
     assert!(
         offenders.is_empty(),
-        "authenticate.rs and project.rs are read-side stages and must not import \
+        "project.rs read-side helpers must not import \
          author.rs. Move shared deterministic bytes to encode.rs, and read-side \
-         proof helpers to authenticate.rs or a neutral standard role:\n{}",
+         proof helpers to the projector-local authenticate module or a neutral standard role:\n{}",
         offenders.join("\n")
     );
 }
@@ -571,7 +620,7 @@ fn target_authors_do_not_own_projection_stage_output() {
     for path in fact_family_files_named(root, "author.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         for marker in [
             "ProjectionContext",
             "ProjectionOutput",
@@ -601,7 +650,7 @@ fn target_projectors_do_not_decode_foreign_fact_layouts_inline() {
     for path in fact_family_files_named(root, "project.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         for marker in ["layout as ", "_layout::decode_fact", "_layout::decode_"] {
             if production.contains(marker) {
                 offenders.push(format!("{relative} contains {marker:?}"));
@@ -857,7 +906,7 @@ fn protocol_fact_layouts_have_exact_byte_roundtrip_guardrails() {
     for path in fact_family_files_named(root, "layout.rs") {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         if !layout_has_fact_codec(&production) {
             continue;
         }
@@ -911,7 +960,7 @@ fn retired_signing_wrapper_and_content_event_families_do_not_reappear() {
     for path in rust_files(&root.join("src/protocol")) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let production =
-            strip_line_comments(production_text_before_unit_tests(&source_text(&path)));
+            strip_line_comments(&production_text_before_unit_tests(&source_text(&path)));
         for marker in [
             "signed_fact",
             "SignedFact",
@@ -961,7 +1010,7 @@ fn signer_bearing_author_helpers_do_not_claim_to_sign() {
     for path in rust_files(&root.join("src/protocol")) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let production =
-            strip_line_comments(production_text_before_unit_tests(&source_text(&path)));
+            strip_line_comments(&production_text_before_unit_tests(&source_text(&path)));
         for marker in forbidden_helpers {
             if production.contains(marker) {
                 offenders.push(format!("{relative} contains {marker:?}"));
@@ -1045,7 +1094,7 @@ fn retired_connection_frame_large_names_do_not_reappear() {
     for path in rust_files(&root.join("src/protocol")) {
         let relative = path.strip_prefix(root).unwrap().display().to_string();
         let production =
-            strip_line_comments(production_text_before_unit_tests(&source_text(&path)));
+            strip_line_comments(&production_text_before_unit_tests(&source_text(&path)));
         for marker in [
             "ConnectionFrameLarge",
             "CONNECTION_FRAME_LARGE",
@@ -1303,15 +1352,12 @@ fn target_manifests_match_their_filesystem_modules() {
 }
 
 /// The only files a fact-family directory may contain.
-const STANDARD_FAMILY_FILES: [&str; 13] = [
+const STANDARD_FAMILY_FILES: [&str; 10] = [
     "fact.rs",
     "encode.rs",
-    "decode.rs",
-    "adapt.rs",
     "author.rs",
-    // Primary-fact authentication: decode + id-check + fact-boundary signature
-    // or container opening + intrinsic field rules, ahead of projection.
-    "authenticate.rs",
+    // Primary decode, authentication, and adaptation live as local modules in
+    // project.rs so the projector owns the complete read path.
     "project.rs",
     "queries.rs",
     "commands.rs",
@@ -1651,8 +1697,7 @@ fn scope_directories_contain_only_intents_and_family_manifests() {
             let relative_key = format!("{scope}/{family}");
             let has_normal_fact_shape = family_dir.join("fact.rs").is_file()
                 && (family_dir.join("layout.rs").is_file()
-                    || (family_dir.join("encode.rs").is_file()
-                        && family_dir.join("decode.rs").is_file()))
+                    || family_dir.join("encode.rs").is_file())
                 && family_dir.join("project.rs").is_file();
             if !has_normal_fact_shape
                 && !NON_FACT_SCOPE_DIR_EXCEPTIONS.contains(&relative_key.as_str())
@@ -1830,8 +1875,9 @@ fn connection_frame_helpers_do_not_reappear() {
 #[test]
 fn fact_like_family_directories_are_registered_normal_fact_modules() {
     // A directory that owns a fact shape (`fact.rs`) or byte tag/layout
-    // (`layout.rs` or the target `encode.rs`/`decode.rs`) is a real fact family. Real fact families have uniform
-    // role files and must be present in the protocol projector route table;
+    // (`layout.rs` or the target `encode.rs` plus projector-local decode) is a
+    // real fact family. Real fact families have uniform role files and must be
+    // present in the protocol projector route table;
     // helper/context-only modules are not fact-like unless they introduce a
     // fact shape or layout.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1843,9 +1889,8 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
         for family_dir in immediate_subdirs(&scope_dir) {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let has_fact = family_dir.join("fact.rs").is_file();
-            let has_layout = family_dir.join("layout.rs").is_file()
-                || (family_dir.join("encode.rs").is_file()
-                    && family_dir.join("decode.rs").is_file());
+            let has_layout =
+                family_dir.join("layout.rs").is_file() || family_dir.join("encode.rs").is_file();
             if !has_fact && !has_layout {
                 continue;
             }
@@ -1854,7 +1899,7 @@ fn fact_like_family_directories_are_registered_normal_fact_modules() {
             let has_project = family_dir.join("project.rs").is_file();
             if !has_fact || !has_layout || !has_project {
                 offenders.push(format!(
-                    "{relative} is fact-like but does not have fact.rs, layout.rs or encode.rs/decode.rs, and project.rs"
+                    "{relative} is fact-like but does not have fact.rs, layout.rs or encode.rs, and project.rs"
                 ));
                 continue;
             }
@@ -1892,8 +1937,7 @@ fn fact_like_family_directories_are_single_flat_fact_shapes() {
             let family = family_dir.file_name().unwrap().to_str().unwrap();
             let fact_path = family_dir.join("fact.rs");
             let layout_path = family_dir.join("layout.rs");
-            let split_layout =
-                family_dir.join("encode.rs").is_file() && family_dir.join("decode.rs").is_file();
+            let split_layout = family_dir.join("encode.rs").is_file();
             if !fact_path.is_file() && !layout_path.is_file() && !split_layout {
                 continue;
             }
@@ -1999,7 +2043,7 @@ fn connection_intents_treat_connection_frames_as_opaque() {
     let mut offenders = Vec::new();
     for path in connection_handlers {
         let text = source_text(&path);
-        let production = strip_line_comments(production_text_before_unit_tests(&text));
+        let production = strip_line_comments(&production_text_before_unit_tests(&text));
         // Connection intent handlers must not hand-roll connection crypto: the
         // wire seal/open primitives live in the request/response layout modules
         // and established-frame wire modules, not in handlers. Loading the local
@@ -2291,7 +2335,7 @@ fn context_app_selects_protocol_description() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("src/context_app.rs");
     let text = source_text(&path);
-    let production = strip_line_comments(production_text_before_unit_tests(&text));
+    let production = strip_line_comments(&production_text_before_unit_tests(&text));
 
     assert!(
         production.contains("core::app::run(&crate::protocol::app::MATCH_PROTOCOL"),

@@ -6,10 +6,7 @@
 //! The index is connection-scoped sharing policy; it does not change the
 //! validity of the underlying facts.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod cli;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod index;
@@ -18,7 +15,7 @@ pub mod project;
 pub const TYPE_SHARED_FACT: u8 = encode::TYPE_SHARED_FACT;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SharedFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 pub use index::{

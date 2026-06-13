@@ -11,11 +11,8 @@
 //! admission policy. Response creation, frame sending, and socket IO belong to
 //! the downstream connection modules.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;

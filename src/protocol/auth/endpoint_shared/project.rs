@@ -1,13 +1,285 @@
-//! Poc-10 endpoint-shared projector.
-//!
-//! POLICY. An endpoint_shared fact is admitted iff:
-//!   1. STRUCTURAL. The outer fact is global, signed, contains endpoint_shared,
-//!      and endpoint/workspace/signing fields are valid.
-//!   2. AUTHORITY. Device endpoints require device_invite context; invite-server
-//!      endpoints require invite_server context. The signer key, workspace, and
-//!      user authority must match that grant.
-//!   3. MATERIALIZE. Write the endpoint_shared row, publish signer/exact
-//!      context, and share the fact with the workspace.
+pub mod decode {
+    //! Byte decoding for endpoint-shared facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+    use crate::core::wire::FixedText;
+
+    use super::super::encode::{FACT_BYTES, TYPE_ENDPOINT_SHARED};
+    use super::super::fact::{
+        EndpointDeviceName, EndpointRole, EndpointSharedFact, ENDPOINT_DEVICE_NAME_BYTES,
+    };
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<EndpointSharedFact, String> {
+        wire::expect_len(bytes, FACT_BYTES).map_err(wire_err)?;
+        let tag = wire::take_u8(&bytes[0..1]).map_err(wire_err)?;
+        if tag != TYPE_ENDPOINT_SHARED {
+            return Err("expected endpoint shared fact".to_string());
+        }
+        let created_at_ms = wire::take_u64be(&bytes[1..9]).map_err(wire_err)?;
+        let mut workspace_id = [0; 32];
+        workspace_id.copy_from_slice(&bytes[9..41]);
+        let mut user_authority_fact_id = [0; 32];
+        user_authority_fact_id.copy_from_slice(&bytes[41..73]);
+        let mut endpoint_id = [0; 32];
+        endpoint_id.copy_from_slice(&bytes[73..105]);
+        let mut signing_public_key = [0; 32];
+        signing_public_key.copy_from_slice(&bytes[105..137]);
+        let endpoint_role =
+            EndpointRole::from_u8(wire::take_u8(&bytes[137..138]).map_err(wire_err)?)?;
+        let device_name = read_device_name(&bytes[138..138 + ENDPOINT_DEVICE_NAME_BYTES])?;
+        let signer_start = 138 + ENDPOINT_DEVICE_NAME_BYTES;
+        let mut signer_id = [0; 32];
+        signer_id.copy_from_slice(&bytes[signer_start..signer_start + 32]);
+        let mut signer_public_key = [0; 32];
+        signer_public_key.copy_from_slice(&bytes[signer_start + 32..signer_start + 64]);
+        Ok(EndpointSharedFact {
+            created_at_ms,
+            workspace_id,
+            user_authority_fact_id,
+            endpoint_id,
+            signing_public_key,
+            endpoint_role,
+            device_name,
+            signer_id,
+            signer_public_key,
+        })
+    }
+
+    fn read_device_name(bytes: &[u8]) -> Result<EndpointDeviceName, String> {
+        let padded: [u8; ENDPOINT_DEVICE_NAME_BYTES] = bytes
+            .try_into()
+            .map_err(|_| "endpoint device name slot has wrong length".to_string())?;
+        FixedText::from_padded(padded).map_err(wire_err)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::endpoint_shared::encode::{encode_fact, FACT_BYTES};
+
+        fn fact() -> EndpointSharedFact {
+            EndpointSharedFact {
+                created_at_ms: 66,
+                workspace_id: [1; 32],
+                user_authority_fact_id: [2; 32],
+                endpoint_id: [3; 32],
+                signing_public_key: [4; 32],
+                endpoint_role: EndpointRole::Device,
+                device_name: EndpointDeviceName::new("laptop").expect("device name"),
+                signer_id: [6; 32],
+                signer_public_key: [7; 32],
+            }
+        }
+
+        #[test]
+        fn endpoint_shared_fact_roundtrips() {
+            let encoded = encode_fact(&fact()).expect("encode");
+            assert_eq!(encoded.len(), FACT_BYTES);
+            assert_eq!(decode_fact(&encoded).expect("decode"), fact());
+        }
+
+        #[test]
+        fn rejects_bad_type() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[0] = 0xff;
+            assert_eq!(
+                decode_fact(&encoded).expect_err("wrong type must fail"),
+                "expected endpoint shared fact"
+            );
+        }
+
+        #[test]
+        fn rejects_nul_device_name() {
+            assert_eq!(
+                EndpointDeviceName::new("bad\0name").expect_err("NUL name must fail"),
+                wire::WireError::InteriorNul { index: 3 }
+            );
+        }
+
+        #[test]
+        fn rejects_non_canonical_device_name_padding() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            let name_start = 138;
+            encoded[name_start + "laptop".len() + 1] = b'x';
+            assert_eq!(
+                decode_fact(&encoded).expect_err("padding must fail"),
+                "NonZeroPadding { index: 7 }"
+            );
+        }
+
+        #[test]
+        fn rejects_unknown_role() {
+            let mut encoded = encode_fact(&fact()).expect("encode");
+            encoded[137] = 99;
+            assert_eq!(
+                decode_fact(&encoded).expect_err("bad role must fail"),
+                "unknown endpoint role"
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Endpoint-shared authenticator.
+    //!
+    //! POLICY. Authenticating an `endpoint_shared` fact proves, over its bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical endpoint-shared fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!   4. FIELDS. Non-empty endpoint id, signing key, and workspace id; a NUL-free
+    //!      device name.
+    //!
+    //! Admission scope (`Global`) is unsigned local metadata, not part of these
+    //! bytes, so the projector checks it — behind the lens and ceiling projector,
+    //! where it can evolve. Whether the signer was an admitted device-invite or
+    //! invite-server grant is AUTHORITY, proven from other facts, also in the
+    //! projector.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::EndpointSharedFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        shared: EndpointSharedFact,
+        _context: &ProjectionContext,
+    ) -> Result<EndpointSharedFact, String> {
+        prove_decoded_endpoint_shared(fact, shared)
+    }
+
+    fn prove_decoded_endpoint_shared(
+        fact: &Fact,
+        shared: EndpointSharedFact,
+    ) -> Result<EndpointSharedFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        // 4. Intrinsic fields.
+        if shared.endpoint_id.iter().all(|byte| *byte == 0) {
+            return Err("endpoint_shared endpoint_id cannot be empty".to_string());
+        }
+        if shared.signing_public_key.iter().all(|byte| *byte == 0) {
+            return Err("endpoint_shared signing_public_key cannot be empty".to_string());
+        }
+        if shared.workspace_id.iter().all(|byte| *byte == 0) {
+            return Err("endpoint_shared workspace_id cannot be empty".to_string());
+        }
+        if shared.device_name.as_bytes().contains(&0) {
+            return Err("endpoint device name cannot contain NUL".to_string());
+        }
+        Ok(shared)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::endpoint_shared::author::authored_endpoint_shared_fact;
+        use crate::protocol::auth::endpoint_shared::fact::{EndpointRole, EndpointSharedFact};
+
+        const SIGNER_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            authored_endpoint_shared_fact(
+                100,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [4; 32],
+                EndpointRole::Device,
+                "phone",
+                [5; 32],
+                SIGNER_KEY,
+            )
+            .expect("authored endpoint_shared fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<EndpointSharedFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+
+        // Admission scope is interpretation, checked by the projector, not the
+        // authenticator: a Local-scoped endpoint_shared authenticates here and is
+        // rejected downstream.
+    }
+}
+pub mod adapt {
+    //! Shared endpoint identity semantic adapter.
+    //!
+    //! The current endpoint_shared wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::EndpointSharedFact;
+
+    pub(crate) fn adapt(source: EndpointSharedFact) -> Result<EndpointSharedFact, String> {
+        Ok(source)
+    }
+}
+
+// Poc-10 endpoint-shared projector.
+//
+// POLICY. An endpoint_shared fact is admitted iff:
+//   1. STRUCTURAL. The outer fact is global, signed, contains endpoint_shared,
+//      and endpoint/workspace/signing fields are valid.
+//   2. AUTHORITY. Device endpoints require device_invite context; invite-server
+//      endpoints require invite_server context. The signer key, workspace, and
+//      user authority must match that grant.
+//   3. MATERIALIZE. Write the endpoint_shared row, publish signer/exact
+//      context, and share the fact with the workspace.
 
 use crate::core::context::ContextNeed;
 use crate::core::facts::{Fact, FactScope};
@@ -40,9 +312,9 @@ impl Projector for EndpointSharedProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }
@@ -54,7 +326,7 @@ impl EndpointSharedProjector {
         shared: super::fact::EndpointSharedFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // Authentication (see authenticate.rs) proved canonical bytes, the
+        // Authentication (see the local authenticate module) proved canonical bytes, the
         // signer signature, and intrinsic fields. Scope is interpretation, not
         // authentication, so it is checked here, behind the lens and ceiling
         // projector.

@@ -12,27 +12,29 @@ use topo::protocol::connection::frame_bundle::encode::{
     CONNECTION_FRAME_BUNDLE_PLAINTEXT_BYTES, CONNECTION_FRAME_BUNDLE_WIRE_BYTES,
     CONNECTION_FRAME_SIZE_CLASS_BUNDLE,
 };
+use topo::protocol::connection::frame_bundle::project::decode as frame_bundle_decode;
 use topo::protocol::connection::frame_bundle::{
-    author as frame_bundle_author, decode as frame_bundle_decode, project as frame_bundle_project,
+    author as frame_bundle_author, project as frame_bundle_project,
 };
 use topo::protocol::connection::frame_file_slice::encode::{
     ConnectionFrameFileSliceV1, CONNECTION_FRAME_FILE_SLICE_CIPHERTEXT_BYTES,
     CONNECTION_FRAME_FILE_SLICE_PLAINTEXT_BYTES, CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES,
     CONNECTION_FRAME_SIZE_CLASS_FILE_SLICE,
 };
+use topo::protocol::connection::frame_file_slice::project::decode as frame_file_slice_decode;
 use topo::protocol::connection::frame_file_slice::{
-    author as frame_file_slice_author, decode as frame_file_slice_decode,
-    project as frame_file_slice_project,
+    author as frame_file_slice_author, project as frame_file_slice_project,
 };
-use topo::protocol::connection::frame_small::decode::ConnectionFrameHeader;
 use topo::protocol::connection::frame_small::encode::{
     self as frame_small_encode, ConnectionFrameSmallV1, CONNECTION_FRAME_HEADER_BYTES,
     CONNECTION_FRAME_SIZE_CLASS_SMALL, CONNECTION_FRAME_SMALL_CIPHERTEXT_BYTES,
     CONNECTION_FRAME_SMALL_PLAINTEXT_BYTES, CONNECTION_FRAME_SMALL_WIRE_BYTES,
     CONNECTION_FRAME_TAG, CONNECTION_FRAME_VERSION,
 };
+use topo::protocol::connection::frame_small::project::decode as frame_small_decode;
+use topo::protocol::connection::frame_small::project::decode::ConnectionFrameHeader;
 use topo::protocol::connection::frame_small::{
-    author as frame_small_author, decode as frame_small_decode, project as frame_small_project,
+    author as frame_small_author, project as frame_small_project,
 };
 use topo::protocol::content::file::encode::CONTENT_FILE_BYTES;
 use topo::protocol::content::file_slice::encode::CONTENT_FILE_SLICE_BYTES;

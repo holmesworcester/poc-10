@@ -83,10 +83,19 @@ facts and validated by their owning projectors.
 
 Established frame logic is deliberately flat inside the concrete fact families.
 `frame_small`, `frame_file_slice`, and `frame_bundle` each own their fixed
-wire layout in `encode.rs` and `decode.rs`, construction and sealing in
-`author.rs`, and receive-side opening/admission in `project.rs`. There is no
-shared `connection/frame.rs` or `connection/frame_wire.rs` layer; duplicated
-byte handling is preferred over hiding the pipeline behind a generic helper.
+wire construction in `encode.rs`, projector-local decode/auth/adapt helpers in
+`project.rs`, construction and sealing in `author.rs`, and receive-side
+opening/admission in `project.rs`. There is no shared `connection/frame.rs` or
+`connection/frame_wire.rs` layer; duplicated byte handling is preferred over
+hiding the pipeline behind a generic helper.
+
+Established frames received from the network are runtime-local projection
+inputs. Their projectors can emit `connection_frame_observation`, `connection`,
+`auth_local_endpoint`, or `connection_ephemeral_secret` needs, but those needs
+are transient for ephemeral inputs: if the context is unavailable in that drain,
+core drops the unopened frame input instead of parking durable state. Replay
+rebuilds retained handshake facts, opened child facts, receipts, and rows; it
+does not replay unopened established-frame bytes.
 
 ## Cross-Scope Row Reads
 
@@ -214,22 +223,23 @@ connection, or established frame path. Projection offers
 
 ### `frame_small` (tag 168)
 
-Local wire fact for one established small encrypted frame. Projection needs a
-matching local `frame_observation` plus the referenced local `connection`, opens
-the frame, emits durable child facts, and emits one receipt per child. Its
-`encode.rs`/`decode.rs` are the complete canonical byte layout for this size
-class; `author.rs` seals outbound frames; `project.rs` opens inbound frames.
+Runtime-local wire fact for one established small encrypted frame. Projection
+needs a matching local `frame_observation` plus the referenced local
+`connection`, opens the frame, emits durable child facts, and emits one receipt
+per child. Its `encode.rs` plus projector-local `decode` module are the complete
+canonical byte layout for this size class; `author.rs` seals outbound frames;
+`project.rs` opens inbound frames.
 
 ### `frame_file_slice` (tag 169)
 
-Local wire fact for an established frame sized for one content file-slice fact.
-It uses the same projection path as `frame_small` but the frame layout has a
-larger fixed ciphertext slot.
+Runtime-local wire fact for an established frame sized for one content
+file-slice fact. It uses the same projection path as `frame_small` but the frame
+layout has a larger fixed ciphertext slot.
 
 ### `frame_bundle` (tag 170)
 
-Local wire fact for an established bundled frame. Projection opens the bundle
-and admits each contained fact with a receipt.
+Runtime-local wire fact for an established bundled frame. Projection opens the
+bundle and admits each contained fact with a receipt.
 
 ### `frame_observation` (tag 173)
 

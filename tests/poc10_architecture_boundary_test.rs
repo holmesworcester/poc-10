@@ -253,6 +253,8 @@ fn poc10_core_contract_files_are_present() {
         "src/core/facts.rs",
         "src/core/context.rs",
         "src/core/intents.rs",
+        "src/core/project_fact.rs",
+        "src/core/handle_intent.rs",
         "src/core/pipeline.rs",
     ];
 
@@ -266,6 +268,45 @@ fn poc10_core_contract_files_are_present() {
         "missing poc-10 core contract files:\n{}",
         missing.join("\n")
     );
+}
+
+#[test]
+fn poc10_pipeline_work_items_live_in_named_core_files() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pipeline = source_text(&root.join("src/core/pipeline.rs"));
+    let project_fact = source_text(&root.join("src/core/project_fact.rs"));
+    let handle_intent = source_text(&root.join("src/core/handle_intent.rs"));
+
+    for retired_inline_module in ["mod pipeline_one", "mod dispatch"] {
+        assert!(
+            !pipeline.contains(retired_inline_module),
+            "src/core/pipeline.rs must not own the active work-item module {retired_inline_module:?}"
+        );
+    }
+
+    for required in [
+        "Run and commit one queued projection item",
+        "commit_projection_effects",
+        "load_pending_fact",
+        "ProjectionSource",
+    ] {
+        assert!(
+            project_fact.contains(required),
+            "src/core/project_fact.rs is missing projection work-item detail {required:?}"
+        );
+    }
+
+    for required in [
+        "Run one claimed intent through its handler",
+        "commit_handler_output",
+        "next_queued_intent",
+        "record_intent_in_table_in_tx",
+    ] {
+        assert!(
+            handle_intent.contains(required),
+            "src/core/handle_intent.rs is missing intent work-item detail {required:?}"
+        );
+    }
 }
 
 #[test]
@@ -369,6 +410,48 @@ fn poc10_pipeline_effects_names_the_common_commit_shape() {
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
     assert!(local_intents.is_empty());
+}
+
+#[test]
+fn poc10_command_output_is_authored_receipt_plus_facts_only() {
+    let topo::core::command_context::AuthoredCommand { receipt, facts } =
+        topo::core::command_context::AuthoredCommand::new(());
+
+    assert_eq!(receipt, ());
+    assert!(facts.is_empty());
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let command_context = root.join("src/core/command_context.rs");
+    let source = source_text(&command_context);
+    for required in [
+        "pub struct AuthoredCommand<T>",
+        "pub receipt: T",
+        "pub facts: Vec<Fact>",
+        "pub type CommandOutput<T> = AuthoredCommand<T>",
+    ] {
+        assert!(
+            source.contains(required),
+            "command output contract is missing {required:?}"
+        );
+    }
+
+    let offenders = source_code_matches_in_paths(
+        root,
+        vec![command_context],
+        &[
+            "PipelineEffects",
+            "pub effects:",
+            "row_mutations",
+            "purged_facts",
+            "intents:",
+            "local_intents",
+        ],
+    );
+    assert!(
+        offenders.is_empty(),
+        "commands must author only facts plus receipts, not full pipeline effects:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]

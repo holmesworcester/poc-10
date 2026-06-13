@@ -6,10 +6,7 @@
 //! stored facts; it does not validate the advertised fact's own protocol
 //! semantics.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -62,5 +59,5 @@ pub fn sync_have_id_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::SyncHaveIdFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }

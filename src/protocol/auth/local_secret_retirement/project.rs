@@ -1,12 +1,201 @@
-//! Local secret-retirement projector.
-//!
-//! POLICY. A local_secret_retirement is admitted iff:
-//!   1. STRUCTURAL. The fact is local-scoped and names a supported retirement
-//!      reason plus target secret-source id.
-//!   2. CONTEXT. Projection waits for the target `local_secret_source` context
-//!      and validates it belongs to the same workspace.
-//!   3. MATERIALIZE. Once validated, projection publishes exact retirement
-//!      context for the target; the target secret projector owns self-purge.
+pub mod decode {
+    //! Byte decoding for local secret-retirement facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order, then
+    //! re-runs field validation to reject non-canonical facts. Id checks live in
+    //! the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{
+        validate_fact, LOCAL_SECRET_RETIREMENT_BYTES, TYPE_LOCAL_SECRET_RETIREMENT,
+    };
+    use super::super::fact::LocalSecretRetirementFact;
+
+    pub fn decode_fact(bytes: &[u8]) -> Result<LocalSecretRetirementFact, String> {
+        wire::expect_len(bytes, LOCAL_SECRET_RETIREMENT_BYTES).map_err(wire_err)?;
+        if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_LOCAL_SECRET_RETIREMENT {
+            return Err("expected local secret retirement".to_string());
+        }
+        let fact = LocalSecretRetirementFact {
+            workspace_id: bytes[1..33].try_into().unwrap(),
+            target_secret_id: bytes[33..65].try_into().unwrap(),
+            reason_kind: wire::take_u8(&bytes[65..66]).map_err(wire_err)?,
+            floor_minute: wire::take_u64be(&bytes[66..74]).map_err(wire_err)?,
+            created_at_ms: wire::take_u64be(&bytes[74..82]).map_err(wire_err)?,
+        };
+        validate_fact(&fact)?;
+        Ok(fact)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::local_secret_retirement::encode::{
+            encode_fact, LOCAL_SECRET_RETIREMENT_BYTES,
+        };
+        use crate::protocol::auth::local_secret_retirement::fact::RETIRE_REASON_CHOP;
+
+        fn sample_fact() -> LocalSecretRetirementFact {
+            LocalSecretRetirementFact {
+                workspace_id: [1; 32],
+                target_secret_id: [2; 32],
+                reason_kind: RETIRE_REASON_CHOP,
+                floor_minute: 10,
+                created_at_ms: 123,
+            }
+        }
+
+        #[test]
+        fn local_secret_retirement_roundtrips_fixed_width() {
+            let fact = sample_fact();
+
+            let encoded = encode_fact(&fact).expect("encode local secret retirement");
+
+            assert_eq!(encoded.len(), LOCAL_SECRET_RETIREMENT_BYTES);
+            assert_eq!(
+                decode_fact(&encoded).expect("decode local secret retirement"),
+                fact
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Local secret-retirement authenticator.
+    //!
+    //! POLICY. Authenticating a `local_secret_retirement` fact proves, over its
+    //! bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical local secret-retirement fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!
+    //! These are local-only context facts, never signed envelopes, so there is no
+    //! fact-boundary signature. Admission scope (`Local`), the target
+    //! secret-source match, and materialization are all interpretation the
+    //! projector owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::LocalSecretRetirementFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        retirement: LocalSecretRetirementFact,
+        _context: &ProjectionContext,
+    ) -> Result<LocalSecretRetirementFact, String> {
+        prove_decoded_local_secret_retirement(fact, retirement)
+    }
+
+    fn prove_decoded_local_secret_retirement(
+        fact: &Fact,
+        retirement: LocalSecretRetirementFact,
+    ) -> Result<LocalSecretRetirementFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(retirement)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::{Fact, FactScope};
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::local_secret_retirement::encode;
+        use crate::protocol::auth::local_secret_retirement::fact::{
+            LocalSecretRetirementFact, RETIRE_REASON_CHOP,
+        };
+
+        fn canonical_fact() -> Fact {
+            let retirement = LocalSecretRetirementFact {
+                workspace_id: [1; 32],
+                target_secret_id: [2; 32],
+                reason_kind: RETIRE_REASON_CHOP,
+                floor_minute: 10,
+                created_at_ms: 123,
+            };
+            let bytes = encode::encode_fact(&retirement).expect("encode local secret retirement");
+            Fact::new(FactScope::Local, 123, bytes)
+        }
+
+        fn authenticate(fact: &Fact) -> Result<LocalSecretRetirementFact, String> {
+            let decoded = super::super::decode::decode_fact(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Local secret-retirement semantic adapter.
+    //!
+    //! The current local_secret_retirement wire shape is already the active
+    //! semantic shape. This identity adapter keeps the staged route explicit and
+    //! gives future versioned facts a dedicated conversion point.
+
+    use super::super::fact::LocalSecretRetirementFact;
+
+    pub(crate) fn adapt(
+        source: LocalSecretRetirementFact,
+    ) -> Result<LocalSecretRetirementFact, String> {
+        Ok(source)
+    }
+}
+
+// Local secret-retirement projector.
+//
+// POLICY. A local_secret_retirement is admitted iff:
+//   1. STRUCTURAL. The fact is local-scoped and names a supported retirement
+//      reason plus target secret-source id.
+//   2. CONTEXT. Projection waits for the target `local_secret_source` context
+//      and validates it belongs to the same workspace.
+//   3. MATERIALIZE. Once validated, projection publishes exact retirement
+//      context for the target; the target secret projector owns self-purge.
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
@@ -67,9 +256,9 @@ impl Projector for LocalSecretRetirementProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_fact(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_fact(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

@@ -11,10 +11,7 @@
 //! context offers change; request and connection facts own how the secret
 //! is consumed.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -67,7 +64,7 @@ pub fn connection_ephemeral_secret_row(
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionEphemeralSecretFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 /// Decoded local ephemeral-secret row.

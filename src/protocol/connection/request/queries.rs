@@ -17,7 +17,7 @@ use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint_shared::queries::all_memberships;
 use crate::protocol::connection::connection::queries::answered_request_ids;
 use crate::protocol::connection::request::{
-    decode::decode_optional_addr, encode::ADDR_BLOCK_BYTES,
+    encode::ADDR_BLOCK_BYTES, project::decode::decode_optional_addr,
 };
 
 use super::{

@@ -1,9 +1,181 @@
-//! Removal frontier projector.
-//!
-//! POLICY. A removal frontier is admitted iff its scope matches the workspace
-//! and its owner endpoint is proven by either an endpoint_shared signer offer or
-//! a local signer secret. Projection publishes frontier context and shares the
-//! fact with the workspace.
+pub mod decode {
+    //! Byte decoding for removal frontier facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, and field order. Id and
+    //! id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{REMOVAL_FRONTIER_BYTES, TYPE_REMOVAL_FRONTIER};
+    use super::super::fact::RemovalFrontierFact;
+
+    pub fn decode_removal_frontier(bytes: &[u8]) -> Result<RemovalFrontierFact, String> {
+        wire::expect_len(bytes, REMOVAL_FRONTIER_BYTES).map_err(wire_err)?;
+        if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_REMOVAL_FRONTIER {
+            return Err("expected removal frontier".to_string());
+        }
+        Ok(RemovalFrontierFact {
+            workspace_id: bytes[1..33].try_into().unwrap(),
+            owner_endpoint_id: bytes[33..65].try_into().unwrap(),
+            created_at_ms: wire::take_u64be(&bytes[65..73]).map_err(wire_err)?,
+            signer_public_key: bytes[73..105].try_into().unwrap(),
+        })
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::removal_frontier::encode::{
+            encode_removal_frontier, REMOVAL_FRONTIER_BYTES,
+        };
+
+        fn sample_fact() -> RemovalFrontierFact {
+            RemovalFrontierFact {
+                workspace_id: [1; 32],
+                owner_endpoint_id: [2; 32],
+                created_at_ms: 123,
+                signer_public_key: [3; 32],
+            }
+        }
+
+        #[test]
+        fn removal_frontier_roundtrips_fixed_width() {
+            let fact = sample_fact();
+
+            let encoded = encode_removal_frontier(&fact).expect("encode removal frontier");
+
+            assert_eq!(encoded.len(), REMOVAL_FRONTIER_BYTES);
+            assert_eq!(
+                decode_removal_frontier(&encoded).expect("decode removal frontier"),
+                fact
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Removal-frontier authenticator.
+    //!
+    //! POLICY. Authenticating a `removal_frontier` fact proves, over its signed
+    //! bytes alone:
+    //!   1. LAYOUT. The bytes decode to a canonical removal-frontier fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!   3. SIGNATURE. The signer signature verifies over the canonical envelope;
+    //!      the verifier key is embedded in the fact, so this needs no context.
+    //!
+    //! Scope and owner-endpoint authority (an `endpoint_shared` signer or a local
+    //! signer secret) are interpretation the projector owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::RemovalFrontierFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        frontier: RemovalFrontierFact,
+        _context: &ProjectionContext,
+    ) -> Result<RemovalFrontierFact, String> {
+        prove_decoded_removal_frontier(fact, frontier)
+    }
+
+    fn prove_decoded_removal_frontier(
+        fact: &Fact,
+        frontier: RemovalFrontierFact,
+    ) -> Result<RemovalFrontierFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(frontier)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::Fact;
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::removal_frontier::author::authored_removal_frontier_fact;
+        use crate::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
+
+        const SIGNER_KEY: [u8; 32] = [7; 32];
+
+        fn canonical_fact() -> Fact {
+            authored_removal_frontier_fact([1; 32], [2; 32], 100, SIGNER_KEY)
+                .expect("signed removal_frontier fact")
+        }
+
+        fn authenticate(fact: &Fact) -> Result<RemovalFrontierFact, String> {
+            let decoded = super::super::decode::decode_removal_frontier(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Removal-frontier semantic adapter.
+    //!
+    //! The current removal_frontier wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::RemovalFrontierFact;
+
+    pub(crate) fn adapt(source: RemovalFrontierFact) -> Result<RemovalFrontierFact, String> {
+        Ok(source)
+    }
+}
+
+// Removal frontier projector.
+//
+// POLICY. A removal frontier is admitted iff its scope matches the workspace
+// and its owner endpoint is proven by either an endpoint_shared signer offer or
+// a local signer secret. Projection publishes frontier context and shares the
+// fact with the workspace.
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
@@ -34,9 +206,9 @@ impl Projector for RemovalFrontierProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_removal_frontier(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_removal_frontier(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }
@@ -48,7 +220,7 @@ impl RemovalFrontierProjector {
         frontier: RemovalFrontierFact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        // Authentication (see authenticate.rs) proved canonical bytes and the
+        // Authentication (see the local authenticate module) proved canonical bytes and the
         // signer signature. Scope is interpretation.
         // 1. Scope.
         let scope = crate::protocol::auth::workspace::scope(frontier.workspace_id);

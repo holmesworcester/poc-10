@@ -1,9 +1,192 @@
-//! Local key secret projector.
-//!
-//! POLICY. A local key secret is admitted iff it is local-scoped and ties to its
-//! removal frontier. Projection publishes frontier-root wrap-source and
-//! secret-coverage offers while live, and self-purges when retirement context
-//! for this secret arrives.
+pub mod decode {
+    //! Byte decoding for local key secret facts.
+    //!
+    //! Decoding proves only the fixed layout: tag, length, field order, and that the
+    //! decoded material is canonical. Id checks live in the local `authenticate` module.
+
+    use crate::core::wire;
+
+    use super::super::encode::{
+        encode_local_key_secret, LOCAL_KEY_SECRET_BYTES, TYPE_LOCAL_KEY_SECRET,
+    };
+    use super::super::fact::LocalKeySecretFact;
+
+    pub fn decode_local_key_secret(bytes: &[u8]) -> Result<LocalKeySecretFact, String> {
+        wire::expect_len(bytes, LOCAL_KEY_SECRET_BYTES).map_err(wire_err)?;
+        if wire::take_u8(&bytes[0..1]).map_err(wire_err)? != TYPE_LOCAL_KEY_SECRET {
+            return Err("expected local key secret".to_string());
+        }
+        let fact = LocalKeySecretFact {
+            workspace_id: bytes[1..33].try_into().unwrap(),
+            frontier_id: bytes[33..65].try_into().unwrap(),
+            owner_endpoint_id: bytes[65..97].try_into().unwrap(),
+            created_at_ms: wire::take_u64be(&bytes[97..105]).map_err(wire_err)?,
+            key_secret: bytes[105..137].try_into().unwrap(),
+        };
+        encode_local_key_secret(&fact)?;
+        Ok(fact)
+    }
+
+    fn wire_err(err: wire::WireError) -> String {
+        format!("{err:?}")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::protocol::auth::local_key_secret::encode::{
+            encode_local_key_secret, LOCAL_KEY_SECRET_BYTES,
+        };
+
+        fn sample_fact() -> LocalKeySecretFact {
+            LocalKeySecretFact {
+                workspace_id: [1; 32],
+                frontier_id: [2; 32],
+                owner_endpoint_id: [3; 32],
+                created_at_ms: 123,
+                key_secret: [4; 32],
+            }
+        }
+
+        #[test]
+        fn local_key_secret_roundtrips_fixed_width() {
+            let fact = sample_fact();
+
+            let encoded = encode_local_key_secret(&fact).expect("encode local key secret");
+
+            assert_eq!(encoded.len(), LOCAL_KEY_SECRET_BYTES);
+            assert_eq!(
+                decode_local_key_secret(&encoded).expect("decode local key secret"),
+                fact
+            );
+        }
+    }
+}
+pub mod authenticate {
+    //! Local key secret authenticator.
+    //!
+    //! POLICY. Authenticating a `local_key_secret` fact proves, over its bytes
+    //! alone:
+    //!   1. LAYOUT. The bytes decode to a canonical local key secret fact.
+    //!   2. ID. The content id equals `hash(bytes)`.
+    //!
+    //! These are local-only secrets, never signed envelopes, so there is no
+    //! fact-boundary signature. Admission scope (`Local`), the removal-frontier
+    //! match, retirement, and materialization are all interpretation the projector
+    //! owns.
+
+    use crate::core::facts::Fact;
+    use crate::core::pipeline::{verify_fact_id, ProjectionContext};
+
+    use super::super::fact::LocalKeySecretFact;
+
+    pub(crate) fn authenticate(
+        fact: &Fact,
+        secret: LocalKeySecretFact,
+        _context: &ProjectionContext,
+    ) -> Result<LocalKeySecretFact, String> {
+        prove_decoded_local_key_secret(fact, secret)
+    }
+
+    fn prove_decoded_local_key_secret(
+        fact: &Fact,
+        secret: LocalKeySecretFact,
+    ) -> Result<LocalKeySecretFact, String> {
+        // 2. Id.
+        verify_fact_id(fact)?;
+        Ok(secret)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::core::facts::{Fact, FactScope};
+        use crate::core::pipeline::ProjectionContext;
+        use crate::protocol::auth::local_key_secret::encode;
+        use crate::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
+
+        fn canonical_fact() -> Fact {
+            let secret = LocalKeySecretFact {
+                workspace_id: [1; 32],
+                frontier_id: [2; 32],
+                owner_endpoint_id: [3; 32],
+                created_at_ms: 123,
+                key_secret: [4; 32],
+            };
+            let bytes = encode::encode_local_key_secret(&secret).expect("encode local key secret");
+            Fact::new(FactScope::Local, 123, bytes)
+        }
+
+        fn authenticate(fact: &Fact) -> Result<LocalKeySecretFact, String> {
+            let decoded = super::super::decode::decode_local_key_secret(fact.body())?;
+            super::authenticate(fact, decoded, &ProjectionContext::default())
+        }
+
+        fn is_invalid(fact: &Fact) -> bool {
+            authenticate(fact).is_err()
+        }
+
+        #[test]
+        fn authenticates_canonical_fact() {
+            assert!(authenticate(&canonical_fact()).is_ok());
+        }
+
+        #[test]
+        fn rejects_wrong_tag() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes[0] ^= 0xff;
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_truncated_bytes() {
+            let canonical = canonical_fact();
+            let mut bytes = canonical.bytes.clone();
+            bytes.pop();
+            assert!(is_invalid(&Fact::new(
+                canonical.scope,
+                canonical.timestamp,
+                bytes
+            )));
+        }
+
+        #[test]
+        fn rejects_id_not_matching_bytes() {
+            let canonical = canonical_fact();
+            let forged = Fact {
+                id: [0; 32],
+                scope: canonical.scope.clone(),
+                timestamp: canonical.timestamp,
+                bytes: canonical.bytes.clone(),
+            };
+            assert!(is_invalid(&forged));
+        }
+    }
+}
+pub mod adapt {
+    //! Local key secret semantic adapter.
+    //!
+    //! The current local_key_secret wire shape is already the active semantic shape.
+    //! This identity adapter keeps the protocol-local conversion point available for
+    //! future versioned facts.
+
+    use super::super::fact::LocalKeySecretFact;
+
+    pub(crate) fn adapt(source: LocalKeySecretFact) -> Result<LocalKeySecretFact, String> {
+        Ok(source)
+    }
+}
+
+// Local key secret projector.
+//
+// POLICY. A local key secret is admitted iff it is local-scoped and ties to its
+// removal frontier. Projection publishes frontier-root wrap-source and
+// secret-coverage offers while live, and self-purges when retirement context
+// for this secret arrives.
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
@@ -36,9 +219,9 @@ impl Projector for LocalKeySecretProjector {
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        let decoded = super::decode::decode_local_key_secret(fact.body())?;
-        let authenticated = super::authenticate::authenticate(fact, decoded, context)?;
-        let semantic = super::adapt::adapt(authenticated)?;
+        let decoded = decode::decode_local_key_secret(fact.body())?;
+        let authenticated = authenticate::authenticate(fact, decoded, context)?;
+        let semantic = adapt::adapt(authenticated)?;
         self.project_semantic(fact, semantic, context)
     }
 }

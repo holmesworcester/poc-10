@@ -8,13 +8,13 @@ use topo::core::command_context::{
 };
 use topo::core::crypto;
 use topo::core::store::Store;
-use topo::protocol::auth::signature::{
+use topo::protocol::auth::signature::project::{
     authenticate as signature_authenticate, decode as signature_decode,
 };
 use topo::protocol::content::file_deletion::commands::delete_file;
-use topo::protocol::content::file_deletion::decode as file_deletion_layout_decode;
+use topo::protocol::content::file_deletion::project::decode as file_deletion_layout_decode;
 use topo::protocol::content::message_deletion::commands::delete_message;
-use topo::protocol::content::message_deletion::decode as message_deletion_layout_decode;
+use topo::protocol::content::message_deletion::project::decode as message_deletion_layout_decode;
 
 struct FixedClock(Cell<u64>);
 
@@ -64,17 +64,17 @@ fn delete_message_emits_decodable_target_fact() {
     let output =
         delete_message(&ctx, [1; 32], [2; 32], [7; 32], 1, [3; 32]).expect("delete message");
 
-    assert_eq!(output.effects.facts.len(), 2);
-    assert!(output.effects.intents.is_empty());
+    assert_eq!(output.facts.len(), 2);
     assert_eq!(output.receipt.created_at_ms, 100);
-    assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
+    assert_eq!(output.receipt.deletion_fact_id, output.facts[0].id);
 
-    let decoded = message_deletion_layout_decode::decode_fact(&output.effects.facts[0].bytes)
+    let decoded = message_deletion_layout_decode::decode_fact(&output.facts[0].bytes)
         .expect("decode deletion");
     let signature =
-        signature_decode::decode_fact(&output.effects.facts[1].bytes).expect("decode signature");
-    signature_authenticate::verify_signature(&signature).expect("verify signature evidence");
-    assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
+        signature_decode::decode_fact(&output.facts[1].bytes).expect("decode signature");
+    signature_authenticate::prove_signature_evidence(&signature)
+        .expect("verify signature evidence");
+    assert_eq!(signature.target_fact_id, output.facts[0].id);
     assert_eq!(decoded.workspace_id, [1; 32]);
     assert_eq!(decoded.created_at_ms, 100);
     assert_eq!(decoded.target_message_id, [2; 32]);
@@ -92,17 +92,17 @@ fn delete_file_emits_decodable_target_fact() {
 
     let output = delete_file(&ctx, [4; 32], [5; 32], [6; 32]).expect("delete file");
 
-    assert_eq!(output.effects.facts.len(), 2);
-    assert!(output.effects.intents.is_empty());
+    assert_eq!(output.facts.len(), 2);
     assert_eq!(output.receipt.created_at_ms, 200);
-    assert_eq!(output.receipt.deletion_fact_id, output.effects.facts[0].id);
+    assert_eq!(output.receipt.deletion_fact_id, output.facts[0].id);
 
-    let decoded = file_deletion_layout_decode::decode_fact(&output.effects.facts[0].bytes)
-        .expect("decode deletion");
+    let decoded =
+        file_deletion_layout_decode::decode_fact(&output.facts[0].bytes).expect("decode deletion");
     let signature =
-        signature_decode::decode_fact(&output.effects.facts[1].bytes).expect("decode signature");
-    signature_authenticate::verify_signature(&signature).expect("verify signature evidence");
-    assert_eq!(signature.target_fact_id, output.effects.facts[0].id);
+        signature_decode::decode_fact(&output.facts[1].bytes).expect("decode signature");
+    signature_authenticate::prove_signature_evidence(&signature)
+        .expect("verify signature evidence");
+    assert_eq!(signature.target_fact_id, output.facts[0].id);
     assert_eq!(decoded.workspace_id, [4; 32]);
     assert_eq!(decoded.created_at_ms, 200);
     assert_eq!(decoded.target_file_id, [5; 32]);

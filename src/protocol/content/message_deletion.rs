@@ -6,11 +6,8 @@
 //! Message, reaction, file, and slice projectors keep matching needs and delete
 //! their own rows plus their own fact bytes when this context arrives.
 
-pub mod adapt;
-pub mod authenticate;
 pub mod author;
 pub mod commands;
-pub mod decode;
 pub mod encode;
 pub mod fact;
 pub mod project;
@@ -22,7 +19,7 @@ pub const MESSAGE_DELETION_ROWS: crate::core::store::TableName =
     crate::protocol::registry::read_models::MESSAGE_DELETION_ROWS;
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ContentMessageDeletionFact, String> {
-    decode::decode_fact(bytes)
+    project::decode::decode_fact(bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +32,7 @@ pub struct MessageDeletionView {
 }
 
 pub fn decode_any_fact(fact: &crate::core::facts::Fact) -> Result<MessageDeletionView, String> {
-    let deletion = decode::decode_fact(fact.body())?;
+    let deletion = project::decode::decode_fact(fact.body())?;
     semantic_message_deletion(deletion)
 }
 

@@ -8,7 +8,7 @@
 //! make those mechanics meaningful.
 //!
 //! The runtime does not interpret protocol bytes. It schedules work and holds
-//! the transaction ordering rules: command effects commit before command
+//! the transaction ordering rules: command-authored facts commit before command
 //! receipts are returned, projection drains before intent dispatch when queues
 //! are being settled, and handler output commits only through the dispatch
 //! boundary. Those rules make facts, context, rows, and queued work visible in
@@ -208,10 +208,11 @@ impl Runtime {
         self.pipeline().submit_local_intent(intent)
     }
 
-    /// Commit the effects returned by a user-facing command and return its receipt.
+    /// Commit the facts returned by a user-facing command and return its receipt.
     ///
     /// Command receipts are not pipeline state. They return directly to the CLI
-    /// caller after the command's facts, rows, and intents have been committed.
+    /// caller after the command's authored facts have been retained and queued
+    /// for projection.
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
         self.pipeline()
             .submit_command_output(output, "submit command output")
