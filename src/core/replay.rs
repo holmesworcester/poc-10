@@ -18,8 +18,8 @@
 //! Invariants. Replay must not perform network IO or run operational wall-clock
 //! decisions. It admits wall-clock context only through the replayable semantic
 //! time-wake timelines the caller supplies, and it asserts that no network queue
-//! rows were produced. Any network row means a replay-allowed handler crossed
-//! the barrier, and replay returns an error instead of a report. Recurring
+//! rows were produced. Any network row means a replay-mode handler crossed into
+//! transport output, and replay returns an error instead of a report. Recurring
 //! operational schedules are not installed during replay, so they cannot fire.
 //!
 //! State summary. `state_summary` hashes the store-declared replay summary
@@ -31,8 +31,9 @@
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet};
+use crate::core::intents::HandlerMode;
 use crate::core::network::{INBOUND_TABLE, OUTBOUND_TABLE};
-use crate::core::project_fact::{self, FactAdmissionFn, IntentAdmissionPolicy, Projector};
+use crate::core::project_fact::{self, FactAdmissionFn, Projector, RuntimeEffectMode};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
@@ -84,14 +85,12 @@ pub struct ReplayReport {
     pub semantic_time_wakes: usize,
     /// Standing time-wake rows remaining after replay settles.
     pub standing_time_wakes: usize,
-    /// Replay-allowed intents dispatched before the barrier.
-    pub replay_allowed_intents: usize,
+    /// Intents dispatched before the replay barrier.
+    pub replayed_intents: usize,
     /// Standing context edges materialized by replay.
     pub context_edges: usize,
     /// Materialized read-model / sync / connection rows after replay.
     pub row_mutations: usize,
-    /// Live-only intents emitted during replay and suppressed before queueing.
-    pub suppressed_live_only_work: usize,
     /// Network queue rows produced during replay; must be zero.
     pub network_rows: usize,
 }
@@ -200,9 +199,9 @@ fn area_diffs(left: &StateSummary, right: &StateSummary) -> Vec<String> {
 /// Run the replay entry point against an opened store.
 ///
 /// Steps: count and drop queued intents, wipe derived state, mark retained facts
-/// pending in the requested order, then drain replay-allowed projection, time
-/// wakes, and intents to a fixpoint. Returns counters, or an error if replay
-/// produced network rows before the barrier.
+/// pending in the requested order, then drain replay-mode projection, time
+/// wakes, and intent dispatch to a fixpoint. Returns counters, or an error if
+/// replay produced network rows before the barrier.
 pub fn run_replay(
     store: &Store,
     projector: &dyn Projector,
@@ -251,8 +250,7 @@ pub fn run_replay(
     report.purged_facts = facts_before.difference(&facts_after).count();
     report.projected_facts = counters.projected_facts;
     report.semantic_time_wakes = counters.time_wake_admissions;
-    report.replay_allowed_intents = counters.replay_allowed_intents;
-    report.suppressed_live_only_work = counters.suppressed_live_only_work;
+    report.replayed_intents = counters.replayed_intents;
     report.standing_time_wakes = table_count(store, TIME_WAKES)?;
     report.context_edges = table_count(store, CONTEXT_EDGES)?;
     report.row_mutations = materialized_row_count(store)?;
@@ -261,13 +259,13 @@ pub fn run_replay(
 
     if remaining_queued_work > 0 {
         return Err(format!(
-            "replay left {remaining_queued_work} queued intent rows after the barrier; replay-allowed work did not reach a fixpoint"
+            "replay left {remaining_queued_work} queued intent rows after the barrier; replay work did not reach a fixpoint"
         ));
     }
 
     if report.network_rows > 0 {
         return Err(format!(
-            "replay produced {} network queue rows before the barrier; a replay-allowed handler crossed into network IO",
+            "replay produced {} network queue rows before the barrier; a replay-mode handler crossed into network IO",
             report.network_rows
         ));
     }
@@ -305,16 +303,14 @@ pub fn state_summary(store: &Store) -> Result<StateSummary, String> {
 struct ReplayCounters {
     projected_facts: usize,
     time_wake_admissions: usize,
-    replay_allowed_intents: usize,
-    suppressed_live_only_work: usize,
+    replayed_intents: usize,
 }
 
 /// Replay-mode work driver over the ordinary projection and dispatch workers.
 ///
-/// It instantiates only the replay-allowed handler routes, so live-only intents
-/// are never claimed from the queue. Projection, time-wake admission, and
-/// replay-allowed dispatch run to a fixpoint together because each can produce
-/// inputs for the others.
+/// It instantiates the ordinary handler routes and passes replay mode through
+/// handler context. Projection, time-wake admission, and replay dispatch run to
+/// a fixpoint together because each can produce inputs for the others.
 struct ReplayDrive<'a> {
     store: &'a Store,
     projector: &'a dyn Projector,
@@ -322,7 +318,6 @@ struct ReplayDrive<'a> {
     fact_admission: Option<FactAdmissionFn>,
     replay_time_wakes: &'a [DaemonTimeWake],
     handlers: HandlerSet,
-    kinds: Vec<&'static str>,
 }
 
 impl<'a> ReplayDrive<'a> {
@@ -334,8 +329,7 @@ impl<'a> ReplayDrive<'a> {
         replay_time_wakes: &'a [DaemonTimeWake],
         routes: &'static [HandlerRoute],
     ) -> Self {
-        let handlers = HandlerSet::new_replay(routes);
-        let kinds = handlers.intent_kinds();
+        let handlers = HandlerSet::new(routes);
         Self {
             store,
             projector,
@@ -343,7 +337,6 @@ impl<'a> ReplayDrive<'a> {
             fact_admission,
             replay_time_wakes,
             handlers,
-            kinds,
         }
     }
 
@@ -353,7 +346,7 @@ impl<'a> ReplayDrive<'a> {
             progressed |= self.project_to_idle(counters)?;
             progressed |= self.admit_time_wakes(counters)?;
             progressed |= self.project_to_idle(counters)?;
-            progressed |= self.dispatch_replay_allowed(counters)?;
+            progressed |= self.dispatch_replay(counters)?;
             if !progressed {
                 return Ok(());
             }
@@ -398,20 +391,17 @@ impl<'a> ReplayDrive<'a> {
         Ok(admitted > 0)
     }
 
-    fn dispatch_replay_allowed(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
-        if self.kinds.is_empty() {
-            return Ok(false);
-        }
+    fn dispatch_replay(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
         let progress = dispatch_intents(
             self.store,
             &self.handlers,
             self.allowed_tables,
             self.fact_admission,
             REPLAY_WORK_LIMIT,
-            IntentAdmissionPolicy::AllowKinds(&self.kinds),
+            HandlerMode::Replay,
+            RuntimeEffectMode::Replay,
         )?;
-        counters.suppressed_live_only_work += progress.suppressed_intents;
-        counters.replay_allowed_intents += progress.dispatched;
+        counters.replayed_intents += progress.dispatched;
         Ok(progress.status.progressed)
     }
 }

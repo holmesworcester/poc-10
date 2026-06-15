@@ -20,8 +20,8 @@ retained facts, and resume operational work without preserving queued intents.
   intentionally emit no live state when `ProjectionContext::is_replay()` is
   true.
 - Core owns replay scheduling. During replay, core queues retained facts in
-  replay mode and may suppress or defer emitted intents according to
-  intent-registry metadata.
+  replay mode and passes replay mode to handlers; projectors and handlers make
+  live-only no-op decisions at their own effect edges.
 - Store and schema declarations own table lifecycle. Core and protocol schema
   sources declare retained fact-store tables, resettable runtime tables, and
   state-summary tables; replay does not discover a keep-list from SQLite.
@@ -49,11 +49,12 @@ Add an explicit replay entry point to core runtime:
 5. Drain fact projection; projectors decide from replay context whether to
    rebuild durable state or no-op live session/negotiation state.
 6. Admit replayable semantic time wakes to fixpoint.
-7. Drain replay-allowed work to fixpoint: pending fact projection, context
-   match wakeups, replayable semantic time wakes, and replay-allowed intents.
+7. Drain replay work to fixpoint: pending fact projection, context match
+   wakeups, replayable semantic time wakes, and queued intents running with
+   replay-mode handler context.
    Each pass may create facts, rows, context, semantic time wakes, or more
-   replay-allowed intents.
-8. Finish all replay-required work before network activity resumes.
+   queued intents.
+8. Finish all replay work before network activity resumes.
 9. Start the daemon, install recurring intents from the handler registry, and
    resume normal dispatch.
 
@@ -61,37 +62,37 @@ Replay is allowed to use wall-clock context only through replayable semantic
 time-wake timelines. It must not run connection maintenance, bootstrap retry,
 presence refresh, sync polling, or network sends.
 
-## Intent Registry
+## Handler Registry And Replay Context
 
-Extend the existing `HandlerRoute` metadata rather than creating a second
-registry:
+Keep the existing `HandlerRoute` registry as the dispatch table and recurring
+schedule source:
 
 ```rust
 pub struct HandlerRoute {
     pub name: &'static str,
     pub intent_kind: &'static str,
     pub factory: HandlerFactory,
-    pub runs_during_replay: bool,
     pub recurrence: Option<RecurringIntentSpec>,
 }
 ```
 
-`runs_during_replay` answers one question: if this intent is emitted while
-replay is rebuilding facts and rows, may core dispatch it before the replay
-barrier finishes?
+Replay mode is not a route-table flag. Core dispatches queued intents with
+`HandlerContext::is_replay()` set, and each handler chooses whether to rebuild
+deterministic state or return empty effects.
 
-Replay-enabled handlers must be deterministic rebuild work. They may create
-facts or local rows from retained facts. They must not use network IO, fresh
-randomness, process-global mutable state, or operational wall-clock decisions.
+Handlers that do work during replay must be deterministic rebuild work. They
+may create facts or local rows from retained facts. Handlers must not use
+network IO, fresh randomness, process-global mutable state, or operational
+wall-clock decisions while `HandlerContext::is_replay()` is true.
 
 Initial poc-10 policy:
 
 | Intent kind | Replay behavior |
 | --- | --- |
-| `share_fact_with_sync` | Runs during replay if kept as an intent; it rebuilds sync-derived state. |
-| `create_key_wrap` | Runs during replay; it deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
-| `unwrap_key_wrap` | Runs during replay if its handler only creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
-| `create_connection` | Does not run during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
+| `share_fact_with_sync` | Rebuilds sync-derived state during replay, but skips live tail advertisements. |
+| `create_key_wrap` | Deterministically creates idempotent `key_wrap` facts from retained recipient/request facts plus retained local source and signer facts. |
+| `unwrap_key_wrap` | Creates deterministic local secret facts from retained wrap, recipient, frontier, and local recipient-key facts. Ordinary purge/retirement rules decide whether those local secret facts survive. |
+| `create_connection` | Returns no effects during replay. Network-visible response work must be rebuilt from committed request/response facts after replay. |
 | accepted bootstrap peer projection | Rebuilt during replay from retained local `invite_accepted` facts; live maintenance consumes those rows after the replay barrier. |
 | sync compare/have/need/send intents | Do not run during replay. They are live session prompts or send packaging. |
 | bootstrap, connection-frame, network-send, receive-network intents | Do not run during replay. They are operational IO attempts. |
@@ -201,12 +202,12 @@ an actual upgrade:
 - `replay [--reverse | --scramble --seed N]`: run the replay entry point with
   network and recurring schedules disabled. The default pass uses canonical
   fact order, `--reverse` admits retained facts newest-first, and `--scramble`
-  admits retained facts plus replay-allowed work in a deterministic shuffled
-  order. Each pass drops queued intents, wipes derived state, projects retained
-  facts, admits replayable semantic time wakes, drains replay-allowed work to
-  fixpoint, and prints counters for dropped intents, projected facts, context
-  match wakeups, semantic time wakes, replay-allowed intents, emitted facts,
-  purged facts, row mutations, and blocked network/live-only work.
+  admits retained facts in a deterministic shuffled order. Each pass drops
+  queued intents, wipes derived state, projects retained facts, admits
+  replayable semantic time wakes, drains replay work to fixpoint, and prints
+  counters for dropped intents, projected facts, context match wakeups,
+  semantic time wakes, replayed intents, emitted facts, purged facts, row
+  mutations, and blocked network work.
 - `state-summary`: print a stable hashable summary of replay-relevant state:
   retained facts, materialized rows, context edges, semantic time wakes, sync
   indexes, local key-material rows, and connection-maintenance rows. The output
@@ -220,12 +221,12 @@ an actual upgrade:
   an idempotent replay, `replay --reverse`, and several
   `replay --scramble --seed N` passes, then compare the same state summary
   `state_hash` for every pass. It should prove replay idempotence, projection
-  order independence, replay-allowed work interleaving independence, and report
+  order independence, replay work interleaving independence, and report
   the per-area hash/count differences for any table or owned-state area whose
   replay-derived rows diverge.
-- `intent-registry`: list every handler route with `runs_during_replay`,
-  recurrence metadata, command exclusion, and whether the route can perform
-  network IO.
+- `intent-registry`: list every handler route with recurrence metadata and
+  command exclusion. Replay behavior is visible in handler code through
+  `HandlerContext::is_replay()`, not in route metadata.
 - `recurring-intents`: list recurring intent specs from the handler registry.
   The output should come from static registry metadata, not persisted job rows.
 - `recurring-run KIND --now MS`: test one recurring intent kind without
@@ -236,21 +237,22 @@ an actual upgrade:
   accepted bootstrap peer rows, active attempts, active connections, target
   count, and pending local bootstrap sends.
 
-These commands should make side effects visible. A replay command that causes
-network rows, live-only local intents, recurring scheduler fires, or
-maintenance attempts before the replay barrier should report an error.
+These commands should make side effects visible. A replay command that leaves
+network rows, fires recurring schedulers, or creates maintenance attempts
+before the replay barrier should report an error.
 
 ## Test Plan
 
-- Registry test: every `HandlerRoute` has `runs_during_replay` set explicitly.
+- Registry test: `HandlerRoute` has no replay policy flag, and live/session
+  handlers explicitly branch on `HandlerContext::is_replay()`.
 - Registry test: recurring operational intents are declared in handler-route
   metadata, not in projectors or durable time-wake declarations.
 - Time-wake test: every daemon `TimeWake` timeline is replayable; connection
   retry is not listed as a daemon time wake.
 - Replay test: old queued intents are dropped, retained facts replay, and
   required sync/key-wrap work is recreated.
-- Replay test: network and connection-send handlers are not dispatched before
-  the replay barrier completes.
+- Replay test: network and connection-send handlers receive replay context and
+  return empty effects before the replay barrier completes.
 - Sync test: shareable-fact rows and negentropy summaries are wiped and rebuilt
   from retained facts.
 - Key-wrap test: replay dispatch of `create_key_wrap` is idempotent and creates
@@ -276,4 +278,4 @@ maintenance attempts before the replay barrier should report an error.
   replay order, with zero network/live-only side effects during every pass.
 - Replay order test: `replay --reverse` and `replay --scramble --seed N`
   produce the same state summary as canonical replay while exercising different
-  projection order and replay-allowed work interleavings.
+  projection order and replay work interleavings.

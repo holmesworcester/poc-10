@@ -81,6 +81,9 @@ impl IntentHandler for SeedConnectionSyncHandler {
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_seed_connection_sync(raw)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let store = context.store()?;
         let Some(_) =
             connection::connection::queries::connection_by_id(store, &input.connection_id)

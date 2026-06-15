@@ -305,6 +305,28 @@ pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
     }
 }
 
+/// Runtime mode visible to intent handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerMode {
+    /// Normal live dispatch after commands, projection, daemon ticks, or IO.
+    Live,
+    /// Replay dispatch while derived runtime state is being rebuilt.
+    Replay,
+}
+
+impl Default for HandlerMode {
+    fn default() -> Self {
+        Self::Live
+    }
+}
+
+impl HandlerMode {
+    /// Whether this dispatch is part of replay.
+    pub fn is_replay(self) -> bool {
+        matches!(self, Self::Replay)
+    }
+}
+
 /// Read-only inputs handed to an intent handler.
 ///
 /// Durable and local queue dispatch both build this immediately before
@@ -315,6 +337,7 @@ pub fn retry_intent_reason(err: &HandlerError) -> Option<&str> {
 pub struct HandlerContext<'a> {
     facts: BTreeMap<FactId, Fact>,
     store: Option<&'a Store>,
+    mode: HandlerMode,
 }
 
 impl fmt::Debug for HandlerContext<'_> {
@@ -323,6 +346,7 @@ impl fmt::Debug for HandlerContext<'_> {
             .debug_struct("HandlerContext")
             .field("facts", &self.facts)
             .field("has_store", &self.store.is_some())
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -338,6 +362,7 @@ impl<'a> HandlerContext<'a> {
         Self {
             facts: facts.into_iter().map(|fact| (fact.id, fact)).collect(),
             store: None,
+            mode: HandlerMode::Live,
         }
     }
 
@@ -345,6 +370,22 @@ impl<'a> HandlerContext<'a> {
     pub fn with_store(mut self, store: &'a Store) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Mark whether this handler invocation is running in live or replay mode.
+    pub fn with_mode(mut self, mode: HandlerMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Return the runtime mode for this handler invocation.
+    pub fn mode(&self) -> HandlerMode {
+        self.mode
+    }
+
+    /// Whether this handler invocation is part of replay.
+    pub fn is_replay(&self) -> bool {
+        self.mode.is_replay()
     }
 
     /// Borrow the store or return a fatal handler error if none was attached.

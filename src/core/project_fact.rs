@@ -1735,41 +1735,22 @@ pub(crate) mod commit_effects {
     use super::route::FactAdmissionFn;
     use super::ProjectionMode;
 
-    /// Which follow-up intents may be recorded by this commit path.
+    /// Runtime mode for committing shared effects.
     #[derive(Debug, Clone, Copy)]
-    pub(crate) enum IntentAdmissionPolicy<'a> {
-        /// Normal runtime behavior: record every emitted intent.
-        All,
-        /// Replay behavior: record only intents whose handlers are replay-allowed.
-        AllowKinds(&'a [&'static str]),
+    pub(crate) enum RuntimeEffectMode {
+        /// Normal runtime behavior.
+        Live,
+        /// Replay behavior: emitted facts stay in replay projection mode.
+        Replay,
     }
 
-    impl IntentAdmissionPolicy<'_> {
+    impl RuntimeEffectMode {
         pub(crate) fn pending_projection_mode(self) -> ProjectionMode {
             match self {
-                Self::All => ProjectionMode::Normal,
-                Self::AllowKinds(_) => ProjectionMode::Replay,
+                Self::Live => ProjectionMode::Normal,
+                Self::Replay => ProjectionMode::Replay,
             }
         }
-
-        fn allows(self, intent: &Intent) -> bool {
-            match self {
-                Self::All => true,
-                Self::AllowKinds(kinds) => kinds.contains(&intent.kind.as_str()),
-            }
-        }
-    }
-
-    /// Remove intents that are not admissible in the current runtime mode.
-    pub(crate) fn suppress_disallowed_intents(
-        effects: &mut RuntimeEffects,
-        policy: IntentAdmissionPolicy<'_>,
-    ) -> usize {
-        let durable_before = effects.intents.len();
-        effects.intents.retain(|intent| policy.allows(intent));
-        let local_before = effects.local_intents.len();
-        effects.local_intents.retain(|intent| policy.allows(intent));
-        (durable_before - effects.intents.len()) + (local_before - effects.local_intents.len())
     }
 
     /// Counts of newly inserted follow-up work after an effect commit.
@@ -3305,7 +3286,7 @@ use crate::core::store::{
     candidate_pending_fact_ids, insert_fact_and_pending_in_tx, insert_pending_owner_with_mode_in_tx,
 };
 
-pub(crate) use commit_effects::IntentAdmissionPolicy;
+pub(crate) use commit_effects::RuntimeEffectMode;
 
 /// Projection progress from one bounded drain pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3924,20 +3905,18 @@ mod tests {
     }
 
     #[test]
-    fn handler_sets_filter_command_and_replay_routes() {
+    fn handler_sets_filter_command_routes() {
         const ROUTES: &[HandlerRoute] = &[
             HandlerRoute {
                 name: "semantic",
                 intent_kind: "semantic",
                 factory: noop_handler,
-                runs_during_replay: true,
                 recurrence: None,
             },
             HandlerRoute {
                 name: "network",
                 intent_kind: "network",
                 factory: noop_handler,
-                runs_during_replay: false,
                 recurrence: None,
             },
         ];
@@ -3948,10 +3927,6 @@ mod tests {
         );
         assert_eq!(
             HandlerSet::new_excluding(ROUTES, &["network"]).intent_kinds(),
-            vec!["semantic"]
-        );
-        assert_eq!(
-            HandlerSet::new_replay(ROUTES).intent_kinds(),
             vec!["semantic"]
         );
     }

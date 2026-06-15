@@ -1,8 +1,8 @@
-//! Replay-mode intent suppression tests.
+//! Replay-mode intent dispatch tests.
 //!
 //! These use a tiny runtime description instead of the full protocol so the
-//! assertion is about core behavior: projectors own replay-mode emissions, and
-//! replay dispatch still filters live-only follow-up work from handlers.
+//! assertion is about core behavior: projectors own replay-mode emissions, core
+//! passes replay mode to handlers, and handlers own replay-time no-ops.
 
 use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
@@ -41,19 +41,19 @@ impl Projector for TestProjector {
 }
 
 #[derive(Debug)]
-struct ReplayAllowedProjector;
+struct ReplayContextProjector;
 
-impl Projector for ReplayAllowedProjector {
+impl Projector for ReplayContextProjector {
     fn project(
         &self,
         fact: &Fact,
         context: &ProjectionContext,
     ) -> Result<ProjectionOutput, String> {
-        if context.is_replay() {
-            Ok(ProjectionOutput::new().intent(intent(REPLAY_OK, &fact.id)))
+        Ok(if context.is_replay() {
+            ProjectionOutput::new().intent(intent(REPLAY_OK, &fact.id))
         } else {
-            Ok(ProjectionOutput::new().intent(intent(REPLAY_OK, &fact.id)))
-        }
+            ProjectionOutput::new()
+        })
     }
 }
 
@@ -84,12 +84,16 @@ impl ReplayHandler {
 }
 
 impl IntentHandler for ReplayHandler {
-    fn handle(&self, intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-        Ok(RuntimeEffects::new().intent(Intent::new(
-            IntentKind::new(LIVE_FROM_HANDLER).expect("valid test intent kind"),
-            intent.key.clone(),
-            vec![1],
-        )))
+    fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
+        Ok(if context.is_replay() {
+            RuntimeEffects::new().intent(Intent::new(
+                IntentKind::new(LIVE_FROM_HANDLER).expect("valid test intent kind"),
+                intent.key.clone(),
+                vec![1],
+            ))
+        } else {
+            RuntimeEffects::new()
+        })
     }
 }
 
@@ -103,8 +107,15 @@ impl LiveOnlyHandler {
 }
 
 impl IntentHandler for LiveOnlyHandler {
-    fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-        Ok(RuntimeEffects::new())
+    fn handle(&self, intent: &Intent, context: &HandlerContext<'_>) -> HandlerResult {
+        if context.is_replay() || intent.kind.as_str() == LIVE_FROM_HANDLER {
+            return Ok(RuntimeEffects::new());
+        }
+        Ok(RuntimeEffects::new().intent(Intent::new(
+            IntentKind::new(LIVE_FROM_HANDLER).expect("valid test intent kind"),
+            intent.key.clone(),
+            vec![1],
+        )))
     }
 }
 
@@ -112,8 +123,8 @@ fn test_projector() -> Box<dyn Projector> {
     Box::new(TestProjector)
 }
 
-fn replay_allowed_projector() -> Box<dyn Projector> {
-    Box::new(ReplayAllowedProjector)
+fn replay_context_projector() -> Box<dyn Projector> {
+    Box::new(ReplayContextProjector)
 }
 
 fn replay_noop_projector() -> Box<dyn Projector> {
@@ -133,28 +144,24 @@ const HANDLERS: &[HandlerRoute] = &[
         name: "replay_ok",
         intent_kind: REPLAY_OK,
         factory: replay_handler,
-        runs_during_replay: true,
         recurrence: None,
     },
     HandlerRoute {
         name: "live_only",
         intent_kind: LIVE_ONLY,
         factory: live_handler,
-        runs_during_replay: false,
         recurrence: None,
     },
     HandlerRoute {
         name: "live_local",
         intent_kind: LIVE_LOCAL,
         factory: live_handler,
-        runs_during_replay: false,
         recurrence: None,
     },
     HandlerRoute {
         name: "live_from_handler",
         intent_kind: LIVE_FROM_HANDLER,
         factory: live_handler,
-        runs_during_replay: false,
         recurrence: None,
     },
 ];
@@ -176,7 +183,7 @@ const RUNTIME: RuntimeDescription = RuntimeDescription {
 const RUNTIME_REPLAY_AWARE: RuntimeDescription = RuntimeDescription {
     schema_sources: SCHEMA_SOURCES,
     row_mutation_tables: &[],
-    projector: replay_allowed_projector,
+    projector: replay_context_projector,
     fact_routes: &[],
     fact_admission: None,
     handlers: HANDLERS,
@@ -214,7 +221,7 @@ fn live_projection_records_all_projector_intents() {
 }
 
 #[test]
-fn replay_suppresses_non_replayable_handler_followup_intents() {
+fn replay_commits_and_dispatches_handler_followup_intents() {
     let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_AWARE).expect("runtime");
     runtime.submit_fact(fact());
 
@@ -222,15 +229,34 @@ fn replay_suppresses_non_replayable_handler_followup_intents() {
         .replay(&[], topo::core::replay::ReplayOrder::Canonical)
         .expect("replay");
 
-    assert_eq!(report.replay_allowed_intents, 1);
     assert_eq!(
-        report.suppressed_live_only_work, 1,
-        "replay suppresses the live-only handler follow-up"
+        report.replayed_intents, 2,
+        "the replay handler sees replay mode, emits a follow-up, and replay dispatches that follow-up too"
     );
     assert_eq!(
         runtime.pending_intent_count(),
         0,
-        "suppressed replay work must not remain queued after the barrier"
+        "replay should consume the handler-emitted follow-up before the barrier"
+    );
+}
+
+#[test]
+fn replay_dispatches_projector_live_work_to_handlers_in_replay_mode() {
+    let mut runtime = Runtime::open_memory(&RUNTIME).expect("runtime");
+    runtime.submit_fact(fact());
+
+    let report = runtime
+        .replay(&[], topo::core::replay::ReplayOrder::Canonical)
+        .expect("replay");
+
+    assert_eq!(
+        report.replayed_intents, 4,
+        "replay dispatches projector-emitted durable and local intents, and live handlers no-op because they see replay mode"
+    );
+    assert_eq!(
+        runtime.pending_intent_count(),
+        0,
+        "handler-owned replay no-ops must drain live-only queued work"
     );
 }
 
@@ -259,7 +285,7 @@ fn replay_projects_retained_facts_with_replay_context() {
         report.projected_facts, 1,
         "replay still runs the projector with replay context"
     );
-    assert_eq!(report.replay_allowed_intents, 0);
+    assert_eq!(report.replayed_intents, 0);
     assert_eq!(
         runtime.pending_intent_count(),
         0,

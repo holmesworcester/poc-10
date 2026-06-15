@@ -261,6 +261,9 @@ impl IntentHandler for SendFactsOnConnectionHandler {
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let work = decode_send_facts_on_connection_work(intent)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let connection_id = work.connection_id();
         let Some(connection) =
             connection_fact::queries::connection_by_id(context.store()?, &connection_id).map_err(

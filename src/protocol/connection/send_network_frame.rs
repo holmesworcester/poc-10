@@ -110,6 +110,9 @@ impl IntentHandler for SendNetworkFrameHandler {
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_network_frame(intent)?;
         validate_frame(&input)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let target = resolve_target(&input.routing_key, context)?;
         network::send(
             context.store()?,

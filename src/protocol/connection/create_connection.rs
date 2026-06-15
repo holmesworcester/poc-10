@@ -158,6 +158,9 @@ impl IntentHandler for CreateConnectionHandler {
 
     fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_create_connection_intent(intent)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let request_fact = context.require_fact(&input.request_id)?;
         let authority_fact = context.require_fact(&input.initiator_endpoint_shared_id)?;
         let receive_fact = context.require_fact(&input.receive_id)?;

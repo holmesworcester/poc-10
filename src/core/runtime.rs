@@ -23,9 +23,9 @@
 use crate::core::command::CommandOutput;
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_intents, HandlerSet};
-use crate::core::intents::Intent;
+use crate::core::intents::{HandlerMode, Intent};
 use crate::core::project_fact::{
-    self, FactAdmissionFn, FactRoute, IntentAdmissionPolicy, Projector, Timeline,
+    self, FactAdmissionFn, FactRoute, Projector, RuntimeEffectMode, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use crate::core::store::persisted_facts;
@@ -141,8 +141,7 @@ impl Runtime {
         stored + local
     }
 
-    /// Borrow the declared handler routes, including replay and recurrence
-    /// metadata, for registry diagnostics.
+    /// Borrow the declared handler routes for registry diagnostics.
     pub fn handler_routes(&self) -> &'static [HandlerRoute] {
         self.description.handlers
     }
@@ -246,7 +245,8 @@ impl Runtime {
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
                 limit,
-                IntentAdmissionPolicy::All,
+                HandlerMode::Live,
+                RuntimeEffectMode::Live,
             )?
             .status,
         );
@@ -301,7 +301,8 @@ impl Runtime {
                     self.description.row_mutation_tables,
                     self.description.fact_admission,
                     limit_per_round,
-                    IntentAdmissionPolicy::All,
+                    HandlerMode::Live,
+                    RuntimeEffectMode::Live,
                 )
                 .map(|progress| progress.status)
             })?;
@@ -364,9 +365,9 @@ impl Runtime {
     ///
     /// Replay drops queued intents and other schema-declared non-fact runtime
     /// state, then reprojects retained facts to a fixpoint using only
-    /// replay-allowed handler routes. The caller supplies the replayable
-    /// semantic time-wake timelines; replay must not run network IO, recurring
-    /// schedules, or operational wall-clock decisions.
+    /// replay-mode projection and handler context. The caller supplies the
+    /// replayable semantic time-wake timelines; replay must not run network IO,
+    /// recurring schedules, or operational wall-clock decisions.
     pub fn replay(
         &mut self,
         replay_time_wakes: &[crate::core::daemon::DaemonTimeWake],

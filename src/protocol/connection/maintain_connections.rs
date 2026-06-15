@@ -128,6 +128,9 @@ impl IntentHandler for MaintainConnectionsHandler {
             return Err(HandlerError::fatal("expected maintain_connections intent"));
         }
         let input = decode_maintain_connections(intent).map_err(HandlerError::fatal)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let store = context.store()?;
         let mut effects = RuntimeEffects::new();
 
