@@ -372,7 +372,6 @@ impl<'a> ReplayDrive<'a> {
                 REPLAY_WORK_LIMIT,
             )?;
             counters.projected_facts += progress.projected;
-            counters.suppressed_live_only_work += progress.suppressed_intents;
             if progress.projected == 0 {
                 break;
             }

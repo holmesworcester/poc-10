@@ -36,6 +36,15 @@ impl RuntimeEffects {
         Self::default()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.facts.is_empty()
+            && self.candidate_facts.is_empty()
+            && self.purged_facts.is_empty()
+            && self.row_mutations.is_empty()
+            && self.intents.is_empty()
+            && self.local_intents.is_empty()
+    }
+
     pub fn fact(mut self, fact: Fact) -> Self {
         self.facts.push(fact);
         self
@@ -64,5 +73,19 @@ impl RuntimeEffects {
     pub fn local_intent(mut self, intent: Intent) -> Self {
         self.local_intents.push(intent);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::facts::{Fact, FactScope};
+
+    #[test]
+    fn runtime_effects_reports_whether_any_runtime_work_exists() {
+        assert!(RuntimeEffects::new().is_empty());
+
+        let fact = Fact::new(FactScope::Global, 1, b"child".to_vec());
+        assert!(!RuntimeEffects::new().fact(fact).is_empty());
     }
 }
