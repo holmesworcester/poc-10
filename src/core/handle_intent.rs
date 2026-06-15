@@ -281,9 +281,13 @@ fn handle_intent_with_policy(
         if status.retried && queued.queue == IntentQueue::Local {
             rotate_local_retry_to_tail(store, &queued.intent)?;
         }
-        return Ok(IntentDispatchReport { status });
+        return Ok(IntentDispatchReport {
+            status,
+            emitted_projectable_facts: false,
+        });
     };
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
+    let emitted_projectable_facts = !output.facts.is_empty() || !output.candidate_facts.is_empty();
     status.progressed = commit_handler_output(
         store,
         &queued,
@@ -292,7 +296,10 @@ fn handle_intent_with_policy(
         fact_admission,
         effect_mode.pending_projection_mode(),
     )?;
-    Ok(IntentDispatchReport { status })
+    Ok(IntentDispatchReport {
+        emitted_projectable_facts: status.progressed && emitted_projectable_facts,
+        status,
+    })
 }
 
 /// Dispatch queued intents with the provided handler set.
@@ -341,6 +348,9 @@ pub(crate) fn dispatch_intents(
                 retried_local.insert(key);
                 continue;
             }
+            break;
+        }
+        if report.emitted_projectable_facts {
             break;
         }
     }
@@ -470,17 +480,20 @@ pub(crate) struct QueuedIntent {
 
 pub(crate) struct IntentDispatchReport {
     pub(crate) status: WorkStatus,
+    pub(crate) emitted_projectable_facts: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::effects::RuntimeEffects;
+    use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{retry_intent, HandlerResult, IntentKind};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static RETRY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static AFTER_FACT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn durable_success_deletes_shadowed_local_intent() {
@@ -551,6 +564,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dispatch_yields_after_handler_emits_projectable_fact() {
+        AFTER_FACT_CALLS.store(0, Ordering::SeqCst);
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let emitted = emitted_fact();
+        submit_intent_to_table(&store, INTENTS, test_intent("emit_fact", b"first"))
+            .expect("submit emitting intent");
+        submit_intent_to_table(&store, INTENTS, test_intent("zz_after_fact", b"second"))
+            .expect("submit following intent");
+
+        let progress = dispatch_intents(
+            &store,
+            &HandlerSet::new(EMIT_FACT_ROUTES),
+            &[],
+            None,
+            8,
+            HandlerMode::Live,
+            RuntimeEffectMode::Live,
+        )
+        .expect("dispatch emitting intent");
+
+        assert_eq!(progress.dispatched, 1);
+        assert_eq!(
+            AFTER_FACT_CALLS.load(Ordering::SeqCst),
+            0,
+            "dispatcher should yield so candidate projection can run before later handlers"
+        );
+        assert!(
+            crate::core::store::candidate_fact_by_id(&store, &emitted.id)
+                .expect("load emitted candidate")
+                .is_some()
+        );
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+    }
+
     struct NoopHandler;
 
     const NOOP_ROUTES: &[HandlerRoute] = &[HandlerRoute {
@@ -567,6 +616,21 @@ mod tests {
         recurrence: None,
     }];
 
+    const EMIT_FACT_ROUTES: &[HandlerRoute] = &[
+        HandlerRoute {
+            name: "emit_fact",
+            intent_kind: "emit_fact",
+            factory: emit_fact_handler,
+            recurrence: None,
+        },
+        HandlerRoute {
+            name: "zz_after_fact",
+            intent_kind: "zz_after_fact",
+            factory: after_fact_handler,
+            recurrence: None,
+        },
+    ];
+
     impl IntentHandler for NoopHandler {
         fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
             Ok(RuntimeEffects::new())
@@ -582,6 +646,23 @@ mod tests {
         }
     }
 
+    struct EmitFactHandler;
+
+    impl IntentHandler for EmitFactHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            Ok(RuntimeEffects::new().fact(emitted_fact()))
+        }
+    }
+
+    struct AfterFactHandler;
+
+    impl IntentHandler for AfterFactHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            AFTER_FACT_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(RuntimeEffects::new())
+        }
+    }
+
     fn noop_handler() -> Box<dyn IntentHandler> {
         Box::new(NoopHandler)
     }
@@ -590,11 +671,23 @@ mod tests {
         Box::new(RetryHandler)
     }
 
+    fn emit_fact_handler() -> Box<dyn IntentHandler> {
+        Box::new(EmitFactHandler)
+    }
+
+    fn after_fact_handler() -> Box<dyn IntentHandler> {
+        Box::new(AfterFactHandler)
+    }
+
     fn test_intent(kind: &'static str, key: &[u8]) -> Intent {
         Intent::new(
             IntentKind::new(kind).expect("valid test kind"),
             key.to_vec(),
             vec![1],
         )
+    }
+
+    fn emitted_fact() -> Fact {
+        Fact::new(FactScope::Global, 42, b"handler-emitted-fact".to_vec())
     }
 }

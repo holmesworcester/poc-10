@@ -8,12 +8,13 @@
 //! make those mechanics meaningful.
 //!
 //! The runtime does not interpret protocol bytes. It schedules work and holds
-//! the transaction ordering rules: command-authored facts commit before command
-//! receipts are returned, projection drains before intent dispatch when queues
-//! are being settled, and handler output commits only through the dispatch
-//! boundary. Those rules make facts, context, rows, and queued work visible in
-//! a predictable order regardless of whether work came from a CLI command, a
-//! daemon tick, sync, or a protocol handler.
+//! the transaction ordering rules: command-authored facts are admitted to
+//! candidate projection staging before command receipts are returned, projection
+//! drains before intent dispatch when queues are being settled, and handler
+//! output commits only through the dispatch boundary. Those rules make facts,
+//! context, rows, and queued work visible in a predictable order regardless of
+//! whether work came from a CLI command, a daemon tick, sync, or a protocol
+//! handler.
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. Runtime holds the concrete store, projector, and protocol
@@ -154,13 +155,13 @@ impl Runtime {
         self.description.command_excluded_handlers
     }
 
-    /// Admit one fact and mark it pending for projection.
+    /// Admit one fact into candidate projection staging.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
         project_fact::submit_fact_with_admission(&self.store, fact, self.description.fact_admission)
             .expect("runtime fact submission should persist")
     }
 
-    /// Admit many facts in one transaction.
+    /// Admit many facts into candidate projection staging in one transaction.
     pub fn submit_facts(&mut self, facts: impl IntoIterator<Item = Fact>) -> Result<usize, String> {
         project_fact::submit_facts_with_admission(
             &self.store,
@@ -189,11 +190,11 @@ impl Runtime {
         crate::core::handle_intent::submit_local_intent_to_store(&self.store, intent)
     }
 
-    /// Commit the facts returned by a user-facing command and return its receipt.
+    /// Admit the facts returned by a user-facing command and return its receipt.
     ///
     /// Command receipts are not runtime queue state. They return directly to the CLI
-    /// caller after the command's authored facts have been retained and queued
-    /// for projection.
+    /// caller after the command's authored facts have entered candidate projection
+    /// staging.
     pub fn submit_command_output<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
         project_fact::submit_command_output_to_store(
             &self.store,
@@ -509,10 +510,17 @@ mod tests {
         let external_fact = Fact::new(FactScope::Global, 7, b"external".to_vec());
         let mut writer = Runtime::open_disk(&TEST_RUNTIME, &path).expect("writer runtime");
         assert!(writer.submit_fact(external_fact.clone()));
+        assert!(
+            !runtime.facts().any(|fact| fact.id == external_fact.id),
+            "fact iteration should not read candidate staging"
+        );
+        writer
+            .process_projection_until_idle(2, 8)
+            .expect("project submitted fact");
 
         assert!(
             runtime.facts().any(|fact| fact.id == external_fact.id),
-            "fact iteration should read externally committed facts from SQLite"
+            "fact iteration should read externally retained facts from SQLite"
         );
     }
 

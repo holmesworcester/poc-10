@@ -931,6 +931,20 @@ const OWNER_KEYED_FACT_PURGE_TABLES: &[TableName] = &[
     PENDING_PROJECTION,
 ];
 
+const CANDIDATE_FACT_DELETE_TABLES: &[TableName] = &[
+    CONTEXT_EDGES,
+    TIME_WAKES,
+    PENDING_TIME_RANGES,
+    PENDING_PROJECTION_MATCHES,
+    PENDING_PROJECTION,
+];
+
+const CANDIDATE_PENDING_WORK_TABLES: &[TableName] = &[
+    PENDING_PROJECTION_MATCHES,
+    PENDING_PROJECTION,
+    PENDING_TIME_RANGES,
+];
+
 #[derive(Debug, Clone, Copy)]
 enum FactReadSource {
     Retained,
@@ -955,6 +969,41 @@ impl FactReadSource {
             }
         }
     }
+
+    fn scan_sql(self) -> &'static str {
+        match self {
+            Self::Retained => {
+                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+                 FROM facts f
+                 JOIN local_fact_admissions m ON m.fact_id = f.id
+                 ORDER BY f.id"
+            }
+            Self::Candidate => {
+                "SELECT id, scope, scope_kind, scope_id, received_at, bytes
+                 FROM candidate_facts
+                 ORDER BY received_at, id"
+            }
+        }
+    }
+
+    fn scan_error(self) -> &'static str {
+        match self {
+            Self::Retained => "load fact rows",
+            Self::Candidate => "load candidate facts",
+        }
+    }
+}
+
+fn delete_owner_rows_from_tables(
+    store: &Store,
+    tables: &[TableName],
+    owner: FactId,
+) -> rusqlite::Result<usize> {
+    let mut deleted = 0usize;
+    for table in tables {
+        deleted += store.delete_rows_by_owner_in_tx(*table, owner)?;
+    }
+    Ok(deleted)
 }
 
 // === Durable mutations ===
@@ -964,6 +1013,7 @@ impl FactReadSource {
 /// Facts are immutable and content-addressed. The fact bytes live in `facts`;
 /// the local admission record is local metadata about those bytes.
 /// Returns whether either row was newly inserted.
+#[cfg(test)]
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
     insert_fact_and_pending_with_mode_in_tx(store, fact, ProjectionMode::Normal)
 }
@@ -998,13 +1048,22 @@ pub(crate) fn insert_pending_owner_with_mode_in_tx(
     )
 }
 
-/// Insert a runtime-local projectable input.
+/// Insert a projectable candidate input.
 ///
 /// Candidate facts use the `Fact` container for id, scope, timestamp, and
 /// bytes, but they are not inserted into durable `facts` or
-/// `local_fact_admissions`. Projection may read durable context and emit durable
-/// facts, then the input row is removed when projection commits.
+/// `local_fact_admissions`. Projection decides whether to retain, park, or drop
+/// the input, then removes the candidate row when that decision commits.
 pub(crate) fn insert_candidate_fact_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
+    if let Some(bytes) = fact_bytes_by_id_in_tx(store, &fact.id)? {
+        if bytes == fact.bytes {
+            return Ok(false);
+        }
+        return Err(rusqlite::Error::InvalidParameterName(
+            "conflicting retained row for candidate fact".to_string(),
+        ));
+    }
+
     let (scope, scope_kind, scope_id) = fact_scope_columns(&fact.scope);
     let changed = store.conn().execute(
         "INSERT OR IGNORE INTO candidate_facts
@@ -1022,19 +1081,41 @@ pub(crate) fn insert_candidate_fact_in_tx(store: &Store, fact: &Fact) -> rusqlit
     verify_idempotent_insert(
         changed,
         || candidate_fact_by_id_in_tx(store, &fact.id),
-        |existing| existing == fact,
+        |existing| existing.bytes == fact.bytes,
         "conflicting row for candidate fact",
     )
 }
 
 pub(crate) fn delete_candidate_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
-    let mut changed =
+    let changed =
         store.delete_rows_by_blob_column_in_tx(CANDIDATE_FACTS, "id", owner.as_slice())? > 0;
-    changed |= store.delete_rows_by_owner_in_tx(PENDING_PROJECTION_MATCHES, owner)? > 0;
+    if changed {
+        delete_owner_rows_from_tables(store, CANDIDATE_FACT_DELETE_TABLES, owner)?;
+    }
     Ok(changed)
 }
 
-/// Move a volatile candidate into the retained fact table without requeueing it.
+pub(crate) fn clear_candidate_projection_work_in_tx(
+    store: &Store,
+    owner: FactId,
+) -> rusqlite::Result<()> {
+    delete_owner_rows_from_tables(store, CANDIDATE_PENDING_WORK_TABLES, owner)?;
+    Ok(())
+}
+
+pub(crate) fn candidate_fact_exists_in_tx(store: &Store, owner: &FactId) -> rusqlite::Result<bool> {
+    store
+        .conn()
+        .query_row(
+            "SELECT 1 FROM candidate_facts WHERE id = ?1 LIMIT 1",
+            params![owner.as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+}
+
+/// Move a candidate into the retained fact table without requeueing it.
 ///
 /// Projection has already consumed this candidate item; retaining it should make
 /// its bytes and local admission visible, but must not create a second initial
@@ -1060,9 +1141,7 @@ pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result
         "fact_id",
         owner.as_slice(),
     )? > 0;
-    for table in OWNER_KEYED_FACT_PURGE_TABLES {
-        changed |= store.delete_rows_by_owner_in_tx(*table, owner)? > 0;
-    }
+    changed |= delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_PURGE_TABLES, owner)? > 0;
     changed |= store.delete_rows_by_blob_column_in_tx(
         PENDING_PROJECTION_MATCHES,
         "offer_owner",
@@ -1149,20 +1228,7 @@ pub fn persisted_fact(store: &Store, id: &FactId) -> Result<Option<Fact>, String
 
 /// Load every stored fact.
 pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
-    let mut stmt = store
-        .conn()
-        .prepare(
-            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-             FROM facts f
-             JOIN local_fact_admissions m ON m.fact_id = f.id
-             ORDER BY f.id",
-        )
-        .map_err(|err| format!("load fact rows: {err}"))?;
-    let rows = stmt
-        .query_map([], fact_from_sql_row)
-        .map_err(|err| format!("load fact rows: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("load fact rows: {err}"))
+    facts_from(store, FactReadSource::Retained)
 }
 
 pub(crate) fn candidate_pending_fact_ids(
@@ -1170,38 +1236,10 @@ pub(crate) fn candidate_pending_fact_ids(
     limit: usize,
 ) -> Result<Vec<FactId>, String> {
     let limit = i64::try_from(limit).map_err(|_| "candidate fact limit exceeds i64".to_string())?;
-    let candidate_facts = quoted_table_name(CANDIDATE_FACTS).map_err(|err| err.to_string())?;
-    let context_edges = quoted_table_name(CONTEXT_EDGES).map_err(|err| err.to_string())?;
+    let sql = candidate_ready_sql("e.id", "ORDER BY e.received_at, e.id LIMIT ?1")?;
     let mut stmt = store
         .conn()
-        .prepare(&format!(
-            r#"
-            SELECT e.id
-            FROM {ephemeral} e
-            WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM {context} n
-                    WHERE n.owner = e.id
-                      AND n.direction = 'need'
-                )
-               OR EXISTS (
-                    SELECT 1
-                    FROM {context} n
-                    JOIN {context} o
-                      ON o.direction = 'offer'
-                     AND o.role = n.role
-                     AND o.scope_key = n.scope_key
-                     AND o.start_key <= n.end_key
-                     AND o.end_key >= n.start_key
-                    WHERE n.owner = e.id
-                      AND n.direction = 'need'
-                )
-            ORDER BY e.received_at, e.id
-            LIMIT ?1
-            "#,
-            ephemeral = candidate_facts,
-            context = context_edges,
-        ))
+        .prepare(&sql)
         .map_err(|err| format!("load candidate facts: {err}"))?;
     let rows = stmt
         .query_map(params![limit], |row| {
@@ -1212,8 +1250,59 @@ pub(crate) fn candidate_pending_fact_ids(
         .map_err(|err| format!("load candidate facts: {err}"))
 }
 
+pub(crate) fn candidate_pending_fact_count(store: &Store) -> Result<usize, String> {
+    let sql = candidate_ready_sql("COUNT(*)", "")?;
+    let count = store
+        .conn()
+        .query_row(&sql, [], |row| row.get::<_, i64>(0))
+        .map_err(|err| format!("count candidate facts: {err}"))?;
+    usize::try_from(count).map_err(|_| "candidate fact count is negative".to_string())
+}
+
 pub(crate) fn candidate_fact_by_id(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
     candidate_fact_by_id_in_tx(store, id).map_err(|err| format!("load candidate fact: {err}"))
+}
+
+pub(crate) fn candidate_facts(store: &Store) -> Result<Vec<Fact>, String> {
+    facts_from(store, FactReadSource::Candidate)
+}
+
+fn facts_from(store: &Store, source: FactReadSource) -> Result<Vec<Fact>, String> {
+    let label = source.scan_error();
+    let mut stmt = store
+        .conn()
+        .prepare(source.scan_sql())
+        .map_err(|err| format!("{label}: {err}"))?;
+    let rows = stmt
+        .query_map([], fact_from_sql_row)
+        .map_err(|err| format!("{label}: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("{label}: {err}"))
+}
+
+fn candidate_ready_sql(select: &str, suffix: &str) -> Result<String, String> {
+    let candidate_facts = quoted_table_name(CANDIDATE_FACTS).map_err(|err| err.to_string())?;
+    let context_edges = quoted_table_name(CONTEXT_EDGES).map_err(|err| err.to_string())?;
+    let pending_matches =
+        quoted_table_name(PENDING_PROJECTION_MATCHES).map_err(|err| err.to_string())?;
+    Ok(format!(
+        r#"
+        SELECT {select}
+        FROM {candidate_facts} e
+        WHERE NOT EXISTS (
+                SELECT 1
+                FROM {context_edges} n
+                WHERE n.owner = e.id
+                  AND n.direction = 'need'
+            )
+           OR EXISTS (
+                SELECT 1
+                FROM {pending_matches} m
+                WHERE m.owner = e.id
+            )
+        {suffix}
+        "#
+    ))
 }
 
 fn fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
@@ -1659,6 +1748,68 @@ CREATE TABLE IF NOT EXISTS "test.typed_events" (
             .expect_err("conflicting insert must reject");
 
         assert!(err.to_string().contains("conflicting intent row for send"));
+    }
+
+    #[test]
+    fn candidate_pending_count_and_ids_use_the_same_ready_predicate() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let ready = Fact::new(FactScope::Local, 1, b"ready candidate".to_vec());
+        let blocked = Fact::new(FactScope::Local, 2, b"blocked candidate".to_vec());
+
+        store
+            .write_transaction(|tx| {
+                insert_candidate_fact_in_tx(tx, &ready)?;
+                insert_candidate_fact_in_tx(tx, &blocked)?;
+                tx.conn().execute(
+                    "INSERT INTO context_edges
+                        (owner, direction, role, scope_key, start_key, end_key)
+                     VALUES (?1, 'need', 'candidate_context', ?2, ?3, ?4)",
+                    params![
+                        blocked.id.as_slice(),
+                        b"scope".as_slice(),
+                        b"a".as_slice(),
+                        b"z".as_slice()
+                    ],
+                )?;
+                Ok(())
+            })
+            .expect("seed candidates");
+
+        assert_eq!(
+            candidate_pending_fact_count(&store).expect("count candidates"),
+            1
+        );
+        assert_eq!(
+            candidate_pending_fact_ids(&store, 10).expect("pending candidate ids"),
+            vec![ready.id]
+        );
+
+        store
+            .conn()
+            .execute(
+                "INSERT INTO pending_projection_matches
+                    (owner, need_role, need_scope_key, need_start_key, need_end_key,
+                     offer_owner, offer_start_key, offer_end_key)
+                 VALUES (?1, 'candidate_context', ?2, ?3, ?4, ?5, ?3, ?4)",
+                params![
+                    blocked.id.as_slice(),
+                    b"scope".as_slice(),
+                    b"a".as_slice(),
+                    b"z".as_slice(),
+                    ready.id.as_slice()
+                ],
+            )
+            .expect("record pending match");
+
+        assert_eq!(
+            candidate_pending_fact_count(&store).expect("count matched candidates"),
+            2
+        );
+        assert_eq!(
+            candidate_pending_fact_ids(&store, 10).expect("matched candidate ids"),
+            vec![ready.id, blocked.id]
+        );
     }
 
     #[test]

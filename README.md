@@ -169,7 +169,7 @@ Runtime work moves through these core-owned queues:
 ```text
 command output
   -> authored facts
-  -> pending_projection
+  -> candidate_facts
   -> projector
   -> replacement needs + append-only offers + row mutations + follow-up intents
   -> durable or ephemeral intent queue

@@ -566,7 +566,7 @@ fn core_readmes_document_runtime_boundaries() {
         "runtime.rs",
         "bounded work ordering",
         "raw fact -> tag route -> projector -> ProjectionOutput -> commit",
-        "command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> projection",
+        "command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> candidate_facts -> projection",
         "`FactAdmissionFn`",
         "poc-10 installs one that dispatches by fact tag to protocol-local decode and validation helpers",
         "record candidate facts in `candidate_facts`",
