@@ -34,6 +34,7 @@ use self::context_store::{
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{Fact, FactId};
+use crate::core::perf_profile as perf;
 use crate::core::store::{
     candidate_fact_by_id, delete_candidate_fact_in_tx, move_candidate_to_retained_in_tx,
     persisted_fact, purge_fact_in_tx,
@@ -63,46 +64,48 @@ pub(crate) fn process_projection_item(
         projection_context,
     } = pending_fact;
 
-    let effects =
-        match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
-            let run =
-                crate::core::perf_profile::measure_result("projection_projector_cpu", || {
-                    run_projection(projector, &fact, &previous_context, projection_context)
-                })?;
-            crate::core::perf_profile::measure_result("projection_validate_effects", || {
-                validate_runtime_effects_for_admission(&run.effects, allowed_tables, fact_admission)
-            })?;
-            Ok::<ProjectionEffects, String>(ProjectionEffects {
-                source,
-                fact,
-                fact_id,
-                mode,
-                retain_self: run.retain_self,
-                next_context: run.context,
-                next_time_wakes: run.time_wakes,
-                context_delta: run.context_delta,
-                effects: run.effects,
-            })
-        }) {
-            Ok(effects) => effects,
-            Err(_rejection) => {
-                match source {
-                    ProjectionSource::Durable => store
-                        .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
-                        .map_err(|err| format!("clear rejected durable projection: {err}"))?,
-                    ProjectionSource::Candidate => store
-                        .write_transaction(|tx| delete_candidate_fact_in_tx(tx, fact_id))
-                        .map(|_| ())
-                        .map_err(|err| format!("drop rejected candidate fact: {err}"))?,
-                }
-                return Ok(false);
+    let projection = match perf::measure_result("projection_prepare_effects", || {
+        let run = perf::measure_result("projection_projector_cpu", || {
+            run_projection(projector, &fact, &previous_context, projection_context)
+        })?;
+        perf::measure_result("projection_validate_effects", || {
+            validate_runtime_effects_for_admission(
+                &run.runtime_effects,
+                allowed_tables,
+                fact_admission,
+            )
+        })?;
+        Ok::<PreparedProjection, String>(PreparedProjection {
+            source,
+            fact,
+            fact_id,
+            mode,
+            retain_self: run.retain_self,
+            context: run.context,
+            time_wakes: run.time_wakes,
+            context_delta: run.context_delta,
+            runtime_effects: run.runtime_effects,
+        })
+    }) {
+        Ok(projection) => projection,
+        Err(_rejection) => {
+            match source {
+                ProjectionSource::Durable => store
+                    .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
+                    .map_err(|err| format!("clear rejected durable projection: {err}"))?,
+                ProjectionSource::Candidate => store
+                    .write_transaction(|tx| delete_candidate_fact_in_tx(tx, fact_id))
+                    .map(|_| ())
+                    .map_err(|err| format!("drop rejected candidate fact: {err}"))?,
             }
-        };
-    crate::core::perf_profile::measure_result("projection_commit_effects", || {
+            return Ok(false);
+        }
+    };
+    perf::measure_result("projection_commit_effects", || {
         store
             .write_transaction(|tx| {
-                crate::core::perf_profile::measure_result("projection_commit_tx_body", || {
-                    commit_projection_effects_in_tx(tx, &effects, allowed_tables, fact_admission)
+                perf::measure_result("projection_commit_tx_body", || {
+                    commit_projection_effects_in_tx(tx, &projection, allowed_tables, fact_admission)
                 })
             })
             .map_err(|err| format!("commit projection effects: {err}"))
@@ -110,17 +113,17 @@ pub(crate) fn process_projection_item(
     Ok(true)
 }
 
-/// The uncommitted output of projecting one pending fact.
-struct ProjectionEffects {
+/// A projector result plus the pending-fact metadata needed to commit it.
+struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
     fact_id: FactId,
     mode: ProjectionMode,
     retain_self: bool,
-    next_context: ContextSet,
-    next_time_wakes: Vec<TimeWake>,
+    context: ContextSet,
+    time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
-    effects: RuntimeEffects,
+    runtime_effects: RuntimeEffects,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,75 +157,77 @@ pub(crate) enum ProjectionSource {
 /// commits.
 fn commit_projection_effects_in_tx(
     tx: &Store,
-    effects: &ProjectionEffects,
+    projection: &PreparedProjection,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
-    let purges_self = effects.effects.purged_facts.contains(&effects.fact_id);
-    let keep_projection_state = match effects.source {
+    let purges_self = projection
+        .runtime_effects
+        .purged_facts
+        .contains(&projection.fact_id);
+    let keep_projection_state = match projection.source {
         ProjectionSource::Durable => !purges_self,
-        ProjectionSource::Candidate => effects.retain_self && !purges_self,
+        ProjectionSource::Candidate => projection.retain_self && !purges_self,
     };
 
-    match effects.source {
+    match projection.source {
         ProjectionSource::Durable => {
-            crate::core::perf_profile::measure_result("projection_clear_pending_work", || {
-                clear_pending_projection_work_in_tx(tx, effects.fact_id)
+            perf::measure_result("projection_clear_pending_work", || {
+                clear_pending_projection_work_in_tx(tx, projection.fact_id)
             })?;
         }
         ProjectionSource::Candidate => {
             if keep_projection_state {
-                move_candidate_to_retained_in_tx(tx, &effects.fact)?;
+                move_candidate_to_retained_in_tx(tx, &projection.fact)?;
             } else {
-                validate_dropped_candidate_projection(effects).map_err(sqlite_string_error)?;
-                crate::core::perf_profile::measure_result("projection_replace_context", || {
-                    tx.delete_rows_by_owner_in_tx(CONTEXT_EDGES, effects.fact_id)
+                validate_dropped_candidate_projection(projection).map_err(sqlite_string_error)?;
+                perf::measure_result("projection_replace_context", || {
+                    tx.delete_rows_by_owner_in_tx(CONTEXT_EDGES, projection.fact_id)
                 })?;
-                crate::core::perf_profile::measure_result(
-                    "projection_delete_candidate_fact",
-                    || delete_candidate_fact_in_tx(tx, effects.fact_id),
-                )?;
+                perf::measure_result("projection_delete_candidate_fact", || {
+                    delete_candidate_fact_in_tx(tx, projection.fact_id)
+                })?;
             }
         }
     }
 
     if keep_projection_state {
-        crate::core::perf_profile::measure_result("projection_replace_context", || {
-            replace_needs_and_append_offers_for_owner(tx, effects.fact_id, &effects.next_context)
+        perf::measure_result("projection_replace_context", || {
+            replace_needs_and_append_offers_for_owner(tx, projection.fact_id, &projection.context)
         })?;
-        crate::core::perf_profile::measure_result("projection_replace_time_wakes", || {
-            replace_stored_time_wake_owner_rows(tx, effects.fact_id, &effects.next_time_wakes)
+        perf::measure_result("projection_replace_time_wakes", || {
+            replace_stored_time_wake_owner_rows(tx, projection.fact_id, &projection.time_wakes)
         })?;
-        crate::core::perf_profile::measure_result("projection_wake_context_matches", || {
-            wake_context_matches_in_tx(tx, &effects.context_delta, effects.mode)
+        perf::measure_result("projection_wake_context_matches", || {
+            wake_context_matches_in_tx(tx, &projection.context_delta, projection.mode)
                 .map_err(sqlite_string_error)
         })?;
     }
 
-    crate::core::perf_profile::measure_result("projection_commit_runtime_effects", || {
+    perf::measure_result("projection_commit_runtime_effects", || {
         commit_runtime_effects_in_tx(
             tx,
-            &effects.effects,
+            &projection.runtime_effects,
             allowed_tables,
             fact_admission,
-            effects.mode,
+            projection.mode,
         )
     })?;
     Ok(())
 }
 
-fn validate_dropped_candidate_projection(effects: &ProjectionEffects) -> Result<(), String> {
+fn validate_dropped_candidate_projection(projection: &PreparedProjection) -> Result<(), String> {
     // A dropped candidate is a one-shot input: it cannot leave standing
     // projection state behind. Runtime effects are allowed only after all
     // transient needs are resolved; otherwise core would commit effects from a
     // projection that explicitly said it still lacked context.
-    if !effects.next_context.offers.is_empty() {
+    if !projection.context.offers.is_empty() {
         return Err("dropped candidate fact cannot emit durable offers".to_string());
     }
-    if !effects.next_time_wakes.is_empty() {
+    if !projection.time_wakes.is_empty() {
         return Err("dropped candidate fact cannot emit time wakes".to_string());
     }
-    if !effects.next_context.needs.is_empty() && !effects.effects.is_empty() {
+    if !projection.context.needs.is_empty() && !projection.runtime_effects.is_empty() {
         return Err(
             "dropped candidate fact cannot emit effects while transient needs remain".to_string(),
         );
@@ -311,25 +316,22 @@ pub(crate) fn load_pending_fact(
     fact_id: FactId,
     mode: ProjectionMode,
 ) -> Result<Option<PendingFact>, String> {
-    let fact =
-        crate::core::perf_profile::measure_result("projection_load_fact", || match source {
-            ProjectionSource::Durable => persisted_fact(store, &fact_id),
-            ProjectionSource::Candidate => candidate_fact_by_id(store, &fact_id),
-        })?;
+    let fact = perf::measure_result("projection_load_fact", || match source {
+        ProjectionSource::Durable => persisted_fact(store, &fact_id),
+        ProjectionSource::Candidate => candidate_fact_by_id(store, &fact_id),
+    })?;
     let Some(fact) = fact else {
         return Ok(None);
     };
-    let previous_context =
-        crate::core::perf_profile::measure_result("projection_load_previous_context", || {
-            stored_context_for_owner(store, &fact_id)
-        })?;
+    let previous_context = perf::measure_result("projection_load_previous_context", || {
+        stored_context_for_owner(store, &fact_id)
+    })?;
     let projection_context = match source {
         ProjectionSource::Durable => {
-            let time_ranges = crate::core::perf_profile::measure_result(
-                "projection_load_pending_time_ranges",
-                || pending_time_ranges_for_owner(store, &fact_id),
-            )?;
-            crate::core::perf_profile::measure_result("projection_load_pending_matches", || {
+            let time_ranges = perf::measure_result("projection_load_pending_time_ranges", || {
+                pending_time_ranges_for_owner(store, fact_id)
+            })?;
+            perf::measure_result("projection_load_pending_matches", || {
                 pending_matching_context_for_owner(store, &fact_id)
             })?
             .with_time_ranges(time_ranges)
@@ -347,22 +349,21 @@ pub(crate) fn load_pending_fact(
     }))
 }
 
-fn pending_time_ranges_for_owner(store: &Store, owner: &FactId) -> Result<Vec<TimeRange>, String> {
-    let mut stmt = store
-        .conn()
-        .prepare(
-            r#"
-        SELECT timeline, has_start, start_exclusive, end_inclusive
-        FROM pending_time_ranges
-        WHERE owner = ?1
-        ORDER BY timeline, has_start, start_exclusive, end_inclusive
-        "#,
+/// Load due time ranges attached to this pending projection owner.
+///
+/// `process_due_time_range` stores these rows when a durable time wake fires.
+/// The next projection receives them as `ProjectionContext::time_ranges`, then
+/// successful projection clears the pending rows with the rest of the owner work.
+fn pending_time_ranges_for_owner(store: &Store, owner: FactId) -> Result<Vec<TimeRange>, String> {
+    store
+        .rows_by_blob_column(
+            PENDING_TIME_RANGES,
+            &["timeline", "has_start", "start_exclusive", "end_inclusive"],
+            "owner",
+            owner.as_slice(),
+            &["timeline", "has_start", "start_exclusive", "end_inclusive"],
+            decode_pending_time_range,
         )
-        .map_err(|err| format!("load pending time ranges: {err}"))?;
-    let rows = stmt
-        .query_map(params![owner.as_slice()], decode_pending_time_range)
-        .map_err(|err| format!("load pending time ranges: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|err| format!("load pending time ranges: {err}"))
 }
 
@@ -395,12 +396,12 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
 
 /// The pure result of running one projector before any SQL writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectionRun {
+struct ProjectedOutput {
     retain_self: bool,
     context: ContextSet,
     context_delta: ContextSetDelta,
     time_wakes: Vec<TimeWake>,
-    effects: RuntimeEffects,
+    runtime_effects: RuntimeEffects,
 }
 
 /// Call the protocol projector and normalize the output for SQL commit.
@@ -414,7 +415,7 @@ fn run_projection(
     fact: &Fact,
     previous_context: &ContextSet,
     context: ProjectionContext,
-) -> Result<ProjectionRun, String> {
+) -> Result<ProjectedOutput, String> {
     let output = projector.project(fact, &context)?;
     enforce_owner_is_self(fact, &output)?;
     let output_context = output.context_set();
@@ -429,12 +430,12 @@ fn run_projection(
     }
     .normalized();
     let context_delta = diff_context_sets(previous_context, &context);
-    Ok(ProjectionRun {
+    Ok(ProjectedOutput {
         retain_self: output.retain_self,
         context,
         context_delta,
         time_wakes: output.time_wakes,
-        effects: output.effects,
+        runtime_effects: output.effects,
     })
 }
 
@@ -588,7 +589,7 @@ mod contract_tests {
         )
         .expect("projection should allow self purge");
 
-        assert_eq!(run.effects.purged_facts, vec![fact.id]);
+        assert_eq!(run.runtime_effects.purged_facts, vec![fact.id]);
     }
 
     #[test]
@@ -617,7 +618,7 @@ mod contract_tests {
         .expect("second run");
         assert!(second.context_delta.is_empty());
         assert_eq!(second.context, first.context);
-        assert!(second.effects.intents.is_empty());
+        assert!(second.runtime_effects.intents.is_empty());
     }
 
     #[test]
@@ -657,8 +658,8 @@ mod contract_tests {
         assert!(next.context.needs.is_empty());
         assert_eq!(next.context_delta.removed_needs, previous.needs);
         assert_eq!(next.context_delta.added_needs.len(), 0);
-        assert_eq!(next.effects.intents.len(), 1);
-        assert_eq!(next.effects.intents[0].kind.as_str(), "followup");
+        assert_eq!(next.runtime_effects.intents.len(), 1);
+        assert_eq!(next.runtime_effects.intents[0].kind.as_str(), "followup");
     }
 
     #[test]
@@ -3432,10 +3433,9 @@ pub(crate) fn drain_projection(
         let remaining = limit - total.projected;
         let mut progress = ProjectionProgress::default();
 
-        let durable_items =
-            crate::core::perf_profile::measure_result("projection_pending_load", || {
-                pending_durable_projection_items(store, remaining)
-            })?;
+        let durable_items = perf::measure_result("projection_pending_load", || {
+            pending_durable_projection_items(store, remaining)
+        })?;
         drain_projection_items(
             store,
             projector,
@@ -3448,10 +3448,9 @@ pub(crate) fn drain_projection(
         )?;
 
         if progress.projected < remaining {
-            let candidate_fact_ids =
-                crate::core::perf_profile::measure_result("projection_candidate_load", || {
-                    candidate_pending_fact_ids(store, remaining - progress.projected)
-                })?;
+            let candidate_fact_ids = perf::measure_result("projection_candidate_load", || {
+                candidate_pending_fact_ids(store, remaining - progress.projected)
+            })?;
             drain_projection_items(
                 store,
                 projector,
@@ -3495,10 +3494,9 @@ fn drain_projection_items(
             break;
         }
         let fact_id = item.fact_id;
-        let Some(pending_fact) =
-            crate::core::perf_profile::measure_result("projection_load_pending_fact", || {
-                load_pending_fact(store, source, fact_id, item.mode)
-            })?
+        let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
+            load_pending_fact(store, source, fact_id, item.mode)
+        })?
         else {
             match source {
                 ProjectionSource::Durable => store
