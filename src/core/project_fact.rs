@@ -41,55 +41,12 @@ use crate::core::store::{
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
-/// Isolate a durable fact whose projection or authentication was rejected.
-///
-/// The batch-safety fix: a single rejected fact must not abort projection of the
-/// rest of the chunk. We then classify the rejection by re-projecting the fact
-/// over an *empty* context — a side-effect-free probe that separates the two
-/// kinds of failure, because the projector runs the authenticator first:
-///
-/// - **Fails without context** (re-project errors): the failure is context-free
-///   — a bad signature, id, intrinsic field, or scope. The bytes are not
-///   admissible protocol data, so purge the fact, the same way beyond-ceiling
-///   bytes are dropped.
-/// - **Otherwise** (re-project succeeds — it just parks on a need): the fact
-///   authenticates and is well-formed; the original rejection came from
-///   *inconsistent context*. Keep the fact and remove only its
-///   pending-projection marker so the drain does not retry it. Such a fact is
-///   kept as evidence: versioning needs different lenses and versions to
-///   interpret an incorrect fact the same way, and purging would destroy the
-///   test subject.
-fn isolate_rejected_durable_fact_in_tx(
-    tx: &Store,
-    fact_id: FactId,
-    projector: &(impl Projector + ?Sized),
-    mode: ProjectionMode,
-) -> rusqlite::Result<()> {
-    let fails_without_context = match persisted_fact(tx, &fact_id) {
-        Ok(Some(fact)) => projector
-            .project(&fact, &ProjectionContext::default().with_mode(mode))
-            .is_err(),
-        // Already gone, or unreadable: nothing to purge; just clear the marker.
-        _ => false,
-    };
-
-    if fails_without_context {
-        purge_fact_in_tx(tx, fact_id)?;
-        return Ok(());
-    }
-    tx.conn().execute(
-        "DELETE FROM pending_projection WHERE owner = ?1",
-        params![fact_id.as_slice()],
-    )?;
-    delete_pending_projection_matches_for_owner_in_tx(tx, fact_id)?;
-    Ok(())
-}
-
 /// Run and commit one queued projection item.
 ///
 /// Projection rejection consumes the queued item according to its source:
-/// durable facts are either purged or isolated as context-inconsistent
-/// evidence; candidate facts are dropped because they are one-shot.
+/// durable facts keep their bytes and lose only their queued work; candidate
+/// facts are dropped because they are one-shot. Projectors that want to remove
+/// durable bytes must emit `ProjectionOutput::purge_self`.
 pub(crate) fn process_projection_item(
     store: &Store,
     projector: &(impl Projector + ?Sized),
@@ -110,12 +67,7 @@ pub(crate) fn process_projection_item(
         match crate::core::perf_profile::measure_result("projection_prepare_effects", || {
             let run =
                 crate::core::perf_profile::measure_result("projection_projector_cpu", || {
-                    run_projection_with_context(
-                        projector,
-                        &fact,
-                        &previous_context,
-                        projection_context,
-                    )
+                    run_projection(projector, &fact, &previous_context, projection_context)
                 })?;
             crate::core::perf_profile::measure_result("projection_validate_effects", || {
                 validate_runtime_effects_for_admission(&run.effects, allowed_tables, fact_admission)
@@ -137,9 +89,18 @@ pub(crate) fn process_projection_item(
                 match source {
                     ProjectionSource::Durable => store
                         .write_transaction(|tx| {
-                            isolate_rejected_durable_fact_in_tx(tx, fact_id, projector, mode)
+                            tx.conn().execute(
+                                "DELETE FROM pending_projection WHERE owner = ?1",
+                                params![fact_id.as_slice()],
+                            )?;
+                            delete_pending_projection_matches_for_owner_in_tx(tx, fact_id)?;
+                            tx.conn().execute(
+                                "DELETE FROM pending_time_ranges WHERE owner = ?1",
+                                params![fact_id.as_slice()],
+                            )?;
+                            Ok(())
                         })
-                        .map_err(|err| format!("isolate rejected durable fact: {err}"))?,
+                        .map_err(|err| format!("clear rejected durable projection: {err}"))?,
                     ProjectionSource::Candidate => store
                         .write_transaction(|tx| delete_candidate_fact_in_tx(tx, fact_id))
                         .map(|_| ())
@@ -280,6 +241,10 @@ fn commit_projection_effects_in_tx(
 }
 
 fn validate_dropped_candidate_projection(effects: &ProjectionEffects) -> Result<(), String> {
+    // A dropped candidate is a one-shot input: it cannot leave standing
+    // projection state behind. Runtime effects are allowed only after all
+    // transient needs are resolved; otherwise core would commit effects from a
+    // projection that explicitly said it still lacked context.
     if !effects.next_context.offers.is_empty() {
         return Err("dropped candidate fact cannot emit durable offers".to_string());
     }
@@ -475,7 +440,7 @@ struct ProjectionRun {
 /// fact. This helper enforces that projectors only own their own context/time
 /// rows and may purge only their own fact, then computes the context delta that
 /// will wake dependent facts after commit.
-fn run_projection_with_context(
+fn run_projection(
     projector: &(impl Projector + ?Sized),
     fact: &Fact,
     previous_context: &ContextSet,
@@ -564,8 +529,13 @@ mod contract_tests {
             }))
         });
 
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign offer owner");
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign offer owner");
 
         assert!(err.contains("projector emitted offer with owner"));
     }
@@ -583,8 +553,13 @@ mod contract_tests {
             }))
         });
 
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign need owner");
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign need owner");
 
         assert!(err.contains("projector emitted need with owner"));
     }
@@ -600,8 +575,13 @@ mod contract_tests {
             }))
         });
 
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign time-wake owner");
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign time-wake owner");
 
         assert!(err.contains("projector emitted time wake"));
     }
@@ -613,8 +593,13 @@ mod contract_tests {
             Ok(ProjectionOutput::new().purge_self([9; 32]))
         });
 
-        let err = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect_err("projection should reject foreign purge owner");
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign purge owner");
 
         assert!(err.contains("projector tried to purge fact"));
     }
@@ -626,8 +611,13 @@ mod contract_tests {
             Ok(ProjectionOutput::new().purge_self(fact.id))
         });
 
-        let run = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect("projection should allow self purge");
+        let run = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("projection should allow self purge");
 
         assert_eq!(run.effects.purged_facts, vec![fact.id]);
     }
@@ -639,13 +629,23 @@ mod contract_tests {
         let key = ContextKey::from_bytes([9; 32]);
         let projector = need_until_offer(role, key, IntentKind::new("followup").unwrap());
 
-        let first =
-            run_projection(&projector, &fact, &ContextSet::new(), Vec::new()).expect("first run");
+        let first = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("first run");
         assert_eq!(first.context_delta.added_needs.len(), 1);
         assert_eq!(first.context_delta.removed_needs.len(), 0);
 
-        let second =
-            run_projection(&projector, &fact, &first.context, Vec::new()).expect("second run");
+        let second = run_projection(
+            &projector,
+            &fact,
+            &first.context,
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("second run");
         assert!(second.context_delta.is_empty());
         assert_eq!(second.context, first.context);
         assert!(second.effects.intents.is_empty());
@@ -661,9 +661,14 @@ mod contract_tests {
             key.clone(),
             IntentKind::new("followup").unwrap(),
         );
-        let previous = run_projection(&projector, &fact, &ContextSet::new(), Vec::new())
-            .expect("previous projection")
-            .context;
+        let previous = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("previous projection")
+        .context;
         let offer = ContextOffer {
             owner: [2; 32],
             role,
@@ -672,8 +677,13 @@ mod contract_tests {
             end_key: key,
         };
 
-        let next = run_projection(&projector, &fact, &previous, vec![offer])
-            .expect("projection with context");
+        let next = run_projection(
+            &projector,
+            &fact,
+            &previous,
+            ProjectionContext::new(vec![offer]),
+        )
+        .expect("projection with context");
 
         assert!(next.context.needs.is_empty());
         assert_eq!(next.context_delta.removed_needs, previous.needs);
@@ -695,8 +705,13 @@ mod contract_tests {
         .normalized();
         let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
 
-        let next = run_projection(&projector, &fact, &previous, Vec::new())
-            .expect("projection without re-emitting old offer");
+        let next = run_projection(
+            &projector,
+            &fact,
+            &previous,
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("projection without re-emitting old offer");
 
         assert_eq!(next.context.offers, vec![previous_offer]);
         assert!(next.context_delta.removed_offers.is_empty());
@@ -989,12 +1004,12 @@ mod contract_tests {
         assert_eq!(pending_projection_count(&store, offered.id), 0);
         assert!(context_edge_count(&store, offered.id) > 0);
 
-        // The failing fact fails regardless of context (context-free), so it is
-        // purged: not retried and its bytes dropped.
+        // Projector errors are not retried, but core keeps durable bytes. A
+        // projector-owned delete must be emitted as `purge_self`.
         assert_eq!(pending_projection_count(&store, failing.id), 0);
         assert!(crate::core::store::persisted_fact(&store, &failing.id)
             .expect("load failing fact")
-            .is_none());
+            .is_some());
     }
 
     #[test]
@@ -1027,9 +1042,8 @@ mod contract_tests {
         assert_eq!(progress.projected, 2);
         assert_eq!(pending_projection_count(&store, offered.id), 0);
 
-        // The failing fact authenticates (it parks when probed with empty
-        // context), so the rejection was inconsistent *context*: it is kept as
-        // evidence (bytes retained) and just not retried (pending cleared).
+        // Projector errors do not let core infer a purge decision. The durable
+        // bytes are retained and only the pending retry marker is cleared.
         assert_eq!(pending_projection_count(&store, failing.id), 0);
         assert!(crate::core::store::persisted_fact(&store, &failing.id)
             .expect("load failing fact")
@@ -1321,23 +1335,10 @@ mod contract_tests {
         assert!(crate::core::store::candidate_fact_by_id(&store, &parent.id)
             .expect("load ephemeral")
             .is_none());
+        assert_eq!(pending_projection_count(&store, child.id), 0);
         assert!(crate::core::store::persisted_fact(&store, &child.id)
             .expect("load child")
-            .is_none());
-    }
-
-    fn run_projection(
-        projector: &impl Projector,
-        fact: &Fact,
-        previous_context: &ContextSet,
-        offers: Vec<ContextOffer>,
-    ) -> Result<ProjectionRun, String> {
-        run_projection_with_context(
-            projector,
-            fact,
-            previous_context,
-            ProjectionContext::new(offers),
-        )
+            .is_some());
     }
 
     fn drain_projection(
