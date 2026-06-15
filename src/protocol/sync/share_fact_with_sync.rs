@@ -207,7 +207,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                             )?)
                         },
                     )?;
-                    if changed {
+                    if changed && !context.is_replay() {
                         crate::core::perf_profile::measure_result("share_live_tail", || {
                             let excluded = crate::protocol::connection::fact_receipt::origin_connection_ids_for_fact(
                                 context.store()?,

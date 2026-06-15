@@ -393,10 +393,10 @@ queues retained facts and replayable scheduled wake-ups into
 `pending_projection` with mode `replay`, exposes that mode through
 `ProjectionContext::is_replay()`, and keeps facts emitted during replay in
 replay projection mode. Projectors use replay mode to avoid live-only
-projection intents. During replay dispatch, handler output is filtered unless
-the matching `HandlerRoute` declares `runs_during_replay`. Recurring work is
-represented as recurring intents; the live daemon's in-memory cadence is only
-the scheduling mechanism that enqueues due work.
+projection intents. During replay dispatch, handlers receive
+`HandlerContext::is_replay()` and return empty effects at live-only edges.
+Recurring work is represented as recurring intents; the live daemon's in-memory
+cadence is only the scheduling mechanism that enqueues due work.
 
 ## Example Runtime Graph
 

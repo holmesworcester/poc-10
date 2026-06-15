@@ -185,54 +185,40 @@ fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit(
 }
 
 #[test]
-fn replay_classification_marks_only_deterministic_rebuild_handlers() {
-    // Replay-enabled handlers must be deterministic fact/row rebuild work over
-    // retained facts. Exactly the three rebuild handlers may run during replay;
-    // everything else (network IO, send packaging, live response/seed work) is
-    // rebuilt after the barrier and must stay replay=false. Adding a route that
-    // flips this set should fail here, not silently replay live-only work.
-    let replayable = MATCH_RUNTIME
-        .handlers
-        .iter()
-        .filter(|route| route.runs_during_replay)
-        .map(|route| route.name)
-        .collect::<BTreeSet<_>>();
-    let expected: BTreeSet<&str> = ["create_key_wrap", "share_fact_with_sync", "unwrap_key_wrap"]
-        .into_iter()
-        .collect();
-    assert_eq!(
-        replayable, expected,
-        "only deterministic rebuild handlers may run during replay"
+fn replay_policy_lives_at_handler_edges() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let registry =
+        std::fs::read_to_string(root.join("src/protocol/registry.rs")).expect("read registry");
+    assert!(
+        !registry.contains("runs_during_replay") && !registry.contains("replay ="),
+        "handler replay policy belongs in handlers, not HANDLER_ROUTES"
     );
 
-    for live_only in [
-        "create_connection",
-        "send_network_frame",
-        "receive_network_frame",
-        "send_facts_on_connection",
+    for handler in [
+        "src/protocol/connection/create_connection.rs",
+        "src/protocol/connection/maintain_connections.rs",
+        "src/protocol/connection/receive_network_frame.rs",
+        "src/protocol/connection/send_facts_on_connection.rs",
+        "src/protocol/connection/send_network_frame.rs",
+        "src/protocol/sync/seed_connection.rs",
+        "src/protocol/sync/send_compare_response.rs",
+        "src/protocol/sync/send_needed_fact_id.rs",
+        "src/protocol/sync/send_requested_fact.rs",
     ] {
-        let route = MATCH_RUNTIME
-            .handlers
-            .iter()
-            .find(|route| route.name == live_only)
-            .unwrap_or_else(|| panic!("missing route {live_only}"));
+        let text = std::fs::read_to_string(root.join(handler)).expect("read handler");
         assert!(
-            !route.runs_during_replay,
-            "live-only handler {live_only} must not run during replay"
+            text.contains("context.is_replay()"),
+            "{handler} must explicitly no-op live/session work during replay"
         );
     }
 
-    // A recurring schedule is live-only operational repetition by definition, so
-    // a route carrying one must never be dispatched during replay.
-    for route in MATCH_RUNTIME.handlers.iter() {
-        if route.recurrence.is_some() {
-            assert!(
-                !route.runs_during_replay,
-                "recurring route {} must not run during replay",
-                route.name
-            );
-        }
-    }
+    let share_fact =
+        std::fs::read_to_string(root.join("src/protocol/sync/share_fact_with_sync.rs"))
+            .expect("read share handler");
+    assert!(
+        share_fact.contains("changed && !context.is_replay()"),
+        "share_fact_with_sync should rebuild sync rows during replay but skip live tail advertisements"
+    );
 }
 
 #[test]

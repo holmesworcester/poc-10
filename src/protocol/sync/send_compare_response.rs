@@ -74,6 +74,9 @@ impl IntentHandler for SendSyncCompareResponseHandler {
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_sync_compare_response(raw)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let compare_fact = context.require_fact(&input.compare_fact_id)?;
         let compare =
             crate::protocol::sync::compare::project::decode::decode_fact(&compare_fact.bytes)?;

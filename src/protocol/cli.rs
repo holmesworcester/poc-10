@@ -649,7 +649,7 @@ pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
 // state summary without requiring an actual upgrade. `replay` rebuilds derived
 // state in place; `state-summary` hashes replay-relevant state; `replay-check`
 // proves replay idempotence and projection-order independence on scratch copies;
-// `intent-registry` lists each route's replay/recurring/command-excluded policy.
+// `intent-registry` lists each route's recurring and command-excluded policy.
 
 pub const REPLAY_USAGE: &str = "replay [--reverse | --scramble --seed N]";
 pub const STATE_SUMMARY_USAGE: &str = "state-summary";
@@ -698,13 +698,12 @@ pub(crate) fn intent_registry(
     let routes = ctx.runtime().handler_routes();
     let mut lines = vec![format!("routes: {}", routes.len())];
     for route in routes {
-        // The three policy questions that drive dispatch: may replay run this,
-        // is it a recurring loop, and may a synchronous command run it.
+        // Route-level policy answers only recurring scheduling and synchronous
+        // command exclusion; replay behavior belongs inside handlers.
         lines.push(format!(
-            "route_{}: kind={} replay={} recurring={} command_excluded={}",
+            "route_{}: kind={} recurring={} command_excluded={}",
             route.name,
             route.intent_kind,
-            route.runs_during_replay,
             route.recurrence.is_some(),
             excluded.contains(&route.name),
         ));
@@ -762,13 +761,9 @@ fn replay_report_output(order: ReplayOrder, report: &ReplayReport) -> CliOutput 
         format!("purged_facts: {}", report.purged_facts),
         format!("semantic_time_wakes: {}", report.semantic_time_wakes),
         format!("standing_time_wakes: {}", report.standing_time_wakes),
-        format!("replay_allowed_intents: {}", report.replay_allowed_intents),
+        format!("replayed_intents: {}", report.replayed_intents),
         format!("context_edges: {}", report.context_edges),
         format!("row_mutations: {}", report.row_mutations),
-        format!(
-            "suppressed_live_only_work: {}",
-            report.suppressed_live_only_work
-        ),
         format!("network_rows: {}", report.network_rows),
     ])
 }

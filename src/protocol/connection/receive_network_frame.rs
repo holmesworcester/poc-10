@@ -126,8 +126,11 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         Ok(Vec::new())
     }
 
-    fn handle(&self, intent: &Intent, _context: &HandlerContext) -> HandlerResult {
+    fn handle(&self, intent: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_receive_network_frame(intent)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let observed_candidate = |frame_fact: core::facts::Fact| -> Result<RuntimeEffects, String> {
             let observation = frame_observation::author::fact_from_observation(
                 frame_fact.id,

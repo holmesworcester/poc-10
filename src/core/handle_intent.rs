@@ -27,14 +27,13 @@
 //! repeat work already accepted durably.
 
 use crate::core::effects::RuntimeEffects;
-use crate::core::intents::{HandlerContext, HandlerError, Intent, IntentHandler};
+use crate::core::intents::{HandlerContext, HandlerError, HandlerMode, Intent, IntentHandler};
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 use crate::core::store::persisted_fact;
 use crate::core::store::{IntentWorkRowOrder, Store, TableName};
 
 use crate::core::project_fact::commit_effects::{
-    commit_runtime_effects_in_tx, suppress_disallowed_intents,
-    validate_runtime_effects_for_admission, IntentAdmissionPolicy,
+    commit_runtime_effects_in_tx, validate_runtime_effects_for_admission, RuntimeEffectMode,
 };
 use crate::core::project_fact::route::FactAdmissionFn;
 use std::collections::BTreeSet;
@@ -84,17 +83,8 @@ pub struct RecurringIntentSpec {
 /// is the queue routing key that selects this handler for both durable and
 /// ephemeral intents.
 ///
-/// `runs_during_replay` answers one question: if this intent is emitted while
-/// replay is rebuilding facts and rows, may core record and dispatch it before
-/// the replay barrier finishes? Replay-enabled handlers must be deterministic
-/// rebuild work over retained facts: no network IO, no fresh randomness, no
-/// process-global mutable state, and no operational wall-clock decisions. Every
-/// route declares this flag explicitly so adding a route forces a conscious
-/// replay decision.
-///
 /// `recurrence` marks live-only operational repetition. A route with a
-/// recurrence is installed as an in-memory daemon schedule and must not run
-/// during replay.
+/// recurrence is installed as an in-memory daemon schedule.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
     /// Human-facing route name used for exclusion lists.
@@ -103,8 +93,6 @@ pub struct HandlerRoute {
     pub intent_kind: &'static str,
     /// Handler factory.
     pub factory: HandlerFactory,
-    /// Whether core may dispatch this intent before the replay barrier finishes.
-    pub runs_during_replay: bool,
     /// Live-only recurring schedule installed by the daemon, if any.
     pub recurrence: Option<RecurringIntentSpec>,
 }
@@ -151,8 +139,7 @@ impl WorkStatus {
 ///
 /// The set owns concrete handler values so dispatch can borrow trait objects
 /// without rebuilding them for every queued row. Command processing builds a
-/// filtered set to avoid daemon/network side effects; replay builds a filtered
-/// set that contains only replay-allowed routes.
+/// filtered set to avoid daemon/network side effects.
 pub(crate) struct HandlerSet {
     entries: Vec<HandlerEntry>,
 }
@@ -190,20 +177,6 @@ impl HandlerSet {
         }
     }
 
-    /// Instantiate only routes allowed to run before the replay barrier.
-    pub(crate) fn new_replay(routes: &'static [HandlerRoute]) -> Self {
-        Self {
-            entries: routes
-                .iter()
-                .filter(|route| route.runs_during_replay)
-                .map(|route| HandlerEntry {
-                    intent_kind: route.intent_kind,
-                    handler: (route.factory)(),
-                })
-                .collect(),
-        }
-    }
-
     pub(crate) fn intent_kinds(&self) -> Vec<&'static str> {
         self.entries.iter().map(|entry| entry.intent_kind).collect()
     }
@@ -220,7 +193,6 @@ impl HandlerSet {
 pub(crate) struct IntentDispatchProgress {
     pub(crate) status: WorkStatus,
     pub(crate) dispatched: usize,
-    pub(crate) suppressed_intents: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,21 +271,18 @@ fn handle_intent_with_policy(
     store: &Store,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    intent_policy: IntentAdmissionPolicy<'_>,
+    handler_mode: HandlerMode,
+    effect_mode: RuntimeEffectMode,
 ) -> Result<IntentDispatchReport, String> {
     let IntentWork { queued, handler } = work;
     let mut status = WorkStatus::idle();
-    let context = load_handler_context(store, handler, &queued.intent)?;
-    let Some(mut output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
+    let context = load_handler_context(store, handler, &queued.intent, handler_mode)?;
+    let Some(output) = run_handler(handler, &queued.intent, &context, &mut status)? else {
         if status.retried && queued.queue == IntentQueue::Local {
             rotate_local_retry_to_tail(store, &queued.intent)?;
         }
-        return Ok(IntentDispatchReport {
-            status,
-            suppressed_intents: 0,
-        });
+        return Ok(IntentDispatchReport { status });
     };
-    let mut suppressed_intents = suppress_disallowed_intents(&mut output, intent_policy);
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
     status.progressed = commit_handler_output(
         store,
@@ -321,28 +290,20 @@ fn handle_intent_with_policy(
         &output,
         allowed_tables,
         fact_admission,
-        intent_policy.pending_projection_mode(),
+        effect_mode.pending_projection_mode(),
     )?;
-    if !status.progressed {
-        suppressed_intents = 0;
-    }
-    Ok(IntentDispatchReport {
-        status,
-        suppressed_intents,
-    })
+    Ok(IntentDispatchReport { status })
 }
 
 /// Dispatch queued intents with the provided handler set.
-///
-/// The policy decides which follow-up intents emitted by handlers may be
-/// recorded; inadmissible ones are suppressed and counted.
 pub(crate) fn dispatch_intents(
     store: &Store,
     handlers: &HandlerSet,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     limit: usize,
-    policy: IntentAdmissionPolicy<'_>,
+    handler_mode: HandlerMode,
+    effect_mode: RuntimeEffectMode,
 ) -> Result<IntentDispatchProgress, String> {
     let mut progress = IntentDispatchProgress::default();
     let kinds = handlers.intent_kinds();
@@ -363,10 +324,15 @@ pub(crate) fn dispatch_intents(
         {
             break;
         }
-        let report =
-            handle_intent_with_policy(work, store, allowed_tables, fact_admission, policy)?;
+        let report = handle_intent_with_policy(
+            work,
+            store,
+            allowed_tables,
+            fact_admission,
+            handler_mode,
+            effect_mode,
+        )?;
         progress.status.merge(report.status);
-        progress.suppressed_intents += report.suppressed_intents;
         if report.status.progressed {
             progress.dispatched += 1;
         }
@@ -414,6 +380,7 @@ fn load_handler_context<'a>(
     store: &'a Store,
     handler: &(impl IntentHandler + ?Sized),
     intent: &Intent,
+    mode: HandlerMode,
 ) -> Result<HandlerContext<'a>, String> {
     let mut facts = Vec::new();
     for id in handler.input_fact_ids(intent)? {
@@ -421,7 +388,7 @@ fn load_handler_context<'a>(
             facts.push(fact);
         }
     }
-    let context = HandlerContext::with_facts(facts);
+    let context = HandlerContext::with_facts(facts).with_mode(mode);
     Ok(context.with_store(store))
 }
 
@@ -503,7 +470,6 @@ pub(crate) struct QueuedIntent {
 
 pub(crate) struct IntentDispatchReport {
     pub(crate) status: WorkStatus,
-    pub(crate) suppressed_intents: usize,
 }
 
 #[cfg(test)]
@@ -531,7 +497,8 @@ mod tests {
             &[],
             None,
             1,
-            IntentAdmissionPolicy::All,
+            HandlerMode::Live,
+            RuntimeEffectMode::Live,
         )
         .expect("dispatch durable intent");
 
@@ -561,7 +528,8 @@ mod tests {
             &[],
             None,
             8,
-            IntentAdmissionPolicy::All,
+            HandlerMode::Live,
+            RuntimeEffectMode::Live,
         )
         .expect("dispatch retrying local intents");
 
@@ -589,7 +557,6 @@ mod tests {
         name: "handled",
         intent_kind: "handled",
         factory: noop_handler,
-        runs_during_replay: true,
         recurrence: None,
     }];
 
@@ -597,7 +564,6 @@ mod tests {
         name: "retrying",
         intent_kind: "retrying",
         factory: retry_handler,
-        runs_during_replay: false,
         recurrence: None,
     }];
 

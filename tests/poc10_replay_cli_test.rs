@@ -60,11 +60,6 @@ fn replay_is_idempotent_and_rebuilds_derived_state() {
         "0",
         "replay must not produce network rows before the barrier"
     );
-    assert_eq!(
-        line_value(&replay, "suppressed_live_only_work"),
-        "0",
-        "this offline scenario should not emit live-only replay work"
-    );
     assert!(
         line_value(&replay, "retained_facts")
             .parse::<u64>()
@@ -77,11 +72,11 @@ fn replay_is_idempotent_and_rebuilds_derived_state() {
         "replay should rebuild materialized read-model rows"
     );
     assert!(
-        line_value(&replay, "replay_allowed_intents")
+        line_value(&replay, "replayed_intents")
             .parse::<u64>()
             .unwrap()
             > 0,
-        "replay should recreate sync and key-wrap work through replay-allowed intents"
+        "replay should recreate sync and key-wrap work through replay dispatch"
     );
 
     let after = state_hash(&db);
@@ -212,7 +207,7 @@ fn replay_recreates_key_material_idempotently() {
     assert_eq!(line_value(&replay, "purged_facts"), "0");
     assert_eq!(line_value(&replay, "network_rows"), "0");
     assert!(
-        line_value(&replay, "replay_allowed_intents")
+        line_value(&replay, "replayed_intents")
             .parse::<u64>()
             .unwrap()
             > 0,

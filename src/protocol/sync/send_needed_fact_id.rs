@@ -73,6 +73,9 @@ impl IntentHandler for SendNeededFactIdHandler {
 
     fn handle(&self, raw: &Intent, context: &HandlerContext) -> HandlerResult {
         let input = decode_send_needed_fact_id(raw)?;
+        if context.is_replay() {
+            return Ok(RuntimeEffects::new());
+        }
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::project::decode::decode_fact(&have_fact.bytes)?;
         if crate::core::store::persisted_fact(context.store()?, &have.fact_id)?.is_some() {
