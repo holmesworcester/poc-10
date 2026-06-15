@@ -7,18 +7,19 @@
 //! concepts layered on top of these primitives.
 //!
 //! There are two row shapes in the project. Typed tables declare their own SQL
-//! columns and are queried directly by the module that owns them. Opaque row
-//! tables use the generic `(row_key, row_value)` shape and flow through the
-//! helpers in this file. `SchemaSource::row_tables` is the allowlist that tells
-//! store which opaque tables are safe for those helpers; it is not a semantic
-//! registry.
+//! columns and are usually queried by the module that owns them, with store
+//! supplying small table/column helpers for mechanical reads and deletes.
+//! Opaque row tables use the generic `(row_key, row_value)` shape and flow
+//! through the helpers in this file. `SchemaSource::row_tables` is the allowlist
+//! that tells store which opaque tables are safe for those helpers; it is not a
+//! semantic registry.
 //!
 //! The critical path is short:
 //! 1. Open a store with the SQL schema batches declared by core IO and the
 //!    selected protocol's module scopes.
 //! 2. Use `write_transaction` to group rows that must become visible together.
-//! 3. Use row helpers for opaque row tables. Query typed tables directly by
-//!    their declared SQLite columns.
+//! 3. Use row helpers for opaque row tables, and typed-table helpers for simple
+//!    table/column operations.
 //!
 //! All atomicity comes from callers choosing the transaction closure. Store
 //! supplies `BEGIN IMMEDIATE`, rollback, quoting, allowlist checks, and
@@ -545,6 +546,36 @@ impl Store {
         )
     }
 
+    /// Select rows from a declared typed table by one blob column.
+    pub(crate) fn rows_by_blob_column<T>(
+        &self,
+        table: TableName,
+        select_columns: &[&str],
+        blob_column: &str,
+        blob_value: &[u8],
+        order_columns: &[&str],
+        decode: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Vec<T>> {
+        if select_columns.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "typed row select requires at least one column".to_string(),
+            ));
+        }
+        let table = quoted_table_name(table)?;
+        let select_columns = quoted_identifier_list(select_columns)?;
+        let blob_column = quoted_identifier(blob_column)?;
+        let order_clause = if order_columns.is_empty() {
+            String::new()
+        } else {
+            format!(" ORDER BY {}", quoted_identifier_list(order_columns)?)
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {select_columns} FROM {table} WHERE {blob_column} = ?1{order_clause}"
+        ))?;
+        let rows = stmt.query_map(params![blob_value], decode)?;
+        rows.collect()
+    }
+
     /// Hash one table's rows canonically, independent of insertion order.
     ///
     /// Rows are ordered by every column so the digest depends only on content,
@@ -671,6 +702,7 @@ mod tests {
 
     const TEST_ROWS: TableName = TableName::new("test.rows");
     const MEMORY_ROWS: TableName = TableName::new("test.memory_rows");
+    const TYPED_EVENTS: TableName = TableName::new("test.typed_events");
 
     const TEST_ROWS_SCHEMA: SchemaSource = SchemaSource {
         ddl: r#"
@@ -692,6 +724,20 @@ CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
 );
 "#,
         row_tables: &[MEMORY_ROWS],
+        row_schemas: &[],
+        replay: ReplayTables::EMPTY,
+    };
+
+    const TYPED_EVENTS_SCHEMA: SchemaSource = SchemaSource {
+        ddl: r#"
+CREATE TABLE IF NOT EXISTS "test.typed_events" (
+    owner BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    PRIMARY KEY (owner, seq)
+);
+"#,
+        row_tables: &[],
         row_schemas: &[],
         replay: ReplayTables::EMPTY,
     };
@@ -820,6 +866,49 @@ CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
             .table_rows_with_key_prefix(MEMORY_ROWS, b"b/", 1)
             .expect("scan prefix");
         assert_eq!(rows, vec![(b"b/1".to_vec(), b"one".to_vec())]);
+    }
+
+    #[test]
+    fn typed_rows_by_blob_column_are_filtered_and_ordered() {
+        let store =
+            Store::open_memory_with_schema_sources(&[TYPED_EVENTS_SCHEMA]).expect("open store");
+        for (owner, seq, label) in [
+            (b"a".as_slice(), 2_i64, "second"),
+            (b"b".as_slice(), 1_i64, "other"),
+            (b"a".as_slice(), 1_i64, "first"),
+        ] {
+            store
+                .conn()
+                .execute(
+                    r#"INSERT INTO "test.typed_events" (owner, seq, label)
+                       VALUES (?1, ?2, ?3)"#,
+                    params![owner, seq, label],
+                )
+                .expect("insert typed event");
+        }
+
+        let rows = store
+            .rows_by_blob_column(
+                TYPED_EVENTS,
+                &["label", "seq"],
+                "owner",
+                b"a",
+                &["seq"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("select typed rows");
+
+        assert_eq!(
+            rows,
+            vec![("first".to_string(), 1), ("second".to_string(), 2)]
+        );
+
+        let err = store
+            .rows_by_blob_column(TYPED_EVENTS, &[], "owner", b"a", &["seq"], |_| Ok(()))
+            .expect_err("empty select should fail before preparing invalid SQL");
+        assert!(err
+            .to_string()
+            .contains("typed row select requires at least one column"));
     }
 }
 
