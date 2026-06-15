@@ -212,14 +212,34 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     Some(upper)
 }
 
-fn unique_table_names<'a>(tables: impl IntoIterator<Item = &'a TableName>) -> Vec<TableName> {
+fn sqlite_limit(limit: usize) -> i64 {
+    // Callers use usize::MAX for unbounded scans; SQLite treats LIMIT -1 as no limit.
+    i64::try_from(limit).unwrap_or(-1)
+}
+
+fn unique_table_names(tables: impl IntoIterator<Item = TableName>) -> Vec<TableName> {
     let mut unique = Vec::new();
     for table in tables {
-        if !unique.contains(table) {
-            unique.push(*table);
+        if !unique.contains(&table) {
+            unique.push(table);
         }
     }
     unique
+}
+
+fn verify_idempotent_insert<T>(
+    changed: usize,
+    existing: impl FnOnce() -> rusqlite::Result<Option<T>>,
+    matches_existing: impl FnOnce(&T) -> bool,
+    conflict_message: impl Into<String>,
+) -> rusqlite::Result<bool> {
+    if changed == 0 {
+        let matches = existing()?.as_ref().map(matches_existing).unwrap_or(false);
+        if !matches {
+            return Err(store_error(conflict_message));
+        }
+    }
+    Ok(changed > 0)
 }
 
 fn quoted_intent_work_table_name(table: TableName) -> rusqlite::Result<String> {
@@ -325,26 +345,32 @@ impl Store {
         conn: SqliteConnection,
         sources: &[SchemaSource],
     ) -> rusqlite::Result<Self> {
-        let row_tables = sources
-            .iter()
-            .flat_map(|source| {
-                source
-                    .row_tables
-                    .iter()
-                    .copied()
-                    .chain(source.row_schemas.iter().map(|schema| schema.table))
-            })
-            .collect();
+        let row_tables = unique_table_names(sources.iter().flat_map(|source| {
+            source
+                .row_tables
+                .iter()
+                .copied()
+                .chain(source.row_schemas.iter().map(|schema| schema.table))
+        }));
         let row_schemas = sources
             .iter()
             .flat_map(|source| source.row_schemas.iter().copied())
             .collect();
-        let replay_protected_tables =
-            unique_table_names(sources.iter().flat_map(|source| source.replay.protected));
-        let replay_reset_tables =
-            unique_table_names(sources.iter().flat_map(|source| source.replay.reset));
-        let replay_summary_tables =
-            unique_table_names(sources.iter().flat_map(|source| source.replay.summary));
+        let replay_protected_tables = unique_table_names(
+            sources
+                .iter()
+                .flat_map(|source| source.replay.protected.iter().copied()),
+        );
+        let replay_reset_tables = unique_table_names(
+            sources
+                .iter()
+                .flat_map(|source| source.replay.reset.iter().copied()),
+        );
+        let replay_summary_tables = unique_table_names(
+            sources
+                .iter()
+                .flat_map(|source| source.replay.summary.iter().copied()),
+        );
         validate_replay_lifecycle(&replay_protected_tables, &replay_reset_tables)?;
         let store = Self::from_connection_parts(
             conn,
@@ -506,23 +532,20 @@ impl Store {
                 ),
                 params![row.key.as_slice(), row.value.as_slice()],
             )?;
-            if changed == 0 {
-                let existing = self
-                    .conn
-                    .query_row(
-                        &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
-                        params![row.key.as_slice()],
-                        |row| row.get::<_, Vec<u8>>(0),
-                    )
-                    .optional()?;
-                if existing.as_deref() != Some(row.value.as_slice()) {
-                    return Err(store_error(format!(
-                        "conflicting row for {}",
-                        row.table.as_str()
-                    )));
-                }
-            }
-            inserted += changed;
+            inserted += usize::from(verify_idempotent_insert(
+                changed,
+                || {
+                    self.conn
+                        .query_row(
+                            &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
+                            params![row.key.as_slice()],
+                            |row| row.get::<_, Vec<u8>>(0),
+                        )
+                        .optional()
+                },
+                |existing| existing.as_slice() == row.value.as_slice(),
+                format!("conflicting row for {}", row.table.as_str()),
+            )?);
         }
         Ok(inserted)
     }
@@ -649,27 +672,24 @@ impl Store {
                 row.payload.as_slice()
             ],
         )?;
-        if changed == 0 {
-            let existing = self
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT payload
+        verify_idempotent_insert(
+            changed,
+            || {
+                self.conn
+                    .query_row(
+                        &format!(
+                            "SELECT payload
                          FROM {table_name}
                          WHERE kind = ?1 AND idempotence_key = ?2"
-                    ),
-                    params![row.kind.as_str(), row.idempotence_key.as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()?;
-            if existing.as_deref() != Some(row.payload.as_slice()) {
-                return Err(store_error(format!(
-                    "conflicting intent row for {}",
-                    row.kind
-                )));
-            }
-        }
-        Ok(changed > 0)
+                        ),
+                        params![row.kind.as_str(), row.idempotence_key.as_slice()],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+            },
+            |existing| existing.as_slice() == row.payload.as_slice(),
+            format!("conflicting intent row for {}", row.kind),
+        )
     }
 
     /// Delete one raw intent work row by its idempotent queue identity.
@@ -807,12 +827,13 @@ impl Store {
     /// Scan one declared table in key order.
     pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let table_name = self.quoted_row_table_name(table)?;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT row_key, row_value FROM {table_name}
-                ORDER BY row_key"
-        ))?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect()
+        self.query_key_value_rows(
+            &format!(
+                "SELECT row_key, row_value FROM {table_name}
+                    ORDER BY row_key"
+            ),
+            [],
+        )
     }
 
     /// Scan one declared table by lexicographic key prefix.
@@ -826,33 +847,39 @@ impl Store {
             return Ok(Vec::new());
         }
         let table_name = self.quoted_row_table_name(table)?;
+        let limit = sqlite_limit(limit);
         let Some(upper) = prefix_upper_bound(prefix) else {
-            let mut stmt = self.conn.prepare(&format!(
-                "SELECT row_key, row_value FROM {table_name}
-                     WHERE row_key >= ?1
-                     ORDER BY row_key"
-            ))?;
-            let rows = stmt.query_map(params![prefix], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                let row = row?;
-                if !row.0.starts_with(prefix) || out.len() == limit {
-                    break;
-                }
-                out.push(row);
-            }
-            return Ok(out);
+            return self.query_key_value_rows(
+                &format!(
+                    "SELECT row_key, row_value FROM {table_name}
+                         WHERE row_key >= ?1
+                         ORDER BY row_key
+                         LIMIT ?2"
+                ),
+                params![prefix, limit],
+            );
         };
+        self.query_key_value_rows(
+            &format!(
+                "SELECT row_key, row_value FROM {table_name}
+                     WHERE row_key >= ?1 AND row_key < ?2
+                     ORDER BY row_key
+                     LIMIT ?3"
+            ),
+            params![prefix, upper, limit],
+        )
+    }
 
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT row_key, row_value FROM {table_name}
-                 WHERE row_key >= ?1 AND row_key < ?2
-                 ORDER BY row_key
-                 LIMIT ?3"
-        ))?;
-        let rows = stmt.query_map(params![prefix, upper, limit as i64], |row| {
+    fn query_key_value_rows<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>>
+    where
+        P: rusqlite::Params,
+    {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params, |row| {
             Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
         rows.collect()
@@ -903,6 +930,32 @@ const OWNER_KEYED_FACT_PURGE_TABLES: &[TableName] = &[
     PENDING_PROJECTION_MATCHES,
     PENDING_PROJECTION,
 ];
+
+#[derive(Debug, Clone, Copy)]
+enum FactReadSource {
+    Retained,
+    Candidate,
+}
+
+impl FactReadSource {
+    fn select_by_id_sql(self) -> &'static str {
+        match self {
+            Self::Retained => {
+                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+                 FROM facts f
+                 JOIN local_fact_admissions m ON m.fact_id = f.id
+                 WHERE f.id = ?1
+                 LIMIT 1"
+            }
+            Self::Candidate => {
+                "SELECT id, scope, scope_kind, scope_id, received_at, bytes
+                 FROM candidate_facts
+                 WHERE id = ?1
+                 LIMIT 1"
+            }
+        }
+    }
+}
 
 // === Durable mutations ===
 
@@ -966,15 +1019,12 @@ pub(crate) fn insert_candidate_fact_in_tx(store: &Store, fact: &Fact) -> rusqlit
             fact.bytes.as_slice()
         ],
     )?;
-    if changed == 0 {
-        let existing = candidate_fact_by_id_in_tx(store, &fact.id)?;
-        if existing.as_ref() != Some(fact) {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "conflicting row for candidate fact".to_string(),
-            ));
-        }
-    }
-    Ok(changed > 0)
+    verify_idempotent_insert(
+        changed,
+        || candidate_fact_by_id_in_tx(store, &fact.id),
+        |existing| existing == fact,
+        "conflicting row for candidate fact",
+    )
 }
 
 pub(crate) fn delete_candidate_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
@@ -1032,15 +1082,12 @@ fn insert_fact_bytes_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool>
         "INSERT OR IGNORE INTO facts (id, bytes) VALUES (?1, ?2)",
         params![fact.id.as_slice(), fact.bytes.as_slice()],
     )?;
-    if changed == 0 {
-        let existing = fact_bytes_by_id_in_tx(store, &fact.id)?;
-        if existing.as_deref() != Some(fact.bytes.as_slice()) {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "conflicting row for facts".to_string(),
-            ));
-        }
-    }
-    Ok(changed > 0)
+    verify_idempotent_insert(
+        changed,
+        || fact_bytes_by_id_in_tx(store, &fact.id),
+        |existing| existing.as_slice() == fact.bytes.as_slice(),
+        "conflicting row for facts",
+    )
 }
 
 fn insert_local_fact_admission_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<usize> {
@@ -1170,28 +1217,22 @@ pub(crate) fn candidate_fact_by_id(store: &Store, id: &FactId) -> Result<Option<
 }
 
 fn fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
-    store
-        .conn()
-        .query_row(
-            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-             FROM facts f
-             JOIN local_fact_admissions m ON m.fact_id = f.id
-             WHERE f.id = ?1
-             LIMIT 1",
-            params![id.as_slice()],
-            fact_from_sql_row,
-        )
-        .optional()
+    fact_by_id_from(store, FactReadSource::Retained, id)
 }
 
 fn candidate_fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
+    fact_by_id_from(store, FactReadSource::Candidate, id)
+}
+
+fn fact_by_id_from(
+    store: &Store,
+    source: FactReadSource,
+    id: &FactId,
+) -> rusqlite::Result<Option<Fact>> {
     store
         .conn()
         .query_row(
-            "SELECT id, scope, scope_kind, scope_id, received_at, bytes
-             FROM candidate_facts
-             WHERE id = ?1
-             LIMIT 1",
+            source.select_by_id_sql(),
             params![id.as_slice()],
             fact_from_sql_row,
         )
@@ -1480,6 +1521,70 @@ CREATE TABLE IF NOT EXISTS "test.typed_events" (
             .table_rows_with_key_prefix(MEMORY_ROWS, b"b/", 1)
             .expect("scan prefix");
         assert_eq!(rows, vec![(b"b/1".to_vec(), b"one".to_vec())]);
+    }
+
+    #[test]
+    fn memory_prefix_scan_without_upper_bound_is_limited_by_sql() {
+        let store =
+            Store::open_memory_with_schema_sources(&[MEMORY_ROWS_SCHEMA]).expect("open store");
+        store
+            .insert_table_rows(vec![
+                TableRow {
+                    table: MEMORY_ROWS,
+                    key: vec![0xfe],
+                    value: b"before".to_vec(),
+                },
+                TableRow {
+                    table: MEMORY_ROWS,
+                    key: vec![0xff],
+                    value: b"root".to_vec(),
+                },
+                TableRow {
+                    table: MEMORY_ROWS,
+                    key: vec![0xff, 0x00],
+                    value: b"child-0".to_vec(),
+                },
+                TableRow {
+                    table: MEMORY_ROWS,
+                    key: vec![0xff, 0x01],
+                    value: b"child-1".to_vec(),
+                },
+            ])
+            .expect("insert rows");
+
+        let rows = store
+            .table_rows_with_key_prefix(MEMORY_ROWS, &[0xff], 2)
+            .expect("scan all-ff prefix");
+        assert_eq!(
+            rows,
+            vec![
+                (vec![0xff], b"root".to_vec()),
+                (vec![0xff, 0x00], b"child-0".to_vec()),
+            ]
+        );
+
+        let rows = store
+            .table_rows_with_key_prefix(MEMORY_ROWS, &[], 2)
+            .expect("scan empty prefix");
+        assert_eq!(
+            rows,
+            vec![
+                (vec![0xfe], b"before".to_vec()),
+                (vec![0xff], b"root".to_vec()),
+            ]
+        );
+
+        let rows = store
+            .table_rows_with_key_prefix(MEMORY_ROWS, &[0xff], usize::MAX)
+            .expect("scan unbounded all-ff prefix");
+        assert_eq!(
+            rows,
+            vec![
+                (vec![0xff], b"root".to_vec()),
+                (vec![0xff, 0x00], b"child-0".to_vec()),
+                (vec![0xff, 0x01], b"child-1".to_vec()),
+            ]
+        );
     }
 
     #[test]
