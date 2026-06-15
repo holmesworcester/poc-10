@@ -88,18 +88,7 @@ pub(crate) fn process_projection_item(
             Err(_rejection) => {
                 match source {
                     ProjectionSource::Durable => store
-                        .write_transaction(|tx| {
-                            tx.conn().execute(
-                                "DELETE FROM pending_projection WHERE owner = ?1",
-                                params![fact_id.as_slice()],
-                            )?;
-                            delete_pending_projection_matches_for_owner_in_tx(tx, fact_id)?;
-                            tx.conn().execute(
-                                "DELETE FROM pending_time_ranges WHERE owner = ?1",
-                                params![fact_id.as_slice()],
-                            )?;
-                            Ok(())
-                        })
+                        .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
                         .map_err(|err| format!("clear rejected durable projection: {err}"))?,
                     ProjectionSource::Candidate => store
                         .write_transaction(|tx| delete_candidate_fact_in_tx(tx, fact_id))
@@ -146,9 +135,9 @@ pub(crate) enum ProjectionSource {
 /// dispatch boundary. The transaction consumes this fact's pending row and makes
 /// the projector's output visible: replacement needs, append-only offers,
 /// replacement time wakes, newly woken dependent facts, protocol row mutations,
-/// and follow-up intents. If projection fails before this function, the pending
-/// row remains queued. If anything fails inside this transaction, SQLite rolls
-/// the whole boundary back.
+/// and follow-up intents. Rejected projection output is handled before this
+/// function. If anything fails inside this transaction, SQLite rolls the whole
+/// boundary back.
 ///
 /// Transaction contents:
 ///
@@ -177,24 +166,9 @@ fn commit_projection_effects_in_tx(
 
     match effects.source {
         ProjectionSource::Durable => {
-            crate::core::perf_profile::measure_result("projection_clear_pending", || {
-                tx.conn().execute(
-                    "DELETE FROM pending_projection WHERE owner = ?1",
-                    params![effects.fact_id.as_slice()],
-                )
+            crate::core::perf_profile::measure_result("projection_clear_pending_work", || {
+                clear_pending_projection_work_in_tx(tx, effects.fact_id)
             })?;
-            crate::core::perf_profile::measure_result("projection_delete_pending_matches", || {
-                delete_pending_projection_matches_for_owner_in_tx(tx, effects.fact_id)
-            })?;
-            crate::core::perf_profile::measure_result(
-                "projection_delete_pending_time_ranges",
-                || {
-                    tx.conn().execute(
-                        "DELETE FROM pending_time_ranges WHERE owner = ?1",
-                        params![effects.fact_id.as_slice()],
-                    )
-                },
-            )?;
         }
         ProjectionSource::Candidate => {
             if keep_projection_state {
@@ -202,10 +176,7 @@ fn commit_projection_effects_in_tx(
             } else {
                 validate_dropped_candidate_projection(effects).map_err(sqlite_string_error)?;
                 crate::core::perf_profile::measure_result("projection_replace_context", || {
-                    tx.conn().execute(
-                        "DELETE FROM context_edges WHERE owner = ?1",
-                        params![effects.fact_id.as_slice()],
-                    )
+                    tx.delete_rows_by_owner_in_tx(CONTEXT_EDGES, effects.fact_id)
                 })?;
                 crate::core::perf_profile::measure_result(
                     "projection_delete_candidate_fact",
@@ -259,14 +230,15 @@ fn validate_dropped_candidate_projection(effects: &ProjectionEffects) -> Result<
     Ok(())
 }
 
-fn delete_pending_projection_matches_for_owner_in_tx(
-    store: &Store,
-    owner: FactId,
-) -> rusqlite::Result<usize> {
-    store.conn().execute(
-        "DELETE FROM pending_projection_matches WHERE owner = ?1",
-        params![owner.as_slice()],
-    )
+fn clear_pending_projection_work_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<()> {
+    for table in [
+        PENDING_PROJECTION,
+        PENDING_PROJECTION_MATCHES,
+        PENDING_TIME_RANGES,
+    ] {
+        store.delete_rows_by_owner_in_tx(table, owner)?;
+    }
+    Ok(())
 }
 
 /// Replace this fact's standing needs and append its offers.
@@ -303,10 +275,7 @@ fn replace_stored_time_wake_owner_rows(
     owner: FactId,
     wakes: &[TimeWake],
 ) -> rusqlite::Result<()> {
-    store.conn().execute(
-        "DELETE FROM time_wakes WHERE owner = ?1",
-        params![owner.as_slice()],
-    )?;
+    store.delete_rows_by_owner_in_tx(TIME_WAKES, owner)?;
     for wake in wakes {
         store.conn().execute(
             "INSERT OR IGNORE INTO time_wakes (timeline, at, owner)
@@ -3373,7 +3342,10 @@ pub use route::{
 
 use crate::core::command::CommandOutput;
 use crate::core::handle_intent::WorkStatus;
-use crate::core::schema::{CANDIDATE_FACTS, PENDING_PROJECTION};
+use crate::core::schema::{
+    CANDIDATE_FACTS, CONTEXT_EDGES, PENDING_PROJECTION, PENDING_PROJECTION_MATCHES,
+    PENDING_TIME_RANGES, TIME_WAKES,
+};
 use crate::core::store::{
     candidate_pending_fact_ids, insert_fact_and_pending_in_tx, insert_pending_owner_with_mode_in_tx,
 };

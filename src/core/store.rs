@@ -521,6 +521,30 @@ impl Store {
             .map(|count| count as usize)
     }
 
+    /// Delete rows from a declared typed table by its `owner` blob column.
+    pub(crate) fn delete_rows_by_owner_in_tx(
+        &self,
+        table: TableName,
+        owner: FactId,
+    ) -> rusqlite::Result<usize> {
+        self.delete_rows_by_blob_column_in_tx(table, "owner", owner.as_slice())
+    }
+
+    /// Delete rows from a declared typed table by one blob column.
+    pub(crate) fn delete_rows_by_blob_column_in_tx(
+        &self,
+        table: TableName,
+        column: &str,
+        value: &[u8],
+    ) -> rusqlite::Result<usize> {
+        let table = quoted_table_name(table)?;
+        let column = quoted_identifier(column)?;
+        self.conn.execute(
+            &format!("DELETE FROM {table} WHERE {column} = ?1"),
+            params![value],
+        )
+    }
+
     /// Hash one table's rows canonically, independent of insertion order.
     ///
     /// Rows are ordered by every column so the digest depends only on content,
@@ -833,7 +857,10 @@ CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::project_fact::ProjectionMode;
-use crate::core::schema::{CANDIDATE_FACTS, CONTEXT_EDGES};
+use crate::core::schema::{
+    CANDIDATE_FACTS, CONTEXT_EDGES, FACTS, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION,
+    PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
+};
 use crate::core::wire::Writer;
 
 // === Durable mutations ===
@@ -910,14 +937,9 @@ pub(crate) fn insert_candidate_fact_in_tx(store: &Store, fact: &Fact) -> rusqlit
 }
 
 pub(crate) fn delete_candidate_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
-    let mut changed = store.conn().execute(
-        "DELETE FROM candidate_facts WHERE id = ?1",
-        params![owner.as_slice()],
-    )? > 0;
-    changed |= store.conn().execute(
-        "DELETE FROM pending_projection_matches WHERE owner = ?1",
-        params![owner.as_slice()],
-    )? > 0;
+    let mut changed =
+        store.delete_rows_by_blob_column_in_tx(CANDIDATE_FACTS, "id", owner.as_slice())? > 0;
+    changed |= store.delete_rows_by_owner_in_tx(PENDING_PROJECTION_MATCHES, owner)? > 0;
     Ok(changed)
 }
 
@@ -941,23 +963,25 @@ pub(crate) fn move_candidate_to_retained_in_tx(
 /// wakes, any pending time-range rows it owns, and its pending-projection
 /// marker. Returns whether anything was actually removed.
 pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
-    let mut changed = store
-        .conn()
-        .execute("DELETE FROM facts WHERE id = ?1", params![owner.as_slice()])?
-        > 0;
-    for sql in [
-        "DELETE FROM local_fact_admissions WHERE fact_id = ?1",
-        "DELETE FROM context_edges WHERE owner = ?1",
-        "DELETE FROM time_wakes WHERE owner = ?1",
-        "DELETE FROM pending_time_ranges WHERE owner = ?1",
-        "DELETE FROM pending_projection_matches WHERE owner = ?1",
-        "DELETE FROM pending_projection_matches WHERE offer_owner = ?1",
+    let mut changed = store.delete_rows_by_blob_column_in_tx(FACTS, "id", owner.as_slice())? > 0;
+    changed |= store.delete_rows_by_blob_column_in_tx(
+        LOCAL_FACT_ADMISSIONS,
+        "fact_id",
+        owner.as_slice(),
+    )? > 0;
+    for table in [
+        CONTEXT_EDGES,
+        TIME_WAKES,
+        PENDING_TIME_RANGES,
+        PENDING_PROJECTION_MATCHES,
+        PENDING_PROJECTION,
     ] {
-        changed |= store.conn().execute(sql, params![owner.as_slice()])? > 0;
+        changed |= store.delete_rows_by_owner_in_tx(table, owner)? > 0;
     }
-    changed |= store.conn().execute(
-        "DELETE FROM pending_projection WHERE owner = ?1",
-        params![owner.as_slice()],
+    changed |= store.delete_rows_by_blob_column_in_tx(
+        PENDING_PROJECTION_MATCHES,
+        "offer_owner",
+        owner.as_slice(),
     )? > 0;
     Ok(changed)
 }
