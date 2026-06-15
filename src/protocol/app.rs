@@ -6,8 +6,8 @@
 //!
 //! `protocol::registry` is the larger table of contents. This file chooses the
 //! pieces needed to run the protocol: schema sources, row mutation allowlist,
-//! projector, handler routes, command-excluded handlers, daemon time wakes, and
-//! inbound-network intent conversion. If a new protocol capability needs to be
+//! projector, handler routes, daemon time wakes, and inbound-network intent
+//! conversion. If a new protocol capability needs to be
 //! visible to core, it is usually declared in the registry and wired into the
 //! `MATCH_RUNTIME` or `MATCH_PROTOCOL` constants here.
 //!
@@ -22,8 +22,8 @@ use crate::core::intents::Intent;
 use crate::core::runtime::RuntimeDescription;
 use crate::core::store::Store;
 use crate::protocol::registry::{
-    authenticate_fact_for_admission, protocol_projector, COMMAND_EXCLUDED_HANDLER_ROUTES,
-    FACT_ROUTES, HANDLER_ROUTES, ROW_MUTATION_TABLES, SCHEMA_SOURCES,
+    authenticate_fact_for_admission, protocol_projector, FACT_ROUTES, HANDLER_ROUTES,
+    ROW_MUTATION_TABLES, SCHEMA_SOURCES,
 };
 use crate::protocol::registry::{MatchCliContext, MATCH_COMMANDS};
 use crate::protocol::{connection, content};
@@ -35,7 +35,6 @@ pub const MATCH_RUNTIME: RuntimeDescription = RuntimeDescription {
     fact_routes: FACT_ROUTES,
     fact_admission: Some(authenticate_fact_for_admission),
     handlers: HANDLER_ROUTES,
-    command_excluded_handlers: COMMAND_EXCLUDED_HANDLER_ROUTES,
 };
 
 pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescription {

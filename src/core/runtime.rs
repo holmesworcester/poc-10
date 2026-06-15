@@ -32,6 +32,9 @@ use crate::core::store::persisted_facts;
 use crate::core::store::{SchemaSource, Store, TableName};
 use std::path::Path;
 
+const PRE_QUERY_PROJECTION_ROUNDS: usize = 4;
+const PRE_QUERY_PROJECTION_LIMIT: usize = 4096;
+
 pub use crate::core::handle_intent::{
     HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, RecurringIntentSpec, WorkStatus,
 };
@@ -60,8 +63,6 @@ pub struct RuntimeDescription {
     pub fact_admission: Option<FactAdmissionFn>,
     /// Intent handlers this runtime may dispatch.
     pub handlers: &'static [HandlerRoute],
-    /// Handler route names a synchronous command should not run.
-    pub command_excluded_handlers: &'static [&'static str],
 }
 
 /// Runtime for one concrete protocol description.
@@ -146,14 +147,6 @@ impl Runtime {
         self.description.handlers
     }
 
-    /// Borrow the handler route names a synchronous command must not run.
-    ///
-    /// These are the daemon/live transport handlers; the intent-registry
-    /// diagnostic reports this as the `command_excluded` policy answer.
-    pub fn command_excluded_handlers(&self) -> &'static [&'static str] {
-        self.description.command_excluded_handlers
-    }
-
     /// Admit one fact and mark it pending for projection.
     pub fn submit_fact(&mut self, fact: Fact) -> bool {
         project_fact::submit_fact_with_admission(&self.store, fact, self.description.fact_admission)
@@ -177,9 +170,9 @@ impl Runtime {
 
     /// Queue durable idempotent work for the protocol handler registry.
     ///
-    /// The handler selected by `intent.kind` may run in a later daemon or
-    /// command-safe drain pass. Use `submit_local_intent` for work that is only
-    /// valid on this process and should disappear on restart.
+    /// The handler selected by `intent.kind` runs in a later runtime/daemon work
+    /// pass. Use `submit_local_intent` for work that is only valid on this
+    /// process and should disappear on restart.
     pub fn submit_intent(&mut self, intent: Intent) -> Result<bool, String> {
         crate::core::handle_intent::submit_intent_to_table(&self.store, INTENTS, intent)
     }
@@ -204,6 +197,28 @@ impl Runtime {
         )
     }
 
+    /// Drain retained local projection work, then run one query.
+    ///
+    /// This gives callers read-your-local-writes semantics without dispatching
+    /// handlers or consuming incoming network facts. Incoming facts and handler
+    /// effects stay daemon/runtime work.
+    pub fn query<T>(&mut self, run: impl FnOnce(&Store) -> Result<T, String>) -> Result<T, String> {
+        self.process_pre_query_projection_until_idle()?;
+        run(&self.store)
+    }
+
+    fn process_pre_query_projection_until_idle(&mut self) -> Result<WorkStatus, String> {
+        project_fact::process_projection_until_idle(
+            &self.store,
+            self.projector.as_ref(),
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            project_fact::ProjectionDrainScope::PreQuery,
+            PRE_QUERY_PROJECTION_ROUNDS,
+            PRE_QUERY_PROJECTION_LIMIT,
+        )
+    }
+
     /// Drain pending projection until no projection work remains or rounds expire.
     ///
     /// Each round processes at most `limit_per_round` facts, and newly emitted
@@ -219,6 +234,7 @@ impl Runtime {
             self.projector.as_ref(),
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            project_fact::ProjectionDrainScope::Runtime,
             max_rounds,
             limit_per_round,
         )
@@ -235,6 +251,7 @@ impl Runtime {
             self.projector.as_ref(),
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            project_fact::ProjectionDrainScope::Runtime,
             4,
             limit,
         )?);
@@ -255,16 +272,16 @@ impl Runtime {
             self.projector.as_ref(),
             self.description.row_mutation_tables,
             self.description.fact_admission,
+            project_fact::ProjectionDrainScope::Runtime,
             4,
             limit,
         )?);
         Ok(total)
     }
 
-    /// Settle all projection and intent work using the protocol's full handler
-    /// set. This is for internal runtime workflows; synchronous CLI commands
-    /// should usually call `process_command_work_until_idle` so daemon/network
-    /// effects remain daemon-owned.
+    /// Settle all projection and intent work using the protocol's full handler set.
+    /// This is for runtime and daemon workflows; user-facing queries should call
+    /// `query` so they only pre-settle retained projection.
     pub fn process_all_work_until_idle(
         &mut self,
         max_rounds: usize,
@@ -289,6 +306,7 @@ impl Runtime {
                         self.projector.as_ref(),
                         self.description.row_mutation_tables,
                         self.description.fact_admission,
+                        project_fact::ProjectionDrainScope::Runtime,
                         8,
                         limit_per_round,
                     )
@@ -316,6 +334,7 @@ impl Runtime {
                             self.projector.as_ref(),
                             self.description.row_mutation_tables,
                             self.description.fact_admission,
+                            project_fact::ProjectionDrainScope::Runtime,
                             8,
                             limit_per_round,
                         )
@@ -325,24 +344,6 @@ impl Runtime {
             }
         }
         Ok(total)
-    }
-
-    /// Settle work that a synchronous CLI command should be allowed to observe.
-    ///
-    /// Protocols declare effectful daemon/network handlers as command-excluded
-    /// routes. The command host can then ask runtime to finish local projection
-    /// and non-effect intent work without knowing the pending-fact, context
-    /// change, or intent queue schedule.
-    pub fn process_command_work_until_idle(
-        &mut self,
-        max_rounds: usize,
-        limit_per_round: usize,
-    ) -> Result<WorkStatus, String> {
-        let handlers = HandlerSet::new_excluding(
-            self.description.handlers,
-            self.description.command_excluded_handlers,
-        );
-        self.process_work_until_idle(max_rounds, limit_per_round, &handlers)
     }
 
     pub fn process_due_time_range(
@@ -453,8 +454,12 @@ fn runtime_schema_sources(description: &RuntimeDescription) -> Vec<SchemaSource>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::effects::RuntimeEffects;
     use crate::core::facts::{Fact, FactScope};
+    use crate::core::intents::{HandlerContext, HandlerResult, IntentHandler, IntentKind};
     use crate::core::project_fact::{ProjectionContext, ProjectionOutput};
+    use crate::core::schema::{INCOMING_FACTS, PENDING_PROJECTION};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct NoopProjector;
 
@@ -472,6 +477,27 @@ mod tests {
         Box::new(NoopProjector)
     }
 
+    struct CountingHandler;
+
+    impl IntentHandler for CountingHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(RuntimeEffects::new())
+        }
+    }
+
+    fn counting_handler() -> Box<dyn IntentHandler> {
+        Box::new(CountingHandler)
+    }
+
+    static HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    const COUNTING_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "counting",
+        factory: counting_handler,
+        recurrence: None,
+    }];
+
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[],
         row_mutation_tables: &[],
@@ -479,7 +505,6 @@ mod tests {
         fact_routes: &[],
         fact_admission: None,
         handlers: &[],
-        command_excluded_handlers: &[],
     };
 
     fn reject_bad_fact(fact: &Fact) -> Result<(), String> {
@@ -497,7 +522,15 @@ mod tests {
         fact_routes: &[],
         fact_admission: Some(reject_bad_fact),
         handlers: &[],
-        command_excluded_handlers: &[],
+    };
+
+    const HANDLER_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[],
+        row_mutation_tables: &[],
+        projector: noop_projector,
+        fact_routes: &[],
+        fact_admission: None,
+        handlers: COUNTING_HANDLERS,
     };
 
     #[test]
@@ -542,6 +575,87 @@ mod tests {
             0,
             "command-authored facts should not pass through incoming intake"
         );
+    }
+
+    #[test]
+    fn query_pre_settles_retained_projection() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let fact = Fact::new(FactScope::Global, 7, b"query-visible-fact".to_vec());
+        runtime
+            .submit_command_output(CommandOutput::new(()).with_facts(vec![fact]))
+            .expect("submit command output");
+
+        assert_eq!(
+            runtime
+                .store()
+                .table_row_count(PENDING_PROJECTION)
+                .expect("pending count"),
+            1
+        );
+        let pending_after_settle = runtime
+            .query(|store| {
+                store
+                    .table_row_count(PENDING_PROJECTION)
+                    .map_err(|err| err.to_string())
+            })
+            .expect("query");
+
+        assert_eq!(pending_after_settle, 0);
+        assert_eq!(runtime.pending_fact_count(), 0);
+    }
+
+    #[test]
+    fn query_does_not_consume_incoming_facts() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let incoming = Fact::new(FactScope::Global, 7, b"incoming-fact".to_vec());
+        runtime
+            .store()
+            .write_transaction(|tx| crate::core::store::insert_incoming_fact_in_tx(tx, &incoming))
+            .expect("insert incoming fact");
+
+        let counts = runtime
+            .query(|store| {
+                Ok((
+                    store
+                        .table_row_count(PENDING_PROJECTION)
+                        .map_err(|err| err.to_string())?,
+                    store
+                        .table_row_count(INCOMING_FACTS)
+                        .map_err(|err| err.to_string())?,
+                ))
+            })
+            .expect("query");
+
+        assert_eq!(counts, (0, 1));
+        assert_eq!(
+            runtime.pending_fact_count(),
+            1,
+            "incoming fact should remain runtime/daemon work"
+        );
+    }
+
+    #[test]
+    fn query_does_not_dispatch_handlers() {
+        HANDLER_CALLS.store(0, Ordering::SeqCst);
+        let mut runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
+        runtime
+            .submit_intent(Intent::new(
+                IntentKind::new("counting").expect("intent kind"),
+                b"one".to_vec(),
+                Vec::new(),
+            ))
+            .expect("submit intent");
+
+        let pending_intents = runtime
+            .query(|store| {
+                store
+                    .table_row_count(crate::core::schema::INTENTS)
+                    .map_err(|err| err.to_string())
+            })
+            .expect("query");
+
+        assert_eq!(pending_intents, 1);
+        assert_eq!(HANDLER_CALLS.load(Ordering::SeqCst), 0);
     }
 
     #[test]

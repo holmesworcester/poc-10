@@ -173,6 +173,7 @@ command output
   -> projector
   -> replacement needs + append-only offers + row mutations + follow-up intents
   -> durable or ephemeral intent queue
+worker/daemon
   -> registered handler
   -> committed RuntimeEffects
 ```
@@ -183,6 +184,13 @@ core retains them in `facts` and `local_fact_admissions`, then marks them in
 network handler enter through `incoming_facts`; projection either drops them or
 retains them as normal facts when they must park on context or become protocol
 evidence.
+
+Commands do not dispatch handlers. Before any protocol query reads projected
+state, runtime pre-settles retained `pending_projection` work so the query sees
+local command-authored facts. That pre-query settle does not consume
+`incoming_facts`, dispatch intents, or admit time wakes; the daemon and worker
+turns own incoming facts, due time wakes, and handler-derived state. Tests that
+observe handler output should run a daemon/worker and assert eventually.
 
 Network input is staged as core-owned opaque bytes, converted by the daemon
 declaration into an ephemeral protocol intent, and then handled through the

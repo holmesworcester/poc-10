@@ -40,7 +40,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
     assert!(MATCH_RUNTIME
         .handlers
         .iter()
-        .any(|handler| handler.name == "receive_network_frame"));
+        .any(|handler| handler.intent_kind == "receive_network_frame"));
 }
 
 #[test]
@@ -153,33 +153,22 @@ fn sync_advertisement_fact_families_stay_retired() {
 }
 
 #[test]
-fn runtime_handler_routes_are_unique_and_command_excluded_handlers_are_explicit() {
-    let names = MATCH_RUNTIME
+fn runtime_handler_routes_are_unique_by_intent_kind() {
+    let kinds = MATCH_RUNTIME
         .handlers
         .iter()
-        .map(|handler| handler.name)
+        .map(|handler| handler.intent_kind)
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        names.len(),
+        kinds.len(),
         MATCH_RUNTIME.handlers.len(),
-        "runtime handler route names must be unique"
+        "runtime handler intent kinds must be unique"
     );
 
     for required in ["send_network_frame", "receive_network_frame"] {
         assert!(
-            names.contains(required),
+            kinds.contains(required),
             "runtime handler route missing {required}"
-        );
-    }
-
-    for excluded in [
-        "send_facts_on_connection",
-        "send_network_frame",
-        "receive_network_frame",
-    ] {
-        assert!(
-            MATCH_RUNTIME.command_excluded_handlers.contains(&excluded),
-            "command runtime should exclude network handler {excluded}"
         );
     }
 }

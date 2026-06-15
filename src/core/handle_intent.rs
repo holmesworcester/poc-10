@@ -79,16 +79,12 @@ pub struct RecurringIntentSpec {
 
 /// One handler route in the protocol registry.
 ///
-/// `name` is a human-facing route name used for exclusion lists. `intent_kind`
-/// is the queue routing key that selects this handler for both durable and
-/// ephemeral intents.
-///
+/// `intent_kind` is the queue routing key that selects this handler for both
+/// durable and ephemeral intents.
 /// `recurrence` marks live-only operational repetition. A route with a
 /// recurrence is installed as an in-memory daemon schedule.
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerRoute {
-    /// Human-facing route name used for exclusion lists.
-    pub name: &'static str,
     /// Intent kind handled by this route.
     pub intent_kind: &'static str,
     /// Handler factory.
@@ -138,8 +134,7 @@ impl WorkStatus {
 /// Instantiated handlers for one runtime pass.
 ///
 /// The set owns concrete handler values so dispatch can borrow trait objects
-/// without rebuilding them for every queued row. Command processing builds a
-/// filtered set to avoid daemon/network side effects.
+/// without rebuilding them for every queued row.
 pub(crate) struct HandlerSet {
     entries: Vec<HandlerEntry>,
 }
@@ -155,20 +150,6 @@ impl HandlerSet {
         Self {
             entries: routes
                 .iter()
-                .map(|route| HandlerEntry {
-                    intent_kind: route.intent_kind,
-                    handler: (route.factory)(),
-                })
-                .collect(),
-        }
-    }
-
-    /// Instantiate every route except the protocol-declared command exclusions.
-    pub(crate) fn new_excluding(routes: &'static [HandlerRoute], excluded_names: &[&str]) -> Self {
-        Self {
-            entries: routes
-                .iter()
-                .filter(|route| !excluded_names.contains(&route.name))
                 .map(|route| HandlerEntry {
                     intent_kind: route.intent_kind,
                     handler: (route.factory)(),
@@ -617,14 +598,12 @@ mod tests {
     struct NoopHandler;
 
     const NOOP_ROUTES: &[HandlerRoute] = &[HandlerRoute {
-        name: "handled",
         intent_kind: "handled",
         factory: noop_handler,
         recurrence: None,
     }];
 
     const RETRY_ROUTES: &[HandlerRoute] = &[HandlerRoute {
-        name: "retrying",
         intent_kind: "retrying",
         factory: retry_handler,
         recurrence: None,
@@ -632,13 +611,11 @@ mod tests {
 
     const EMIT_FACT_ROUTES: &[HandlerRoute] = &[
         HandlerRoute {
-            name: "emit_fact",
             intent_kind: "emit_fact",
             factory: emit_fact_handler,
             recurrence: None,
         },
         HandlerRoute {
-            name: "zz_after_fact",
             intent_kind: "zz_after_fact",
             factory: after_fact_handler,
             recurrence: None,

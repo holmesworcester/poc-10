@@ -362,6 +362,7 @@ impl<'a> ReplayDrive<'a> {
                 self.projector,
                 self.allowed_tables,
                 self.fact_admission,
+                project_fact::ProjectionDrainScope::Runtime,
                 REPLAY_WORK_LIMIT,
             )?;
             counters.projected_facts += progress.projected;

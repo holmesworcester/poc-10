@@ -146,36 +146,24 @@ fn cli_recipient_rotation_keeps_new_content_working_and_rejects_retired_recipien
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&alice, "Fs Keys", "alice", "alice-laptop");
+    let alice_port = free_port();
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
 
     let first_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let first_recipient_id = line_value(&first_recipient, "recipient_key_id");
     let first_frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let first_frontier_id = line_value(&first_frontier, "removal_frontier_id");
-    let first_wrap = assert_success(topo(&[
-        "--db",
+    let first_wrap = key_wrap_with_retry(
         &alice,
-        "key-wrap",
         &workspace_id,
         &first_frontier_id,
         &first_recipient_id,
-    ]));
+    );
     assert_eq!(
         line_value(&first_wrap, "recipient_key_id"),
         first_recipient_id
     );
-    assert_eq!(
-        line_value(
-            &assert_success(topo(&[
-                "--db",
-                &alice,
-                "key-access",
-                &workspace_id,
-                &first_frontier_id,
-            ])),
-            "access",
-        ),
-        "yes"
-    );
+    wait_for_key_access(&alice, &workspace_id, &first_frontier_id, "yes");
 
     let rotated = assert_success(topo(&[
         "--db",
@@ -213,14 +201,12 @@ fn cli_recipient_rotation_keeps_new_content_working_and_rejects_retired_recipien
         stderr(&old_wrap)
     );
 
-    let new_wrap = assert_success(topo(&[
-        "--db",
+    let new_wrap = key_wrap_with_retry(
         &alice,
-        "key-wrap",
         &workspace_id,
         &new_frontier_id,
         &new_recipient_key_id,
-    ]));
+    );
     assert_eq!(
         line_value(&new_wrap, "recipient_key_id"),
         new_recipient_key_id

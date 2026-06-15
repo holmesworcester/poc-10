@@ -122,7 +122,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
     let dispatched = MATCH_RUNTIME
         .handlers
         .iter()
-        .map(|handler| handler.name.to_string())
+        .map(|handler| handler.intent_kind.to_string())
         .collect::<BTreeSet<_>>();
 
     assert!(
@@ -133,7 +133,7 @@ fn runtime_dispatches_every_protocol_handler_registration() {
     );
     assert!(
         dispatched.len() == MATCH_RUNTIME.handlers.len(),
-        "HANDLER_ROUTES must not contain duplicate runtime handler names"
+        "HANDLER_ROUTES must not contain duplicate runtime intent kinds"
     );
 }
 

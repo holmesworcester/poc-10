@@ -16,7 +16,7 @@ mod cli_harness;
 use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cli_harness::*;
 
@@ -33,6 +33,7 @@ fn cli_negentropy_settles_root_after_expiry() {
 
     let workspace_id = create_workspace_with_ttl(&alice, "DrainerSolo", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let alice_daemon = spawn_daemon(&alice, alice_port);
 
     // Pin the clock and author three messages so the workspace has a
     // non-trivial pre-expiry `root_fingerprint`.
@@ -41,8 +42,9 @@ fn cli_negentropy_settles_root_after_expiry() {
         assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
+    wait_for_runtime_idle(&alice);
+    let pre = wait_for_sync_indexed_count_at_least(&alice, 3);
 
-    let pre = sync_status(&alice);
     let pre_count: u64 = line_value(&pre, "indexed_facts").parse().expect("count");
     assert!(
         pre_count >= 3,
@@ -50,9 +52,7 @@ fn cli_negentropy_settles_root_after_expiry() {
     );
     let pre_fingerprint = line_value(&pre, "root_fingerprint");
 
-    // Spawn the daemon, advance past expiry, and wait for CLI-visible
-    // message removal.
-    let alice_daemon = spawn_daemon(&alice, alice_port);
+    // Advance past expiry, and wait for CLI-visible message removal.
     assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -294,6 +294,7 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
 
     let workspace_id = create_workspace_with_ttl(&alice, "Batch", "alice", "alice-laptop", 1);
     assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
 
     // Author N=10 messages all at the same minute so a single TTL-1
     // expiry transition retires all of them together.
@@ -304,13 +305,13 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
         assert_success(topo(&["--db", &alice, "send", &workspace_id, &body]));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), N);
-    let pre = sync_status(&alice);
+    wait_for_runtime_idle(&alice);
+    let pre = wait_for_sync_indexed_count_at_least(&alice, N as u64);
     let pre_count: u64 = line_value(&pre, "indexed_facts")
         .parse()
         .expect("pre count");
     let pre_fp = line_value(&pre, "root_fingerprint");
 
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
     assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -504,16 +505,16 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 4);
 
-    let pre_restart = sync_status(&alice);
-    let pre_fp = line_value(&pre_restart, "root_fingerprint");
-    let pre_count: u64 = line_value(&pre_restart, "indexed_facts")
-        .parse()
-        .expect("pre count");
-
     // Bring the daemon up briefly and then stop it. This exercises the
     // "daemon was running, we stopped it, will restart" case rather than
     // a never-started cold start.
     let daemon = spawn_daemon(&alice, alice_port);
+    wait_for_runtime_idle(&alice);
+    let pre_restart = wait_for_sync_indexed_count_at_least(&alice, 4);
+    let pre_fp = line_value(&pre_restart, "root_fingerprint");
+    let pre_count: u64 = line_value(&pre_restart, "indexed_facts")
+        .parse()
+        .expect("pre count");
     thread::sleep(Duration::from_millis(300));
     drop(daemon);
     // Spin until the lock file is released so a restart can re-acquire.
@@ -693,6 +694,50 @@ fn keys_value(db: &str, workspace_id: &str) -> String {
 
 fn sync_status(db: &str) -> String {
     assert_success(topo(&["--db", db, "sync-status"]))
+}
+
+fn wait_for_runtime_idle(db: &str) {
+    let started = Instant::now();
+    let timeout = Duration::from_secs(30);
+    loop {
+        let out = assert_success(topo(&["--db", db, "count"]));
+        let facts: u64 = line_value(&out, "facts").parse().expect("facts count");
+        let applied: u64 = line_value(&out, "applied_facts")
+            .parse()
+            .expect("applied facts count");
+        let pending_intents: u64 = line_value(&out, "pending_intents")
+            .parse()
+            .expect("pending intents count");
+        if facts == applied && pending_intents == 0 {
+            return;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "daemon did not settle runtime queues:\n{out}\n\n{}",
+            daemon_diagnostics_block(&[("db", db)])
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_sync_indexed_count_at_least(db: &str, expected_min: u64) -> String {
+    let started = Instant::now();
+    let timeout = Duration::from_secs(30);
+    loop {
+        let out = sync_status(db);
+        let indexed: u64 = line_value(&out, "indexed_facts")
+            .parse()
+            .expect("indexed facts");
+        if indexed >= expected_min {
+            return out;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "sync indexed facts did not reach {expected_min}:\n{out}\n\n{}",
+            daemon_diagnostics_block(&[("db", db)])
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn messages_text(db: &str, workspace_id: &str) -> String {

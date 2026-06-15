@@ -831,12 +831,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
 ];
 
-pub(crate) const COMMAND_EXCLUDED_HANDLER_ROUTES: &[&str] = &[
-    "send_facts_on_connection",
-    "send_network_frame",
-    "receive_network_frame",
-];
-
 pub(crate) const SCHEMA_SOURCES: &[SchemaSource] = &[network::SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE];
 
 pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
@@ -969,17 +963,15 @@ projector_routes! {
 // <RecurringIntentSpec>` marks a live-only operational loop the daemon installs
 // as an in-memory schedule after replay.
 macro_rules! handler_route {
-    ($name:literal, $intent_kind:path, $handler:path) => {
+    ($intent_kind:path, $handler:path) => {
         HandlerRoute {
-            name: $name,
             intent_kind: $intent_kind,
             factory: || Box::new(<$handler>::new()),
             recurrence: None,
         }
     };
-    ($name:literal, $intent_kind:path, $handler:path, recurring = $spec:expr) => {
+    ($intent_kind:path, $handler:path, recurring = $spec:expr) => {
         HandlerRoute {
-            name: $name,
             intent_kind: $intent_kind,
             factory: || Box::new(<$handler>::new()),
             recurrence: Some($spec),
@@ -992,35 +984,29 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // live session, rebuilt from committed request/response facts after the
     // barrier — never replay-time work.
     handler_route!(
-        "create_connection",
         connection::create_connection::CREATE_CONNECTION,
         connection::create_connection::CreateConnectionHandler
     ),
     handler_route!(
-        "send_sync_compare_response",
         sync::send_compare_response::SEND_SYNC_COMPARE_RESPONSE,
         sync::send_compare_response::SendSyncCompareResponseHandler
     ),
     handler_route!(
-        "send_needed_fact_id",
         sync::send_needed_fact_id::SEND_NEEDED_FACT_ID,
         sync::send_needed_fact_id::SendNeededFactIdHandler
     ),
     handler_route!(
-        "send_requested_fact",
         sync::send_requested_fact::SEND_REQUESTED_FACT,
         sync::send_requested_fact::SendRequestedFactHandler
     ),
     // share_fact_with_sync rebuilds sync-derived shareable/negentropy state from
     // retained facts: deterministic replay rebuild work.
     handler_route!(
-        "share_fact_with_sync",
         sync::share_fact_with_sync::SHARE_FACT_WITH_SYNC,
         sync::share_fact_with_sync::ShareFactWithSyncHandler
     ),
     // Seeding sync runs only for connections explicitly recreated after replay.
     handler_route!(
-        "seed_connection_sync",
         sync::seed_connection::SEED_CONNECTION_SYNC,
         sync::seed_connection::SeedConnectionSyncHandler
     ),
@@ -1029,7 +1015,6 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // cadence; it re-sends unanswered local outbound requests and never runs
     // during replay. This replaces the wall-clock connection_peer_retry wake.
     handler_route!(
-        "maintain_connections",
         connection::maintain_connections::MAINTAIN_CONNECTIONS,
         connection::maintain_connections::MaintainConnectionsHandler,
         recurring = RecurringIntentSpec {
@@ -1041,31 +1026,26 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     // Key wrap creation is deterministic, idempotent fact creation from retained
     // recipient/request/source/signer facts.
     handler_route!(
-        "create_key_wrap",
         auth::create_key_wrap::CREATE_KEY_WRAP,
         auth::create_key_wrap::CreateKeyWrapHandler
     ),
     // Unwrap deterministically creates local secret facts (ids, not plaintext)
     // from retained wrap/recipient/frontier/local recipient-key facts.
     handler_route!(
-        "unwrap_key_wrap",
         auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
         auth::unwrap_key_wrap::UnwrapKeyWrapHandler
     ),
     // Sending facts over a connection, frame send, and frame receive are
     // operational IO over a live session.
     handler_route!(
-        "send_facts_on_connection",
         connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
         connection::send_facts_on_connection::SendFactsOnConnectionHandler
     ),
     handler_route!(
-        "send_network_frame",
         connection::send_network_frame::SEND_NETWORK_FRAME,
         connection::send_network_frame::SendNetworkFrameHandler
     ),
     handler_route!(
-        "receive_network_frame",
         connection::receive_network_frame::RECEIVE_NETWORK_FRAME,
         connection::receive_network_frame::ReceiveNetworkFrameHandler
     ),
