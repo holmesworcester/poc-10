@@ -29,7 +29,7 @@
 
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{IntentWorkRow, Store, TableName, TableRow};
 use rusqlite::types::Value as SqliteValue;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -117,6 +117,20 @@ impl Intent {
             key: key.into(),
             payload: payload.into(),
         }
+    }
+
+    pub(crate) fn work_row(&self) -> IntentWorkRow {
+        IntentWorkRow::new(
+            self.kind.as_str().to_string(),
+            self.key.clone(),
+            self.payload.clone(),
+        )
+    }
+
+    pub(crate) fn from_work_row(row: IntentWorkRow) -> Result<Self, String> {
+        let kind = IntentKind::new(row.kind)
+            .map_err(|err| format!("invalid queued intent kind: {err}"))?;
+        Ok(Self::new(kind, row.idempotence_key, row.payload))
     }
 }
 

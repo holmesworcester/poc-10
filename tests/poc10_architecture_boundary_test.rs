@@ -297,7 +297,7 @@ fn poc10_pipeline_work_items_live_in_named_core_files() {
         "Run one claimed intent through its handler",
         "commit_handler_output",
         "next_queued_intent",
-        "record_intent_in_table_in_tx",
+        "insert_intent_work_row_in_tx",
     ] {
         assert!(
             handle_intent.contains(required),

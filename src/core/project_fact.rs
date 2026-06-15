@@ -1734,7 +1734,6 @@ pub(crate) mod commit_effects {
     use super::context_store::insert_pending_matches_for_stored_needs_in_tx;
     use super::route::FactAdmissionFn;
     use super::ProjectionMode;
-    use crate::core::handle_intent::record_intent_in_table_in_tx;
 
     /// Which follow-up intents may be recorded by this commit path.
     #[derive(Debug, Clone, Copy)]
@@ -2007,14 +2006,14 @@ pub(crate) mod commit_effects {
 
         let mut intents = 0usize;
         for intent in &effects.intents {
-            if record_intent_in_table_in_tx(tx, INTENTS, intent)? {
+            if tx.insert_intent_work_row_in_tx(INTENTS, &intent.work_row())? {
                 intents += 1;
             }
         }
 
         let mut local_intents = 0usize;
         for intent in &effects.local_intents {
-            if record_intent_in_table_in_tx(tx, LOCAL_INTENTS, intent)? {
+            if tx.insert_intent_work_row_in_tx(LOCAL_INTENTS, &intent.work_row())? {
                 local_intents += 1;
             }
         }
