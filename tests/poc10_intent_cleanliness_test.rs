@@ -676,7 +676,7 @@ fn event_module_context_rs_files_do_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put nontrivial range encoders and candidate validation beside the domain that validates them instead:\n{}",
+        "protocol-specific fact-module context.rs files are dumping-ground risks, not a target source of truth. Core-owned src/core/context.rs is allowed; put nontrivial range encoders and matched-payload validation beside the domain that validates them instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -696,7 +696,7 @@ fn legacy_custom_context_matcher_api_does_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "the legacy ContextMatcher API is retired; use core-owned byte-range overlap and projector/domain candidate validation instead:\n{}",
+        "the legacy ContextMatcher API is retired; use core-owned byte-range overlap and projector/domain matched-payload validation instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -731,7 +731,7 @@ fn temporary_protocol_context_helpers_do_not_emit_work_or_rows() {
 
     assert!(
         offenders.is_empty(),
-        "temporary protocol context.rs helper files are not the context source of truth; range encoders and candidate validation belong beside their domain, while ProjectionContext inspection belongs in project.rs:\n{}",
+        "temporary protocol context.rs helper files are not the context source of truth; range encoders and matched-payload validation belong beside their domain, while ProjectionContext inspection belongs in project.rs:\n{}",
         offenders.join("\n")
     );
 }

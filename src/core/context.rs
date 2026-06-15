@@ -32,7 +32,7 @@
 //! identical. Core can build bounded canonical keys from simple parts for exact
 //! and composite-key dependencies. Broader dependencies still choose an
 //! order-preserving byte layout in the protocol domain so ordinary
-//! lexicographic range overlap is enough to find candidates.
+//! lexicographic range overlap is enough to find matching offers.
 //!
 //! Core's only matching rule is:
 //!
@@ -46,7 +46,7 @@
 //! Core never parses range bytes. It stores them, indexes them, performs the
 //! overlap query, wakes affected owners, and loads the offer owner's fact as
 //! matched payload. The woken projector must still decode and validate the
-//! candidate before emitting rows, offers, or intents.
+//! matched payload before emitting rows, offers, or intents.
 //!
 //! `owner` says which fact produced the row so later projection can replace
 //! that fact's context without deleting anyone else's rows. For needs, `owner`

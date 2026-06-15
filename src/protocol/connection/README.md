@@ -89,13 +89,13 @@ opening/admission in `project.rs`. There is no shared `connection/frame.rs` or
 `connection/frame_wire.rs` layer; duplicated byte handling is preferred over
 hiding projector-specific receive semantics behind a generic helper.
 
-Established frames received from the network are candidate projection inputs.
+Established frames received from the network are incoming projection inputs.
 Their projectors can emit `connection_frame_observation`, `connection`,
 `auth_local_endpoint`, or `connection_ephemeral_secret` needs. If required
-context is missing, the candidate is retained as a fact with standing needs so a
+context is missing, the incoming fact is retained with standing needs so a
 later context offer can reopen it. Wire-invalid bytes still drop at the network
 boundary or during frame projection. Replay rebuilds retained handshake facts,
-opened child facts, receipts, and rows; unopened frame candidates that were
+opened child facts, receipts, and rows; unopened incoming frames that were
 retained wait on the same context rules as any other retained fact.
 
 ## Cross-Scope Row Reads
@@ -138,8 +138,8 @@ facts.
 
 `receive_network_frame` is the inbound socket boundary. It has no input facts.
 It normalizes origin metadata and admits sealed `request`, sealed `connection`,
-or established-frame bytes as typed candidate facts. It emits the matching
-`frame_observation` fact in the same handler output so the candidate frame and
+or established-frame bytes as typed incoming facts. It emits the matching
+`frame_observation` fact in the same handler output so the incoming frame and
 its receive metadata enter projection together. It does no unsealing itself.
 
 `maintain_connections` drives outbound request sends from retryable request
@@ -260,7 +260,7 @@ outbound initiator:
 inbound responder transport observation:
   sealed request bytes
     -> receive_network_frame
-    -> candidate request + frame_observation
+    -> incoming request + frame_observation
     -> frame_observation
 
 inbound responder dependency graph:
@@ -282,7 +282,7 @@ connection projector on responder:
 inbound initiator transport observation:
   sealed connection bytes
     -> receive_network_frame
-    -> candidate connection + frame_observation
+    -> incoming connection + frame_observation
     -> frame_observation
 
 connection projector on initiator:
@@ -295,7 +295,7 @@ established connection transfer:
     -> send_facts_on_connection
     -> send_network_frame
     -> remote frame_small/frame_bundle/frame_file_slice
-    -> remote candidate frame + frame_observation
+    -> remote incoming frame + frame_observation
        needs frame_observation + connection
        open to child facts + fact_receipts
 ```

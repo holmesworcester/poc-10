@@ -165,29 +165,32 @@ fn core_local_intents_table_is_temp() {
 }
 
 #[test]
-fn core_candidate_facts_table_survives_reopen() {
+fn core_incoming_facts_table_is_temp() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().join("candidate-facts-store.db");
+    let path = tmp.path().join("incoming-facts-store.db");
+    let incoming_facts = TableName::new("incoming_facts");
 
-    Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+    let store = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("open store with core schema");
-    let conn = Connection::open(&path).expect("open sqlite");
-    conn.execute(
-        "INSERT INTO candidate_facts
-            (id, scope, scope_kind, scope_id, received_at, bytes)
-         VALUES (?1, 'global', '', ?2, 123, ?3)",
-        params![[7u8; 32], [0u8; 32], b"candidate".as_slice()],
-    )
-    .expect("insert candidate fact");
-    drop(conn);
+    assert_eq!(
+        store
+            .table_row_count(incoming_facts)
+            .expect("count temp rows"),
+        0
+    );
+    assert!(
+        !sqlite_table_names(&path).contains("incoming_facts"),
+        "incoming_facts should not be durable"
+    );
 
-    Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
+    let reopened = Store::open_disk_with_schema_sources(&path, &[CORE_SCHEMA_SOURCE])
         .expect("reopen store with core schema");
-    let conn = Connection::open(&path).expect("open sqlite after reopen");
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM candidate_facts", [], |row| row.get(0))
-        .expect("count candidate facts");
-    assert_eq!(count, 1);
+    assert_eq!(
+        reopened
+            .table_row_count(incoming_facts)
+            .expect("count temp rows after reopen"),
+        0
+    );
 }
 
 #[test]

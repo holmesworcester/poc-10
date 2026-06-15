@@ -345,7 +345,7 @@ pub fn project_observed_frame(
     }
 
     let Ok(connection_id) = decode::received_connection_fact_id(frame) else {
-        return Ok(ProjectionOutput::new().drop_candidate());
+        return Ok(ProjectionOutput::new().drop_incoming());
     };
 
     let observation_need = exact_need(
@@ -386,7 +386,7 @@ pub fn project_observed_frame(
             }
             return Ok(output);
         }
-        ConnectionMaterialContext::Invalid => return Ok(ProjectionOutput::new().drop_candidate()),
+        ConnectionMaterialContext::Invalid => return Ok(ProjectionOutput::new().drop_incoming()),
     };
 
     match open_received_frame_with_material(
@@ -396,7 +396,7 @@ pub fn project_observed_frame(
         observation.received_at_local_ms,
     ) {
         Ok(facts) => Ok(facts_output(fact.id, facts)),
-        Err(_) => Ok(ProjectionOutput::new().drop_candidate()),
+        Err(_) => Ok(ProjectionOutput::new().drop_incoming()),
     }
 }
 
@@ -406,10 +406,10 @@ fn exact_need(owner: [u8; 32], role: &'static str, scope: FactScope, key: [u8; 3
 
 fn facts_output(frame_fact_id: FactId, facts: Vec<Fact>) -> ProjectionOutput {
     let mut output = ProjectionOutput::new()
-        .drop_candidate()
+        .drop_incoming()
         .purge_self(frame_fact_id);
     for fact in facts {
-        output = output.candidate_fact(fact);
+        output = output.incoming_fact(fact);
     }
     output
 }

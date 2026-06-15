@@ -287,7 +287,7 @@ fn handle_intent_with_policy(
         });
     };
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
-    let emitted_projectable_facts = !output.facts.is_empty() || !output.candidate_facts.is_empty();
+    let emitted_projectable_facts = !output.facts.is_empty() || !output.incoming_facts.is_empty();
     status.progressed = commit_handler_output(
         store,
         &queued,
@@ -489,7 +489,7 @@ mod tests {
     use crate::core::effects::RuntimeEffects;
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{retry_intent, HandlerResult, IntentKind};
-    use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use crate::core::schema::{CORE_SCHEMA_SOURCE, INCOMING_FACTS, PENDING_PROJECTION};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static RETRY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_yields_after_handler_emits_projectable_fact() {
+    fn handler_fact_effects_are_retained_queued_and_yield_dispatch() {
         AFTER_FACT_CALLS.store(0, Ordering::SeqCst);
         let store =
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
@@ -590,12 +590,26 @@ mod tests {
         assert_eq!(
             AFTER_FACT_CALLS.load(Ordering::SeqCst),
             0,
-            "dispatcher should yield so candidate projection can run before later handlers"
+            "dispatcher should yield so projection can run before later handlers"
         );
-        assert!(
-            crate::core::store::candidate_fact_by_id(&store, &emitted.id)
-                .expect("load emitted candidate")
-                .is_some()
+        assert_eq!(
+            persisted_fact(&store, &emitted.id).expect("load emitted fact"),
+            Some(emitted),
+            "intent-created fact should be retained immediately"
+        );
+        assert_eq!(
+            store
+                .table_row_count(PENDING_PROJECTION)
+                .expect("pending projection count"),
+            1,
+            "intent-created fact should be queued for projection"
+        );
+        assert_eq!(
+            store
+                .table_row_count(INCOMING_FACTS)
+                .expect("incoming count"),
+            0,
+            "intent-created facts should not pass through incoming intake"
         );
         assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
     }

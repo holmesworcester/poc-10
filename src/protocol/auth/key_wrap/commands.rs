@@ -7,8 +7,7 @@
 use crate::core::command::CommandOutput;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::core::runtime::Runtime;
-use crate::core::store::Store;
+use crate::core::store::{persisted_fact, persisted_facts, Store};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
 
@@ -163,24 +162,18 @@ pub fn create_key_frontier(
 }
 
 pub fn create_history_node(
-    runtime: &Runtime,
+    store: &Store,
     input: CreateHistoryNode,
 ) -> Result<CommandOutput<CreateHistoryNodeReceipt>, String> {
-    // This is still a multi-phase runtime workflow and should move out of this file.
-    // Key chopping should move to a workflow host.
-    if history_source_is_tombstoned(runtime, input.source_secret_id)? {
+    if history_source_is_tombstoned(store, input.source_secret_id)? {
         return Err("history node source fact is missing".to_string());
     }
-    let source = runtime
-        .facts()
-        .find(|fact| fact.id == input.source_secret_id)
+    let source = persisted_fact(store, &input.source_secret_id)?
         .ok_or_else(|| "history node source fact is missing".to_string())?;
     let (owner_endpoint_id, source_secret) =
         history_source_material(&source, input.workspace_id, input.removal_frontier_id)?;
     if input.tombstone_node_id != [0; 32] {
-        let tombstone = runtime
-            .facts()
-            .find(|fact| fact.id == input.tombstone_node_id)
+        let tombstone = persisted_fact(store, &input.tombstone_node_id)?
             .ok_or_else(|| "history node tombstone fact is missing".to_string())?;
         local_history_layout_decode::decode_local_history_node_secret(&tombstone.bytes)
             .map_err(|_| "history node tombstone fact is not a history node".to_string())?;
@@ -237,11 +230,8 @@ fn history_source_material(
     Ok((node.owner_endpoint_id, node.node_secret))
 }
 
-fn history_source_is_tombstoned(
-    runtime: &Runtime,
-    source_secret_id: FactId,
-) -> Result<bool, String> {
-    for fact in runtime.facts() {
+fn history_source_is_tombstoned(store: &Store, source_secret_id: FactId) -> Result<bool, String> {
+    for fact in persisted_facts(store)? {
         let Ok(node) = local_history_layout_decode::decode_local_history_node_secret(fact.body())
         else {
             continue;

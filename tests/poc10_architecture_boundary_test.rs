@@ -400,7 +400,7 @@ fn poc10_projector_output_contract_emits_context_time_wakes_and_intents() {
 fn poc10_runtime_effects_names_the_common_commit_shape() {
     let topo::core::effects::RuntimeEffects {
         facts,
-        candidate_facts,
+        incoming_facts,
         purged_facts,
         row_mutations,
         intents,
@@ -408,7 +408,7 @@ fn poc10_runtime_effects_names_the_common_commit_shape() {
     } = topo::core::effects::RuntimeEffects::new();
 
     assert!(facts.is_empty());
-    assert!(candidate_facts.is_empty());
+    assert!(incoming_facts.is_empty());
     assert!(purged_facts.is_empty());
     assert!(row_mutations.is_empty());
     assert!(intents.is_empty());
@@ -464,16 +464,10 @@ fn poc10_protocol_commands_do_not_hide_runtime_work_or_read_models() {
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
         .collect::<Vec<_>>();
-    let key_wrap_workflow = root.join("src/protocol/auth/key_wrap/commands.rs");
-    let simple_command_files = command_files
-        .iter()
-        .filter(|path| *path != &key_wrap_workflow)
-        .cloned()
-        .collect::<Vec<_>>();
 
     let runtime_offenders = source_code_matches_in_paths(
         root,
-        simple_command_files,
+        command_files.clone(),
         &[
             "use crate::core::runtime::Runtime",
             "RuntimeEffects",
@@ -515,20 +509,6 @@ fn poc10_protocol_commands_do_not_hide_runtime_work_or_read_models() {
         "command modules must not expose read-model lookup/status/count APIs; put those in the owning queries.rs:\n{}",
         read_model_offenders.join("\n")
     );
-
-    let workflow_text = source_text(&key_wrap_workflow)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    for required in [
-        "multi-phase runtime",
-        "workflow and should move out of this file",
-    ] {
-        assert!(
-            workflow_text.contains(required),
-            "the key_wrap chop workflow exception must remain explicit until it moves to a workflow host: missing {required:?}"
-        );
-    }
 }
 
 #[test]

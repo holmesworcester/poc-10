@@ -77,7 +77,7 @@ Protocol code enters core through declarations and effect values:
   `CommandClock` directly, then query protocol-owned state before authoring
   facts.
 - `effects::RuntimeEffects` is the shared language for projector and handler
-  facts to admit, candidate facts, purges, row mutations, durable intents, and
+  facts to admit, incoming facts, purges, row mutations, durable intents, and
   local intents.
 - `store::SchemaSource` lets core, network IO, and protocol registry code
   declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
@@ -93,7 +93,7 @@ opaque outbound rows from `network`.
 ```text
 CLI command / daemon / handler
   -> authored facts or RuntimeEffects
-  -> fact admission and candidate_facts
+  -> fact admission and pending_projection
   -> projector
   -> context needs/offers, time wakes, rows, intents
   -> intent queue
@@ -101,18 +101,16 @@ CLI command / daemon / handler
   -> RuntimeEffects
 ```
 
-Facts can enter through commands, handlers, sync, or incoming daemon input. Core
-records candidate bytes with admission scope and timestamp first; projection
-retains durable bytes only after a projector accepts, materializes, or finishes
-without parking. Replay is the exception: it queues already-retained facts
-directly for replay projection. Projection is the only path from fact bytes to
-standing context, read-model rows, time wakes, and follow-up work. Runtime work
-can record candidate facts in `candidate_facts`, submit local (ephemeral,
-not-replayed) intents to `local_intents`, and mark facts whose scheduled wake-up
-time has arrived as pending projection work.
+Facts can enter through commands, handlers, sync, or incoming daemon input.
+Core records durable bytes or incoming bytes with admission scope and
+timestamp, then queues them for projection. Projection is the only path from
+fact bytes to standing context, read-model rows, time wakes, and follow-up work.
+Runtime work can record incoming facts in `incoming_facts`, submit local
+(ephemeral, not-replayed) intents to `local_intents`, and mark facts whose
+scheduled wake-up time has arrived as pending projection work.
 
 Network bytes enter as `network_in` rows, become local protocol intents via the
-daemon declaration, then stage protocol frame facts as candidates. Candidate
+daemon declaration, then stage protocol frame facts as incoming facts. Incoming
 frame facts may be retained while they wait on observation, connection, or key
 context. Outbound bytes are produced by protocol handlers, staged as
 `network_out` rows, and written by core's TCP pump without parsing frame
@@ -147,9 +145,9 @@ the owning projector decide whether that time proves anything.
 - Rejected durable projection items do not stall the batch. Context-free
   rejection purges the fact; context-dependent rejection keeps the fact bytes as
   evidence and clears only the pending row.
-- Candidate facts start as temp rows. A projector may keep a candidate retained
-  while parked on standing context needs, retain it as protocol evidence, or
-  drop it.
+- Incoming facts start as temp rows. A projector may keep an incoming fact
+  retained while parked on standing context needs, retain it as protocol
+  evidence, or drop it.
 - Typed-table inserts are idempotent only when the existing row matches every
   supplied column; changing typed projection state is expressed as
   `DeleteWhere` followed by `InsertValues`.
@@ -206,7 +204,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   drain loop. The protocol declaration decides how inbound bytes become local
   intents and which time-wake timelines are active.
 - `effects.rs`: shared effect language for projectors and handlers.
-  `RuntimeEffects` names facts to admit, candidate facts, exact purges, row
+  `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
   this mechanical description atomically inside the caller's transaction;
   commands use `AuthoredCommand` facts plus a receipt instead.
@@ -233,7 +231,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   measurement semantics.
 - `project_fact.rs`: one queued fact projection transaction. It loads matched
   context and due time ranges, runs the routed projector, applies
-  durable/candidate source rules, replaces the owner's needs/time wakes,
+  durable/incoming source rules, replaces the owner's needs/time wakes,
   appends offers, wakes matched owners, and commits emitted effects.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command-authored facts, drains
@@ -241,7 +239,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   handlers, and composes `project_fact.rs` and `handle_intent.rs` into bounded
   runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
-  admissions, context edges, time wakes, pending projection, candidate facts,
+  admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, intent queues, local network
   tables, and the local clock table. Protocol rows live in protocol schema
   sources.
@@ -276,7 +274,7 @@ mode.
   append-only offers, plus shared `RuntimeEffects` for one fact.
 - `project_fact.rs::commit_effects`: shared atomic commit path for
   `RuntimeEffects`. It validates duplicate or conflicting effects, purges exact
-  facts, admits durable facts, candidate facts, row mutations, and queues
+  facts, admits durable facts, incoming facts, row mutations, and queues
   follow-up intents inside the caller's transaction.
 - `project_fact.rs::context_store`: SQL implementation of standing context. It
   stores need/offer edges, assembles projection context from queued
@@ -291,7 +289,7 @@ mode.
   and due time ranges, runs the routed projector, replaces the owner's
   needs/time wakes, appends offers, and commits emitted effects.
 - `runtime.rs`: bounded work ordering. It admits facts and due time wakes,
-  selects durable and candidate projection items through `project_fact.rs`,
+  selects durable and incoming projection items through `project_fact.rs`,
   dispatches queued intents through `handle_intent.rs`, and lets context wakes
   or emitted child facts re-enter the queue explicitly.
 
@@ -300,18 +298,17 @@ mode.
 The write-side authoring path is:
 
 ```text
-command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> candidate_facts -> projection
+command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> projection
 ```
 
 Commands own user intent, argument parsing, local capability lookup, receipts,
 and the decision to author facts. They return `AuthoredCommand` facts plus a
 receipt, not row mutations, purges, or intents. Family `author.rs` owns
 construction crypto: signing, encryption, and typed assembly. Family
-`encode.rs` owns canonical byte encoding only. Before candidate staging, the
-runtime may call the protocol-owned `FactAdmissionFn`; poc-10 installs one that
-dispatches by fact tag to protocol-local decode and validation helpers. After
-admission each live fact enters `candidate_facts`; projection later decides
-whether to retain it into durable `facts`, park it on context, or drop it.
+`encode.rs` owns canonical byte encoding only. Before storage, the runtime may
+call the protocol-owned `FactAdmissionFn`; poc-10 installs one that dispatches
+by fact tag to protocol-local decode and validation helpers. After admission
+each fact is queued for projection like any other durable fact.
 
 The routed fact path is:
 
@@ -320,7 +317,7 @@ raw fact -> tag route -> projector -> ProjectionOutput -> commit
 ```
 
 The core projection worker stays protocol-neutral. It loads one durable or
-candidate fact, the matched context already attached to that pending row, due
+incoming fact, the matched context already attached to that pending row, due
 time ranges, and projection mode, then invokes the registered protocol
 projector. A typical projector locally decodes the raw body, validates the fact
 id and cryptographic/container proof, requests missing context as needs,
@@ -329,11 +326,11 @@ projects rows, context, time wakes, purges, or intents.
 
 Missing context is normal projection output, not a separate core stage. The
 projector emits standing needs; core records those replacement needs and parks
-the fact. Retained owners wake through `pending_projection`; candidate owners
-stay in `candidate_facts` and wake when `pending_projection_matches` records
-matched context for them. The retried item already carries the context that woke
-it, so the projector reads the matched payload through `ProjectionContext`
-instead of doing a database search.
+the fact. When a later offer matches a parked need, core records that offer in
+`pending_projection_matches` for the parked owner and queues the owner again.
+The pending item already carries the context that woke it, so the retried
+projector reads the matched payload through `ProjectionContext` instead of
+doing a database search.
 
 Detached signature evidence, key material, deletion markers, receipts, and
 other cross-fact proof are ordinary facts that may publish context offers after
@@ -352,13 +349,11 @@ wake owners whose needs match newly added offers and record their matched contex
 apply RuntimeEffects through commit_effects
 ```
 
-For a candidate fact, one projection commit either records only needs and leaves
-the candidate parked in `candidate_facts`, moves the candidate into `facts` and
-`local_fact_admissions` before applying the same context/time/effect commit as a
-durable fact, or drops it. A dropped candidate commit validates that no durable
-offers or time wakes remain, deletes old context for that input id, deletes the
-candidate fact row, and applies `RuntimeEffects` through
-`commit_effects`.
+For a retained incoming fact, the commit moves the incoming row into `facts` and
+`local_fact_admissions`, then applies the same context/time/effect commit as a
+durable fact. For a dropped incoming fact, the commit validates that no durable
+offers or time wakes remain, deletes any old context for that input id, deletes
+the incoming fact row, and applies `RuntimeEffects` through `commit_effects`.
 
 Before that boundary, projector runs are calculation. Durable pending items
 start with the matched context already attached to their queue row. Newly
@@ -373,9 +368,8 @@ One handler commit performs this ordered unit:
 delete claimed intent row
 delete shadowed local duplicate intent when the claimed row was durable
 purge exact facts
-admit emitted live facts into candidate_facts
-retain and queue replay-emitted facts in replay mode
-insert emitted candidate facts
+admit emitted facts and mark them pending
+insert emitted incoming facts
 apply row mutations
 record durable follow-up intents
 record local follow-up intents
