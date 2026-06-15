@@ -65,16 +65,17 @@ fn generate_cli_can_profile_runtime_phases_to_stderr() {
     assert!(err.contains("generate_profile status=ok"), "{err}");
     assert!(err.contains("command_build_ms="), "{err}");
     assert!(err.contains("commit_ms="), "{err}");
-    assert!(err.contains("projection_ms="), "{err}");
+    assert!(err.contains("settle_ms="), "{err}");
     assert!(err.contains("projection_load_pending_fact_ms="), "{err}");
     assert!(err.contains("projection_prepare_effects_ms="), "{err}");
     assert!(err.contains("projection_projector_cpu_ms="), "{err}");
     assert!(err.contains("projection_commit_effects_ms="), "{err}");
     assert!(err.contains("projection_replace_context_ms="), "{err}");
     assert!(err.contains("projection_wake_context_matches_ms="), "{err}");
-    assert!(err.contains("intent_dispatch_ms="), "{err}");
-    assert!(err.contains("share_record_sync_contribution_ms="), "{err}");
-    assert!(err.contains("negentropy_update_path_ms="), "{err}");
+    assert!(
+        !err.contains("intent_dispatch_ms="),
+        "generate command should not dispatch handlers during query settling\n{err}"
+    );
 }
 
 #[test]

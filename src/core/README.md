@@ -24,6 +24,13 @@ human-readable `CliOutput`, but command-authored durable protocol state must
 enter through facts; rows, purges, and intents come from projection or handler
 work.
 
+Every protocol query enters through `Runtime::query`. Runtime first drains only
+retained `pending_projection` work, then runs the read. That gives queries
+read-your-local-writes behavior for command-authored facts without consuming
+`incoming_facts`, admitting due time wakes, or dispatching handlers. Incoming
+facts, time wakes, and handler-derived rows are worker/daemon progress; callers
+that need those effects observe them eventually through the normal runtime loop.
+
 Projection is core's deterministic reaction step. Core drains
 `pending_projection`, loads one fact and the matched context attached to that
 pending row, resolves any newly declared needs that already match stored offers,
@@ -35,13 +42,14 @@ standing needs now overlap newly added offers. Core performs the overlap query
 mechanically when it queues the work, but projectors decide what the matched
 payload proves.
 
-Intents are core's bounded stateful work step. A projector or command emits an
-intent when the next action should not happen inside deterministic projection:
-sending bytes, building a response fact, creating a key wrap, seeding sync, or
-performing any other retryable action. Core claims one durable or local intent,
-loads only the fact inputs declared by that handler, calls the registered
-handler, and commits the handler's output atomically with queue consumption.
-Retry leaves the row queued; success deletes the row with its effects.
+Intents are core's bounded stateful work step. A projector or explicit runtime
+operation emits an intent when the next action should not happen inside
+deterministic projection: sending bytes, building a response fact, creating a key
+wrap, seeding sync, or performing any other retryable action. Core claims one
+durable or local intent, loads only the fact inputs declared by that handler,
+calls the registered handler, and commits the handler's output atomically with
+queue consumption. Retry leaves the row queued; success deletes the row with its
+effects.
 
 The daemon runs the same mechanics without a user command on the stack. Each
 tick stages accepted network bytes as local protocol intents, admits due
@@ -62,8 +70,7 @@ connection-frame opening, read-model rows, commands, and queries.
 Protocol code enters core through declarations and effect values:
 
 - `runtime::RuntimeDescription` declares protocol schema sources, allowed row
-  mutation tables, the projector factory, registered intent handlers, and
-  command-excluded handler names.
+  mutation tables, the projector factory, and registered intent handlers.
 - `app::ProtocolDescription` adds the product name, daemon declarations, and
   CLI command table.
 - `project_fact::Projector` receives one `Fact` plus a `ProjectionContext` and
@@ -224,7 +231,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   local intent, loads only handler-declared fact inputs, calls the registered
   handler, handles retry/fatal outcomes, and commits handler output atomically
   with queue-row deletion. It also owns handler route metadata, handler sets,
-  recurring intent schedules, work status, and replay dispatch filtering.
+  recurring intent schedules, work status, and replay-mode dispatch context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
   normal command output by default. It is for runtime profiling, not protocol
@@ -234,10 +241,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   durable/incoming source rules, replaces the owner's needs/time wakes,
   appends offers, wakes matched owners, and commits emitted effects.
 - `runtime.rs`: executable engine for one selected protocol description. It
-  opens stores, applies declared schemas, submits command-authored facts, drains
-  projection and intent queues, admits due time wakes, filters command-safe
-  handlers, and composes `project_fact.rs` and `handle_intent.rs` into bounded
-  runtime turns.
+  opens stores, applies declared schemas, submits command-authored facts, runs
+  query pre-settle over retained projection, drains runtime projection and intent
+  queues, admits due time wakes, and composes `project_fact.rs` and
+  `handle_intent.rs` into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, intent queues, local network

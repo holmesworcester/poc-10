@@ -132,6 +132,15 @@ pub(crate) enum ProjectionSource {
     Incoming,
 }
 
+/// Which pending fact sources a projection drain may consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectionDrainScope {
+    /// Runtime/daemon work drains retained pending facts and ephemeral incoming facts.
+    Runtime,
+    /// Query pre-settle drains only retained pending facts created by local work.
+    PreQuery,
+}
+
 /// Commit one pending fact's complete projection result.
 ///
 /// This is the projection boundary, the same way `commit_handler_output` is the
@@ -1278,6 +1287,7 @@ mod contract_tests {
             projector,
             allowed_tables,
             fact_admission,
+            ProjectionDrainScope::Runtime,
             limit,
         )
     }
@@ -3305,9 +3315,18 @@ struct PendingProjectionItem {
 
 /// Count durable plus incoming facts currently queued for projection.
 pub(crate) fn pending_fact_count(store: &Store) -> usize {
-    store
+    pending_fact_count_for_scope(store, ProjectionDrainScope::Runtime)
+}
+
+/// Count queued projection work visible to the requested drain scope.
+pub(crate) fn pending_fact_count_for_scope(store: &Store, scope: ProjectionDrainScope) -> usize {
+    let durable = store
         .table_row_count(PENDING_PROJECTION)
-        .expect("pending projection count should load from store")
+        .expect("pending projection count should load from store");
+    if scope == ProjectionDrainScope::PreQuery {
+        return durable;
+    }
+    durable
         + store
             .table_row_count(INCOMING_FACTS)
             .expect("incoming fact count should load from store")
@@ -3361,6 +3380,7 @@ pub(crate) fn drain_projection(
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    scope: ProjectionDrainScope,
     limit: usize,
 ) -> Result<ProjectionProgress, String> {
     let mut total = ProjectionProgress::default();
@@ -3382,7 +3402,7 @@ pub(crate) fn drain_projection(
             remaining,
         )?;
 
-        if progress.projected < remaining {
+        if scope == ProjectionDrainScope::Runtime && progress.projected < remaining {
             let incoming_fact_ids = perf::measure_result("projection_incoming_load", || {
                 incoming_pending_fact_ids(store, remaining - progress.projected)
             })?;
@@ -3466,6 +3486,7 @@ pub(crate) fn process_projection_until_idle(
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
+    scope: ProjectionDrainScope,
     max_rounds: usize,
     limit_per_round: usize,
 ) -> Result<WorkStatus, String> {
@@ -3476,10 +3497,11 @@ pub(crate) fn process_projection_until_idle(
             projector,
             allowed_tables,
             fact_admission,
+            scope,
             limit_per_round,
         )?;
         total.merge(progress.status);
-        if progress.projected == 0 && pending_fact_count(store) == 0 {
+        if progress.projected == 0 && pending_fact_count_for_scope(store, scope) == 0 {
             return Ok(total);
         }
     }
@@ -3799,8 +3821,6 @@ mod tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
     use crate::core::facts::{Fact, FactId, FactScope};
-    use crate::core::handle_intent::{HandlerRoute, HandlerSet};
-    use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler};
 
     #[test]
     fn projection_output_keeps_context_and_work_separate() {
@@ -3904,33 +3924,6 @@ mod tests {
         assert_eq!(output.offers.len(), 1);
     }
 
-    #[test]
-    fn handler_sets_filter_command_routes() {
-        const ROUTES: &[HandlerRoute] = &[
-            HandlerRoute {
-                name: "semantic",
-                intent_kind: "semantic",
-                factory: noop_handler,
-                recurrence: None,
-            },
-            HandlerRoute {
-                name: "network",
-                intent_kind: "network",
-                factory: noop_handler,
-                recurrence: None,
-            },
-        ];
-
-        assert_eq!(
-            HandlerSet::new(ROUTES).intent_kinds(),
-            vec!["semantic", "network"]
-        );
-        assert_eq!(
-            HandlerSet::new_excluding(ROUTES, &["network"]).intent_kinds(),
-            vec!["semantic"]
-        );
-    }
-
     struct ModelProjector;
 
     impl ModelProjector {
@@ -3943,18 +3936,6 @@ mod tests {
                 vec![semantic as u8],
             )))
         }
-    }
-
-    struct NoopIntentHandler;
-
-    impl IntentHandler for NoopIntentHandler {
-        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
-            Ok(crate::core::effects::RuntimeEffects::new())
-        }
-    }
-
-    fn noop_handler() -> Box<dyn IntentHandler> {
-        Box::new(NoopIntentHandler)
     }
 
     fn matched_context(need: ContextNeed, payload_id: FactId) -> MatchedContext {

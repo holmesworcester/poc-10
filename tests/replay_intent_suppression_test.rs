@@ -141,25 +141,21 @@ fn live_handler() -> Box<dyn IntentHandler> {
 
 const HANDLERS: &[HandlerRoute] = &[
     HandlerRoute {
-        name: "replay_ok",
         intent_kind: REPLAY_OK,
         factory: replay_handler,
         recurrence: None,
     },
     HandlerRoute {
-        name: "live_only",
         intent_kind: LIVE_ONLY,
         factory: live_handler,
         recurrence: None,
     },
     HandlerRoute {
-        name: "live_local",
         intent_kind: LIVE_LOCAL,
         factory: live_handler,
         recurrence: None,
     },
     HandlerRoute {
-        name: "live_from_handler",
         intent_kind: LIVE_FROM_HANDLER,
         factory: live_handler,
         recurrence: None,
@@ -177,7 +173,6 @@ const RUNTIME: RuntimeDescription = RuntimeDescription {
     fact_routes: &[],
     fact_admission: None,
     handlers: HANDLERS,
-    command_excluded_handlers: &[],
 };
 
 const RUNTIME_REPLAY_AWARE: RuntimeDescription = RuntimeDescription {
@@ -187,7 +182,6 @@ const RUNTIME_REPLAY_AWARE: RuntimeDescription = RuntimeDescription {
     fact_routes: &[],
     fact_admission: None,
     handlers: HANDLERS,
-    command_excluded_handlers: &[],
 };
 
 const RUNTIME_REPLAY_NOOP: RuntimeDescription = RuntimeDescription {
@@ -197,7 +191,6 @@ const RUNTIME_REPLAY_NOOP: RuntimeDescription = RuntimeDescription {
     fact_routes: &[],
     fact_admission: None,
     handlers: HANDLERS,
-    command_excluded_handlers: &[],
 };
 
 fn fact() -> Fact {

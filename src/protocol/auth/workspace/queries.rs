@@ -163,6 +163,7 @@ pub struct RuntimeCountReport {
     pub facts: usize,
     pub sync_facts: usize,
     pub applied_facts: usize,
+    pub pending_intents: usize,
     pub connections: usize,
     pub connection_facts: usize,
     pub invite_accepted: usize,
@@ -176,6 +177,7 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
     let facts = runtime.facts().count();
     let sync_facts = shared_fact::sync_status(runtime.store())?.indexed_facts;
     let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
+    let pending_intents = runtime.pending_intent_count();
     let connections = runtime
         .store()
         .table_rows(connection::connection::CONNECTION_ROWS)
@@ -196,6 +198,7 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
         facts,
         sync_facts,
         applied_facts,
+        pending_intents,
         connections,
         connection_facts: connection_requests + connections,
         invite_accepted,

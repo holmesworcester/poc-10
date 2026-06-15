@@ -13,7 +13,7 @@ mod cli_harness;
 use std::io::{BufRead, BufReader};
 use std::process::Child;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cli_harness::*;
 
@@ -36,7 +36,77 @@ fn seed_workspace_with_content(db: &str) -> String {
     assert_success(topo(&["--db", db, "key-frontier", &workspace_id]));
     assert_success(topo(&["--db", db, "send", &workspace_id, "first message"]));
     assert_success(topo(&["--db", db, "send", &workspace_id, "second message"]));
+    settle_runtime_with_daemon(db);
     workspace_id
+}
+
+struct StartedDaemon {
+    db: String,
+    child: Child,
+}
+
+impl Drop for StartedDaemon {
+    fn drop(&mut self) {
+        let _ = topo(&["--db", &self.db, "stop"]);
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_worker_daemon(db: &str) -> StartedDaemon {
+    let port = free_port().to_string();
+    let mut child = spawn_topo(&[
+        "--db",
+        db,
+        "start",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--tick-ms",
+        "25",
+        "--quiet-ms",
+        "25",
+    ]);
+    let stdout = child.stdout.take().expect("daemon stdout");
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
+    }
+    let mut line = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut line)
+        .expect("read daemon ready line");
+    assert!(line.contains("listening:"), "daemon did not start: {line}");
+    StartedDaemon {
+        db: db.to_string(),
+        child,
+    }
+}
+
+fn settle_runtime_with_daemon(db: &str) {
+    let _daemon = spawn_worker_daemon(db);
+    wait_for_runtime_idle(db);
+}
+
+fn wait_for_runtime_idle(db: &str) {
+    let started = Instant::now();
+    let timeout = Duration::from_secs(10);
+    loop {
+        let last = assert_success(topo(&["--db", db, "count"]));
+        let facts: u64 = line_value(&last, "facts").parse().expect("facts count");
+        let applied: u64 = line_value(&last, "applied_facts")
+            .parse()
+            .expect("applied facts count");
+        let pending_intents: u64 = line_value(&last, "pending_intents")
+            .parse()
+            .expect("pending intents count");
+        if facts == applied && pending_intents == 0 {
+            return;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "daemon did not settle runtime queues:\n{last}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn state_hash(db: &str) -> String {
@@ -251,6 +321,7 @@ fn replay_recreates_key_material_idempotently() {
         &workspace_id,
         "secret message",
     ]));
+    wait_for_runtime_idle(&db);
 
     let summary_before = wait_for_area_count_at_least(&db, "key_wrap_rows", 1);
     let key_wrap_before = area_line(&summary_before, "key_wrap_rows");
