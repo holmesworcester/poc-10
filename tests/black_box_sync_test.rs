@@ -123,25 +123,8 @@ fn three_player_sync_through_alice_keeps_workspace_scopes_separate() {
 
     generate(&bob, &workspace_a, 3, 128);
     generate(&carol, &workspace_b, 4, 128);
-    let alice_endpoint = endpoint_id(&alice);
-    sync_range_until_queued(
-        &bob,
-        &alice_endpoint,
-        &workspace_a,
-        "0",
-        "18446744073709551615",
-        true,
-        30_000,
-    );
-    sync_range_until_queued(
-        &carol,
-        &alice_endpoint,
-        &workspace_b,
-        "0",
-        "18446744073709551615",
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&bob, &workspace_a, "0", "18446744073709551615", 30_000);
+    set_sync_range_until_visible(&carol, &workspace_b, "0", "18446744073709551615", 30_000);
 
     wait_for_content_count(&alice, &workspace_a, 3);
     wait_for_content_count(&alice, &workspace_b, 4);
@@ -235,7 +218,7 @@ fn cli_two_long_running_daemons_converge_messages_without_manual_sync() {
 }
 
 #[test]
-fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
+fn cli_sync_setting_range_delivers_transitive_admin_and_message_context() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-range.db");
     let carol = temp_db(&tmp, "carol-range.db");
@@ -255,16 +238,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
         "bob-range",
         "bob-range-phone",
     );
-    let bob_endpoint = endpoint_id(&bob);
-    sync_range_until_queued(
-        &alice,
-        &bob_endpoint,
-        &workspace,
-        "0",
-        "18446744073709551615",
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&alice, &workspace, "0", "18446744073709551615", 30_000);
     poll_for_workspace_member(&bob, &workspace, "bob-range", 10_000);
 
     let removal_frontier_id = create_local_content_key(&alice, &workspace);
@@ -292,16 +266,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
     let accepted_carol =
         accept_with_identity_retry(&carol, &carol_invite, "carol-range", "carol-range-laptop");
     assert_eq!(line_value(&accepted_carol, "workspace_id"), workspace);
-    let carol_endpoint = endpoint_id(&carol);
-    sync_range_until_queued(
-        &alice,
-        &carol_endpoint,
-        &workspace,
-        "0",
-        "18446744073709551615",
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&alice, &workspace, "0", "18446744073709551615", 30_000);
     poll_for_workspace_member(&carol, &workspace, "carol-range", 30_000);
 
     let carol_recipient = assert_success(topo(&["--db", &carol, "key-recipient", &workspace]));
@@ -310,16 +275,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
     drop(alice_daemon);
     wait_for_daemon_lock_release(&alice);
     alice_daemon = spawn_daemon(&alice, alice_port);
-    let alice_endpoint = endpoint_id(&alice);
-    sync_range_until_queued(
-        &carol,
-        &alice_endpoint,
-        &workspace,
-        "0",
-        "18446744073709551615",
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&carol, &workspace, "0", "18446744073709551615", 30_000);
     poll_for_wrap_eligibility(
         &alice,
         &workspace,
@@ -337,15 +293,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
         &carol_user_id,
     ]));
     assert!(!line_value(&carol_admin, "admin_id").is_empty());
-    sync_range_until_queued(
-        &alice,
-        &carol_endpoint,
-        &workspace,
-        "0",
-        "18446744073709551615",
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&alice, &workspace, "0", "18446744073709551615", 30_000);
     poll_for_local_admin(&carol, &workspace, 30_000);
     poll_for_key_access(&carol, &workspace, &removal_frontier_id, "yes", 30_000);
 
@@ -361,15 +309,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
     drop(alice_daemon);
     wait_for_daemon_lock_release(&alice);
     alice_daemon = spawn_daemon(&alice, alice_port);
-    sync_range_until_queued(
-        &carol,
-        &alice_endpoint,
-        &workspace,
-        &message_at,
-        &message_at,
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&carol, &workspace, &message_at, &message_at, 30_000);
     poll_for_message_text(&alice, &workspace, "carol-range-message", 10_000);
 
     let policy_at = message_at
@@ -387,15 +327,7 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
         "120",
     ]));
     assert_eq!(line_value(&policy, "ttl_minutes"), "120");
-    sync_range_until_queued(
-        &carol,
-        &alice_endpoint,
-        &workspace,
-        &policy_at,
-        &policy_at,
-        true,
-        30_000,
-    );
+    set_sync_range_until_visible(&carol, &workspace, &policy_at, &policy_at, 30_000);
     poll_for_disappearing_value(&alice, &workspace, "current_ttl_minutes", "120", 10_000);
     alice_daemon.assert_running();
     carol_daemon.assert_running();
@@ -403,90 +335,15 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
     drop(carol_daemon);
     wait_for_daemon_lock_release(&carol);
 
-    bob_daemon = spawn_daemon_with_sync_ms(&bob, bob_port, 600_000);
-    let policy_materialized_without_deps =
-        if disappearing_value(&bob, &workspace, "current_ttl_minutes") == "120" {
-            true
-        } else {
-            let policy_without = assert_success(topo(&[
-                "--db",
-                &alice,
-                "sync-range",
-                &bob_endpoint,
-                "--workspace",
-                &workspace,
-                "--start-ms",
-                &policy_at,
-                "--end-ms",
-                &policy_at,
-                "--without-deps",
-            ]));
-            assert_eq!(line_value(&policy_without, "deps"), "without");
-            assert_eq!(line_value(&policy_without, "queued"), "yes");
-            thread::sleep(Duration::from_millis(1200));
-            disappearing_value(&bob, &workspace, "current_ttl_minutes") == "120"
-        };
+    bob_daemon = spawn_daemon(&bob, bob_port);
+    let policy_with =
+        set_sync_range_until_visible(&alice, &workspace, &policy_at, &policy_at, 30_000);
+    assert_eq!(line_value(&policy_with, "mode"), "range");
+    poll_for_disappearing_value(&bob, &workspace, "current_ttl_minutes", "120", 10_000);
 
-    let message_materialized_without_deps =
-        if messages_text(&bob, &workspace).contains("carol-range-message") {
-            true
-        } else {
-            let without = assert_success(topo(&[
-                "--db",
-                &alice,
-                "sync-range",
-                &bob_endpoint,
-                "--workspace",
-                &workspace,
-                "--start-ms",
-                &message_at,
-                "--end-ms",
-                &message_at,
-                "--without-deps",
-            ]));
-            assert_eq!(line_value(&without, "deps"), "without");
-            assert_eq!(line_value(&without, "queued"), "yes");
-            thread::sleep(Duration::from_millis(1200));
-            messages_text(&bob, &workspace).contains("carol-range-message")
-        };
-
-    let policy_with = assert_success(topo(&[
-        "--db",
-        &alice,
-        "sync-range",
-        &bob_endpoint,
-        "--workspace",
-        &workspace,
-        "--start-ms",
-        &policy_at,
-        "--end-ms",
-        &policy_at,
-        "--with-deps",
-    ]));
-    assert_eq!(line_value(&policy_with, "deps"), "with");
-    assert_eq!(line_value(&policy_with, "queued"), "yes");
-    if !policy_materialized_without_deps {
-        poll_for_disappearing_value(&bob, &workspace, "current_ttl_minutes", "120", 10_000);
-    }
-
-    let with = assert_success(topo(&[
-        "--db",
-        &alice,
-        "sync-range",
-        &bob_endpoint,
-        "--workspace",
-        &workspace,
-        "--start-ms",
-        &message_at,
-        "--end-ms",
-        &message_at,
-        "--with-deps",
-    ]));
-    assert_eq!(line_value(&with, "deps"), "with");
-    assert_eq!(line_value(&with, "queued"), "yes");
-    if !message_materialized_without_deps {
-        poll_for_message_text(&bob, &workspace, "carol-range-message", 10_000);
-    }
+    let with = set_sync_range_until_visible(&alice, &workspace, &message_at, &message_at, 30_000);
+    assert_eq!(line_value(&with, "mode"), "range");
+    poll_for_message_text(&bob, &workspace, "carol-range-message", 10_000);
     assert_eq!(
         disappearing_value(&bob, &workspace, "current_ttl_minutes"),
         "120"
@@ -496,10 +353,11 @@ fn cli_sync_range_with_deps_delivers_transitive_admin_and_message_context() {
 }
 
 #[test]
-fn cli_two_long_running_daemons_download_multislice_file_via_sync_range() {
+fn cli_two_long_running_daemons_download_multislice_file_via_sync_setting() {
     // This is the poc-10 replacement for the basic simulated download proof:
     // drive only the product CLI plus daemon networking, then assert the peer
-    // can save the exact multi-slice bytes after a normal sync-range dispatch.
+    // can save the exact multi-slice bytes after daemon sync observes the
+    // sender's local sync setting.
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice-file.db");
     let bob = temp_db(&tmp, "bob-file.db");
@@ -551,16 +409,7 @@ fn cli_two_long_running_daemons_download_multislice_file_via_sync_range() {
         in_path.to_str().expect("source path"),
     ]));
     assert_eq!(line_value(&sent, "blob_bytes"), payload.len().to_string());
-    let bob_endpoint = endpoint_id(&bob);
-    sync_range_until_queued(
-        &alice,
-        &bob_endpoint,
-        &workspace,
-        "0",
-        "18446744073709551615",
-        true,
-        60_000,
-    );
+    set_sync_range_until_visible(&alice, &workspace, "0", "18446744073709551615", 60_000);
 
     let listing = poll_for_file_complete(&bob, &workspace, "network-download.bin", 60_000);
     assert!(listing.contains("\u{2714}"), "{listing}");
@@ -1038,44 +887,32 @@ fn poll_for_disappearing_value(
     panic!("disappearing-status {key} did not reach {expected} in {db}; last output:\n{last}");
 }
 
-fn endpoint_id(db: &str) -> String {
-    let identity = assert_success(topo(&["--db", db, "identity"]));
-    line_value(&identity, "endpoint_id")
-}
-
-fn sync_range_until_queued(
+fn set_sync_range_until_visible(
     sender_db: &str,
-    peer_or_connection_id: &str,
     workspace_id: &str,
     start_ms: &str,
     end_ms: &str,
-    include_deps: bool,
     timeout_ms: u64,
 ) -> String {
-    let deps_arg = if include_deps {
-        "--with-deps"
-    } else {
-        "--without-deps"
-    };
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut last = String::new();
     while std::time::Instant::now() < deadline {
         let output = topo(&[
             "--db",
             sender_db,
-            "sync-range",
-            peer_or_connection_id,
-            "--workspace",
-            workspace_id,
+            "sync",
+            "range",
             "--start-ms",
             start_ms,
             "--end-ms",
             end_ms,
-            deps_arg,
         ]);
         if output.status.success() {
             let text = stdout(&output);
-            if line_value(&text, "queued") == "yes" {
+            if line_value(&text, "mode") == "range"
+                && line_value(&text, "start_ms") == start_ms
+                && line_value(&text, "end_ms") == end_ms
+            {
                 return text;
             }
             last = text;
@@ -1084,7 +921,7 @@ fn sync_range_until_queued(
         }
         thread::sleep(Duration::from_millis(250));
     }
-    panic!("sync-range never queued; last error:\n{last}");
+    panic!("sync range setting did not become visible in {sender_db} for {workspace_id}; last output:\n{last}");
 }
 
 fn poll_for_file_complete(

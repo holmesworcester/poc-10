@@ -574,38 +574,20 @@ pub(crate) fn sync_status(
     Ok(sync::shared_fact::cli::sync_status_output(&status))
 }
 
-pub(crate) fn sync_range(
-    ctx: &mut MatchCliContext,
-    args: CliArgs<'_>,
-) -> Result<CliOutput, String> {
-    let parsed = sync::shared_fact::cli::parse_sync_range_args(args)?;
-    let connection_id = ctx
-        .query_store(|store| {
-            sync::shared_fact::connection_id_for_peer_or_connection(
-                store,
-                parsed.workspace_id,
-                parsed.peer_or_connection_id,
-            )
-        })?
-        .ok_or_else(|| "sync-range could not find an authorized connection".to_string())?;
-    ctx.runtime_mut().submit_intent(
-        crate::protocol::connection::send_facts_on_connection::send_shareable_range_on_connection_intent(
-            connection_id,
-            parsed.start_ms,
-            parsed.end_ms,
-            parsed.include_deps,
-        ),
-    )?;
-    Ok(sync::shared_fact::cli::sync_range_output(
-        sync::shared_fact::cli::SyncRangeDispatched {
-            connection_id,
-            workspace_id: parsed.workspace_id,
-            start_ms: parsed.start_ms,
-            end_ms: parsed.end_ms,
-            include_deps: parsed.include_deps,
-            queued: true,
-        },
-    ))
+pub(crate) fn sync(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
+    match sync::local_setting::parse_sync_args(args)? {
+        sync::local_setting::SyncCliCommand::Show => {
+            let setting = ctx.query_store(sync::local_setting::current_setting)?;
+            Ok(sync::local_setting::sync_setting_output(setting.as_ref()))
+        }
+        sync::local_setting::SyncCliCommand::Set(mode) => {
+            let output = ctx.with_command_inputs(|_store, clock| {
+                sync::local_setting::author_setting(clock, mode)
+            })?;
+            let receipt = ctx.submit_and_project(output)?;
+            Ok(sync::local_setting::sync_setting_receipt_output(&receipt))
+        }
+    }
 }
 
 pub(crate) fn content_count(

@@ -1373,25 +1373,12 @@ fn wait_for_key_access(
 }
 
 fn sync_full_range_to_peer(sender: &str, receiver: &str, workspace_id: &str) {
-    let receiver_endpoint = endpoint_id(receiver);
     let mut last = String::new();
     for _ in 0..300 {
-        let output = topo(&[
-            "--db",
-            sender,
-            "sync-range",
-            &receiver_endpoint,
-            "--workspace",
-            workspace_id,
-            "--start-ms",
-            "0",
-            "--end-ms",
-            "18446744073709551615",
-            "--with-deps",
-        ]);
+        let output = topo(&["--db", sender, "sync", "all"]);
         if output.status.success() {
             let out = stdout(&output);
-            if line_value(&out, "queued") == "yes" {
+            if line_value(&out, "mode") == "all" {
                 return;
             }
             last = out;
@@ -1400,12 +1387,7 @@ fn sync_full_range_to_peer(sender: &str, receiver: &str, workspace_id: &str) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("sync-range never queued from {sender} to {receiver_endpoint}: {last}");
-}
-
-fn endpoint_id(db: &str) -> String {
-    let identity = assert_success(topo(&["--db", db, "identity"]));
-    line_value(&identity, "endpoint_id")
+    panic!("sync all setting did not become visible in {sender} before syncing {workspace_id} to {receiver}: {last}");
 }
 
 fn invite_link_from_output(output: &str) -> String {

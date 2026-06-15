@@ -192,6 +192,11 @@ local command-authored facts. That pre-query settle does not consume
 turns own incoming facts, due time wakes, and handler-derived state. Tests that
 observe handler output should run a daemon/worker and assert eventually.
 
+Local operational settings follow the same rule. For example, `sync range`
+authors a local sync-setting fact and projects it before returning; recurring
+daemon sync reads the projected setting and performs compare/have/need/fact-send
+work later. A setting command changes state, not the handler queue.
+
 Network input is staged as core-owned opaque bytes, converted by the daemon
 declaration into an ephemeral protocol intent, and then handled through the
 same intent dispatch path. Network output is produced by protocol handlers as

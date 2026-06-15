@@ -35,7 +35,14 @@ pub fn start_compare_fact_with_summary(
     connection_id: FactId,
     summary: RangeSummary,
 ) -> Result<Fact, String> {
-    let range = TimestampRange::ROOT;
+    start_compare_fact_for_range_with_summary(connection_id, TimestampRange::ROOT, summary)
+}
+
+pub fn start_compare_fact_for_range_with_summary(
+    connection_id: FactId,
+    range: TimestampRange,
+    summary: RangeSummary,
+) -> Result<Fact, String> {
     let compare = SyncCompareFact {
         connection_id,
         range,

@@ -98,13 +98,22 @@ impl IntentHandler for SeedConnectionSyncHandler {
 }
 
 pub fn advertise_connection_shareable_facts(store: &Store, connection_id: FactId) -> HandlerResult {
-    let summary = sync::shared_fact::range_summary_for_connection(
-        store,
+    append_connection_shareable_facts(RuntimeEffects::new(), store, connection_id)
+}
+
+pub fn append_connection_shareable_facts(
+    output: RuntimeEffects,
+    store: &Store,
+    connection_id: FactId,
+) -> HandlerResult {
+    let range = sync::local_setting::active_range(store)?;
+    let summary = sync::shared_fact::range_summary_for_connection(store, connection_id, range)?;
+    let compare = sync::compare::author::start_compare_fact_for_range_with_summary(
         connection_id,
-        sync::compare::fact::TimestampRange::ROOT,
+        range,
+        summary,
     )?;
-    let compare = sync::compare::author::start_compare_fact_with_summary(connection_id, summary)?;
-    Ok(RuntimeEffects::new()
+    Ok(output
         .fact(compare.clone())
         .intent(send_facts_on_connection_intent(SendFactsOnConnection {
             connection_id,
@@ -137,6 +146,10 @@ fn append_live_tail_send(
     connection_id: FactId,
     fact: &Fact,
 ) -> HandlerResult {
+    let active_range = sync::local_setting::active_range(store)?;
+    if !sync::local_setting::contains_timestamp(active_range, fact.timestamp) {
+        return Ok(output);
+    }
     let fact_ids = sync::shared_fact::expand_fact_ids_with_context_for_connection(
         store,
         connection_id,
@@ -155,6 +168,8 @@ mod tests {
     use super::*;
     use crate::core::crypto;
     use crate::core::facts::{FactScope, ScopeKind};
+    use crate::core::intents::RowMutation;
+    use crate::core::project_fact::{ProjectionContext, Projector};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::{self as endpoint_rows, fact::EndpointFact};
@@ -274,6 +289,39 @@ mod tests {
     }
 
     #[test]
+    fn advertise_connection_shareable_facts_uses_local_sync_range_setting() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
+                .expect("store");
+        let connection_id = [8; 32];
+        let range = sync::compare::fact::TimestampRange { start: 10, end: 20 };
+        store
+            .insert_table_rows(vec![connection::connection::connection_row(
+                connection::connection::ConnectionRowFields::without_addresses(
+                    connection_id,
+                    [1; 32],
+                    [2; 32],
+                    [3; 32],
+                    [7; 32],
+                    [8; 32],
+                    [9; 32],
+                ),
+            )
+            .expect("connection row")])
+            .expect("insert rows");
+        project_sync_range_setting(&store, 500, range);
+
+        let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
+
+        assert_eq!(output.facts.len(), 1);
+        let compare = sync::compare::project::decode::decode_fact(&output.facts[0].bytes)
+            .expect("compare fact");
+        assert_eq!(compare.connection_id, connection_id);
+        assert_eq!(compare.range, range);
+        assert!(compare.response_requested);
+    }
+
+    #[test]
     fn live_tail_send_expands_projector_context_for_trigger_fact() {
         let store =
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
@@ -333,6 +381,11 @@ mod tests {
         store.insert_table_rows(rows).expect("seed rows");
         record_share(&store, workspace_id, &context_fact, Vec::new());
         record_share(&store, workspace_id, &owner_fact, vec![context_fact.id]);
+        project_sync_range_setting(
+            &store,
+            500,
+            sync::compare::fact::TimestampRange { start: 20, end: 20 },
+        );
 
         let output =
             append_live_tail_send(RuntimeEffects::new(), &store, connection_id, &owner_fact)
@@ -346,6 +399,16 @@ mod tests {
             .expect("decode send");
         assert_eq!(send.connection_id, connection_id);
         assert_eq!(send.fact_ids, vec![context_fact.id, owner_fact.id]);
+
+        project_sync_range_setting(
+            &store,
+            600,
+            sync::compare::fact::TimestampRange { start: 30, end: 40 },
+        );
+        let out_of_range =
+            append_live_tail_send(RuntimeEffects::new(), &store, connection_id, &owner_fact)
+                .expect("tail out of range");
+        assert!(out_of_range.intents.is_empty());
     }
 
     fn workspace_scope(workspace_id: FactId) -> FactScope {
@@ -368,5 +431,30 @@ mod tests {
             Some(fact),
         )
         .expect("record share");
+    }
+
+    fn project_sync_range_setting(
+        store: &Store,
+        effective_at_ms: u64,
+        range: sync::compare::fact::TimestampRange,
+    ) {
+        let fact = sync::local_setting::setting_fact(
+            effective_at_ms,
+            sync::local_setting::SyncSettingMode::Range(range),
+        )
+        .expect("setting fact");
+        let output = sync::local_setting::SyncLocalSettingProjector::new()
+            .project(&fact, &ProjectionContext::default())
+            .expect("project setting");
+        let rows = output
+            .effects
+            .row_mutations
+            .into_iter()
+            .filter_map(|mutation| match mutation {
+                RowMutation::PutRow(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        store.insert_table_rows(rows).expect("insert setting rows");
     }
 }

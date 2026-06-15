@@ -64,13 +64,19 @@ pub fn decode_connection_row(key: &[u8], value: &[u8]) -> Result<ConnectionRow, 
 
 pub fn answered_request_ids(store: &Store) -> Result<BTreeSet<FactId>, String> {
     let mut answered = BTreeSet::new();
-    for (key, value) in store
-        .table_rows(CONNECTION_ROWS)
-        .map_err(|err| format!("read connection rows: {err}"))?
-    {
-        answered.insert(decode_connection_row(&key, &value)?.request_id);
+    for row in connection_rows(store)? {
+        answered.insert(row.request_id);
     }
     Ok(answered)
+}
+
+pub fn connection_rows(store: &Store) -> Result<Vec<ConnectionRow>, String> {
+    store
+        .table_rows(CONNECTION_ROWS)
+        .map_err(|err| format!("read connection rows: {err}"))?
+        .into_iter()
+        .map(|(key, value)| decode_connection_row(&key, &value))
+        .collect()
 }
 
 pub fn connection_by_id(
@@ -89,11 +95,7 @@ pub fn has_connection_between(
     left_endpoint: FactId,
     right_endpoint: FactId,
 ) -> Result<bool, String> {
-    for (key, value) in store
-        .table_rows(CONNECTION_ROWS)
-        .map_err(|err| format!("read connection rows: {err}"))?
-    {
-        let row = decode_connection_row(&key, &value)?;
+    for row in connection_rows(store)? {
         if (row.from_endpoint == left_endpoint && row.to_endpoint == right_endpoint)
             || (row.from_endpoint == right_endpoint && row.to_endpoint == left_endpoint)
         {

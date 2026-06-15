@@ -190,7 +190,7 @@ generate-fixture
 
 That command could write precomputed facts/projections/sync rows directly, but
 it should not be used as evidence that the normal command/projection path is
-fast. It is useful for network, download, storage, or sync-range scale tests
+fast. It is useful for network, download, storage, or sync-setting scale tests
 where authoring cost is not the subject.
 
 ## Preferred Order

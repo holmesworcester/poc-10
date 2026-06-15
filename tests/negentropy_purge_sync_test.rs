@@ -853,37 +853,19 @@ fn send_message_and_sync_to_peer(
     body: &str,
 ) {
     assert_success(topo(&["--db", sender, "send", workspace_id, body]));
-    let receiver_endpoint = endpoint_id(receiver);
-    sync_range_until_queued(sender, &receiver_endpoint, workspace_id);
+    set_sync_all_until_visible(sender, receiver, workspace_id);
     let suffix = format!("{author}: {body}");
     wait_for_message_text(sender, workspace_id, &suffix);
     wait_for_message_text(receiver, workspace_id, &suffix);
 }
 
-fn endpoint_id(db: &str) -> String {
-    let identity = assert_success(topo(&["--db", db, "identity"]));
-    line_value(&identity, "endpoint_id")
-}
-
-fn sync_range_until_queued(sender: &str, peer_endpoint: &str, workspace_id: &str) {
+fn set_sync_all_until_visible(sender: &str, receiver: &str, workspace_id: &str) {
     let mut last = String::new();
     for _ in 0..300 {
-        let output = topo(&[
-            "--db",
-            sender,
-            "sync-range",
-            peer_endpoint,
-            "--workspace",
-            workspace_id,
-            "--start-ms",
-            "0",
-            "--end-ms",
-            "18446744073709551615",
-            "--with-deps",
-        ]);
+        let output = topo(&["--db", sender, "sync", "all"]);
         if output.status.success() {
             let out = stdout(&output);
-            if line_value(&out, "queued") == "yes" {
+            if line_value(&out, "mode") == "all" {
                 return;
             }
             last = out;
@@ -892,7 +874,7 @@ fn sync_range_until_queued(sender: &str, peer_endpoint: &str, workspace_id: &str
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("sync-range never queued from {sender} to {peer_endpoint}:\n{last}");
+    panic!("sync all setting did not become visible in {sender} before syncing {workspace_id} to {receiver}:\n{last}");
 }
 
 /// Poll until `db` and `other` agree on a stable `root_count` and

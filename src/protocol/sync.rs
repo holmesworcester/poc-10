@@ -17,6 +17,8 @@
 
 pub mod compare;
 pub mod have_id;
+pub mod local_setting;
+pub mod maintain_sync;
 pub mod need_id;
 pub mod range_request;
 pub mod share_fact_with_sync;

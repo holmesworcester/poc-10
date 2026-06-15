@@ -10,14 +10,17 @@ compare/have/need/fact-send work and due time wakes. A secondary goal is fast
 wall-clock display of fact state in a requested range, such as latest messages;
 that requires syncing the range's dependency closure, not only the owner facts
 in the range. The scope owns shareability rows, projector-owned range
-summaries, compare/have/need facts, and sync handler work.
+summaries, compare/have/need facts, local sync-setting facts, and sync handler
+work.
 
 ## Interface To Core
 
 Data enters sync as ordinary sync facts from connection receive paths, as
-sync-owned intents dispatched by core, and from CLI/test commands that create
-range facts. Other scopes may enqueue sync-owned intents as follow-up work, but
-core treats those payloads as opaque queued work.
+sync-owned intents dispatched by core, and from CLI/test commands that author
+local sync-setting facts. The `sync` command does not queue handler work. It
+writes local state; daemon runtime work reads that state and performs ongoing
+sync. Other scopes may enqueue sync-owned intents as follow-up work, but core
+treats those payloads as opaque queued work.
 
 Data leaves sync as:
 
@@ -35,12 +38,14 @@ scope and tag sendability through the owning helpers.
 ## Managed Row State
 
 Sync owns shareable-fact rows, negentropy leaf rows, negentropy context-have
-rows, negentropy node rows, compare rows, have-id rows, and need-id rows. These
-rows are the durable visibility index:
+rows, negentropy node rows, compare rows, have-id rows, need-id rows, and local
+sync-setting rows. The share/negentropy rows are the durable visibility index:
 shareable and leaf rows record which owner facts are eligible to send in a sync
 scope, context-have rows record direct validated dependency facts supplied by
 the owner projector, node rows store deterministic range counts and
-fingerprints, and compare/have/need rows record received control facts.
+fingerprints, and compare/have/need rows record received control facts. Local
+sync-setting rows record one local-only setting fact per command; the active
+setting is the row with the greatest `(effective_at_ms, setting_fact_id)`.
 
 Sync rows are internal planning state. Other scopes enqueue sync work or
 consume sync context; they should not treat sync rows as their admission
@@ -247,8 +252,13 @@ skipping the origin connection that supplied the fact.
 
 `seed_connection_sync` is emitted by `connection` projection after
 `connection` context proves the live connection row exists. It
-computes the root range summary for facts visible on that connection, creates a
-root `compare` fact, and asks connection to send it.
+computes the active configured range summary for facts visible on that
+connection, creates a `compare` fact, and asks connection to send it.
+
+`maintain_sync` is a live-only recurring daemon intent. It scans existing
+connection rows, reads the active local sync setting, and reseeds compare work
+for each connection. This is the ongoing-sync path; user commands influence it
+only by changing projected local state.
 
 `send_sync_compare_response` handles one `compare` fact. It loads connection
 visible shareable facts, computes local summaries for the requested range,
@@ -350,6 +360,23 @@ need_id {
 }
 ```
 
+### `local_setting` (tag 174, local only)
+
+Local-only setting for recurring sync. Projection writes
+`sync_local_setting_rows`, and current-state queries choose the most recent row.
+`mode = all` uses the root timestamp range. `mode = range` limits seed compares
+and live-tail owner selection to the inclusive timestamp interval while still
+expanding selected owners through dependency closure before bytes are sent.
+
+```text
+local_setting {
+  mode: range
+  effective_at_ms: 1715001000000
+  start_ms: 1715000000000
+  end_ms: 1715000999999
+}
+```
+
 ## Example Fact Graph
 
 ```text
@@ -359,7 +386,7 @@ auth/content projector admits message_hello
 
 connection_ab
   -> seed_connection_sync
-  -> compare(root summary)
+  -> compare(active sync-setting range summary)
   -> send_facts_on_connection(compare)
 
 peer compare differs

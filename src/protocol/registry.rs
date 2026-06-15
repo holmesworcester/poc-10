@@ -387,6 +387,11 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             sync::need_id::project::decode::decode_fact,
             sync::need_id::project::authenticate::authenticate
         ),
+        sync::local_setting::TYPE_SYNC_LOCAL_SETTING => authenticate_admission_arm!(
+            fact,
+            sync::local_setting::decode_fact_payload,
+            sync::local_setting::authenticate
+        ),
         connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL => {
             authenticate_admission_arm!(
                 fact,
@@ -469,6 +474,7 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     sync::shared_fact::index::NEGENTROPY_LEAF_ROWS,
     sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
     sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
+    sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
     read_models::MESSAGE_DELETION_ROWS,
     read_models::FILE_DELETION_ROWS,
     content::retention_policy::RETENTION_POLICY_ROWS,
@@ -585,6 +591,7 @@ CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (row_key BLOB PRIMARY KEY NO
 CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sync_negentropy_node_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_local_setting_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_fact_receipt_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 
 CREATE TABLE IF NOT EXISTS message_deletion_rows (
@@ -637,6 +644,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::shared_fact::index::NEGENTROPY_LEAF_ROWS,
         sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
         sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
+        sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
         content::retention_policy::RETENTION_POLICY_ROWS,
     ],
     row_schemas: &[
@@ -658,6 +666,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         sync::compare::SYNC_COMPARE_ROW_SCHEMA,
         sync::have_id::SYNC_HAVE_ID_ROW_SCHEMA,
         sync::need_id::SYNC_NEED_ID_ROW_SCHEMA,
+        sync::local_setting::SYNC_LOCAL_SETTING_ROW_SCHEMA,
         content::retention_policy::RETENTION_POLICY_ROW_SCHEMA,
     ],
     replay: ReplayTables {
@@ -807,11 +816,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         sync::shared_fact::cli::SYNC_STATUS_USAGE,
         sync_status
     ),
-    cli_command!(
-        "sync-range",
-        sync::shared_fact::cli::SYNC_RANGE_USAGE,
-        sync_range
-    ),
+    cli_command!("sync", sync::local_setting::SYNC_USAGE, sync),
     cli_command!(
         "content-count",
         content::message::cli::CONTENT_COUNT_USAGE,
@@ -865,6 +870,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     sync::compare::SYNC_COMPARE_ROWS,
     sync::have_id::SYNC_HAVE_ID_ROWS,
     sync::need_id::SYNC_NEED_ID_ROWS,
+    sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
 ];
 
 pub(crate) fn protocol_projector() -> Box<dyn Projector> {
@@ -949,6 +955,7 @@ projector_routes! {
     project_sync_compare => sync::compare::encode::TYPE_SYNC_COMPARE, sync::compare::project::SyncCompareProjector, sync::compare::project::PROJECTOR_INFO;
     project_sync_have_id => sync::have_id::encode::TYPE_SYNC_HAVE_ID, sync::have_id::project::SyncHaveIdProjector, sync::have_id::project::PROJECTOR_INFO;
     project_sync_need_id => sync::need_id::encode::TYPE_SYNC_NEED_ID, sync::need_id::project::SyncNeedIdProjector, sync::need_id::project::PROJECTOR_INFO;
+    project_sync_local_setting => sync::local_setting::TYPE_SYNC_LOCAL_SETTING, sync::local_setting::SyncLocalSettingProjector, sync::local_setting::PROJECTOR_INFO;
     project_connection_frame_small => connection::frame_small::encode::TYPE_CONNECTION_FRAME_SMALL, connection::frame_small::project::ConnectionFrameSmallProjector, connection::frame_small::project::PROJECTOR_INFO;
     project_connection_frame_file_slice => connection::frame_file_slice::encode::TYPE_CONNECTION_FRAME_FILE_SLICE, connection::frame_file_slice::project::ConnectionFrameFileSliceProjector, connection::frame_file_slice::project::PROJECTOR_INFO;
     project_connection_frame_bundle => connection::frame_bundle::encode::TYPE_CONNECTION_FRAME_BUNDLE, connection::frame_bundle::project::ConnectionFrameBundleProjector, connection::frame_bundle::project::PROJECTOR_INFO;
@@ -1009,6 +1016,17 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
     handler_route!(
         sync::seed_connection::SEED_CONNECTION_SYNC,
         sync::seed_connection::SeedConnectionSyncHandler
+    ),
+    // Sync maintenance is a live-only recurring operational loop. User-facing
+    // sync settings affect it through projected local state.
+    handler_route!(
+        sync::maintain_sync::MAINTAIN_SYNC,
+        sync::maintain_sync::MaintainSyncHandler,
+        recurring = RecurringIntentSpec {
+            interval_ms: 250,
+            initial_delay_ms: 0,
+            build_intent: sync::maintain_sync::build_maintain_sync_intent,
+        }
     ),
     // Connection maintenance is a live-only recurring operational loop. The
     // daemon installs it as an in-memory schedule and fires it on a fixed
