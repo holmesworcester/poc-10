@@ -11,7 +11,7 @@
 //!     rejects regressing the floor when `--floor` is supplied below
 //!     the previous value).
 //!   * `disappearing-status` round-trips the active policy,
-//!     dispatcher chop progress, and message + tombstone counts.
+//!     horizon progress, and message + tombstone counts.
 //!   * `disappearing-tighten --yes` advances the floor and the
 //!     dispatcher then deletes pre-floor messages.
 //!   * `disappearing-compact` advances the floor without touching the
@@ -175,7 +175,7 @@ fn cli_disappearing_status_round_trips_known_setup() {
     assert_eq!(line_value(&status, "live_messages"), "2");
     assert_eq!(line_value(&status, "message_tombstones"), "0");
     assert_eq!(line_value(&status, "leaf_tombstones"), "0");
-    // No daemon ran ⇒ no chop has happened ⇒ "none".
+    // The cover horizon has not advanced, so no horizon floor is reported.
     assert_eq!(line_value(&status, "last_chopped_floor"), "none");
 }
 
@@ -204,8 +204,8 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "stale-2"]));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
 
-    // Spawn the daemon BEFORE the tighten so the dispatcher can pick up
-    // the new floor and chop within the polling window.
+    // Spawn the daemon BEFORE the tighten so projection work runs inside
+    // the polling window.
     let _daemon = spawn_daemon(&alice, alice_port);
 
     // Advance clock to minute 200. Tighten with TTL=5: target floor =
@@ -225,7 +225,7 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
     assert_eq!(line_value(&tighten, "new_floor_minute"), "195");
     assert_eq!(line_value(&tighten, "messages_below_floor"), "2");
 
-    // Wait for the dispatcher to chop. Minute-expiry has likely already
+    // Wait for the retention projection to settle. Minute-expiry has likely already
     // retired the messages (clock = 200 > 100 + 60 = 160), but the
     // tighten's floor advancement is what we're proving end-to-end:
     // `disappearing-status::current_floor_minute` jumps to 195.
@@ -454,50 +454,6 @@ fn cli_sync_status_reports_changed_root_after_expiry() {
         post_count + 3 <= pre_count,
         "root count must drop by at least the 3 expired messages: pre={pre_count}, post={post_count}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// Test 8: `chop-now` runs ChopTimeTreePrefix on the workspace's most
-// recent frontier and prints the report. We verify that supplying a
-// non-zero floor produces at least one tombstone (subtree or boundary
-// descend).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_chop_now_reports_non_zero_tombstones_for_non_zero_floor() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-
-    let workspace_id = create_workspace_with_ttl(&alice, "ChopNow", "alice", "alice-laptop", 5);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
-
-    let chop = assert_success(topo(&["--db", &alice, "chop-now", &workspace_id, "100"]));
-    assert_eq!(line_value(&chop, "floor_minute"), "100");
-    let subtree: u64 = line_value(&chop, "subtree_tombstones_written")
-        .parse()
-        .expect("parse subtree");
-    let boundary: u64 = line_value(&chop, "boundary_descend_tombstones_written")
-        .parse()
-        .expect("parse boundary");
-    assert!(
-        subtree + boundary > 0,
-        "non-zero floor must produce at least one tombstone:\n{chop}"
-    );
-    // The rest of the report fields must at least be present and
-    // parseable — they're surfaced for diagnostic use, so we just smoke
-    // them to catch typos in the output schema.
-    let _: u64 = line_value(&chop, "right_side_siblings_materialized")
-        .parse()
-        .expect("parse siblings");
-    let _: u64 = line_value(&chop, "purged_secret_bytes")
-        .parse()
-        .expect("parse purged bytes");
-    let _: u64 = line_value(&chop, "subsumed_message_tombstones_gcd")
-        .parse()
-        .expect("parse gcd msg ts");
-    let _: u64 = line_value(&chop, "subsumed_leaf_tombstones_gcd")
-        .parse()
-        .expect("parse gcd leaf ts");
 }
 
 // ---------------------------------------------------------------------------
