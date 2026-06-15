@@ -2,7 +2,7 @@
 
 Status: implemented in this worktree. The active runtime no longer has a
 `pipeline.rs` facade; `project_fact.rs` and `handle_intent.rs` own the n=1 work
-items, and incoming network frames enter as candidate facts that can be retained
+items, and incoming network frames enter as incoming facts that can be retained
 while waiting on context.
 
 ## Goal
@@ -126,7 +126,7 @@ fn submit_authored_command<T>(cmd: AuthoredCommand<T>) -> Result<T, String> {
 ```
 
 Command-created facts are retained immediately. They never enter the volatile
-incoming candidate store.
+incoming incoming store.
 
 ## Command Chains
 
@@ -168,14 +168,14 @@ Network/sync/handler-arrived facts enter as volatile candidates:
 ```rust
 fn submit_incoming_fact(fact: Fact) -> Result<(), String> {
     store.write_transaction(|tx| {
-        tx.insert_candidate_fact(&fact)?;
+        tx.insert_incoming_fact(&fact)?;
         enqueue_candidate_projection(tx, fact.id)?;
         Ok(())
     })
 }
 ```
 
-Candidate facts may be lost before projection. Once projected, a projector
+Incoming facts may be lost before projection. Once projected, a projector
 decides whether a candidate should become retained, dropped, or retained while
 parked on standing context needs. Network frame candidates use that last path
 when observation, connection, or key material context has not arrived yet.
@@ -240,7 +240,7 @@ Sketch:
 
 ```rust
 fn commit_projection(tx: &Store, input: ProjectionInput, output: ProjectionOutput) -> Result<()> {
-    retain_or_drop_candidate(tx, &input, output.retain_self)?;
+    retain_or_drop_incoming(tx, &input, output.retain_self)?;
 
     if input.is_retained_after_commit() {
         commit_context_and_requeue_matches(tx, input.fact.id, output.context_set())?;
@@ -296,7 +296,7 @@ Each projector owns the full local meaning of its fact:
 - inspect supplied context,
 - emit missing needs,
 - validate present offers,
-- decide candidate retention,
+- decide incoming retention,
 - decide replay behavior from `ProjectionContext::mode()`,
 - decide when to purge/delete itself,
 - emit offers, time wakes, rows, child facts, and intents.
@@ -342,7 +342,7 @@ shared commit machinery.
 
 - transaction helpers,
 - retained fact primitives,
-- candidate fact primitives,
+- incoming fact primitives,
 - typed protocol row insert/delete,
 - opaque row primitives if still needed,
 - validated table clearing primitives.
@@ -351,12 +351,12 @@ Good store methods are primitive:
 
 ```rust
 insert_retained_fact
-insert_candidate_fact
-move_candidate_to_retained
+insert_incoming_fact
+move_incoming_to_retained
 load_retained_fact
-load_candidate_fact
+load_incoming_fact
 purge_retained_fact
-delete_candidate_fact
+delete_incoming_fact
 insert_values
 delete_where
 delete_all_rows
@@ -429,7 +429,7 @@ fn wipe_derived_state(tx: &Store, schema: &ProtocolSchema) -> Result<()> {
 }
 ```
 
-Retained facts are the durable protocol truth and survive replay. Candidate
+Retained facts are the durable protocol truth and survive replay. Incoming
 facts, pending queues, context edges, time wakes, intent queues, and derived
 protocol rows are wiped. Local runtime metadata needed to run the database,
 such as schema and replay lifecycle rows, may also survive, but it is not

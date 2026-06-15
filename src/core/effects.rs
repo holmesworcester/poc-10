@@ -3,7 +3,7 @@
 //! Projection and intent handlers reduce to this structure before the SQL
 //! runtime workers commit their output. The structure is intentionally mechanical: it
 //! names facts to admit, facts to purge, row mutations, durable intents,
-//! ephemeral intents, and candidate facts. It does not contain
+//! ephemeral intents, and outside-origin incoming facts. It does not contain
 //! callbacks, open sockets, command receipts, or protocol-specific execution
 //! state.
 //!
@@ -19,8 +19,8 @@ use crate::core::intents::{Intent, RowMutation};
 pub struct RuntimeEffects {
     /// New facts to admit and mark pending for projection.
     pub facts: Vec<Fact>,
-    /// Runtime-local projectable inputs that should not enter durable facts.
-    pub candidate_facts: Vec<Fact>,
+    /// Outside-origin projectable inputs that are not durable until projection retains them.
+    pub incoming_facts: Vec<Fact>,
     /// Existing facts to remove with their derived core-owned rows.
     pub purged_facts: Vec<FactId>,
     /// Protocol or core table mutations validated against the runtime allowlist.
@@ -38,7 +38,7 @@ impl RuntimeEffects {
 
     pub fn is_empty(&self) -> bool {
         self.facts.is_empty()
-            && self.candidate_facts.is_empty()
+            && self.incoming_facts.is_empty()
             && self.purged_facts.is_empty()
             && self.row_mutations.is_empty()
             && self.intents.is_empty()
@@ -50,8 +50,8 @@ impl RuntimeEffects {
         self
     }
 
-    pub fn candidate_fact(mut self, fact: Fact) -> Self {
-        self.candidate_facts.push(fact);
+    pub fn incoming_fact(mut self, fact: Fact) -> Self {
+        self.incoming_facts.push(fact);
         self
     }
 

@@ -2,7 +2,7 @@
 //!
 //! Replay rebuilds all non-fact runtime state from retained facts. It is the
 //! mechanism behind a safe upgrade: queued intents, projected rows, standing
-//! context, time wakes, candidate inputs, network queues, and local clock state
+//! context, time wakes, incoming inputs, network queues, and local clock state
 //! are not protocol truth, so a process can drop them and reproject retained
 //! facts to recover read-model rows, standing context, semantic time wakes,
 //! sync indexes, and key material. The same entry point backs the

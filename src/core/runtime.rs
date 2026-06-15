@@ -517,6 +517,34 @@ mod tests {
     }
 
     #[test]
+    fn command_output_retains_facts_and_queues_projection_without_incoming() {
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let fact = Fact::new(FactScope::Global, 7, b"command-produced-fact".to_vec());
+
+        runtime
+            .submit_command_output(CommandOutput::new(()).with_facts(vec![fact.clone()]))
+            .expect("submit command output");
+
+        assert!(
+            runtime.facts().any(|stored| stored == fact),
+            "command-authored fact should be retained immediately"
+        );
+        assert_eq!(
+            runtime.pending_fact_count(),
+            1,
+            "command-authored fact should be queued for projection"
+        );
+        assert_eq!(
+            runtime
+                .store()
+                .table_row_count(crate::core::schema::INCOMING_FACTS)
+                .expect("incoming count"),
+            0,
+            "command-authored facts should not pass through incoming intake"
+        );
+    }
+
+    #[test]
     fn command_output_rejects_facts_that_fail_runtime_admission() {
         let mut runtime = Runtime::open_memory(&ADMISSION_RUNTIME).expect("runtime");
         let rejected = Fact::new(FactScope::Global, 7, b"!bad".to_vec());

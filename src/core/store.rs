@@ -35,7 +35,7 @@ use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::project_fact::ProjectionMode;
 use crate::core::row_schema::RowTableSchema;
 use crate::core::schema::{
-    CANDIDATE_FACTS, CONTEXT_EDGES, FACTS, INTENTS, LOCAL_FACT_ADMISSIONS, LOCAL_INTENTS,
+    CONTEXT_EDGES, FACTS, INCOMING_FACTS, INTENTS, LOCAL_FACT_ADMISSIONS, LOCAL_INTENTS,
     PENDING_PROJECTION, PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
 };
 use crate::core::wire::Writer;
@@ -868,7 +868,7 @@ impl Store {
 // operations should happen.
 //
 // Store is allowed to know the protocol-neutral `Fact` shape, local admission
-// columns, candidate rows, and projection queue links. It must not decode fact
+// columns, incoming rows, and projection queue links. It must not decode fact
 // bytes or branch on protocol-specific fact types, fact families, or payload
 // tags.
 //
@@ -945,16 +945,25 @@ pub(crate) fn insert_pending_owner_with_mode_in_tx(
     )
 }
 
-/// Insert a runtime-local projectable input.
+/// Insert an outside-origin projectable input.
 ///
-/// Candidate facts use the `Fact` container for id, scope, timestamp, and
+/// Incoming facts use the `Fact` container for id, scope, timestamp, and
 /// bytes, but they are not inserted into durable `facts` or
 /// `local_fact_admissions`. Projection may read durable context and emit durable
 /// facts, then the input row is removed when projection commits.
-pub(crate) fn insert_candidate_fact_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
+pub(crate) fn insert_incoming_fact_in_tx(store: &Store, fact: &Fact) -> rusqlite::Result<bool> {
+    if let Some(bytes) = fact_bytes_by_id_in_tx(store, &fact.id)? {
+        if bytes == fact.bytes {
+            return Ok(false);
+        }
+        return Err(rusqlite::Error::InvalidParameterName(
+            "conflicting retained row for incoming fact".to_string(),
+        ));
+    }
+
     let (scope, scope_kind, scope_id) = fact_scope_columns(&fact.scope);
     let changed = store.conn().execute(
-        "INSERT OR IGNORE INTO candidate_facts
+        "INSERT OR IGNORE INTO incoming_facts
             (id, scope, scope_kind, scope_id, received_at, bytes)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
@@ -962,39 +971,39 @@ pub(crate) fn insert_candidate_fact_in_tx(store: &Store, fact: &Fact) -> rusqlit
             scope,
             scope_kind,
             scope_id.as_slice(),
-            sqlite_u64(fact.timestamp, "candidate fact received_at")?,
+            sqlite_u64(fact.timestamp, "incoming fact received_at")?,
             fact.bytes.as_slice()
         ],
     )?;
     if changed == 0 {
-        let existing = candidate_fact_by_id_in_tx(store, &fact.id)?;
+        let existing = incoming_fact_by_id_in_tx(store, &fact.id)?;
         if existing.as_ref() != Some(fact) {
             return Err(rusqlite::Error::InvalidParameterName(
-                "conflicting row for candidate fact".to_string(),
+                "conflicting row for incoming fact".to_string(),
             ));
         }
     }
     Ok(changed > 0)
 }
 
-pub(crate) fn delete_candidate_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
+pub(crate) fn delete_incoming_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result<bool> {
     let mut changed =
-        store.delete_rows_by_blob_column_in_tx(CANDIDATE_FACTS, "id", owner.as_slice())? > 0;
+        store.delete_rows_by_blob_column_in_tx(INCOMING_FACTS, "id", owner.as_slice())? > 0;
     changed |= store.delete_rows_by_owner_in_tx(PENDING_PROJECTION_MATCHES, owner)? > 0;
     Ok(changed)
 }
 
-/// Move a volatile candidate into the retained fact table without requeueing it.
+/// Move a volatile incoming fact into the retained fact table without requeueing it.
 ///
-/// Projection has already consumed this candidate item; retaining it should make
+/// Projection has already consumed this incoming item; retaining it should make
 /// its bytes and local admission visible, but must not create a second initial
 /// pending-projection row for the same fact.
-pub(crate) fn move_candidate_to_retained_in_tx(
+pub(crate) fn move_incoming_to_retained_in_tx(
     store: &Store,
     fact: &Fact,
 ) -> rusqlite::Result<bool> {
     let retained = insert_retained_fact_in_tx(store, fact)?;
-    delete_candidate_fact_in_tx(store, fact.id)?;
+    delete_incoming_fact_in_tx(store, fact.id)?;
     Ok(retained)
 }
 
@@ -1118,12 +1127,12 @@ pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
         .map_err(|err| format!("load fact rows: {err}"))
 }
 
-pub(crate) fn candidate_pending_fact_ids(
+pub(crate) fn incoming_pending_fact_ids(
     store: &Store,
     limit: usize,
 ) -> Result<Vec<FactId>, String> {
-    let limit = i64::try_from(limit).map_err(|_| "candidate fact limit exceeds i64".to_string())?;
-    let candidate_facts = quoted_table_name(CANDIDATE_FACTS).map_err(|err| err.to_string())?;
+    let limit = i64::try_from(limit).map_err(|_| "incoming fact limit exceeds i64".to_string())?;
+    let incoming_facts = quoted_table_name(INCOMING_FACTS).map_err(|err| err.to_string())?;
     let context_edges = quoted_table_name(CONTEXT_EDGES).map_err(|err| err.to_string())?;
     let mut stmt = store
         .conn()
@@ -1152,21 +1161,21 @@ pub(crate) fn candidate_pending_fact_ids(
             ORDER BY e.received_at, e.id
             LIMIT ?1
             "#,
-            ephemeral = candidate_facts,
+            ephemeral = incoming_facts,
             context = context_edges,
         ))
-        .map_err(|err| format!("load candidate facts: {err}"))?;
+        .map_err(|err| format!("load incoming facts: {err}"))?;
     let rows = stmt
         .query_map(params![limit], |row| {
-            fact_id_column(row.get::<_, Vec<u8>>(0)?, "candidate id")
+            fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")
         })
-        .map_err(|err| format!("load candidate facts: {err}"))?;
+        .map_err(|err| format!("load incoming facts: {err}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("load candidate facts: {err}"))
+        .map_err(|err| format!("load incoming facts: {err}"))
 }
 
-pub(crate) fn candidate_fact_by_id(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
-    candidate_fact_by_id_in_tx(store, id).map_err(|err| format!("load candidate fact: {err}"))
+pub(crate) fn incoming_fact_by_id(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
+    incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
 }
 
 fn fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
@@ -1184,12 +1193,12 @@ fn fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>
         .optional()
 }
 
-fn candidate_fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
+fn incoming_fact_by_id_in_tx(store: &Store, id: &FactId) -> rusqlite::Result<Option<Fact>> {
     store
         .conn()
         .query_row(
             "SELECT id, scope, scope_kind, scope_id, received_at, bytes
-             FROM candidate_facts
+             FROM incoming_facts
              WHERE id = ?1
              LIMIT 1",
             params![id.as_slice()],

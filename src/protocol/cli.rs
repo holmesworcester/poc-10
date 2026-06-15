@@ -301,7 +301,7 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     let args = auth::key_wrap::cli::key_node_args(args)?;
     ctx.settle_local_command_work()?;
     let output = auth::key_wrap::commands::create_history_node(
-        ctx.runtime(),
+        ctx.runtime().store(),
         auth::key_wrap::commands::CreateHistoryNode {
             created_at_ms: SystemClock.next_timestamp(),
             workspace_id: args.workspace_id,

@@ -476,8 +476,9 @@ pub(crate) struct IntentDispatchReport {
 mod tests {
     use super::*;
     use crate::core::effects::RuntimeEffects;
+    use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{retry_intent, HandlerResult, IntentKind};
-    use crate::core::schema::CORE_SCHEMA_SOURCE;
+    use crate::core::schema::{CORE_SCHEMA_SOURCE, INCOMING_FACTS, PENDING_PROJECTION};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static RETRY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -551,6 +552,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn handler_fact_effects_are_retained_and_queued_without_incoming() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        submit_intent_to_table(&store, INTENTS, test_intent("emits_fact", b"emit-key"))
+            .expect("submit durable");
+
+        let progress = dispatch_intents(
+            &store,
+            &HandlerSet::new(EMIT_FACT_ROUTES),
+            &[],
+            None,
+            1,
+            HandlerMode::Live,
+            RuntimeEffectMode::Live,
+        )
+        .expect("dispatch durable intent");
+
+        let fact = emitted_fact();
+        assert_eq!(progress.dispatched, 1);
+        assert!(progress.status.progressed);
+        assert_eq!(
+            persisted_fact(&store, &fact.id).expect("load emitted fact"),
+            Some(fact),
+            "intent-created fact should be retained immediately"
+        );
+        assert_eq!(
+            store
+                .table_row_count(PENDING_PROJECTION)
+                .expect("pending projection count"),
+            1,
+            "intent-created fact should be queued for projection"
+        );
+        assert_eq!(
+            store
+                .table_row_count(INCOMING_FACTS)
+                .expect("incoming count"),
+            0,
+            "intent-created facts should not pass through incoming intake"
+        );
+    }
+
     struct NoopHandler;
 
     const NOOP_ROUTES: &[HandlerRoute] = &[HandlerRoute {
@@ -564,6 +607,13 @@ mod tests {
         name: "retrying",
         intent_kind: "retrying",
         factory: retry_handler,
+        recurrence: None,
+    }];
+
+    const EMIT_FACT_ROUTES: &[HandlerRoute] = &[HandlerRoute {
+        name: "emits_fact",
+        intent_kind: "emits_fact",
+        factory: emit_fact_handler,
         recurrence: None,
     }];
 
@@ -582,12 +632,32 @@ mod tests {
         }
     }
 
+    struct EmitFactHandler;
+
+    impl IntentHandler for EmitFactHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            Ok(RuntimeEffects::new().fact(emitted_fact()))
+        }
+    }
+
     fn noop_handler() -> Box<dyn IntentHandler> {
         Box::new(NoopHandler)
     }
 
     fn retry_handler() -> Box<dyn IntentHandler> {
         Box::new(RetryHandler)
+    }
+
+    fn emit_fact_handler() -> Box<dyn IntentHandler> {
+        Box::new(EmitFactHandler)
+    }
+
+    fn emitted_fact() -> Fact {
+        Fact::new(
+            FactScope::Local,
+            77,
+            b"handler-produced-durable-fact".to_vec(),
+        )
     }
 
     fn test_intent(kind: &'static str, key: &[u8]) -> Intent {
