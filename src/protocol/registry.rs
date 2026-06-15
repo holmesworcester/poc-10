@@ -751,7 +751,6 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!("key-node", auth::key_wrap::cli::KEY_NODE_USAGE, key_node),
     cli_command!("keys", auth::key_wrap::cli::KEYS_USAGE, keys),
-    cli_command!("chop-now", auth::key_wrap::cli::CHOP_NOW_USAGE, chop_now),
     cli_command!(
         "disappearing-set",
         content::retention_policy::cli::DISAPPEARING_SET_USAGE,

@@ -80,6 +80,23 @@ fn con_negentropy_drain_is_not_registered() {
 }
 
 #[test]
+fn con_chop_now_is_not_registered() {
+    let output = con_cli(&["chop-now"]);
+
+    assert!(
+        !output.status.success(),
+        "`chop-now` should not remain as a product CLI command"
+    );
+    let stderr = cli_harness::stderr(&output);
+    assert!(
+        stderr.contains("unknown command `chop-now`")
+            && stderr.contains("con --db PATH disappearing-set WORKSPACE_ID_HEX TTL_MINUTES [--floor MINUTE]")
+            && !stderr.contains("con --db PATH chop-now"),
+        "`chop-now` should be rejected while retention-floor commands remain available; got:\n{stderr}"
+    );
+}
+
+#[test]
 fn con_cascade_fixture_commands_are_not_registered() {
     for command in ["test-generate-deps", "test-replay-deps-reverse"] {
         let output = con_cli(&[command]);
