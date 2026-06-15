@@ -2162,11 +2162,18 @@ fn target_schema_substrate_stays_protocol_neutral() {
     let production = production_text_before_unit_tests(&text);
     let mut offenders = Vec::new();
 
+    // Store owns mechanical SQL row shapes, including the raw durable/local
+    // work-row substrate. It must not depend on semantic protocol, projection,
+    // context, or handler types.
     for forbidden in [
         "crate::protocol",
         "crate::legacy::protocol",
         "crate::legacy::workers",
-        "Intent",
+        "crate::core::intents",
+        "Intent::",
+        "IntentKind",
+        "IntentHandler",
+        "HandlerContext",
         "ProjectionOutput",
         "ContextNeed",
         "ContextOffer",

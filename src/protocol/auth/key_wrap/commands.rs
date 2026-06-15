@@ -3,6 +3,9 @@
 //! These commands are the local entry points for creating recipient keys,
 //! removal frontiers, history nodes, and key wraps. They read projected auth
 //! state, construct facts, and return receipts suitable for CLI output.
+//!
+//! The history-node chop path is a multi-phase runtime workflow and should move out of this file.
+//! Core still needs a workflow host for command-facing sequences before it can move.
 
 use crate::core::command::CommandOutput;
 use crate::core::crypto;

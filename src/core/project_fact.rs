@@ -1,10 +1,22 @@
 //! One queued fact projection item.
 //!
-//! One item loads one fact, any matched payload facts, and due time ranges.
-//! It then runs the routed protocol projector. The projector may decode raw
-//! bytes, validate context, park on needs, and emit effects or offers. Core
-//! resolves newly declared needs that already match stored offers and commits
-//! the settled output once.
+//! The projection loop is intentionally a one-item pipeline:
+//!
+//! 1. Select pending durable fact ids first; if the durable pass leaves budget,
+//!    select candidate fact ids.
+//! 2. Load one pending item: the fact bytes, its previous standing context,
+//!    matched context payloads that woke it, and any due time ranges.
+//! 3. Run the routed protocol projector once against that loaded snapshot.
+//! 4. Normalize and validate the output as this fact's complete replacement
+//!    projection state.
+//! 5. Commit the item in one transaction, consuming the queue row and making
+//!    context, time wakes, row mutations, purges, child facts, and follow-up
+//!    intents visible together.
+//!
+//! That item boundary is the important unit. The loop never holds hidden
+//! cross-item state: child facts and newly satisfied dependents are written back
+//! to the same pending queues, then drained by later iterations like any other
+//! item.
 //!
 //! Projection commits are the only path from fact bytes to standing context,
 //! read-model rows, time wakes, purges, and follow-up work. For a durable fact,
@@ -43,6 +55,11 @@ use crate::core::store::{Store, TableName};
 use rusqlite::params;
 
 /// Run and commit one queued projection item.
+///
+/// The caller has already selected an id and loaded the pending item. This
+/// function owns the rest of the item lifecycle: run the projector against that
+/// snapshot, validate the effects before SQL, consume or drop rejected work, and
+/// commit accepted output atomically.
 ///
 /// Projection rejection consumes the queued item according to its source:
 /// durable facts keep their bytes and lose only their queued work; candidate
@@ -3375,6 +3392,13 @@ pub(crate) fn submit_command_output_to_store<T>(
 }
 
 /// Drive one bounded projection drain pass.
+///
+/// Each pass is a loop over independent projection items. Durable pending facts
+/// are loaded first for deterministic retained-state rebuilds. Candidate facts
+/// use only leftover budget because they are speculative inputs that either
+/// retain themselves or disappear. A committed item may enqueue child facts or
+/// wake dependents, so the outer loop keeps asking for new items until the pass
+/// spends its budget or a full durable-plus-candidate scan makes no progress.
 pub(crate) fn drain_projection(
     store: &Store,
     projector: &(impl Projector + ?Sized),
@@ -3433,6 +3457,11 @@ pub(crate) fn drain_projection(
     Ok(total)
 }
 
+/// Process a concrete batch of pending projection ids one item at a time.
+///
+/// The batch is only a list of ids. Each iteration reloads the current fact and
+/// context before projection, removes stale queue rows whose facts disappeared,
+/// and delegates the item boundary to `process_projection_item`.
 fn drain_projection_items(
     store: &Store,
     projector: &(impl Projector + ?Sized),

@@ -8,12 +8,25 @@
 //! keeps commands, projection, network IO, and background maintenance on the
 //! same idempotent queue model.
 //!
-//! Dispatch owns the lifecycle of one queued intent row. It chooses the next
-//! row for a registered kind, loads only the facts requested by the handler,
-//! and calls the handler. On success it opens the transaction that deletes the
-//! handled row, then delegates the handler's `RuntimeEffects` to
-//! `commit_effects` inside that same transaction. Retry errors deliberately
-//! leave the row queued.
+//! The dispatch loop is intentionally a one-item pipeline:
+//!
+//! 1. Build the set of registered handler kinds for this pass.
+//! 2. Select the next queued row for one of those kinds, checking the durable
+//!    queue before the local ephemeral queue.
+//! 3. Attach the registered handler to that row.
+//! 4. Load only the persisted facts the handler declares for this intent.
+//! 5. Run the handler once against that bounded context.
+//! 6. On success, validate and commit the handler output in the same
+//!    transaction that deletes the handled row.
+//! 7. On retry, make no output visible and leave the row queued. Local retries
+//!    rotate to the tail so other local rows can make one attempt in the same
+//!    bounded pass; durable retries stop the pass so deterministic order is
+//!    preserved.
+//!
+//! That item boundary is the important unit. Dispatch has no hidden protocol
+//! state between rows: any child facts, row mutations, purges, or follow-up
+//! intents become visible only through the shared `RuntimeEffects` commit path,
+//! then later loops drain the work those effects queued.
 //!
 //! This transaction boundary is why dispatch matters. A handler output is
 //! visible exactly when its input queue row is consumed: no output without
@@ -291,9 +304,14 @@ struct IntentWork<'a> {
 
 /// Run one claimed intent through its handler.
 ///
-/// On success, the handled row and all effects admitted by the intent policy
-/// commit together. On retry, no SQL changes are made and the returned status
-/// records that dispatch should stop this bounded pass.
+/// The caller has selected a queue row and attached its handler. This function
+/// owns the rest of the item lifecycle: load the declared fact inputs, run the
+/// handler once, suppress follow-up intents disallowed by the current runtime
+/// mode, validate effects, and commit accepted output with queue deletion.
+///
+/// On retry, no output is committed. Local retry rows are moved to the tail so
+/// the current bounded pass can try other local work once; durable retry rows
+/// remain in stable order and stop the pass.
 fn handle_intent_with_policy(
     work: IntentWork<'_>,
     store: &Store,
@@ -333,6 +351,13 @@ fn handle_intent_with_policy(
 }
 
 /// Dispatch queued intents with the provided handler set.
+///
+/// This is the bounded pass around the one-intent item lifecycle. Each
+/// iteration selects one row for a registered kind, sends it through
+/// `handle_intent_with_policy`, accumulates progress, then decides whether the
+/// pass may continue. Successful items count as dispatched. Durable retries stop
+/// the pass; local retries rotate and continue until the same local identity
+/// would be retried twice in one pass.
 ///
 /// The policy decides which follow-up intents emitted by handlers may be
 /// recorded; inadmissible ones are suppressed and counted.
