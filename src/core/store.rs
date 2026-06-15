@@ -32,7 +32,9 @@
 //! conservative identifier check.
 
 use crate::core::row_schema::RowTableSchema;
-use rusqlite::{params, types::ValueRef, Connection as SqliteConnection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, types::ValueRef, Connection as SqliteConnection, OptionalExtension,
+};
 use std::path::Path;
 use std::time::Duration;
 
@@ -156,6 +158,41 @@ pub struct TableRow {
     pub value: Vec<u8>,
 }
 
+/// One raw row in the durable or local intent work table.
+///
+/// Store owns the idempotent SQL shape for these rows. `core::intents` owns
+/// converting between this mechanical form and an `Intent`, and
+/// `handle_intent` owns queue precedence, retry, and handler semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntentWorkRow {
+    pub(crate) kind: String,
+    pub(crate) idempotence_key: Vec<u8>,
+    pub(crate) payload: Vec<u8>,
+}
+
+impl IntentWorkRow {
+    pub(crate) fn new(
+        kind: impl Into<String>,
+        idempotence_key: impl Into<Vec<u8>>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            idempotence_key: idempotence_key.into(),
+            payload: payload.into(),
+        }
+    }
+}
+
+/// Ordering policy for selecting the next raw intent work row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntentWorkRowOrder {
+    /// Stable identity order for durable, replayable work.
+    StableIdentity,
+    /// SQLite insertion order for process-local ephemeral work.
+    Insertion,
+}
+
 fn store_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
@@ -176,6 +213,19 @@ fn unique_table_names<'a>(tables: impl IntoIterator<Item = &'a TableName>) -> Ve
         }
     }
     unique
+}
+
+fn intent_work_table_name(table: TableName) -> rusqlite::Result<&'static str> {
+    if table == crate::core::schema::INTENTS {
+        Ok("\"intents\"")
+    } else if table == crate::core::schema::LOCAL_INTENTS {
+        Ok("\"local_intents\"")
+    } else {
+        Err(store_error(format!(
+            "table {} is not an intent work table",
+            table.as_str()
+        )))
+    }
 }
 
 fn validate_replay_lifecycle(protected: &[TableName], reset: &[TableName]) -> rusqlite::Result<()> {
@@ -576,6 +626,114 @@ impl Store {
         rows.collect()
     }
 
+    /// Insert one raw intent work row idempotently inside the caller's transaction.
+    pub(crate) fn insert_intent_work_row_in_tx(
+        &self,
+        table: TableName,
+        row: &IntentWorkRow,
+    ) -> rusqlite::Result<bool> {
+        let table_name = intent_work_table_name(table)?;
+        let changed = self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {table_name} (kind, idempotence_key, payload)
+                 VALUES (?1, ?2, ?3)"
+            ),
+            params![
+                row.kind.as_str(),
+                row.idempotence_key.as_slice(),
+                row.payload.as_slice()
+            ],
+        )?;
+        if changed == 0 {
+            let existing = self
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT payload
+                         FROM {table_name}
+                         WHERE kind = ?1 AND idempotence_key = ?2"
+                    ),
+                    params![row.kind.as_str(), row.idempotence_key.as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            if existing.as_deref() != Some(row.payload.as_slice()) {
+                return Err(store_error(format!(
+                    "conflicting intent row for {}",
+                    row.kind
+                )));
+            }
+        }
+        Ok(changed > 0)
+    }
+
+    /// Delete one raw intent work row by its idempotent queue identity.
+    pub(crate) fn delete_intent_work_row_in_tx(
+        &self,
+        table: TableName,
+        kind: &str,
+        idempotence_key: &[u8],
+    ) -> rusqlite::Result<usize> {
+        let table_name = intent_work_table_name(table)?;
+        self.conn.execute(
+            &format!("DELETE FROM {table_name} WHERE kind = ?1 AND idempotence_key = ?2"),
+            params![kind, idempotence_key],
+        )
+    }
+
+    /// Move a local raw intent row to the end of insertion order.
+    pub(crate) fn rotate_intent_work_row_to_tail_in_tx(
+        &self,
+        table: TableName,
+        row: &IntentWorkRow,
+    ) -> rusqlite::Result<bool> {
+        if self.delete_intent_work_row_in_tx(table, &row.kind, &row.idempotence_key)? == 0 {
+            return Ok(false);
+        }
+        self.insert_intent_work_row_in_tx(table, row)?;
+        Ok(true)
+    }
+
+    /// Select the next raw intent work row for any allowed handler kind.
+    pub(crate) fn next_intent_work_row(
+        &self,
+        table: TableName,
+        allowed_kinds: &[&str],
+        order: IntentWorkRowOrder,
+    ) -> rusqlite::Result<Option<IntentWorkRow>> {
+        if allowed_kinds.is_empty() {
+            return Ok(None);
+        }
+        let table_name = intent_work_table_name(table)?;
+        let order = match order {
+            IntentWorkRowOrder::StableIdentity => "kind, idempotence_key",
+            IntentWorkRowOrder::Insertion => "rowid",
+        };
+        let placeholders = (1..=allowed_kinds.len())
+            .map(|idx| format!("?{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT kind, idempotence_key, payload
+                     FROM {table_name}
+                     WHERE kind IN ({placeholders})
+                     ORDER BY {order}
+                     LIMIT 1"
+                ),
+                params_from_iter(allowed_kinds.iter().copied()),
+                |row| {
+                    Ok(IntentWorkRow {
+                        kind: row.get(0)?,
+                        idempotence_key: row.get(1)?,
+                        payload: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     /// Hash one table's rows canonically, independent of insertion order.
     ///
     /// Rows are ordered by every column so the digest depends only on content,
@@ -699,6 +857,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 
     const TEST_ROWS: TableName = TableName::new("test.rows");
     const MEMORY_ROWS: TableName = TableName::new("test.memory_rows");
@@ -909,6 +1068,94 @@ CREATE TABLE IF NOT EXISTS "test.typed_events" (
         assert!(err
             .to_string()
             .contains("typed row select requires at least one column"));
+    }
+
+    #[test]
+    fn intent_work_rows_are_idempotent_but_conflicts_reject() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let row = IntentWorkRow::new("send", b"key".to_vec(), b"one".to_vec());
+
+        assert!(store
+            .write_transaction(|tx| tx.insert_intent_work_row_in_tx(INTENTS, &row))
+            .expect("insert intent row"));
+        assert!(!store
+            .write_transaction(|tx| tx.insert_intent_work_row_in_tx(INTENTS, &row))
+            .expect("idempotent insert"));
+
+        let err = store
+            .write_transaction(|tx| {
+                tx.insert_intent_work_row_in_tx(
+                    INTENTS,
+                    &IntentWorkRow::new("send", b"key".to_vec(), b"two".to_vec()),
+                )
+            })
+            .expect_err("conflicting insert must reject");
+
+        assert!(err.to_string().contains("conflicting intent row for send"));
+    }
+
+    #[test]
+    fn intent_work_rows_select_durable_by_identity_order() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        for row in [
+            IntentWorkRow::new("z_kind", b"2".to_vec(), b"z".to_vec()),
+            IntentWorkRow::new("a_kind", b"2".to_vec(), b"a2".to_vec()),
+            IntentWorkRow::new("a_kind", b"1".to_vec(), b"a1".to_vec()),
+        ] {
+            store
+                .write_transaction(|tx| tx.insert_intent_work_row_in_tx(INTENTS, &row))
+                .expect("insert durable row");
+        }
+
+        let selected = store
+            .next_intent_work_row(
+                INTENTS,
+                &["z_kind", "a_kind"],
+                IntentWorkRowOrder::StableIdentity,
+            )
+            .expect("select durable row")
+            .expect("durable row");
+
+        assert_eq!(selected.kind, "a_kind");
+        assert_eq!(selected.idempotence_key, b"1");
+        assert_eq!(selected.payload, b"a1");
+    }
+
+    #[test]
+    fn local_intent_work_rows_select_by_insertion_and_rotate_to_tail() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let first = IntentWorkRow::new("work", b"first".to_vec(), b"1".to_vec());
+        let second = IntentWorkRow::new("work", b"second".to_vec(), b"2".to_vec());
+        for row in [&first, &second] {
+            store
+                .write_transaction(|tx| tx.insert_intent_work_row_in_tx(LOCAL_INTENTS, row))
+                .expect("insert local row");
+        }
+
+        assert_eq!(
+            store
+                .next_intent_work_row(LOCAL_INTENTS, &["work"], IntentWorkRowOrder::Insertion)
+                .expect("select first local")
+                .expect("first local")
+                .idempotence_key,
+            b"first"
+        );
+
+        store
+            .write_transaction(|tx| tx.rotate_intent_work_row_to_tail_in_tx(LOCAL_INTENTS, &first))
+            .expect("rotate first row");
+
+        assert_eq!(
+            store
+                .next_intent_work_row(LOCAL_INTENTS, &["work"], IntentWorkRowOrder::Insertion)
+                .expect("select second local")
+                .expect("second local")
+                .idempotence_key,
+            b"second"
+        );
     }
 }
 
