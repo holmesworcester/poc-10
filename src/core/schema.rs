@@ -2,10 +2,9 @@
 //!
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
-//! projection, pending projection matches, candidate facts, intent
-//! queues, and the store-local clock. It exposes one executable `SchemaSource`
-//! plus typed `TableName` constants so the rest of core does not repeat string
-//! literals.
+//! projection, pending projection matches, candidate fact staging, intent queues,
+//! and the store-local clock. It exposes one executable `SchemaSource` plus typed
+//! `TableName` constants so the rest of core does not repeat string literals.
 //!
 //! These tables are the shared substrate behind the runtime work documented in
 //! `src/core/README.md` and the projection boundary documented in
@@ -48,7 +47,12 @@ pub(crate) const PENDING_TIME_RANGES: TableName = TableName::new("pending_time_r
 pub(crate) const INTENTS: TableName = TableName::new("intents");
 /// Ephemeral intent queue table.
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
-/// Volatile incoming fact candidate table.
+/// Fact candidate staging table.
+///
+/// Candidates are outside retained fact history until projection commits them
+/// into `facts`, but the staging rows must survive process boundaries so parked
+/// command and handler facts can wake when later context arrives. Replay resets
+/// this table with other non-history runtime work.
 pub(crate) const CANDIDATE_FACTS: TableName = TableName::new("candidate_facts");
 /// Store-local trusted clock observation table.
 pub(crate) const CLOCK: TableName = TableName::new("clock");
@@ -172,7 +176,7 @@ CREATE TEMP TABLE IF NOT EXISTS local_intents (
     PRIMARY KEY (kind, idempotence_key)
 );
 
-CREATE TEMP TABLE IF NOT EXISTS candidate_facts (
+CREATE TABLE IF NOT EXISTS candidate_facts (
     id BLOB PRIMARY KEY NOT NULL,
     scope TEXT NOT NULL,
     scope_kind TEXT NOT NULL,

@@ -8,8 +8,8 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::store::persisted_facts;
 use crate::core::store::Store;
+use crate::core::store::{candidate_facts, persisted_facts};
 
 use super::fact::EndpointFact;
 use super::{encode, project::decode};
@@ -88,7 +88,9 @@ pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
 }
 
 fn unprojected_local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
-    let mut endpoints = persisted_facts(store)?
+    let mut facts = persisted_facts(store)?;
+    facts.extend(candidate_facts(store)?);
+    let mut endpoints = facts
         .into_iter()
         .filter(|fact| fact.scope == FactScope::Local)
         .filter_map(|fact| {

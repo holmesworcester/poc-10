@@ -224,6 +224,9 @@ fn live_projection_records_all_projector_intents() {
 fn replay_commits_and_dispatches_handler_followup_intents() {
     let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_AWARE).expect("runtime");
     runtime.submit_fact(fact());
+    runtime
+        .process_projection_until_idle(4, 32)
+        .expect("retain fact before replay");
 
     let report = runtime
         .replay(&[], topo::core::replay::ReplayOrder::Canonical)
@@ -244,6 +247,9 @@ fn replay_commits_and_dispatches_handler_followup_intents() {
 fn replay_dispatches_projector_live_work_to_handlers_in_replay_mode() {
     let mut runtime = Runtime::open_memory(&RUNTIME).expect("runtime");
     runtime.submit_fact(fact());
+    runtime
+        .process_projection_until_idle(4, 32)
+        .expect("retain fact before replay");
 
     let report = runtime
         .replay(&[], topo::core::replay::ReplayOrder::Canonical)

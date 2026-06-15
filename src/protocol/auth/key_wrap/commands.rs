@@ -166,6 +166,8 @@ pub fn create_history_node(
     runtime: &Runtime,
     input: CreateHistoryNode,
 ) -> Result<CommandOutput<CreateHistoryNodeReceipt>, String> {
+    // This is still a multi-phase runtime workflow and should move out of this file.
+    // Key chopping should move to a workflow host.
     if history_source_is_tombstoned(runtime, input.source_secret_id)? {
         return Err("history node source fact is missing".to_string());
     }

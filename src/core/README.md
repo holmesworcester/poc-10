@@ -93,7 +93,7 @@ opaque outbound rows from `network`.
 ```text
 CLI command / daemon / handler
   -> authored facts or RuntimeEffects
-  -> fact admission and pending_projection
+  -> fact admission and candidate_facts
   -> projector
   -> context needs/offers, time wakes, rows, intents
   -> intent queue
@@ -101,13 +101,15 @@ CLI command / daemon / handler
   -> RuntimeEffects
 ```
 
-Facts can enter through commands, handlers, sync, or incoming daemon input.
-Core records durable bytes or candidate bytes with admission scope and
-timestamp, then queues them for projection. Projection is the only path from
-fact bytes to standing context, read-model rows, time wakes, and follow-up work.
-Runtime work can record candidate facts in `candidate_facts`, submit local
-(ephemeral, not-replayed) intents to `local_intents`, and mark facts whose
-scheduled wake-up time has arrived as pending projection work.
+Facts can enter through commands, handlers, sync, or incoming daemon input. Core
+records candidate bytes with admission scope and timestamp first; projection
+retains durable bytes only after a projector accepts, materializes, or finishes
+without parking. Replay is the exception: it queues already-retained facts
+directly for replay projection. Projection is the only path from fact bytes to
+standing context, read-model rows, time wakes, and follow-up work. Runtime work
+can record candidate facts in `candidate_facts`, submit local (ephemeral,
+not-replayed) intents to `local_intents`, and mark facts whose scheduled wake-up
+time has arrived as pending projection work.
 
 Network bytes enter as `network_in` rows, become local protocol intents via the
 daemon declaration, then stage protocol frame facts as candidates. Candidate
@@ -298,17 +300,18 @@ mode.
 The write-side authoring path is:
 
 ```text
-command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> projection
+command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> candidate_facts -> projection
 ```
 
 Commands own user intent, argument parsing, local capability lookup, receipts,
 and the decision to author facts. They return `AuthoredCommand` facts plus a
 receipt, not row mutations, purges, or intents. Family `author.rs` owns
 construction crypto: signing, encryption, and typed assembly. Family
-`encode.rs` owns canonical byte encoding only. Before storage, the runtime may
-call the protocol-owned `FactAdmissionFn`; poc-10 installs one that dispatches
-by fact tag to protocol-local decode and validation helpers. After admission
-each fact is queued for projection like any other durable fact.
+`encode.rs` owns canonical byte encoding only. Before candidate staging, the
+runtime may call the protocol-owned `FactAdmissionFn`; poc-10 installs one that
+dispatches by fact tag to protocol-local decode and validation helpers. After
+admission each live fact enters `candidate_facts`; projection later decides
+whether to retain it into durable `facts`, park it on context, or drop it.
 
 The routed fact path is:
 
@@ -326,11 +329,11 @@ projects rows, context, time wakes, purges, or intents.
 
 Missing context is normal projection output, not a separate core stage. The
 projector emits standing needs; core records those replacement needs and parks
-the fact. When a later offer matches a parked need, core records that offer in
-`pending_projection_matches` for the parked owner and queues the owner again.
-The pending item already carries the context that woke it, so the retried
-projector reads the matched payload through `ProjectionContext` instead of
-doing a database search.
+the fact. Retained owners wake through `pending_projection`; candidate owners
+stay in `candidate_facts` and wake when `pending_projection_matches` records
+matched context for them. The retried item already carries the context that woke
+it, so the projector reads the matched payload through `ProjectionContext`
+instead of doing a database search.
 
 Detached signature evidence, key material, deletion markers, receipts, and
 other cross-fact proof are ordinary facts that may publish context offers after
@@ -349,11 +352,13 @@ wake owners whose needs match newly added offers and record their matched contex
 apply RuntimeEffects through commit_effects
 ```
 
-For a retained candidate fact, the commit moves the candidate into `facts` and
-`local_fact_admissions`, then applies the same context/time/effect commit as a
-durable fact. For a dropped candidate fact, the commit validates that no durable
-offers or time wakes remain, deletes any old context for that input id, deletes
-the candidate fact row, and applies `RuntimeEffects` through `commit_effects`.
+For a candidate fact, one projection commit either records only needs and leaves
+the candidate parked in `candidate_facts`, moves the candidate into `facts` and
+`local_fact_admissions` before applying the same context/time/effect commit as a
+durable fact, or drops it. A dropped candidate commit validates that no durable
+offers or time wakes remain, deletes old context for that input id, deletes the
+candidate fact row, and applies `RuntimeEffects` through
+`commit_effects`.
 
 Before that boundary, projector runs are calculation. Durable pending items
 start with the matched context already attached to their queue row. Newly
@@ -368,7 +373,8 @@ One handler commit performs this ordered unit:
 delete claimed intent row
 delete shadowed local duplicate intent when the claimed row was durable
 purge exact facts
-admit emitted facts and mark them pending
+admit emitted live facts into candidate_facts
+retain and queue replay-emitted facts in replay mode
 insert emitted candidate facts
 apply row mutations
 record durable follow-up intents
