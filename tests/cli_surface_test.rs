@@ -257,7 +257,80 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: `disappearing-compact` advances the floor without changing
+// Test 5: an explicit retention floor retires messages below the floor while
+// retaining messages at or above it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alice = temp_db(&tmp, "alice.db");
+    let workspace_id =
+        create_workspace_with_ttl(&alice, "Retention Floor", "alice", "alice-laptop", 1000);
+    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+
+    assert_success(topo(&["--db", &alice, "clock", "set", "3000000"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "below floor",
+    ]));
+    assert_success(topo(&["--db", &alice, "clock", "set", "12000000"]));
+    assert_success(topo(&[
+        "--db",
+        &alice,
+        "send",
+        &workspace_id,
+        "above floor",
+    ]));
+
+    let pre_messages = messages_text(&alice, &workspace_id);
+    assert!(
+        pre_messages.contains("alice: below floor"),
+        "{pre_messages}"
+    );
+    assert!(
+        pre_messages.contains("alice: above floor"),
+        "{pre_messages}"
+    );
+
+    let floor = assert_success(topo(&[
+        "--db",
+        &alice,
+        "disappearing-set",
+        &workspace_id,
+        "1000",
+        "--floor",
+        "100",
+    ]));
+    assert_eq!(line_value(&floor, "previous_floor_minute"), "0");
+    assert_eq!(line_value(&floor, "new_floor_minute"), "100");
+
+    let status = assert_success(topo(&[
+        "--db",
+        &alice,
+        "disappearing-status",
+        &workspace_id,
+    ]));
+    assert_eq!(line_value(&status, "current_floor_minute"), "100");
+
+    let post_messages = messages_text(&alice, &workspace_id);
+    assert!(
+        !post_messages.contains("alice: below floor"),
+        "retention floor must retire below-floor opened message rows:\n{post_messages}"
+    );
+    assert!(
+        post_messages.contains("alice: above floor"),
+        "retention floor must retain above-floor content rows:\n{post_messages}"
+    );
+    let count = assert_success(topo(&["--db", &alice, "content-count", &workspace_id]));
+    assert_eq!(line_value(&count, "content_messages"), "1");
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: `disappearing-compact` advances the floor without changing
 // the TTL. Live messages stamped under the current policy survive
 // (their `expires_at_minute >= new_floor` by construction); only debris
 // is GC'd.
@@ -322,7 +395,7 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: `sync-status` after expiry reports a changed root summary.
+// Test 7: `sync-status` after expiry reports a changed root summary.
 //
 // Setup: author messages, then expire them by advancing the clock past
 // the TTL horizon. We then call `sync-status` directly to verify
@@ -384,7 +457,7 @@ fn cli_sync_status_reports_changed_root_after_expiry() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 7: `chop-now` runs ChopTimeTreePrefix on the workspace's most
+// Test 8: `chop-now` runs ChopTimeTreePrefix on the workspace's most
 // recent frontier and prints the report. We verify that supplying a
 // non-zero floor produces at least one tombstone (subtree or boundary
 // descend).
@@ -470,6 +543,10 @@ fn message_lines(db: &str, workspace_id: &str) -> Vec<String> {
         })
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn messages_text(db: &str, workspace_id: &str) -> String {
+    assert_success(topo(&["--db", db, "messages", workspace_id]))
 }
 
 fn wait_for_leaf_count(db: &str, workspace_id: &str, expected: &str) {

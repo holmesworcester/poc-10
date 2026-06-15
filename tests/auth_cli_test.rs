@@ -385,99 +385,6 @@ fn cli_peer_recipient_rotation_preserves_fresh_sharing_and_rejects_retired_wraps
 }
 
 #[test]
-fn cli_chop_purges_below_floor_messages_and_retains_above_floor_rows() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let workspace_id =
-        create_workspace_with_ttl(&alice, "FS Chop Floor", "alice", "alice-laptop", 1000);
-
-    let recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
-    let retired_recipient_key_id = line_value(&recipient, "recipient_key_id");
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "key-wrap",
-        &workspace_id,
-        &removal_frontier_id,
-        &retired_recipient_key_id,
-    ]));
-
-    assert_success(topo(&["--db", &alice, "clock", "set", "3000000"]));
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "send",
-        &workspace_id,
-        "below floor",
-    ]));
-    assert_success(topo(&["--db", &alice, "clock", "set", "12000000"]));
-    assert_success(topo(&[
-        "--db",
-        &alice,
-        "send",
-        &workspace_id,
-        "above floor",
-    ]));
-    let pre_messages = messages_text(&alice, &workspace_id);
-    assert!(
-        pre_messages.contains("alice: below floor"),
-        "{pre_messages}"
-    );
-    assert!(
-        pre_messages.contains("alice: above floor"),
-        "{pre_messages}"
-    );
-
-    let chop = assert_success(topo(&["--db", &alice, "chop-now", &workspace_id, "100"]));
-    assert_eq!(line_value(&chop, "floor_minute"), "100");
-    assert_eq!(
-        line_value(&chop, "subtree_tombstones_written"),
-        "1",
-        "chop must retire the local frontier root at the floor boundary:\n{chop}"
-    );
-    let access_post = assert_success(topo(&[
-        "--db",
-        &alice,
-        "key-access",
-        &workspace_id,
-        &removal_frontier_id,
-    ]));
-    assert_eq!(line_value(&access_post, "access"), "no");
-    let keys_after_chop = assert_success(topo(&["--db", &alice, "keys", &workspace_id]));
-    assert_eq!(line_value(&keys_after_chop, "local_key_secrets"), "0");
-    let post_messages = messages_text(&alice, &workspace_id);
-    assert!(
-        !post_messages.contains("alice: below floor"),
-        "chop must purge below-floor opened message rows:\n{post_messages}"
-    );
-    assert!(
-        post_messages.contains("alice: above floor"),
-        "chop must not delete above-floor content rows:\n{post_messages}"
-    );
-    let count = assert_success(topo(&["--db", &alice, "content-count", &workspace_id]));
-    assert_eq!(line_value(&count, "content_messages"), "1");
-
-    let new_frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
-    let new_frontier_id = line_value(&new_frontier, "removal_frontier_id");
-    let retired_wrap = topo(&[
-        "--db",
-        &alice,
-        "key-wrap",
-        &workspace_id,
-        &new_frontier_id,
-        &retired_recipient_key_id,
-    ]);
-    assert!(
-        !retired_wrap.status.success(),
-        "chop rotation must reject new wraps to the retired recipient\nstdout={}\nstderr={}",
-        stdout(&retired_wrap),
-        stderr(&retired_wrap)
-    );
-}
-
-#[test]
 fn cli_chop_revokes_frontier_rejects_old_wraps_and_allows_fresh_messages() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
@@ -605,29 +512,6 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         username,
         "--devicename",
         device_name,
-    ]));
-    line_value(&out, "workspace_id")
-}
-
-fn create_workspace_with_ttl(
-    db: &str,
-    name: &str,
-    username: &str,
-    device_name: &str,
-    ttl_minutes: u32,
-) -> String {
-    let ttl = ttl_minutes.to_string();
-    let out = assert_success(topo(&[
-        "--db",
-        db,
-        "create-workspace",
-        name,
-        "--username",
-        username,
-        "--devicename",
-        device_name,
-        "--ttl-minutes",
-        &ttl,
     ]));
     line_value(&out, "workspace_id")
 }
