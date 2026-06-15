@@ -19,7 +19,6 @@ pub const KEY_ACCESS_USAGE: &str = "key-access WORKSPACE_ID_HEX REMOVAL_FRONTIER
 pub const KEY_DERIVE_USAGE: &str = "key-derive [LIMIT]";
 pub const KEY_NODE_USAGE: &str = "key-node WORKSPACE_ID_HEX REMOVAL_FRONTIER_ID_HEX SOURCE_SECRET_ID_HEX RANGE_START RANGE_WIDTH [TOMBSTONE_NODE_ID_HEX]";
 pub const KEYS_USAGE: &str = "keys WORKSPACE_ID_HEX";
-pub const CHOP_NOW_USAGE: &str = "chop-now WORKSPACE_ID_HEX FLOOR_MINUTE";
 
 pub fn key_recipient(
     store: &Store,
@@ -235,24 +234,6 @@ pub fn keys_workspace_id(args: CliArgs<'_>) -> Result<[u8; 32], String> {
     core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChopNowArgs {
-    pub workspace_id: [u8; 32],
-    pub floor_minute: u64,
-}
-
-pub fn chop_now_args(args: CliArgs<'_>) -> Result<ChopNowArgs, String> {
-    args.require_len(2, CHOP_NOW_USAGE)?;
-    Ok(ChopNowArgs {
-        workspace_id: core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")?,
-        floor_minute: args
-            .get(1)
-            .expect("length checked")
-            .parse::<u64>()
-            .map_err(|_| "chop-now floor minute must be a u64".to_string())?,
-    })
-}
-
 pub fn history_node_output(receipt: &commands::CreateHistoryNodeReceipt) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
@@ -273,34 +254,6 @@ pub fn history_node_output(receipt: &commands::CreateHistoryNodeReceipt) -> CliO
         format!(
             "tombstoned_node_id: {}",
             encode_hex(&receipt.tombstone_node_id)
-        ),
-    ])
-}
-
-pub fn chop_now_output(receipt: &commands::ChopNowReceipt) -> CliOutput {
-    CliOutput::lines(vec![
-        format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
-        format!("floor_minute: {}", receipt.floor_minute),
-        format!(
-            "subtree_tombstones_written: {}",
-            receipt.subtree_tombstones_written
-        ),
-        format!(
-            "boundary_descend_tombstones_written: {}",
-            receipt.boundary_descend_tombstones_written
-        ),
-        format!(
-            "right_side_siblings_materialized: {}",
-            receipt.right_side_siblings_materialized
-        ),
-        format!("purged_secret_bytes: {}", receipt.purged_secret_bytes),
-        format!(
-            "subsumed_message_tombstones_gcd: {}",
-            receipt.subsumed_message_tombstones_gcd
-        ),
-        format!(
-            "subsumed_leaf_tombstones_gcd: {}",
-            receipt.subsumed_leaf_tombstones_gcd
         ),
     ])
 }

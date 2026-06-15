@@ -323,20 +323,6 @@ pub(crate) fn keys(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
     Ok(auth::key_wrap::cli::keys_output(&report))
 }
 
-pub(crate) fn chop_now(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let args = auth::key_wrap::cli::chop_now_args(args)?;
-    ctx.settle_local_command_work()?;
-    let receipt = auth::key_wrap::commands::chop_now(
-        ctx.runtime_mut(),
-        auth::key_wrap::commands::ChopNow {
-            workspace_id: args.workspace_id,
-            floor_minute: args.floor_minute,
-            created_at_ms: SystemClock.next_timestamp(),
-        },
-    )?;
-    Ok(auth::key_wrap::cli::chop_now_output(&receipt))
-}
-
 pub(crate) fn disappearing_set(
     ctx: &mut MatchCliContext,
     cli_args: CliArgs<'_>,

@@ -1,11 +1,8 @@
-//! User-facing auth key-material command authors and chop workflow.
+//! User-facing auth key-material command authors.
 //!
 //! These commands are the local entry points for creating recipient keys,
-//! removal frontiers, history nodes, key wraps, and retention chops. Simple
-//! commands read projected auth state, construct facts, and return receipts
-//! suitable for CLI output. The `chop_now` entry point is a multi-phase runtime
-//! workflow and should move out of this file when workflow hosts get their own
-//! module.
+//! removal frontiers, history nodes, and key wraps. They read projected auth
+//! state, construct facts, and return receipts suitable for CLI output.
 
 use crate::core::command::CommandOutput;
 use crate::core::crypto;
@@ -14,7 +11,6 @@ use crate::core::runtime::Runtime;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
-use crate::protocol::content;
 
 use crate::protocol::auth::local_history_node_secret::project::decode as local_history_layout_decode;
 use crate::protocol::auth::local_key_secret::project::decode as local_key_secret_layout_decode;
@@ -67,25 +63,6 @@ pub struct CreateHistoryNodeReceipt {
     pub range_start: u64,
     pub range_width: u64,
     pub tombstone_node_id: FactId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChopNow {
-    pub workspace_id: FactId,
-    pub floor_minute: u64,
-    pub created_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChopNowReceipt {
-    pub workspace_id: FactId,
-    pub floor_minute: u64,
-    pub subtree_tombstones_written: usize,
-    pub boundary_descend_tombstones_written: usize,
-    pub right_side_siblings_materialized: usize,
-    pub purged_secret_bytes: usize,
-    pub subsumed_message_tombstones_gcd: usize,
-    pub subsumed_leaf_tombstones_gcd: usize,
 }
 
 pub fn create_recipient_key(
@@ -237,86 +214,6 @@ pub fn create_history_node(
         tombstone_node_id: input.tombstone_node_id,
     })
     .with_facts(vec![fact]))
-}
-
-pub fn chop_now(runtime: &mut Runtime, input: ChopNow) -> Result<ChopNowReceipt, String> {
-    apply_retention_floor(runtime, input)?;
-
-    let local_key_secret_ids = runtime
-        .facts()
-        .filter_map(|fact| {
-            local_key_secret_layout_decode::decode_local_key_secret(fact.body())
-                .ok()
-                .filter(|secret| secret.workspace_id == input.workspace_id)
-                .map(|_| fact.id)
-        })
-        .collect::<Vec<_>>();
-    if !local_key_secret_ids.is_empty() {
-        rotate_recipient_for_chop(runtime, input)?;
-    }
-    let retirement_facts = local_key_secret_ids
-        .iter()
-        .map(|fact_id| {
-            auth::local_secret_retirement::author::chop_retirement_fact(
-                input.workspace_id,
-                *fact_id,
-                input.floor_minute,
-                input.created_at_ms,
-            )
-            .map(|(_retirement, fact)| fact)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    runtime.submit_facts(retirement_facts)?;
-    runtime.process_all_work_until_idle(4, 512)?;
-    Ok(ChopNowReceipt {
-        workspace_id: input.workspace_id,
-        floor_minute: input.floor_minute,
-        subtree_tombstones_written: local_key_secret_ids.len(),
-        boundary_descend_tombstones_written: 0,
-        right_side_siblings_materialized: 0,
-        purged_secret_bytes: 0,
-        subsumed_message_tombstones_gcd: 0,
-        subsumed_leaf_tombstones_gcd: 0,
-    })
-}
-
-fn apply_retention_floor(runtime: &mut Runtime, input: ChopNow) -> Result<(), String> {
-    let Some(active_policy) = content::retention_policy::queries::active_for_workspace(
-        runtime.store(),
-        input.workspace_id,
-    )?
-    else {
-        return Ok(());
-    };
-    let output = content::retention_policy::commands::author_set_with_auto_floor(
-        runtime.store(),
-        content::retention_policy::commands::AuthorPolicy {
-            workspace_id: input.workspace_id,
-            now_ms: input.created_at_ms,
-            ttl_minutes: active_policy.ttl_minutes,
-            explicit_floor: Some(input.floor_minute),
-        },
-    )?;
-    runtime.submit_command_output(output)?;
-    runtime.process_all_work_until_idle(4, 512)?;
-    Ok(())
-}
-
-fn rotate_recipient_for_chop(runtime: &mut Runtime, input: ChopNow) -> Result<(), String> {
-    if let Some(previous) = super::queries::recipient_key_for_rotation(runtime, input.workspace_id)?
-    {
-        let output = create_recipient_key(
-            runtime.store(),
-            CreateRecipientKey {
-                created_at_ms: input.created_at_ms,
-                workspace_id: input.workspace_id,
-                previous_recipient_key_id: previous,
-            },
-        )?;
-        let _ = runtime.submit_command_output(output)?;
-        runtime.process_all_work_until_idle(4, 512)?;
-    }
-    Ok(())
 }
 
 fn history_source_material(
