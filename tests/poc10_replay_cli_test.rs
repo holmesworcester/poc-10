@@ -10,6 +10,11 @@
 
 mod cli_harness;
 
+use std::io::{BufRead, BufReader};
+use std::process::Child;
+use std::thread;
+use std::time::Duration;
+
 use cli_harness::*;
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
@@ -39,6 +44,42 @@ fn state_hash(db: &str) -> String {
         &assert_success(topo(&["--db", db, "state-summary"])),
         "state_hash",
     )
+}
+
+struct RunningDaemon {
+    child: Child,
+}
+
+impl Drop for RunningDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
+    let port = port.to_string();
+    let mut child = spawn_topo(&[
+        "--db",
+        db,
+        "start",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--tick-ms",
+        "50",
+        "--quiet-ms",
+        "50",
+    ]);
+    let stdout = child.stdout.take().expect("daemon stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut first = String::new();
+    reader.read_line(&mut first).expect("daemon first line");
+    assert!(
+        first.starts_with("listening: "),
+        "daemon did not report listening: {first}"
+    );
+    RunningDaemon { child }
 }
 
 #[test]
@@ -168,10 +209,38 @@ fn area_line(summary: &str, area: &str) -> String {
         .to_string()
 }
 
+fn area_count(summary: &str, area: &str) -> u64 {
+    let line = area_line(summary, area);
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("state-summary area {area} count is invalid: {line}"))
+}
+
+fn wait_for_area_count_at_least(db: &str, area: &str, expected_min: u64) -> String {
+    let mut last = String::new();
+    for _ in 0..40 {
+        let output = topo(&["--db", db, "state-summary"]);
+        if output.status.success() {
+            let summary = stdout(&output);
+            if area_count(&summary, area) >= expected_min {
+                return summary;
+            }
+            last = summary;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("state-summary area {area} did not reach {expected_min}:\n{last}");
+}
+
 #[test]
 fn replay_recreates_key_material_idempotently() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
+    let daemon_port = free_port();
+    let _daemon = spawn_daemon(&db, daemon_port);
     let workspace_id = create_workspace(&db, "Keys", "alice", "laptop");
     assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
     assert_success(topo(&["--db", &db, "key-recipient", &workspace_id]));
@@ -182,16 +251,11 @@ fn replay_recreates_key_material_idempotently() {
         &workspace_id,
         "secret message",
     ]));
-    assert_success(topo(&["--db", &db, "key-derive", "64"]));
 
-    let summary_before = assert_success(topo(&["--db", &db, "state-summary"]));
+    let summary_before = wait_for_area_count_at_least(&db, "key_wrap_rows", 1);
     let key_wrap_before = area_line(&summary_before, "key_wrap_rows");
     // The recipient scenario materializes at least one key wrap.
-    let key_wrap_count: u64 = key_wrap_before
-        .split_whitespace()
-        .nth(1)
-        .and_then(|count| count.parse().ok())
-        .unwrap();
+    let key_wrap_count = area_count(&summary_before, "key_wrap_rows");
     assert!(key_wrap_count > 0, "{key_wrap_before}");
     let before = state_hash(&db);
 

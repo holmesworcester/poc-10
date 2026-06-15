@@ -17,12 +17,12 @@ use std::time::Duration;
 use cli_harness::*;
 
 // ---------------------------------------------------------------------------
-// Test 1: single-peer CLI contract — message purges, key access is lost,
-// re-derive cannot recover it, and daemon restarts do not resurrect content.
+// Test 1: single-peer CLI contract — message purges, key access is lost, daemon
+// ticks do not recover it, and daemon restarts do not resurrect content.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cli_disappearing_messages_expire_and_resist_rederive() {
+fn cli_disappearing_messages_expire_and_resist_daemon_recovery() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let alice_port = free_port();
@@ -52,30 +52,13 @@ fn cli_disappearing_messages_expire_and_resist_rederive() {
     assert_eq!(content_message_count(&alice, &workspace_id), "0");
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
 
-    // Stop the daemon and confirm the on-disk state still resists recovery.
-    drop(alice_daemon);
-    let derive = assert_success(topo(&["--db", &alice, "key-derive"]));
-    assert_eq!(
-        line_value(&derive, "derived_key_secrets"),
-        "0",
-        "rederive must not produce any new key secrets after expiry"
-    );
-    assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
-    assert_eq!(content_message_count(&alice, &workspace_id), "0");
-    // Remaining gap: no non-dev CLI recovery attempt targets a specific
-    // message id or minute coordinate. The old assertion used `key-node` and
-    // `cover_summary`, which are internal tree probes, to prove the retired
-    // minute node could not be re-materialized.
-
-    // Restart the daemon and tick once more: still no recovery.
-    let alice_daemon_again = spawn_daemon(&alice, alice_port);
+    // Tick once more with the daemon running: still no recovery.
     assert_success(topo(&["--db", &alice, "clock", "set", "6120001"]));
     thread::sleep(Duration::from_millis(300));
     assert_eq!(message_lines(&alice, &workspace_id).len(), 0);
     assert_eq!(content_message_count(&alice, &workspace_id), "0");
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "no");
-    drop(alice_daemon_again);
+    drop(alice_daemon);
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +99,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    drain_key_derivation(&bob);
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Pin both clocks to the same unix_minute and have each peer author.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
@@ -359,7 +342,6 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
         &removal_frontier_id_before,
         &alice_recipient_id,
     );
-    drain_key_derivation(&bob);
     wait_for_key_access(&alice, &workspace_id, &removal_frontier_id_before, "yes");
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id_before, "yes");
 
@@ -470,7 +452,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    drain_key_derivation(&bob);
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Pin both clocks to minute 100 (ms = 6_000_000) and author one
     // message at that minute. With TTL=0 the message has no
@@ -595,7 +577,6 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    drain_key_derivation(&bob);
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Pin both clocks to unix_minute 100 (ms = 6_000_000). Author X under
@@ -701,8 +682,8 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
 //
 // Setup choreography:
 //   1. Both peers start with daemons connected; alice wraps the frontier
-//      for bob and bob runs `key-derive` so bob can open alice-authored
-//      messages before the horizon moves.
+//      for bob and bob eventually reports key access so he can open
+//      alice-authored messages before the horizon moves.
 //   2. The peers pin to minute T_AUTHOR = 100 and alice authors X.
 //   3. Alice's daemon is stopped before X is authored, so X remains local
 //      until Alice is restarted after Bob advances the floor.
@@ -755,7 +736,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
         &removal_frontier_id,
         &alice_recipient_id,
     );
-    drain_key_derivation(&bob);
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
     drop(alice_daemon);
 
     // Pin both clocks to minute 100. Alice authors X; with TTL=0 the
@@ -920,7 +901,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     // Bob receives the proactive wrap and derives F. Once F exists, sync
     // either opens X from an already admitted sealed row or redelivers X and
     // admits it with the covering source now present.
-    drain_key_derivation(&bob);
+    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Sync naturally redelivers: alice's negentropy "have" set includes X,
     // bob's "have" set still excludes it, so alice resends X on the next
@@ -1153,19 +1134,6 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         "--poll-ms",
         "100",
     ]));
-}
-
-fn drain_key_derivation(db: &str) {
-    let mut last = String::new();
-    for _ in 0..20 {
-        let output = topo(&["--db", db, "key-derive"]);
-        if output.status.success() {
-            return;
-        }
-        last = stderr(&output);
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("key-derive did not succeed: {last}");
 }
 
 fn wait_for_disappearing_value(db: &str, workspace_id: &str, key: &str, expected: &str) {

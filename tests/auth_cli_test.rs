@@ -19,6 +19,8 @@ use cli_harness::*;
 fn cli_key_derive_reports_key_wrap_summary_only() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "derive-output.db");
+    let daemon_port = free_port();
+    let _daemon = spawn_daemon(&db, daemon_port);
 
     let out = assert_success(topo(&["--db", &db, "key-derive"]));
 
