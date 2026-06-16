@@ -1354,9 +1354,11 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
     })
 }
 
-fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
+pub(crate) fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| {
-        rusqlite::Error::InvalidParameterName(format!("{name} exceeds SQLite integer range"))
+        rusqlite::Error::InvalidParameterName(format!(
+            "{name}: SQL value exceeds SQLite integer range"
+        ))
     })
 }
 

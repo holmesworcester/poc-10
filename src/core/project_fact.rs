@@ -1741,7 +1741,7 @@ pub(crate) mod commit_effects {
     use rusqlite::{params_from_iter, OptionalExtension};
     use std::collections::BTreeMap;
 
-    use super::context_store::insert_pending_matches_for_stored_needs_in_tx;
+    use super::context_store::record_pending_matches_for_stored_needs_in_tx;
     use super::route::FactAdmissionFn;
     use super::ProjectionMode;
 
@@ -1967,7 +1967,7 @@ pub(crate) mod commit_effects {
         let mut facts = 0usize;
         for fact in &effects.facts {
             if insert_fact_and_pending_with_mode_in_tx(tx, fact, pending_mode)? {
-                insert_pending_matches_for_stored_needs_in_tx(tx, fact.id, pending_mode)
+                record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
                     .map_err(sqlite_string_error)?;
                 facts += 1;
             }
@@ -2745,42 +2745,40 @@ pub(crate) mod context_store {
         Ok(())
     }
 
-    /// Insert pending owners woken by newly added context rows.
+    /// Queue and record matches for owners woken by newly added context rows.
     ///
     /// Removals do not wake projection. A projector that stops needing context has
     /// already run; dependent facts wake only when a new need can now be satisfied
-    /// or a new offer may satisfy existing needs.
+    /// or a new offer may satisfy existing needs. An owner is woken only when at
+    /// least one overlapping edge exists; for each such owner this queues it pending
+    /// and records every match its standing needs currently have. Recording from
+    /// stored needs is idempotent, so distinct overlaps for the same owner collapse
+    /// to one queue-and-record pass.
     pub(crate) fn wake_context_matches_in_tx(
         store: &Store,
         delta: &ContextSetDelta,
         mode: ProjectionMode,
     ) -> Result<usize, String> {
-        let mut changed = 0usize;
+        let mut owners = BTreeSet::new();
         for need in &delta.added_needs {
-            for offer in stored_overlapping_offers_for_need(store, need)? {
-                changed += insert_pending_projection_match_in_tx(store, need, &offer, mode)?;
+            if !stored_overlapping_offers_for_need(store, need)?.is_empty() {
+                owners.insert(need.owner);
             }
         }
         for offer in &delta.added_offers {
             for need in stored_overlapping_needs_for_offer(store, offer)? {
-                changed += insert_pending_projection_match_in_tx(store, &need, offer, mode)?;
+                owners.insert(need.owner);
             }
         }
-        Ok(changed)
-    }
 
-    /// Attach current stored matches for an owner that is being queued directly.
-    ///
-    /// Context wake fanout already knows the matching edge that caused the wake.
-    /// Direct queueing paths, such as due time wakes or duplicate fact admission,
-    /// use this helper to attach matches for any standing needs the owner already
-    /// has.
-    pub(super) fn insert_pending_matches_for_stored_needs_in_tx(
-        store: &Store,
-        owner: FactId,
-        _mode: ProjectionMode,
-    ) -> Result<usize, String> {
-        record_pending_matches_for_stored_needs_in_tx(store, owner)
+        let mut changed = 0usize;
+        for owner in owners {
+            let queued = insert_pending_owner_with_mode_in_tx(store, owner, mode)
+                .map_err(|err| format!("queue pending projection match: {err}"))?;
+            let recorded = record_pending_matches_for_stored_needs_in_tx(store, owner)?;
+            changed += usize::from(queued > 0 || recorded > 0);
+        }
+        Ok(changed)
     }
 
     fn stored_overlapping_needs_for_offer(
@@ -2809,22 +2807,12 @@ pub(crate) mod context_store {
         )
     }
 
-    fn insert_pending_projection_match_in_tx(
-        store: &Store,
-        need: &ContextNeed,
-        offer: &ContextOffer,
-        mode: ProjectionMode,
-    ) -> Result<usize, String> {
-        if need.role != offer.role || need.scope != offer.scope {
-            return Err("pending projection match role/scope mismatch".to_string());
-        }
-        let pending_changed = insert_pending_owner_with_mode_in_tx(store, need.owner, mode)
-            .map_err(|err| format!("queue pending projection match: {err}"))?;
-        let match_changed = record_pending_matches_for_stored_needs_in_tx(store, need.owner)?;
-        Ok(usize::from(pending_changed > 0 || match_changed > 0))
-    }
-
-    fn record_pending_matches_for_stored_needs_in_tx(
+    /// Record matches for every standing need an owner currently holds.
+    ///
+    /// Used both by context wake fanout and by direct queueing paths (due time
+    /// wakes, duplicate fact admission) that attach matches for an owner's existing
+    /// needs. Idempotent: every match row is an `INSERT OR IGNORE`.
+    pub(super) fn record_pending_matches_for_stored_needs_in_tx(
         store: &Store,
         owner: FactId,
     ) -> Result<usize, String> {
@@ -3293,6 +3281,7 @@ use crate::core::schema::{
 };
 use crate::core::store::{
     incoming_pending_fact_ids, insert_fact_and_pending_in_tx, insert_pending_owner_with_mode_in_tx,
+    sqlite_u64,
 };
 
 pub(crate) use commit_effects::RuntimeEffectMode;
@@ -3549,12 +3538,8 @@ pub(crate) fn submit_fact_to_store(store: &Store, fact: Fact) -> Result<bool, St
         .write_transaction(|tx| {
             let inserted = insert_fact_and_pending_in_tx(tx, &fact)?;
             if inserted {
-                context_store::insert_pending_matches_for_stored_needs_in_tx(
-                    tx,
-                    fact.id,
-                    ProjectionMode::Normal,
-                )
-                .map_err(commit_effects::sqlite_string_error)?;
+                context_store::record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
+                    .map_err(commit_effects::sqlite_string_error)?;
             }
             Ok(inserted)
         })
@@ -3573,12 +3558,8 @@ pub(crate) fn submit_facts_to_store(
             let mut inserted = 0;
             for fact in &facts {
                 if insert_fact_and_pending_in_tx(tx, fact)? {
-                    context_store::insert_pending_matches_for_stored_needs_in_tx(
-                        tx,
-                        fact.id,
-                        ProjectionMode::Normal,
-                    )
-                    .map_err(commit_effects::sqlite_string_error)?;
+                    context_store::record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
+                        .map_err(commit_effects::sqlite_string_error)?;
                     inserted += 1;
                 }
             }
@@ -3668,7 +3649,7 @@ fn enqueue_due_time_wakes_in_tx(
     let mut inserted = 0;
     for owner in owners {
         inserted += insert_pending_owner_with_mode_in_tx(store, owner, mode)?;
-        context_store::insert_pending_matches_for_stored_needs_in_tx(store, owner, mode).map_err(
+        context_store::record_pending_matches_for_stored_needs_in_tx(store, owner).map_err(
             |err| rusqlite::Error::InvalidParameterName(format!("queue time wake matches: {err}")),
         )?;
         store.conn().execute(
@@ -3803,14 +3784,6 @@ fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
 fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
     u64::try_from(value)
         .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
-}
-
-fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
-    i64::try_from(value).map_err(|_| {
-        rusqlite::Error::InvalidParameterName(format!(
-            "{name}: SQL value exceeds SQLite integer range"
-        ))
-    })
 }
 
 pub(crate) use commit_effects::commit_runtime_effects_to_store;
