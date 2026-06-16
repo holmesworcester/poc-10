@@ -141,11 +141,13 @@ facts.
 ## Runtime Work
 
 `receive_network_frame` is the inbound socket boundary. It normalizes origin
-metadata and admits sealed `request`, sealed `connection`, or
+metadata and stages sealed `request`, sealed `connection`, or
 established-frame bytes as typed incoming facts. It emits the matching
 `frame_observation` fact in the same effect batch so the incoming frame and its
-receive metadata enter projection together. It does no unsealing itself and is
-called directly by the daemon's inbound intake hook, not through a queued intent.
+receive metadata enter projection together. It does no unsealing itself and does
+not decide retention; the owning projector decides whether the incoming fact is
+kept as durable evidence or deleted after projection. It is called directly by
+the daemon's inbound intake hook, not through a queued intent.
 
 `maintain_connections` drives outbound request sends from retryable request
 rows. The request command creates invite or membership authority, initiator

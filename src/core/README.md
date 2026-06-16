@@ -84,8 +84,8 @@ Protocol code enters core through declarations and effect values:
   `CommandClock` directly, then query protocol-owned state before authoring
   facts.
 - `effects::RuntimeEffects` is the shared language for projector and handler
-  facts to admit, incoming facts, purges, row mutations, durable intents, and
-  local intents.
+  facts to admit durably, incoming facts to stage for projection, purges, row
+  mutations, durable intents, and local intents.
 - `store::SchemaSource` lets core, network IO, and protocol registry code
   declare SQL DDL, opaque row-table allowlists, and replay lifecycle for
   retained fact storage, resettable runtime state, and state-summary tables.
@@ -100,7 +100,7 @@ opaque outgoing rows from `network`.
 ```text
 CLI command / daemon / handler
   -> authored facts or RuntimeEffects
-  -> fact admission and pending_projection
+  -> durable fact admission or incoming_facts staging
   -> projector
   -> context needs/offers, time wakes, rows, intents
   -> intent queue
@@ -109,19 +109,22 @@ CLI command / daemon / handler
 ```
 
 Facts can enter through commands, handlers, sync, or incoming daemon input.
-Core records durable bytes or incoming bytes with admission scope and
-timestamp, then queues them for projection. Projection is the only path from
-fact bytes to standing context, read-model rows, time wakes, and follow-up work.
-Runtime work can record incoming facts in `incoming_facts`, submit local
-(ephemeral, not-replayed) intents to `local_intents`, and mark facts whose
-scheduled wake-up time has arrived as pending projection work.
+Core records durable fact bytes with admission metadata and retained
+`pending_projection` work; outside-origin bytes are staged in the temporary
+`incoming_facts` queue until runtime loads them into the owning projector.
+Projection is the only path from fact bytes to standing context, read-model
+rows, time wakes, and follow-up work. Runtime work can stage incoming facts in
+`incoming_facts`, submit local (ephemeral, not-replayed) intents to
+`local_intents`, and mark facts whose scheduled wake-up time has arrived as
+pending projection work.
 
 Network bytes enter through the TCP listener and are handed to the protocol
 inbound intake hook with origin and receive-time metadata. Recognized frame
-bytes commit as `incoming_facts` plus local observation facts through the same
-`RuntimeEffects` admission path used by other runtime work. Incoming frame
-facts may be retained while they wait on observation, connection, or key
-context. Outgoing bytes are produced by protocol handlers, staged as
+bytes commit as temporary `incoming_facts` plus local observation facts through
+`RuntimeEffects`. The owning projector decides whether each incoming frame fact
+is retained while it waits on observation, connection, or key context, or
+dropped after the one-shot projection succeeds. Outgoing bytes are produced by
+protocol handlers, staged as
 per-target `network_outgoing` frame rows, and written by core's TCP pump without
 parsing frame payloads. A separate `network_outgoing_targets` index names active
 addresses so the pump schedules peers without scanning frame payloads. The pump
@@ -395,8 +398,8 @@ One handler commit performs this ordered unit:
 delete claimed intent row
 delete shadowed local duplicate intent when the claimed row was durable
 purge exact facts
-admit emitted facts and mark them pending
-insert emitted incoming facts
+admit emitted durable facts and mark them pending
+stage emitted incoming facts
 apply row mutations
 record durable follow-up intents
 record local follow-up intents

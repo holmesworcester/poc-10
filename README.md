@@ -181,9 +181,10 @@ worker/daemon
 Command-authored facts and intent-created facts skip the incoming intake table:
 core retains them in `facts` and `local_fact_admissions`, then marks them in
 `pending_projection` in the same transaction. Outside-origin facts from the
-network handler enter through `incoming_facts`; projection either drops them or
-retains them as normal facts when they must park on context or become protocol
-evidence.
+network handler enter through the temporary `incoming_facts` queue. Intake only
+stages those rows; runtime loads them into the owning projector, and projector
+output either deletes the incoming row or retains it as a normal fact when it
+must park on context or become protocol evidence.
 
 Commands do not dispatch handlers. Before any protocol query reads projected
 state, runtime pre-settles retained `pending_projection` work so the query sees

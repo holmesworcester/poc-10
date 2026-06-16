@@ -47,37 +47,49 @@ flowchart TD
 ## 1) Fact Admission And Context Matching
 
 Facts enter from commands, inbound network intake, opened frames, and handlers.
-Projection emits the complete standing needs and offers for the fact being
-projected. Context is a range relationship: an offer can satisfy many needs, and
-an offer may exist before a later fact creates the matching need.
+Core commits command-authored facts and `RuntimeEffects::facts` as retained
+`facts` with `pending_projection` rows. Core stages
+`RuntimeEffects::incoming_facts` in the temporary `incoming_facts` queue; the
+runtime drains those rows straight into the owning projector, and projector
+output decides whether core retains the incoming fact or deletes it. Projection
+emits the complete standing needs and offers for the fact being projected.
+Context is a range relationship: an offer can satisfy many needs, and an offer
+may exist before a later fact creates the matching need.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    CMD["AuthoredCommand facts"] --> ADMIT["admit or stage facts"]
+    CMD["AuthoredCommand facts"] --> DURABLE_IN["durable fact commit"]
     INTAKE["inbound network intake RuntimeEffects"] --> EFFECTS["RuntimeEffects"]
     OPENED["opened child facts and receipts"] --> EFFECTS
     HANDLER_OUT["handler RuntimeEffects"] --> EFFECTS
 
-    EFFECTS --> ADMIT
-    ADMIT --> FACTS[("facts")]
-    ADMIT --> INCOMING[("incoming_facts")]
-    ADMIT --> PENDING[("pending_projection")]
+    EFFECTS --> DURABLE_IN
+    EFFECTS --> INCOMING_STAGE["stage incoming fact"]
+    DURABLE_IN --> FACTS[("facts")]
+    DURABLE_IN --> PENDING[("pending_projection retained queue")]
+    INCOMING_STAGE --> INCOMING[("incoming_facts temporary queue")]
 
-    PENDING --> LOAD["load fact plus matched context"]
+    PENDING --> LOAD["load retained fact plus matched context"]
+    INCOMING --> INCOMING_READY["incoming ready scan"]
+    INCOMING_READY --> LOAD_INCOMING["load incoming fact plus matched context"]
+    LOAD_INCOMING --> PROJECTOR
     LOAD --> PROJECTOR["owning projector"]
     PROJECTOR --> NEEDS["context needs"]
     PROJECTOR --> OFFERS["context offers"]
     PROJECTOR --> ROWS["scope-owned rows"]
     PROJECTOR --> INTENTS["durable or local intents"]
     PROJECTOR --> TIME["time wakes"]
-    PROJECTOR --> RETAIN["retain, drop, or reject incoming fact"]
+    PROJECTOR --> INCOMING_DECISION["incoming projector output"]
+    INCOMING_DECISION --> RETAIN["retain incoming fact"]
+    INCOMING_DECISION --> DROP["delete incoming_facts row"]
 
     NEEDS --> CONTEXT[("context rows")]
     OFFERS --> CONTEXT
     CONTEXT --> MATCH["range-overlap matcher"]
     MATCH --> WAKE["wake newly matched owners"]
     WAKE --> PENDING
+    WAKE --> INCOMING_READY
 
     INTENTS --> QUEUES[("intent queues")]
     QUEUES --> HANDLER["registered intent handler"]
@@ -90,97 +102,12 @@ flowchart TD
     DUE --> PENDING
 ```
 
-## 2) Context As The Cross-Scope Interface
+The lifecycle diagram above is the context diagram: it shows projectors
+declaring needs and offers, core matching ranges, and matches waking later
+projection work. The concrete role catalog belongs beside the projector docs
+that own those roles, not in a second architecture graph.
 
-Cross-scope proof usually travels through context, not direct row reads.
-Projectors publish role-scoped ranges; later projectors consume matched payload
-facts through `ProjectionContext` and still validate them locally. This diagram
-shows context as a proof surface; fact emission from bootstrap and frame opening
-is shown in the connection flow below.
-
-```mermaid
-flowchart LR
-    subgraph OFFERS["Context offers"]
-      AUTH_WS["auth_workspace"]
-      AUTH_USER["auth_user"]
-      AUTH_SIGNER["content_signer"]
-      AUTH_ADMIN["auth_admin"]
-      SIGNATURE["signature_proof"]
-      AUTH_ENDPOINT["auth_local_endpoint"]
-      ENDPOINT_SHARED["auth_endpoint_shared"]
-      INVITE_SECRET["connection_invite_secret"]
-      RECIPIENT["recipient_key"]
-      COVERAGE["secret_coverage"]
-      OBSERVATION["connection_frame_observation"]
-      EPHEMERAL["connection_ephemeral_secret"]
-      CONN_REQUEST["connection_request"]
-      CONN["connection"]
-      CONN_RECEIPT["connection_fact_receipt"]
-      CONTENT_MSG["content_message and content_message_meta"]
-      CONTENT_FILE["content_file"]
-      PURGE["fact_purged and content_retention_floor"]
-      SYNC_EXACT["sync_exact_fact"]
-    end
-
-    CONTEXT[("core context matcher")]
-
-    subgraph NEEDS["Projector needs"]
-      MSG_NEEDS["message needs signature, signer, author, key coverage, purge watch"]
-      FILE_NEEDS["file/slice needs parent content, key coverage, purge watch"]
-      DELETE_NEEDS["deletion needs target plus author or admin proof"]
-      REQUEST_NEEDS["request needs local endpoint, observation, invite or membership proof"]
-      CONNECTION_NEEDS["connection/frame needs request, connection, observation, endpoint, or ephemeral secret"]
-      AUTH_KEY_NEEDS["auth key material needs recipient, source, retirement, or exact fact proof"]
-      EXACT_NEEDS["exact-id waiters need sync_exact_fact"]
-    end
-
-    subgraph OUTPUTS["Validated outputs"]
-      OPENED["opened content rows"]
-      CONTENT_CONTEXT["content context offers"]
-      CONNECTION_ROWS["connection rows and context"]
-      AUTH_ROWS["auth rows and key-material facts"]
-      EXACT_PROGRESS["projector progress from exact fact payload"]
-    end
-
-    AUTH_WS --> CONTEXT
-    AUTH_USER --> CONTEXT
-    AUTH_SIGNER --> CONTEXT
-    AUTH_ADMIN --> CONTEXT
-    SIGNATURE --> CONTEXT
-    AUTH_ENDPOINT --> CONTEXT
-    ENDPOINT_SHARED --> CONTEXT
-    INVITE_SECRET --> CONTEXT
-    RECIPIENT --> CONTEXT
-    COVERAGE --> CONTEXT
-    OBSERVATION --> CONTEXT
-    EPHEMERAL --> CONTEXT
-    CONN_REQUEST --> CONTEXT
-    CONN --> CONTEXT
-    CONN_RECEIPT --> CONTEXT
-    CONTENT_MSG --> CONTEXT
-    CONTENT_FILE --> CONTEXT
-    PURGE --> CONTEXT
-    SYNC_EXACT --> CONTEXT
-
-    CONTEXT --> MSG_NEEDS
-    CONTEXT --> FILE_NEEDS
-    CONTEXT --> DELETE_NEEDS
-    CONTEXT --> REQUEST_NEEDS
-    CONTEXT --> CONNECTION_NEEDS
-    CONTEXT --> AUTH_KEY_NEEDS
-    CONTEXT --> EXACT_NEEDS
-
-    MSG_NEEDS --> OPENED
-    MSG_NEEDS --> CONTENT_CONTEXT
-    FILE_NEEDS --> OPENED
-    DELETE_NEEDS --> OPENED
-    REQUEST_NEEDS --> CONNECTION_ROWS
-    CONNECTION_NEEDS --> CONNECTION_ROWS
-    AUTH_KEY_NEEDS --> AUTH_ROWS
-    EXACT_NEEDS --> EXACT_PROGRESS
-```
-
-## 3) Connection Bootstrap And Established Frames
+## 2) Connection Bootstrap And Established Frames
 
 Connection owns sealed transport. Request and connection facts are their own
 sealed wire bytes. The daemon converts accepted TCP bytes through
@@ -251,7 +178,7 @@ flowchart TD
     REC_CHILD --> CORE
 ```
 
-## 4) Sync Seed, Live Tail, And Catch-Up
+## 3) Sync Seed, Live Tail, And Catch-Up
 
 Sync plans replication over connection rows. A connection becomes live only
 after its projector validates request, authority, observation, and
@@ -315,7 +242,7 @@ flowchart TD
     QUEUED --> SEND_COMPARE
 ```
 
-## 5) Responsibility Summary
+## 4) Responsibility Summary
 
 ```mermaid
 flowchart TD
@@ -327,12 +254,16 @@ flowchart TD
     INTENTS --> HANDLERS["handlers perform retryable effects"]
     HANDLERS --> EFFECTS["RuntimeEffects"]
     EFFECTS --> FACTS
+    EFFECTS --> INCOMING
 
     COMMANDS["commands author facts only"] --> FACTS
-    INTAKE["network intake stages incoming typed facts"] --> FACTS
+    INTAKE["network intake stages incoming typed facts"] --> INCOMING["incoming_facts temp queue"]
+    INCOMING --> PROJECTORS
+    PROJECTORS --> RETAIN_INCOMING["incoming retention decision"]
+    RETAIN_INCOMING --> FACTS
     REPLAY["replay drains retained facts and replayable time wakes"] --> PROJECTORS
     RECURRING["live recurring intents run operational loops"] --> HANDLERS
-    CONNECTION["connection carries bytes"] --> FACTS
+    CONNECTION["connection carries bytes"] --> INTAKE
     SYNC["sync chooses ids and dependency closure"] --> CONNECTION
     AUTH["auth proves authority and key access"] --> PROJECTORS
     CONTENT["content proves user-visible data and purge"] --> PROJECTORS
