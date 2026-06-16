@@ -11,6 +11,12 @@ Core owns turn locking, queue draining, context matching, transaction
 boundaries, time-wake admission, recurring schedule firing, and opaque network
 bytes. Protocol code participates when runtime turns call command authors,
 inbound intake, projectors, registered handlers, and recurring intent builders.
+Network ingress here is tick-scoped, not a background async receive path. A
+tick asks the nonblocking listener for ready streams; the work limit bounds
+accepted streams, and each accepted stream is read as length-prefixed frames.
+Each decoded frame is passed directly to inbound intake; recognized frames
+commit `RuntimeEffects` directly into runtime queues, including
+`incoming_facts`.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
@@ -30,8 +36,9 @@ flowchart TD
     DAEMON_PATH --> FIRE["fire recurring intent builders"]
     FIRE --> LOCAL_QUEUE["queue local_intents"]
     LOCAL_QUEUE --> STORE
-    FIRE --> NET_IN["drain available inbound TCP frames"]
-    NET_IN --> INTAKE["call inbound intake hook"]
+    FIRE --> NET_IN["drain ready TCP streams"]
+    NET_IN --> FRAME["decode length-prefixed frames"]
+    FRAME --> INTAKE["call inbound intake hook"]
     INTAKE --> COMMIT
     NET_IN --> TIME["admit due time wakes"]
     TIME --> STORE
