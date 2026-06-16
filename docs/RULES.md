@@ -60,13 +60,12 @@ in `src/core` or `src/protocol`.
   Primary byte parsing, primary-fact authentication, and semantic adaptation
   live as local `decode`, `authenticate`, and `adapt` modules inside
   `project.rs`.
-- Routed fact families do not use `layout.rs`, `create.rs`, or handwritten
-  fact-family `rows.rs` files. Byte construction rules live in `encode.rs`;
-  byte parsing rules live in the projector-local `decode` module; pure fact
-  construction, signing, encryption, and assembly live in `author.rs`; runtime
-  gathering remains in `commands.rs`; row shape is declared through schema
-  metadata or clearly named non-family modules such as sync `index.rs` /
-  `staging.rs`.
+- Routed fact families use the settled role-file split. Byte construction rules
+  live in `encode.rs`; byte parsing rules live in the projector-local `decode`
+  module; pure fact construction, signing, encryption, and assembly live in
+  `author.rs`; runtime gathering remains in `commands.rs`; row shape is
+  declared through schema metadata or clearly named non-family modules such as
+  sync `index.rs` / `staging.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
@@ -257,8 +256,9 @@ Patterns to avoid in projector files:
 - Deferred handlers must be retry-safe: if required inputs or external effects
   are unavailable, return an error so the intent remains queued.
 - Handlers must not construct shared fact wire layouts inline. If a handler
-  needs to create a protocol fact, the owning event module provides an
-  `author.rs` helper; `create.rs` is transitional for unmigrated families.
+  needs to create a protocol fact, the owning fact-family module provides an
+  `author.rs` helper. Fact construction, signing, encryption, and assembly stay
+  in the fact-family authoring module.
 - Handlers must not become logic dumping grounds. They validate their intent,
   load exact inputs through handler context, perform one bounded effect, and
   return facts/intents/purges.
@@ -335,7 +335,6 @@ transit-wrapper fact in another module.
   wrapping, and wrapping is authoring's job. `encode.rs` owns canonical byte
   serialization only. Handshake facts are sealed asymmetrically to the recipient
   endpoint; established frames are sealed with the `connection_secret`.
-  `create.rs` is only a transitional name for unmigrated families.
 - Unsealing is a context need. A receiver opens a sealed connection fact in that
   fact's own projector, which declares a context need for its unseal key —
   `auth_local_endpoint` (the local endpoint secret) for handshake facts,

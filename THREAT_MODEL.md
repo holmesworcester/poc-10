@@ -255,7 +255,7 @@ review.
 | TM-M5, TM-C4, TM-D3, TM-D6 | Auth key-material predicates and handlers: `valid_recipient_key_offer`, `valid_wrap_source_offer`, `valid_secret_coverage_offer`, `valid_key_wrap_fact`, `create_key_wrap`, and `unwrap_key_wrap`. |
 | TM-C1, TM-C5, TM-I1, TM-I2 | Content admission predicates for message, reaction, file, file-slice, deletion, and retention-policy projectors. |
 | TM-C2, TM-C3, TM-D2, TM-D4 | Sync shareability and connection sendability: `share_fact_with_sync`, dependency closure, connection-visible send filters, and local/private tag rejection. |
-| TM-D1, TM-D2, TM-D4 | Content deletion/retention proof: deletion facts publish `content_purged` only for proved targets, and target projectors self-purge only their own facts. |
+| TM-D1, TM-D2, TM-D4 | Content deletion/retention proof: deletion facts publish `fact_purged` only for proved targets, and target projectors self-purge only their own facts. |
 | TM-D5 | Cross-scope composition of content deletion, auth root retirement, retained-node coverage, sync retraction, and local/private send rejection. |
 
 The core induction target remains:

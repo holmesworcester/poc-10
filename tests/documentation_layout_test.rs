@@ -618,6 +618,87 @@ fn core_readmes_document_runtime_boundaries() {
 }
 
 #[test]
+fn architecture_docs_match_current_module_and_context_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let core_readme = source_text(&root.join("src/core/README.md"));
+    let normalized_core = normalize_whitespace(&core_readme);
+    let mut core_modules = fs::read_dir(root.join("src/core"))
+        .expect("read src/core")
+        .map(|entry| entry.expect("read src/core entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .expect("core module filename is utf-8")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    core_modules.sort();
+    let missing_modules = core_modules
+        .iter()
+        .filter(|module| !core_readme.contains(&format!("`{module}`:")))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        missing_modules.is_empty(),
+        "src/core/README.md is missing Top-Level Files entries for:\n{}",
+        missing_modules.join("\n")
+    );
+
+    for required in [
+        "`replay.rs`: replay and replay-check entry point",
+        "`row_schema.rs`: schema-backed helper layer for opaque row table key/value bytes",
+        "`versioning.rs`: protocol-neutral version ceiling and release-profile policy",
+        "`pending_time_ranges` work table",
+    ] {
+        assert!(
+            normalized_core.contains(required),
+            "src/core/README.md is missing current core detail {required:?}"
+        );
+    }
+
+    let rules = source_text(&root.join("docs/RULES.md"));
+    let normalized_rules = normalize_whitespace(&rules);
+    for required in [
+        "Routed fact families use the settled role-file split",
+        "owning fact-family module provides an `author.rs` helper",
+        "Fact construction, signing, encryption, and assembly stay in the fact-family authoring module",
+    ] {
+        assert!(
+            normalized_rules.contains(required),
+            "docs/RULES.md is missing settled authoring guidance {required:?}"
+        );
+    }
+    for removed in ["create.rs` is transitional", "unmigrated families"] {
+        assert!(
+            !rules.contains(removed),
+            "docs/RULES.md should not describe completed migrations as current work: {removed:?}"
+        );
+    }
+
+    let connection_readme = source_text(&root.join("src/protocol/connection/README.md"));
+    assert!(
+        connection_readme.contains("-> connection_fact_receipt(request) local receive proof"),
+        "src/protocol/connection/README.md should show request projection producing the receipt"
+    );
+    assert!(
+        !connection_readme.contains("needs connection_fact_receipt(request)"),
+        "src/protocol/connection/README.md should not document the produced receipt as a need"
+    );
+
+    let threat_model = source_text(&root.join("THREAT_MODEL.md"));
+    assert!(
+        threat_model.contains("publish `fact_purged` only for proved targets"),
+        "THREAT_MODEL.md should use the current generic purge context role"
+    );
+    assert!(
+        !threat_model.contains("content_purged"),
+        "THREAT_MODEL.md should not name the removed content_purged role"
+    );
+}
+
+#[test]
 fn active_readmes_do_not_refer_to_previous_designs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for readme in [

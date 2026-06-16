@@ -270,8 +270,8 @@ inbound responder dependency graph:
   request
     needs auth_local_endpoint(to_endpoint)
     needs connection_frame_observation(request)
-    needs connection_fact_receipt(request) for local receive proof
     needs connection_invite_secret(invite_secret) or endpoint_shared
+    -> connection_fact_receipt(request) local receive proof
     -> create_connection(request, authority, receipt)
 
 create_connection

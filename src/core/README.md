@@ -242,6 +242,14 @@ use core syntax and contracts, but core must not import their semantic rules.
   context and due time ranges, runs the routed projector, applies
   durable/incoming source rules, replaces the owner's needs/time wakes,
   appends offers, wakes matched owners, and commits emitted effects.
+- `replay.rs`: replay and replay-check entry point. It resets
+  schema-declared derived state, reprojects retained facts in canonical,
+  reverse, or deterministic scrambled order, computes state summaries, and
+  enforces replay constraints such as no network rows.
+- `row_schema.rs`: schema-backed helper layer for opaque row table key/value
+  bytes. It defines row fields, table schemas, runtime row values, and
+  encode/decode helpers that protocol-owned row helpers can use without giving
+  core protocol row semantics.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command-authored facts, runs
   query pre-settle over retained projection, drains runtime projection and intent
@@ -249,7 +257,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   `handle_intent.rs` into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,
-  pending projection matches, intent queues, local network
+  pending projection matches, the `pending_time_ranges` work table, intent
+  queues, local network
   tables, and the local clock table. Protocol rows live in protocol schema
   sources.
 - `store.rs`: SQLite substrate below runtime policy. It applies schema batches,
@@ -257,6 +266,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   provides immutable fact storage primitives, and provides generic keyed row
   helpers. It does not know what a fact tag, context role, network frame, or
   protocol row means.
+- `versioning.rs`: protocol-neutral version ceiling and release-profile policy.
+  It computes read/admit ceilings, maps protocol bundles to family versions,
+  decides which versions a release may author, and classifies received bytes as
+  active or pending before protocol code interprets them.
 - `wire.rs`: fixed-layout byte primitive layer. It provides exact-length
   readers/writers, big-endian integers, one-byte booleans, bounded padded
   slots, and trailing-byte checks. Owning fact and intent modules layer tags,
