@@ -201,6 +201,7 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
         (
             "sync",
             &[
+                "maintain_sync",
                 "seed_connection",
                 "send_compare_response",
                 "send_needed_fact_id",
@@ -1374,7 +1375,14 @@ const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local helper files that are deliberately not intents or fact-family
 /// manifests. These must stay rare and named explicitly.
-const SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS: [&str; 1] = ["connection/receive_network_frame.rs"];
+const SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS: [&str; 2] = [
+    "connection/receive_network_frame.rs",
+    "sync/local_setting.rs",
+];
+
+/// Fact-scope files that deliberately host a command parsing boundary because
+/// their command is just local setting authoring, not semantic protocol work.
+const CLI_BOUNDARY_FILE_EXCEPTIONS: [&str; 1] = ["src/protocol/sync/local_setting.rs"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
@@ -2275,6 +2283,10 @@ fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
         .filter(|path| path.file_name().is_none_or(|name| name != "cli.rs"))
         .chain(intent_handler_files(root))
     {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        if CLI_BOUNDARY_FILE_EXCEPTIONS.contains(&relative.as_str()) {
+            continue;
+        }
         let text = source_text(&path);
         for forbidden in [
             "CliArgs",
@@ -2290,10 +2302,7 @@ fn target_cli_equivalents_do_not_exist_or_parse_user_commands() {
             "parse::<",
         ] {
             if text.contains(forbidden) {
-                offenders.push(format!(
-                    "{} contains {forbidden:?}",
-                    path.strip_prefix(root).unwrap().display()
-                ));
+                offenders.push(format!("{relative} contains {forbidden:?}"));
             }
         }
     }

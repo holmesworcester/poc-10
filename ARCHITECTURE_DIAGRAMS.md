@@ -19,9 +19,9 @@ flowchart TD
     APP --> RUNTIME
 
     NET_IN["network_in opaque bytes"] --> DAEMON
-    RUNTIME --> PIPE["core pipeline"]
-    PIPE --> STORE[("SQLite fact store, context, rows, intents")]
-    STORE --> PIPE
+    RUNTIME --> WORKERS["core runtime workers"]
+    WORKERS --> STORE[("SQLite facts, context, rows, queues, time wakes")]
+    STORE --> WORKERS
 
     subgraph SCOPES["Protocol scopes"]
       AUTH["auth facts, keys, authority"]
@@ -30,14 +30,14 @@ flowchart TD
       SYNC["sync facts, range summaries, visibility"]
     end
 
-    PIPE --> AUTH
-    PIPE --> CONTENT
-    PIPE --> CONNECTION
-    PIPE --> SYNC
-    AUTH --> PIPE
-    CONTENT --> PIPE
-    CONNECTION --> PIPE
-    SYNC --> PIPE
+    WORKERS --> AUTH
+    WORKERS --> CONTENT
+    WORKERS --> CONNECTION
+    WORKERS --> SYNC
+    AUTH --> WORKERS
+    CONTENT --> WORKERS
+    CONNECTION --> WORKERS
+    SYNC --> WORKERS
 
     CONNECTION --> NET_OUT["network_outgoing opaque bytes"]
     NET_OUT --> PEER["remote node"]
@@ -46,20 +46,22 @@ flowchart TD
 
 ## 1) Fact Admission And Context Matching
 
-Facts enter from commands, received frames, and handlers. Projection emits the
-complete standing needs and offers for the fact being projected. Context is a
-range relationship: an offer can satisfy many needs, and an offer may exist
-before a later fact creates the matching need.
+Facts enter from commands, inbound network intake, opened frames, and handlers.
+Projection emits the complete standing needs and offers for the fact being
+projected. Context is a range relationship: an offer can satisfy many needs, and
+an offer may exist before a later fact creates the matching need.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    CMD["command output"] --> EFFECTS["PipelineEffects"]
-    RECV["opened network bytes"] --> EFFECTS
-    HANDLER_OUT["handler output"] --> EFFECTS
+    CMD["AuthoredCommand facts"] --> ADMIT["admit or stage facts"]
+    INTAKE["inbound network intake RuntimeEffects"] --> EFFECTS["RuntimeEffects"]
+    OPENED["opened child facts and receipts"] --> EFFECTS
+    HANDLER_OUT["handler RuntimeEffects"] --> EFFECTS
 
-    EFFECTS --> ADMIT["admit immutable facts"]
+    EFFECTS --> ADMIT
     ADMIT --> FACTS[("facts")]
+    ADMIT --> INCOMING[("incoming_facts")]
     ADMIT --> PENDING[("pending_projection")]
 
     PENDING --> LOAD["load fact plus matched context"]
@@ -69,6 +71,7 @@ flowchart TD
     PROJECTOR --> ROWS["scope-owned rows"]
     PROJECTOR --> INTENTS["durable or local intents"]
     PROJECTOR --> TIME["time wakes"]
+    PROJECTOR --> RETAIN["retain, drop, or reject incoming fact"]
 
     NEEDS --> CONTEXT[("context rows")]
     OFFERS --> CONTEXT
@@ -81,7 +84,10 @@ flowchart TD
     HANDLER --> HANDLER_OUT
 
     ROWS --> STORE[("read models and planning rows")]
-    TIME --> STORE
+    RETAIN --> FACTS
+    TIME --> TIME_ROWS[("time_wakes")]
+    TIME_ROWS --> DUE["daemon admits due ranges"]
+    DUE --> PENDING
 ```
 
 ## 2) Context As The Cross-Scope Interface
@@ -96,47 +102,73 @@ is shown in the connection flow below.
 flowchart LR
     subgraph OFFERS["Context offers"]
       AUTH_WS["auth_workspace"]
+      AUTH_USER["auth_user"]
       AUTH_SIGNER["content_signer"]
       AUTH_ADMIN["auth_admin"]
+      SIGNATURE["signature_proof"]
       AUTH_ENDPOINT["auth_local_endpoint"]
+      ENDPOINT_SHARED["auth_endpoint_shared"]
       INVITE_SECRET["connection_invite_secret"]
       RECIPIENT["recipient_key"]
       COVERAGE["secret_coverage"]
+      OBSERVATION["connection_frame_observation"]
+      EPHEMERAL["connection_ephemeral_secret"]
       CONN_REQUEST["connection_request"]
       CONN["connection"]
+      CONN_RECEIPT["connection_fact_receipt"]
+      CONTENT_MSG["content_message and content_message_meta"]
+      CONTENT_FILE["content_file"]
+      PURGE["fact_purged and content_retention_floor"]
+      SYNC_EXACT["sync_exact_fact"]
     end
 
     CONTEXT[("core context matcher")]
 
     subgraph NEEDS["Projector needs"]
-      MSG_NEEDS["message needs signer + key coverage"]
-      FILE_NEEDS["file/slice needs message + key coverage"]
-      DELETE_NEEDS["deletion needs target + admin proof"]
-      REQUEST_NEEDS["request needs invite secret"]
-      CONNECTION_NEEDS["connection needs request + invite proof"]
+      MSG_NEEDS["message needs signature, signer, author, key coverage, purge watch"]
+      FILE_NEEDS["file/slice needs parent content, key coverage, purge watch"]
+      DELETE_NEEDS["deletion needs target plus author or admin proof"]
+      REQUEST_NEEDS["request needs local endpoint, observation, invite or membership proof"]
+      CONNECTION_NEEDS["connection/frame needs request, connection, observation, endpoint, or ephemeral secret"]
+      AUTH_KEY_NEEDS["auth key material needs recipient, source, retirement, or exact fact proof"]
+      EXACT_NEEDS["exact-id waiters need sync_exact_fact"]
     end
 
     subgraph OUTPUTS["Validated outputs"]
       OPENED["opened content rows"]
       CONTENT_CONTEXT["content context offers"]
       CONNECTION_ROWS["connection rows and context"]
+      AUTH_ROWS["auth rows and key-material facts"]
+      EXACT_PROGRESS["projector progress from exact fact payload"]
     end
 
     AUTH_WS --> CONTEXT
+    AUTH_USER --> CONTEXT
     AUTH_SIGNER --> CONTEXT
     AUTH_ADMIN --> CONTEXT
+    SIGNATURE --> CONTEXT
     AUTH_ENDPOINT --> CONTEXT
+    ENDPOINT_SHARED --> CONTEXT
     INVITE_SECRET --> CONTEXT
     RECIPIENT --> CONTEXT
     COVERAGE --> CONTEXT
+    OBSERVATION --> CONTEXT
+    EPHEMERAL --> CONTEXT
     CONN_REQUEST --> CONTEXT
     CONN --> CONTEXT
+    CONN_RECEIPT --> CONTEXT
+    CONTENT_MSG --> CONTEXT
+    CONTENT_FILE --> CONTEXT
+    PURGE --> CONTEXT
+    SYNC_EXACT --> CONTEXT
 
     CONTEXT --> MSG_NEEDS
     CONTEXT --> FILE_NEEDS
     CONTEXT --> DELETE_NEEDS
     CONTEXT --> REQUEST_NEEDS
     CONTEXT --> CONNECTION_NEEDS
+    CONTEXT --> AUTH_KEY_NEEDS
+    CONTEXT --> EXACT_NEEDS
 
     MSG_NEEDS --> OPENED
     MSG_NEEDS --> CONTENT_CONTEXT
@@ -144,54 +176,75 @@ flowchart LR
     DELETE_NEEDS --> OPENED
     REQUEST_NEEDS --> CONNECTION_ROWS
     CONNECTION_NEEDS --> CONNECTION_ROWS
+    AUTH_KEY_NEEDS --> AUTH_ROWS
+    EXACT_NEEDS --> EXACT_PROGRESS
 ```
 
 ## 3) Connection Bootstrap And Established Frames
 
 Connection owns sealed transport. Request and connection facts are their own
-sealed wire bytes. Established frames carry ordinary fact bytes; once opened,
-child facts return to core admission and their owning scope validates meaning.
+sealed wire bytes. The daemon converts accepted TCP bytes through
+`receive_network_frame` intake effects, which stage typed incoming facts plus
+`frame_observation`. Request sends are live operational work from
+`maintain_connections`; response sends are emitted by the connection projector
+after the connection fact commits. Established frames carry ordinary fact bytes;
+once opened, child facts return to core admission and their owning scope
+validates meaning.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 340}} }%%
 flowchart TD
-    REMOTE_REQ["remote sealed request bytes"] --> RECEIVE["receive_network_frame"]
-    RECEIVE --> REQ["request fact"]
+    REQUEST_CMD["request command or accepted invite row"] --> LOCAL_REQ["ephemeral_secret plus sealed request fact"]
+    LOCAL_REQ --> REQUEST_PROJECTOR["request projector"]
+    REQUEST_PROJECTOR --> REQUEST_ROW["retryable request row"]
+    REQUEST_ROW --> MAINTAIN["maintain_connections recurring intent"]
+    MAINTAIN --> SEND_REQ["network_outgoing sealed request"]
+    SEND_REQ --> PEER["remote node"]
+
+    PEER --> REMOTE_REQ["remote sealed request bytes"]
+    REMOTE_REQ --> RECEIVE["receive_network_frame intake effects"]
+    RECEIVE --> REQ["incoming request fact"]
     RECEIVE --> OBS1["frame_observation for request"]
-    REQ --> CREATE_RESP["create_connection"]
-    OBS1 --> REQ
+    REQ --> REQ_PROJECTOR["request projector"]
+    OBS1 --> REQ_PROJECTOR
+    REQ_PROJECTOR --> REQ_RECEIPT["connection_fact_receipt for request"]
+    REQ_PROJECTOR --> CREATE_RESP["create_connection"]
     CREATE_RESP --> RESP_SECRET["responder ephemeral_secret"]
     CREATE_RESP --> RESP_OUT["sealed connection fact"]
     RESP_OUT --> RESP_PROJECT_A["connection projector"]
     RESP_PROJECT_A --> CONNECTION_A["connection row and context"]
     RESP_PROJECT_A --> QUEUE_RESP["queue_outgoing_frame"]
-    QUEUE_RESP --> RESP_BYTES["sealed connection bytes"]
-    RESP_BYTES --> PEER["remote node"]
+    RESP_PROJECT_A --> SEED_A["seed_connection_sync"]
+    QUEUE_RESP --> RESP_BYTES["network_outgoing sealed connection"]
+    RESP_BYTES --> PEER
 
     PEER --> REMOTE_RESP["remote sealed response bytes"]
     REMOTE_RESP --> RECEIVE
-    RECEIVE --> RESP_LOCAL["connection fact"]
+    RECEIVE --> RESP_LOCAL["incoming connection fact"]
     RECEIVE --> OBS2["frame_observation for response"]
     RESP_LOCAL --> RESP_PROJECT_B["connection projector"]
     OBS2 --> RESP_PROJECT_B
     RESP_PROJECT_B --> CONNECTION_B["connection row and context"]
-    RESP_PROJECT_B --> SEED["seed_connection_sync"]
+    RESP_PROJECT_B --> RESP_RECEIPT["connection_fact_receipt for response"]
+    RESP_PROJECT_B --> SEED_B["seed_connection_sync"]
 
     subgraph ESTABLISHED["Established connection"]
       SYNC_IDS["sync-selected fact ids"] --> SEND_IDS["send_facts_on_connection"]
       CONNECTION_B --> SEND_IDS
       FACT_STORE[("fact store payload bytes")] --> SEND_IDS
-      SEND_IDS --> FRAME_OUT["frame_small or frame_file_slice"]
+      SEND_IDS --> FRAME_OUT["frame_small, frame_file_slice, or frame_bundle"]
       FRAME_OUT --> NETWORK["network_outgoing"]
       NETWORK --> PEER
       PEER --> FRAME_IN_BYTES["sealed established frame bytes"]
       FRAME_IN_BYTES --> RECEIVE
       RECEIVE --> OBS["frame_observation"]
-      RECEIVE --> FRAME_IN["frame_small or frame_file_slice"]
-      OBS --> FRAME_IN
-      CONNECTION_B --> FRAME_IN
-      FRAME_IN --> CHILD["child facts"]
-      FRAME_IN --> REC_CHILD["connection_fact_receipt per child"]
+      RECEIVE --> FRAME_IN["incoming frame fact"]
+      OBS --> FRAME_PROJECTOR["frame projector"]
+      CONNECTION_B --> FRAME_PROJECTOR
+      FRAME_IN --> FRAME_PROJECTOR
+      FRAME_PROJECTOR --> PARK["retain with needs until context appears"]
+      FRAME_PROJECTOR --> CHILD["child facts"]
+      FRAME_PROJECTOR --> REC_CHILD["connection_fact_receipt per child"]
     end
 
     CHILD --> CORE["ordinary core admission"]
@@ -200,13 +253,14 @@ flowchart TD
 
 ## 4) Sync Seed, Live Tail, And Catch-Up
 
-Sync plans replication over connection rows. A received connection becomes live
-only after its projector validates request, authority, observation,
-and ephemeral-secret context. That projection writes the live connection row and
-emits `seed_connection_sync`. That seed creates the first compare. Later share
+Sync plans replication over connection rows. A connection becomes live only
+after its projector validates request, authority, observation, and
+ephemeral-secret context. That projection writes the live connection row and
+emits `seed_connection_sync`. The seed and live-only recurring `maintain_sync`
+path create compares over the active local sync-setting range. Later share
 contributions live-tail to established authorized connections. Periodic daemon
-ticks drain queued compare, have, need, send, and time-wake work when catch-up
-remains.
+ticks drain recurring intents, queued compare, have, need, fact-send, and
+replayable time-wake work when catch-up remains.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 340}} }%%
@@ -221,8 +275,11 @@ flowchart TD
     RESP_FACT --> RESP_PROJECTOR
     RESP_PROJECTOR --> CONNECTION_ROWS["connection rows"]
     RESP_PROJECTOR --> SEED["seed_connection_sync"]
-    SEED --> ROOT_COMPARE["root compare fact"]
-    ROOT_COMPARE --> SEND_COMPARE["send_facts_on_connection"]
+    CONNECTION_ROWS --> MAINTAIN_SYNC["maintain_sync recurring intent"]
+    SETTING["active sync-setting range"] --> RANGE_COMPARE["compare fact"]
+    SEED --> RANGE_COMPARE
+    MAINTAIN_SYNC --> RANGE_COMPARE
+    RANGE_COMPARE --> SEND_COMPARE["send_facts_on_connection"]
     SEND_COMPARE --> PEER["remote node"]
 
     PEER --> PEER_COMPARE["received compare"]
@@ -230,11 +287,19 @@ flowchart TD
     COMPARE_HANDLER --> CHILD_COMPARE["child compare facts"]
     COMPARE_HANDLER --> HAVE["have_id facts"]
     COMPARE_HANDLER --> SELECT["selected fact ids"]
+    CHILD_COMPARE --> SEND_COMPARE
+    HAVE --> SEND_HAVE["send_facts_on_connection have_id"]
+    SEND_HAVE --> PEER
     SELECT --> EXPAND["expand context_have recursively"]
     EXPAND --> SEND_BYTES["send owner bytes plus authorized dependencies"]
     SEND_BYTES --> PEER
 
-    HAVE --> PEER_NEED["peer sends need_id if missing"]
+    PEER --> PEER_HAVE["received have_id"]
+    PEER_HAVE --> NEED_HANDLER["send_needed_fact_id"]
+    NEED_HANDLER --> NEED_FACT["need_id fact if missing"]
+    NEED_FACT --> SEND_NEED["send_facts_on_connection"]
+    SEND_NEED --> PEER
+    PEER --> PEER_NEED["received need_id"]
     PEER_NEED --> SEND_REQUESTED["send_requested_fact"]
     SEND_REQUESTED --> EXPAND
 
@@ -244,7 +309,7 @@ flowchart TD
     LIVE --> ORIGIN_FILTER["skip origin connection receipts"]
     ORIGIN_FILTER --> EXPAND
 
-    TICK["daemon tick catch-up"] --> QUEUED["queued intents and due time wakes"]
+    TICK["daemon tick catch-up"] --> QUEUED["recurring intents, queued intents, and due time wakes"]
     QUEUED --> COMPARE_HANDLER
     QUEUED --> SEND_REQUESTED
     QUEUED --> SEND_COMPARE
@@ -260,8 +325,13 @@ flowchart TD
     PROJECTORS --> ROWS["scope-owned rows materialize local state"]
     PROJECTORS --> INTENTS["intents name bounded stateful work"]
     INTENTS --> HANDLERS["handlers perform retryable effects"]
-    HANDLERS --> FACTS
+    HANDLERS --> EFFECTS["RuntimeEffects"]
+    EFFECTS --> FACTS
 
+    COMMANDS["commands author facts only"] --> FACTS
+    INTAKE["network intake stages incoming typed facts"] --> FACTS
+    REPLAY["replay drains retained facts and replayable time wakes"] --> PROJECTORS
+    RECURRING["live recurring intents run operational loops"] --> HANDLERS
     CONNECTION["connection carries bytes"] --> FACTS
     SYNC["sync chooses ids and dependency closure"] --> CONNECTION
     AUTH["auth proves authority and key access"] --> PROJECTORS
