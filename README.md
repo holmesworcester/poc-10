@@ -197,10 +197,14 @@ authors a local sync-setting fact and projects it before returning; recurring
 daemon sync reads the projected setting and performs compare/have/need/fact-send
 work later. A setting command changes state, not the handler queue.
 
-Network input is staged as core-owned opaque bytes, converted by the daemon
-declaration into an ephemeral protocol intent, and then handled through the
-same intent dispatch path. Network output is produced by protocol handlers as
-opaque byte rows and written by the core TCP pump.
+Network input is accepted by core's TCP listener and handed directly to the
+protocol-declared inbound intake. The intake commits recognized wire frames as
+incoming facts plus observation facts through `RuntimeEffects`; core does not
+store a separate inbound byte queue. Network output is produced by protocol
+handlers as opaque frame bytes addressed to a `SocketAddr`. Core stores those
+bytes in memory-local `network_out` rows, keeps active peer addresses in
+`network_out_targets`, and lets the daemon TCP pump write and delete frames as
+socket capacity allows.
 
 ## Scope Layout
 
@@ -278,20 +282,24 @@ frames move bytes and produce receipts, while the owning fact projector
 validates every recovered fact.
 
 This keeps core's network interface minimal. Core owns TCP accept/write
-mechanics and stores inbound or outbound network payloads as opaque bytes. It
-does not know whether a byte string is a bootstrap request, bootstrap response,
-established connection frame, auth fact, sync fact, or content fact. On ingress,
-the daemon hands accepted bytes to the protocol-declared inbound network intent;
-the connection scope classifies the frame, emits the right local wrapper fact,
-and lets connection projectors open it with auth and connection context. Opened
-payloads re-enter the normal fact admission path as child facts, and receipt
-facts record which connection delivered them.
+mechanics, the volatile outbound frame queue, and the active-target scheduling
+index. It does not know whether a byte string is a bootstrap request, bootstrap
+response, established connection frame, auth fact, sync fact, or content fact.
+On ingress, the daemon hands accepted bytes to the protocol-declared inbound
+intake; the connection scope classifies the frame, emits the right local
+wrapper fact and observation fact, and lets connection projectors open it with
+auth and connection context. Opened payloads re-enter the normal fact admission
+path as child facts, and receipt facts record which connection delivered them.
 
 Egress is the same boundary in reverse. Sync may decide that a fact id should
 be sent to an authorized connection, but the connection scope decides how to
 load, filter, batch, seal, and address those facts as connection frames. The
 final `send_network_frame` intent gives core only a route and opaque frame
-bytes. Core writes bytes to the socket; connection facts preserve the durable
+bytes. The handler resolves that route to a `SocketAddr` and queues the bytes
+in `network_out`; `network_out_targets` records that the address has queued
+work. Core's daemon pump schedules active target addresses, writes
+length-prefixed frames from the per-target queue, and deletes each frame row
+only after it has been fully written. Connection facts preserve the durable
 relationship between those bytes, the session, recovered child facts, and
 receipts.
 

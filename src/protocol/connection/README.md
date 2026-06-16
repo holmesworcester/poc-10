@@ -37,11 +37,13 @@ context offers such as `connection_ephemeral_secret`, `connection_request`,
 durable intents for connection creation, sync seeding, fact batching,
 maintenance, and socket writes.
 
-Core owns queueing, fact storage, local-intent retry/removal, outbound socket
-table mechanics, inbound frame delivery, and transaction boundaries. Connection
-owns packet classification, handshake transcript checks, connection secret use,
-frame sealing/opening, and which child facts may be emitted from received
-bytes.
+Core owns fact storage, local-intent retry/removal, direct inbound frame
+delivery to the protocol intake callback, volatile outbound frame rows,
+active-address scheduling through `network_out_targets`, TCP writes, and
+transaction boundaries. Connection owns packet classification, route resolution
+from requests or connections to socket addresses, handshake transcript checks,
+connection secret use, frame sealing/opening, and which child facts may be
+emitted from received bytes.
 
 ## Managed Row State
 

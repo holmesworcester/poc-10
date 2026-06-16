@@ -228,10 +228,12 @@ use core syntax and contracts, but core must not import their semantic rules.
   local intent identity, opaque payloads, row mutation values, handler input
   declarations, retry/fatal handler errors, and the rule that handlers return
   `RuntimeEffects` instead of mutating runtime state directly.
-- `network.rs`: opaque network IO boundary. It owns memory-local inbound and
-  outbound queue rows, deterministic route+bytes row keys, listener setup,
-  length-prefixed TCP frame reading/writing, and cleanup. It does not classify
-  bootstrap frames, connection frames, auth facts, sync facts, or content facts.
+- `network.rs`: opaque network IO boundary. It owns listener setup, inbound
+  length-prefixed frame reading, direct delivery to the daemon intake callback,
+  memory-local `network_out` frame rows, the `network_out_targets` active-peer
+  index, deterministic route+bytes row keys, bounded TCP writes, and sent-row
+  cleanup. It does not classify bootstrap frames, connection frames, auth facts,
+  sync facts, or content facts.
 - `handle_intent.rs`: one queued intent transaction. It claims one durable or
   local intent, loads only handler-declared fact inputs, calls the registered
   handler, handles retry/fatal outcomes, and commits handler output atomically
