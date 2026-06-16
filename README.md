@@ -192,6 +192,15 @@ local command-authored facts. That pre-query settle does not consume
 turns own incoming facts, due time wakes, and handler-derived state. Tests that
 observe handler output should run a daemon/worker and assert eventually.
 
+User query-facing commands should not require intent dispatch to finish their
+visible writes. If a command needs additional facts before its rows can be read
+back, prefer authoring those facts in the command chain itself so projection
+settlement is sufficient. If a future command truly needs a deterministic
+fact-creating intent before its query-visible state is complete, the
+pre-query settle boundary must expand to drain those bounded intents and the
+pending projections they create to a fixpoint. The current runtime does not
+need that: query settling drains retained `pending_projection` only.
+
 Local operational settings follow the same rule. For example, `sync range`
 authors a local sync-setting fact and projects it before returning; recurring
 daemon sync reads the projected setting and performs compare/have/need/fact-send
