@@ -122,8 +122,10 @@ bytes commit as `incoming_facts` plus local observation facts through the same
 `RuntimeEffects` admission path used by other runtime work. Incoming frame
 facts may be retained while they wait on observation, connection, or key
 context. Outbound bytes are produced by protocol handlers, staged as
-`network_out` rows, and written by core's TCP pump without parsing frame
-payloads.
+address-keyed `network_out` rows, and written by core's TCP pump without
+parsing frame payloads. The pump discovers queued target addresses, writes
+length-prefixed frames as socket capacity allows, and deletes each row only
+after its frame is written.
 
 Time enters through daemon-owned `DaemonTimeWake` declarations. Core selects
 due `time_wakes`, attaches the due `TimeRange` to projection context, and lets

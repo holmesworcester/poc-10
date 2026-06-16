@@ -2,9 +2,10 @@
 //!
 //! This local intent is the final outgoing boundary for already-packaged
 //! connection-frame bytes. The handler resolves the connection route from local
-//! context, stages the opaque frame in core networking, and attempts one bounded
-//! TCP write. If route context or the socket is unavailable, it asks the intent
-//! runtime to retry instead of making network delivery durable protocol truth.
+//! context and stages the opaque frame in core networking. If route context is
+//! unavailable, it asks the intent runtime to retry instead of making network
+//! delivery durable protocol truth. TCP reachability belongs to the core
+//! outbound pump, not to this protocol handler.
 //!
 //! The payload is only `(routing_key, frame bytes)`, and the idempotence key is
 //! deterministic over both fields. Change this file for route lookup, retry
@@ -119,7 +120,7 @@ impl IntentHandler for SendNetworkFrameHandler {
             target,
             OutboundFrame { bytes: input.frame },
         )
-        .map_err(|err| retry_intent(format!("send_network_frame tcp send: {err}")))?;
+        .map_err(|err| HandlerError::fatal(format!("send_network_frame enqueue: {err}")))?;
         Ok(RuntimeEffects::new())
     }
 }

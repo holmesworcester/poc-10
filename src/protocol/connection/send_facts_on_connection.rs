@@ -9,7 +9,7 @@
 //! This is not socket IO and it is not sync visibility policy. Sync owns the
 //! shareable index and requested ids, this handler owns byte-level sendability
 //! and frame-family selection, each frame fact family owns sealing, and
-//! `send_network_frame` owns the final opaque socket write.
+//! `send_network_frame` owns final route resolution and outbound queueing.
 
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,

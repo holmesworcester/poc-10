@@ -162,9 +162,12 @@ connection and payload facts, rejects local/private facts, batches small facts
 or file slices into frame classes, seals each batch with the connection secret,
 and emits local `send_network_frame` intents.
 
-`send_network_frame` is the final outbound socket boundary. It resolves the
-route from a request row or connection row, validates frame size, stages the
-opaque bytes, and retries the intent on socket or route failure.
+`send_network_frame` is the final protocol-owned outbound boundary. It resolves
+the route from a request row or connection row, validates frame size, and stages
+opaque bytes in the core `network_out` queue. Route failures retry the intent.
+TCP reachability and backpressure are core concerns: the daemon pump drains
+address-keyed queue rows and leaves rows queued when a target cannot accept
+bytes.
 
 ## Facts
 

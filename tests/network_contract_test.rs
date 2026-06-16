@@ -1,4 +1,6 @@
-use std::net::SocketAddr;
+use std::io::Read;
+use std::net::{SocketAddr, TcpListener};
+use std::thread;
 
 use topo::core::network::{self, NetworkTarget, OutboundNetworkRow};
 use topo::core::store::Store;
@@ -62,4 +64,81 @@ fn outbound_network_rows_are_opaque_and_idempotent() {
             .is_empty(),
         "network rows are process-local IO staging, not restart-durable protocol truth"
     );
+}
+
+#[test]
+fn outbound_pump_writes_queued_rows_and_deletes_sent_frames() {
+    let store = Store::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let target = NetworkTarget::new(addr);
+    let first = OutboundNetworkRow::new(target, b"first frame".to_vec());
+    let second = OutboundNetworkRow::new(target, b"second frame".to_vec());
+    let mut expected_rows = vec![first.clone(), second.clone()];
+    expected_rows.sort_by(|left, right| left.key.cmp(&right.key));
+
+    network::enqueue_outbound(&store, &[second, first]).expect("enqueue outbound rows");
+
+    let reader = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept pump stream");
+        vec![
+            read_length_prefixed_frame(&mut stream),
+            read_length_prefixed_frame(&mut stream),
+        ]
+    });
+    let report = network::pump_outbound(&store, 16, 16).expect("pump outbound rows");
+
+    assert_eq!(
+        report,
+        network::OutboundPumpReport {
+            target_count: 1,
+            sent_frames: 2,
+            deferred_targets: 0,
+        }
+    );
+    assert_eq!(
+        reader.join().expect("reader thread"),
+        expected_rows
+            .iter()
+            .map(|row| row.bytes.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(network::claim_outbound_for_target(&store, target, 16)
+        .expect("claim after pump")
+        .is_empty());
+}
+
+#[test]
+fn outbound_pump_leaves_rows_queued_when_target_is_unavailable() {
+    let store = Store::open_memory_with_schema_sources(&[network::SCHEMA_SOURCE]).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
+    let addr = listener.local_addr().expect("listener addr");
+    drop(listener);
+    let target = NetworkTarget::new(addr);
+    let outbound = OutboundNetworkRow::new(target, b"queued until reachable".to_vec());
+
+    network::enqueue_outbound(&store, std::slice::from_ref(&outbound))
+        .expect("enqueue outbound row");
+    let report = network::pump_outbound(&store, 16, 16).expect("pump unavailable target");
+
+    assert_eq!(
+        report,
+        network::OutboundPumpReport {
+            target_count: 1,
+            sent_frames: 0,
+            deferred_targets: 1,
+        }
+    );
+    assert_eq!(
+        network::claim_outbound_for_target(&store, target, 16).expect("claim queued row"),
+        vec![outbound]
+    );
+}
+
+fn read_length_prefixed_frame(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).expect("read frame length");
+    let mut body = vec![0; u32::from_be_bytes(len) as usize];
+    stream.read_exact(&mut body).expect("read frame body");
+    body
 }

@@ -2,9 +2,7 @@
 //!
 //! Network-send handler wiring tests.
 
-use std::io::Read;
 use std::net::TcpListener;
-use std::thread;
 
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
@@ -23,17 +21,8 @@ use topo::protocol::connection::send_network_frame::{
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
 #[test]
-fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let reader = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept send");
-        let mut len = [0u8; 4];
-        stream.read_exact(&mut len).expect("read len");
-        let mut body = vec![0; u32::from_be_bytes(len) as usize];
-        stream.read_exact(&mut body).expect("read body");
-        body
-    });
+fn well_formed_frame_resolves_route_and_queues_outbound_row() {
+    let addr = "127.0.0.1:41000".parse().expect("addr");
     let store = test_store();
     let local_endpoint = local_endpoint();
     store
@@ -54,13 +43,18 @@ fn well_formed_frame_resolves_route_and_writes_to_tcp_peer() {
             &intent,
             &HandlerContext::with_facts([connection_fact]).with_store(&store),
         )
-        .expect("network send should write frame");
+        .expect("network send should queue frame");
 
     assert!(output.facts.is_empty());
     assert!(output.intents.is_empty());
+    let queued = network::claim_outbound_for_target(&store, network::NetworkTarget::new(addr), 16)
+        .expect("claim queued outbound frame");
     assert_eq!(
-        reader.join().expect("reader"),
-        b"opaque-connection::frame-frame-bytes"
+        queued
+            .iter()
+            .map(|row| row.bytes.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"opaque-connection::frame-frame-bytes".as_slice()]
     );
 }
 
@@ -73,12 +67,12 @@ fn empty_frame_is_rejected_before_route_lookup() {
     let handler = SendNetworkFrameHandler::new();
     let err = handler
         .handle(&intent, &HandlerContext::new())
-        .expect_err("empty frame must be rejected before tcp stop");
+        .expect_err("empty frame must be rejected before route lookup");
     assert!(err.contains("empty"), "{err}");
 }
 
 #[test]
-fn unreachable_peer_requests_retry_without_consuming_intent() {
+fn resolved_route_queues_without_opening_tcp_peer() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed listener");
     let addr = listener.local_addr().expect("listener addr");
     drop(listener);
@@ -95,15 +89,21 @@ fn unreachable_peer_requests_retry_without_consuming_intent() {
         frame: b"opaque-connection::frame-frame-bytes".to_vec(),
     });
 
-    let err = SendNetworkFrameHandler::new()
+    let output = SendNetworkFrameHandler::new()
         .handle(
             &intent,
             &HandlerContext::with_facts([connection_fact]).with_store(&store),
         )
-        .expect_err("unreachable peer should request retry");
+        .expect("send handler only queues outbound bytes");
 
-    assert!(retry_intent_reason(&err).is_some(), "{err}");
-    assert!(err.contains("open tcp stream"), "{err}");
+    assert!(output.facts.is_empty());
+    assert!(output.intents.is_empty());
+    assert_eq!(
+        network::claim_outbound_for_target(&store, network::NetworkTarget::new(addr), 16)
+            .expect("claim queued outbound frame")
+            .len(),
+        1
+    );
 }
 
 #[test]

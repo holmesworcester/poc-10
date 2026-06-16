@@ -1,13 +1,14 @@
 //! Core-owned opaque network IO boundary and TCP frame pump.
 //!
-//! Protocol code hands opaque frame bytes to this module. Core stages outbound
-//! bytes in memory-local SQLite queue rows before TCP writes, and it delivers
-//! inbound TCP frames to a caller-provided intake callback as soon as the frame
-//! has been decoded.
+//! Protocol code hands opaque frame bytes to this module. Core stores outbound
+//! bytes in address-keyed memory-local SQLite queue rows, pumps those rows to
+//! TCP when a daemon tick has socket capacity, and delivers inbound TCP frames
+//! to a caller-provided intake callback as soon as the frame has been decoded.
 //!
 //! The queue rows are process-local operational state, not protocol truth.
 //! Durable work lives in projected facts, context, rows, and intents; network
-//! bytes are retried by re-running the intent that staged them.
+//! bytes are retried by keeping queued rows until the TCP pump deletes them
+//! after a successful write.
 //!
 //! The outbound queue key is intentionally deterministic: the same route and
 //! same bytes map to the same row. That gives the boundary a cheap idempotence
@@ -124,11 +125,11 @@ impl OutboundNetworkRow {
     }
 }
 
-/// Send one outbound frame through TCP after staging it in the core outbound queue.
+/// Queue one outbound frame for the daemon TCP pump.
 pub fn send(store: &Store, target: NetworkTarget, frame: OutboundFrame) -> Result<(), String> {
     let OutboundFrame { bytes } = frame;
     let row = OutboundNetworkRow::new(target, bytes);
-    send_once(store, target, vec![row], (), |_, _| Ok(())).map(|_| ())
+    enqueue_outbound(store, std::slice::from_ref(&row)).map(|_| ())
 }
 
 /// Insert outbound rows idempotently.
@@ -160,10 +161,80 @@ pub fn claim_outbound_for_target(
         .collect()
 }
 
+/// Discover targets with queued outbound rows.
+///
+/// The queue key starts with the target address, so a pump pass can discover
+/// distinct address prefixes without parsing protocol bytes or route rows.
+pub fn queued_outbound_targets(store: &Store, limit: usize) -> Result<Vec<NetworkTarget>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut targets = Vec::new();
+    for (key, _) in store
+        .table_rows(OUTBOUND_TABLE)
+        .map_err(|err| format!("discover outbound network targets: {err}"))?
+    {
+        let target = NetworkTarget::new(decode_addr_from_key(&key)?);
+        if targets.contains(&target) {
+            continue;
+        }
+        targets.push(target);
+        if targets.len() == limit {
+            break;
+        }
+    }
+    Ok(targets)
+}
+
+/// Counts observed while draining the queued outbound network rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboundPumpReport {
+    /// Distinct queued targets considered in this pass.
+    pub target_count: usize,
+    /// Frames successfully written and removed from the queue.
+    pub sent_frames: usize,
+    /// Targets that still have queued rows after a TCP connect or write failed.
+    pub deferred_targets: usize,
+}
+
+/// Drain queued outbound frames to TCP targets.
+///
+/// This is the daemon-side outbound pump. It discovers address-keyed queued
+/// rows, opens a bounded TCP stream per target, and deletes each row only after
+/// its length-prefixed frame has been written. TCP failures are backpressure or
+/// reachability signals: they defer that target for a later pass instead of
+/// turning opaque transport state into durable protocol truth.
+pub fn pump_outbound(
+    store: &Store,
+    max_targets: usize,
+    max_frames_per_target: usize,
+) -> Result<OutboundPumpReport, String> {
+    let targets = queued_outbound_targets(store, max_targets)?;
+    let mut report = OutboundPumpReport {
+        target_count: targets.len(),
+        ..OutboundPumpReport::default()
+    };
+    if max_frames_per_target == 0 {
+        return Ok(report);
+    }
+    for target in targets {
+        match pump_outbound_target(store, target, max_frames_per_target)? {
+            TargetPumpOutcome::Drained { sent_frames } => {
+                report.sent_frames += sent_frames;
+            }
+            TargetPumpOutcome::Deferred { sent_frames } => {
+                report.sent_frames += sent_frames;
+                report.deferred_targets += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
 /// Claim specific outbound rows by exact deterministic key.
 ///
-/// This is the shape used by one-shot intent handlers: the handler proves the
-/// rows it just staged are present before attempting the socket write.
+/// This lets tests and synchronous send helpers prove the deterministic rows
+/// they just staged are present before attempting a socket write.
 pub fn claim_exact_outbound(
     store: &Store,
     rows: &[OutboundNetworkRow],
@@ -354,11 +425,10 @@ pub fn listen(listen: SocketAddr) -> Result<Listener, String> {
 
 /// Open a TCP stream, send outbound rows for that target, and return.
 ///
-/// This is the daemon-friendly shape for queued outbound work whose responses
-/// will arrive later as ordinary inbound streams. It stages bytes in the
-/// core outbound queue and calls `on_sent` only after bounded socket writes and
-/// queue deletion complete. If the remote side stops draining its socket, the
-/// write times out and the protocol send rows remain queued for a later pass.
+/// This synchronous helper stages bytes in the core outbound queue and calls
+/// `on_sent` only after bounded socket writes and queue deletion complete. The
+/// daemon normally uses `pump_outbound` so already queued rows can be drained
+/// by target address.
 pub fn send_once<T>(
     store: &Store,
     target: NetworkTarget,
@@ -440,6 +510,37 @@ fn write_claimed_outbound<T>(
     on_sent(&claimed, value)?;
     report.sent_frames += claimed.len();
     Ok(())
+}
+
+enum TargetPumpOutcome {
+    Drained { sent_frames: usize },
+    Deferred { sent_frames: usize },
+}
+
+fn pump_outbound_target(
+    store: &Store,
+    target: NetworkTarget,
+    limit: usize,
+) -> Result<TargetPumpOutcome, String> {
+    let rows = claim_outbound_for_target(store, target, limit)?;
+    if rows.is_empty() {
+        return Ok(TargetPumpOutcome::Drained { sent_frames: 0 });
+    }
+    let mut stream = match connect(target.addr()) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(TargetPumpOutcome::Deferred { sent_frames: 0 }),
+    };
+    let mut sent_frames = 0;
+    for row in rows {
+        ensure_target(target, std::slice::from_ref(&row))?;
+        if write_frame(&mut stream, &row.bytes).is_err() {
+            return Ok(TargetPumpOutcome::Deferred { sent_frames });
+        }
+        delete_outbound(store, std::slice::from_ref(&row))?;
+        sent_frames += 1;
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(TargetPumpOutcome::Drained { sent_frames })
 }
 
 fn ensure_target(target: NetworkTarget, rows: &[OutboundNetworkRow]) -> Result<(), String> {

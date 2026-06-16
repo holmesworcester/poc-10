@@ -4,8 +4,8 @@
 //! per-store lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
-//! commit protocol-classified incoming facts, process declared time wakes, then
-//! drain projection/intent/projection work.
+//! commit protocol-classified incoming facts, process declared time wakes, drain
+//! projection/intent/projection work, then pump queued outbound network bytes.
 //!
 //! The daemon is the host for work that should keep happening without a user
 //! command on the stack. It does not decode connection frames or choose protocol
@@ -14,11 +14,11 @@
 //! the runtime handlers that consume queued work.
 //!
 //! The order inside `tick` is part of the runtime contract. Network input is
-//! admitted first, due time ranges wake facts, and then the runtime drains
-//! projection, intent dispatch, and projection again. Change that order here
-//! only if the whole daemon scheduling policy changes; protocol handlers should
-//! adapt by emitting facts, time wakes, or intents rather than calling daemon
-//! steps directly.
+//! admitted first, due time ranges wake facts, the runtime drains projection,
+//! intent dispatch, and projection again, and then queued outbound TCP bytes are
+//! pumped by target address. Change that order here only if the whole daemon
+//! scheduling policy changes; protocol handlers should adapt by emitting facts,
+//! time wakes, or intents rather than calling daemon steps directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::effects::RuntimeEffects;
@@ -96,8 +96,8 @@ pub struct DaemonTimeWake {
 /// Run one bounded daemon tick.
 ///
 /// The order is fixed: accept TCP, commit inbound intake effects, admit time
-/// wakes, then drain projection/intent/projection work. Protocols should
-/// change their declarations rather than reordering this loop.
+/// wakes, drain projection/intent/projection work, then pump outbound TCP rows.
+/// Protocols should change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
     runtime: &mut Runtime,
@@ -113,6 +113,7 @@ pub fn tick(
     )?);
     status.merge(drain_time_wakes(description, runtime, work_limit)?);
     status.merge(runtime.drain_daemon_queues_once(work_limit)?);
+    status.merge(drain_outbound_network(runtime, work_limit)?);
     Ok(status)
 }
 
@@ -157,6 +158,11 @@ fn drain_time_wakes(
             runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, work_limit)?;
     }
     Ok(WorkStatus::progressed(due > 0))
+}
+
+fn drain_outbound_network(runtime: &mut Runtime, work_limit: usize) -> Result<WorkStatus, String> {
+    let report = network::pump_outbound(runtime.store(), work_limit, work_limit)?;
+    Ok(WorkStatus::progressed(report.sent_frames > 0))
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -683,6 +689,38 @@ fn print_line_now(line: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::facts::Fact;
+    use crate::core::network::{NetworkTarget, OutboundFrame};
+    use crate::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
+    use crate::core::runtime::RuntimeDescription;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    struct NoopProjector;
+
+    impl Projector for NoopProjector {
+        fn project(
+            &self,
+            _fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    fn noop_projector() -> Box<dyn Projector> {
+        Box::new(NoopProjector)
+    }
+
+    const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[network::SCHEMA_SOURCE],
+        row_mutation_tables: &[],
+        projector: noop_projector,
+        fact_routes: &[],
+        fact_admission: None,
+        handlers: &[],
+    };
 
     #[test]
     fn parses_daemon_start_flags() {
@@ -742,5 +780,55 @@ mod tests {
             ),
             Some(Duration::from_millis(200))
         );
+    }
+
+    #[test]
+    fn tick_pumps_queued_outbound_rows_after_runtime_work() {
+        let peer = TcpListener::bind("127.0.0.1:0").expect("bind outbound peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let reader = thread::spawn(move || {
+            let (mut stream, _) = peer.accept().expect("accept outbound pump");
+            read_length_prefixed_frame(&mut stream)
+        });
+        let listener =
+            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        network::send(
+            runtime.store(),
+            NetworkTarget::new(peer_addr),
+            OutboundFrame {
+                bytes: b"tick queued frame".to_vec(),
+            },
+        )
+        .expect("queue outbound frame");
+
+        let status = tick(
+            DaemonDescription {
+                inbound_network_intake: None,
+                time_wakes: &[],
+            },
+            &mut runtime,
+            &listener,
+            16,
+        )
+        .expect("daemon tick");
+
+        assert!(status.progressed);
+        assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
+        assert!(network::claim_outbound_for_target(
+            runtime.store(),
+            NetworkTarget::new(peer_addr),
+            16
+        )
+        .expect("claim after tick")
+        .is_empty());
+    }
+
+    fn read_length_prefixed_frame(stream: &mut TcpStream) -> Vec<u8> {
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).expect("read frame length");
+        let mut body = vec![0; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut body).expect("read frame body");
+        body
     }
 }
