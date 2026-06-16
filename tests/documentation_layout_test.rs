@@ -105,7 +105,7 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "runtime store and queues",
         "run command or query",
         "call protocol command author",
-        "pre-query retained projection settle",
+        "query path: drain retained projection queue",
         "run daemon tick",
         "fire recurring intent builders",
         "drain ready TCP streams",
@@ -259,6 +259,8 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "drain available inbound TCP frames",
         "NET_IN --> TIME",
         "decode length-prefixed frames",
+        "pre-query retained projection settle",
+        "PREQUERY --> PROJECTOR",
     ] {
         assert!(
             !diagrams.contains(removed),

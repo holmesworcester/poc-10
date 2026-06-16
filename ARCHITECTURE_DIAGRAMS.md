@@ -30,8 +30,9 @@ flowchart TD
     COMMAND_PATH --> COMMANDS["call protocol command author"]
     COMMANDS --> COMMAND_FACTS["authored facts"]
     COMMAND_FACTS --> COMMIT["atomic fact/effect commit"]
-    COMMAND_PATH --> PREQUERY["pre-query retained projection settle"]
-    PREQUERY --> PROJECTOR
+    COMMAND_PATH --> PREQUERY_QUEUE["query path: drain retained projection queue"]
+    STORE --> PREQUERY_QUEUE
+    PREQUERY_QUEUE --> PROJECTOR
 
     TURN --> DAEMON_PATH["run daemon tick"]
     DAEMON_PATH --> FIRE["fire recurring intent builders"]
