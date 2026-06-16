@@ -39,7 +39,7 @@ flowchart TD
     CONNECTION --> PIPE
     SYNC --> PIPE
 
-    CONNECTION --> NET_OUT["network_out opaque bytes"]
+    CONNECTION --> NET_OUT["network_outgoing opaque bytes"]
     NET_OUT --> PEER["remote node"]
     PEER --> NET_IN
 ```
@@ -164,7 +164,8 @@ flowchart TD
     CREATE_RESP --> RESP_OUT["sealed connection fact"]
     RESP_OUT --> RESP_PROJECT_A["connection projector"]
     RESP_PROJECT_A --> CONNECTION_A["connection row and context"]
-    RESP_PROJECT_A --> RESP_BYTES["sealed connection bytes"]
+    RESP_PROJECT_A --> QUEUE_RESP["queue_outgoing_frame"]
+    QUEUE_RESP --> RESP_BYTES["sealed connection bytes"]
     RESP_BYTES --> PEER["remote node"]
 
     PEER --> REMOTE_RESP["remote sealed response bytes"]
@@ -181,7 +182,7 @@ flowchart TD
       CONNECTION_B --> SEND_IDS
       FACT_STORE[("fact store payload bytes")] --> SEND_IDS
       SEND_IDS --> FRAME_OUT["frame_small or frame_file_slice"]
-      FRAME_OUT --> NETWORK["send_network_frame"]
+      FRAME_OUT --> NETWORK["network_outgoing"]
       NETWORK --> PEER
       PEER --> FRAME_IN_BYTES["sealed established frame bytes"]
       FRAME_IN_BYTES --> RECEIVE

@@ -28,18 +28,18 @@ Data enters core from three places:
   `request`, and `close` facts;
 - the daemon hands accepted TCP frames to `receive_network_frame` intake, which
   commits recognized frames as incoming facts plus observation facts;
-- sync and connection handlers queue outbound frame intents.
+- sync and connection handlers queue outgoing frame bytes.
 
 Projection and handlers return child facts opened from established frames,
 context offers such as `connection_ephemeral_secret`, `connection_request`,
 `connection`, `connection_for_request`, `connection_fact_receipt`,
 `connection_closed`, and `connection_ephemeral_secret_closed`, plus local or
 durable intents for connection creation, sync seeding, fact batching,
-maintenance, and socket writes.
+maintenance, and route-resolved outgoing queueing.
 
 Core owns fact storage, local-intent retry/removal, direct inbound frame
-delivery to the protocol intake callback, volatile outbound frame rows,
-active-address scheduling through `network_out_targets`, TCP writes, and
+delivery to the protocol intake callback, volatile outgoing frame rows,
+active-address scheduling through `network_outgoing_targets`, TCP writes, and
 transaction boundaries. Connection owns packet classification, route resolution
 from requests or connections to socket addresses, handshake transcript checks,
 connection secret use, frame sealing/opening, and which child facts may be
@@ -52,13 +52,14 @@ live connections, ephemeral handshake secrets, and fact receipts.
 `invite_accepted` rows identify accepted bootstrap peers; the
 `bootstrap_connection_attempt_rows` index prevents a maintenance tick from
 forking duplicate requests for the same accepted invite. Request rows let
-`maintain_connections` resend unanswered outbound requests. Connection rows let send handlers find the
+`maintain_connections` resend unanswered requests by queueing their sealed bytes
+to the stored peer address. Connection rows let send handlers find the
 connection secret and the connection-scoped route. Fact-receipt rows answer local
 diagnostics and sync context expansion.
 
 Connection rows are not the cross-scope transport contract. The reusable
-interfaces are connection context roles, queued connection intents, and facts
-carried inside sealed frames.
+interfaces are connection context roles, connection-owned work intents, core's
+outgoing queue, and facts carried inside sealed frames.
 
 ## Interfaces To Other Scopes
 
@@ -137,38 +138,40 @@ Close is target-owned. A close fact publishes close context. The connection and
 ephemeral-secret projectors consume it and delete or purge their own rows and
 facts.
 
-## Intent Handlers
+## Runtime Work
 
 `receive_network_frame` is the inbound socket boundary. It normalizes origin
 metadata and admits sealed `request`, sealed `connection`, or
 established-frame bytes as typed incoming facts. It emits the matching
 `frame_observation` fact in the same effect batch so the incoming frame and its
-receive metadata enter projection together. It does no unsealing itself. The
-module also keeps an intent-handler wrapper for generic handler-level tests and
-queued callers, but the live daemon uses the direct intake effect path.
+receive metadata enter projection together. It does no unsealing itself and is
+called directly by the daemon's inbound intake hook, not through a queued intent.
 
 `maintain_connections` drives outbound request sends from retryable request
 rows. The request command creates invite or membership authority, initiator
-ephemeral material, and the exact sealed request fact. Maintenance re-queues
-`send_network_frame` for unanswered rows.
+ephemeral material, and the exact sealed request fact. Maintenance queues
+unanswered sealed request bytes directly into core's `network_outgoing` table
+for the row's peer address.
 
 `create_connection` is responder-side handshake work. It loads the request,
 authority fact, receive receipt, and local endpoint row, validates the bootstrap
 or membership proof and receipt path, creates responder ephemeral material, and
 returns responder `ephemeral_secret` plus sealed `connection`. It sends nothing
-itself; connection projection emits the local `send_network_frame` intent after
+itself; connection projection emits the local `queue_outgoing_frame` intent after
 the connection fact is admitted.
 
 `send_facts_on_connection` packages facts chosen by sync. It loads the
 connection and payload facts, rejects local/private facts, batches small facts
 or file slices into frame classes, seals each batch with the connection secret,
-and emits local `send_network_frame` intents.
+resolves the connection row to a peer address, and queues outgoing frame bytes
+directly into core's `network_outgoing` table.
 
-`send_network_frame` is the final protocol-owned outbound boundary. It resolves
-the route from a request row or connection row, validates frame size, and stages
-opaque bytes in the core `network_out` frame queue. Route failures retry the
-intent. TCP reachability and backpressure are core concerns: the daemon pump
-schedules active addresses from `network_out_targets`, drains per-target frame
+`queue_outgoing_frame` is the route-resolving bridge used when projection has
+sealed bytes but cannot mutate the core network queue directly. It resolves a
+connection row to a peer address, validates frame size, and stages opaque bytes
+in the core `network_outgoing` frame queue. Route failures retry the intent. TCP
+reachability and backpressure are core concerns: the daemon pump
+schedules active addresses from `network_outgoing_targets`, drains per-target frame
 rows, and leaves rows queued when a target cannot accept bytes.
 
 ## Facts
@@ -263,7 +266,7 @@ outbound initiator:
     -> sealed request
     -> request row
     -> maintain_connections
-    -> send_network_frame
+    -> network_outgoing
 
 inbound responder transport observation:
   sealed request bytes
@@ -285,7 +288,7 @@ create_connection
 connection projector on responder:
   needs request + responder ephemeral_secret + authority
   -> connection row + connection offer
-  -> send_network_frame(sealed connection)
+  -> queue_outgoing_frame(sealed connection)
 
 inbound initiator transport observation:
   sealed connection bytes
@@ -301,7 +304,7 @@ connection projector on initiator:
 established connection transfer:
   sync selected facts
     -> send_facts_on_connection
-    -> send_network_frame
+    -> network_outgoing
     -> remote frame_small/frame_bundle/frame_file_slice
     -> remote incoming frame + frame_observation
        needs frame_observation + connection

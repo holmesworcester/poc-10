@@ -1053,19 +1053,15 @@ pub(crate) const HANDLER_ROUTES: &[HandlerRoute] = &[
         auth::unwrap_key_wrap::UNWRAP_KEY_WRAP,
         auth::unwrap_key_wrap::UnwrapKeyWrapHandler
     ),
-    // Sending facts over a connection, frame send, and frame receive are
-    // operational IO over a live session.
+    // Sending facts over a connection and route-resolved outgoing frame
+    // queueing are operational IO over a live session.
     handler_route!(
         connection::send_facts_on_connection::SEND_FACTS_ON_CONNECTION,
         connection::send_facts_on_connection::SendFactsOnConnectionHandler
     ),
     handler_route!(
-        connection::send_network_frame::SEND_NETWORK_FRAME,
-        connection::send_network_frame::SendNetworkFrameHandler
-    ),
-    handler_route!(
-        connection::receive_network_frame::RECEIVE_NETWORK_FRAME,
-        connection::receive_network_frame::ReceiveNetworkFrameHandler
+        connection::queue_outgoing_frame::QUEUE_OUTGOING_FRAME,
+        connection::queue_outgoing_frame::QueueOutgoingFrameHandler
     ),
 ];
 

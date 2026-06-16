@@ -27,7 +27,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
     assert!(MATCH_RUNTIME
         .schema_sources
         .iter()
-        .any(|source| source.ddl.contains("network_out")));
+        .any(|source| source.ddl.contains("network_outgoing")));
 
     assert!(MATCH_PROTOCOL
         .commands
@@ -37,10 +37,6 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .commands
         .iter()
         .any(|command| command.name == "assert"));
-    assert!(MATCH_RUNTIME
-        .handlers
-        .iter()
-        .any(|handler| handler.intent_kind == "receive_network_frame"));
     assert!(MATCH_PROTOCOL.daemon.inbound_network_intake.is_some());
 }
 
@@ -166,7 +162,7 @@ fn runtime_handler_routes_are_unique_by_intent_kind() {
         "runtime handler intent kinds must be unique"
     );
 
-    for required in ["send_network_frame", "receive_network_frame"] {
+    for required in ["queue_outgoing_frame"] {
         assert!(
             kinds.contains(required),
             "runtime handler route missing {required}"
@@ -187,9 +183,8 @@ fn replay_policy_lives_at_handler_edges() {
     for handler in [
         "src/protocol/connection/create_connection.rs",
         "src/protocol/connection/maintain_connections.rs",
-        "src/protocol/connection/receive_network_frame.rs",
         "src/protocol/connection/send_facts_on_connection.rs",
-        "src/protocol/connection/send_network_frame.rs",
+        "src/protocol/connection/queue_outgoing_frame.rs",
         "src/protocol/sync/seed_connection.rs",
         "src/protocol/sync/send_compare_response.rs",
         "src/protocol/sync/send_needed_fact_id.rs",

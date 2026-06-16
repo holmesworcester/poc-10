@@ -2,6 +2,7 @@ use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::IntentKind;
 use topo::core::intents::{HandlerContext, IntentHandler};
+use topo::core::network::{self, NetworkTarget};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth;
@@ -11,12 +12,12 @@ use topo::protocol::connection::connection as connection_rows;
 use topo::protocol::connection::connection::encode as connection_layout;
 use topo::protocol::connection::connection::fact::ConnectionFact;
 use topo::protocol::connection::frame_small::project as frame_small_project;
+use topo::protocol::connection::queue_outgoing_frame::{
+    queue_outgoing_frame_intent, QueueOutgoingFrame,
+};
 use topo::protocol::connection::send_facts_on_connection::{
     decode_send_facts_on_connection, send_facts_on_connection_intent, SendFactsOnConnection,
     SendFactsOnConnectionHandler, SEND_FACTS_ON_CONNECTION,
-};
-use topo::protocol::connection::send_network_frame::{
-    decode_send_network_frame, send_network_frame_intent, SendNetworkFrame,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{encode as shared_fact_layout, fact::SharedFact};
@@ -33,7 +34,7 @@ fn connection_fact() -> (Fact, ConnectionFact) {
         handshake_hash: [17; 32],
         connection_secret: [18; 32],
         responder_addr: None,
-        initiator_addr: None,
+        initiator_addr: Some("127.0.0.1:41000".parse().unwrap()),
     };
     let fact = Fact::new(
         FactScope::Local,
@@ -165,11 +166,16 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
         .expect("normal shared fact packages for connection send");
 
     assert!(output.intents.is_empty());
-    assert_eq!(output.local_intents.len(), 1);
-    let send = decode_send_network_frame(&output.local_intents[0]).unwrap();
-    assert_eq!(send.routing_key, connection_fact.id);
+    assert!(output.local_intents.is_empty());
+    let queued = network::claim_outgoing_for_target(
+        &store,
+        NetworkTarget::new("127.0.0.1:41000".parse().unwrap()),
+        16,
+    )
+    .expect("claim outgoing frame");
+    assert_eq!(queued.len(), 1);
     let opened =
-        frame_small_project::open_connection_frame(&send.frame, &connection.connection_secret)
+        frame_small_project::open_connection_frame(&queued[0].bytes, &connection.connection_secret)
             .expect("open packaged connection frame");
     assert_eq!(opened.facts, vec![fact.bytes]);
 }
@@ -178,14 +184,15 @@ fn send_facts_on_connection_accepts_normal_shared_facts() {
 fn intent_kind_names_keep_connection_boundaries_clear() {
     for kind in [
         SEND_FACTS_ON_CONNECTION,
-        topo::protocol::connection::send_network_frame::SEND_NETWORK_FRAME,
+        topo::protocol::connection::queue_outgoing_frame::QUEUE_OUTGOING_FRAME,
     ] {
         IntentKind::new(kind).expect("intent kind is registry-safe");
     }
 
     assert!(SEND_FACTS_ON_CONNECTION.starts_with("send_"));
     assert!(
-        topo::protocol::connection::send_network_frame::SEND_NETWORK_FRAME.starts_with("send_")
+        topo::protocol::connection::queue_outgoing_frame::QUEUE_OUTGOING_FRAME
+            .starts_with("queue_")
     );
 }
 
@@ -208,11 +215,11 @@ fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
         "same connection may have multiple pending fact bundles"
     );
 
-    let first_frame = send_network_frame_intent(SendNetworkFrame {
+    let first_frame = queue_outgoing_frame_intent(QueueOutgoingFrame {
         routing_key: [1; 32],
         frame: b"frame:a".to_vec(),
     });
-    let second_frame = send_network_frame_intent(SendNetworkFrame {
+    let second_frame = queue_outgoing_frame_intent(QueueOutgoingFrame {
         routing_key: [1; 32],
         frame: b"frame:b".to_vec(),
     });
@@ -223,8 +230,12 @@ fn idempotence_keys_distinguish_parallel_batches_on_same_route() {
 }
 
 fn store_with_local_endpoint() -> Store {
-    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-        .expect("store");
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        network::SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
         .expect("seed local endpoint");

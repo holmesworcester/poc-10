@@ -5,7 +5,7 @@
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
 //! commit protocol-classified incoming facts, process declared time wakes, drain
-//! projection/intent/projection work, then pump queued outbound network bytes.
+//! projection/intent/projection work, then pump queued outgoing network bytes.
 //!
 //! The daemon is the host for work that should keep happening without a user
 //! command on the stack. It does not decode connection frames or choose protocol
@@ -15,7 +15,7 @@
 //!
 //! The order inside `tick` is part of the runtime contract. Network input is
 //! admitted first, due time ranges wake facts, the runtime drains projection,
-//! intent dispatch, and projection again, and then queued outbound TCP bytes are
+//! intent dispatch, and projection again, and then queued outgoing TCP bytes are
 //! pumped by target address. Change that order here only if the whole daemon
 //! scheduling policy changes; protocol handlers should adapt by emitting facts,
 //! time wakes, or intents rather than calling daemon steps directly.
@@ -96,7 +96,7 @@ pub struct DaemonTimeWake {
 /// Run one bounded daemon tick.
 ///
 /// The order is fixed: accept TCP, commit inbound intake effects, admit time
-/// wakes, drain projection/intent/projection work, then pump outbound TCP rows.
+/// wakes, drain projection/intent/projection work, then pump outgoing TCP rows.
 /// Protocols should change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
@@ -113,7 +113,7 @@ pub fn tick(
     )?);
     status.merge(drain_time_wakes(description, runtime, work_limit)?);
     status.merge(runtime.drain_daemon_queues_once(work_limit)?);
-    status.merge(drain_outbound_network(runtime, work_limit)?);
+    status.merge(drain_outgoing_network(runtime, work_limit)?);
     Ok(status)
 }
 
@@ -160,8 +160,8 @@ fn drain_time_wakes(
     Ok(WorkStatus::progressed(due > 0))
 }
 
-fn drain_outbound_network(runtime: &mut Runtime, work_limit: usize) -> Result<WorkStatus, String> {
-    let report = network::pump_outbound(runtime.store(), work_limit, work_limit)?;
+fn drain_outgoing_network(runtime: &mut Runtime, work_limit: usize) -> Result<WorkStatus, String> {
+    let report = network::pump_outgoing(runtime.store(), work_limit, work_limit)?;
     Ok(WorkStatus::progressed(report.sent_frames > 0))
 }
 
@@ -690,7 +690,7 @@ fn print_line_now(line: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::core::facts::Fact;
-    use crate::core::network::{NetworkTarget, OutboundFrame};
+    use crate::core::network::{NetworkTarget, OutgoingFrame};
     use crate::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
     use crate::core::runtime::RuntimeDescription;
     use std::io::Read;
@@ -783,24 +783,24 @@ mod tests {
     }
 
     #[test]
-    fn tick_pumps_queued_outbound_rows_after_runtime_work() {
-        let peer = TcpListener::bind("127.0.0.1:0").expect("bind outbound peer");
+    fn tick_pumps_queued_outgoing_rows_after_runtime_work() {
+        let peer = TcpListener::bind("127.0.0.1:0").expect("bind outgoing peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         let reader = thread::spawn(move || {
-            let (mut stream, _) = peer.accept().expect("accept outbound pump");
+            let (mut stream, _) = peer.accept().expect("accept outgoing pump");
             read_length_prefixed_frame(&mut stream)
         });
         let listener =
             network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
         let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
-        network::send(
+        network::queue_outgoing(
             runtime.store(),
             NetworkTarget::new(peer_addr),
-            OutboundFrame {
+            OutgoingFrame {
                 bytes: b"tick queued frame".to_vec(),
             },
         )
-        .expect("queue outbound frame");
+        .expect("queue outgoing frame");
 
         let status = tick(
             DaemonDescription {
@@ -815,7 +815,7 @@ mod tests {
 
         assert!(status.progressed);
         assert_eq!(reader.join().expect("reader thread"), b"tick queued frame");
-        assert!(network::claim_outbound_for_target(
+        assert!(network::claim_outgoing_for_target(
             runtime.store(),
             NetworkTarget::new(peer_addr),
             16

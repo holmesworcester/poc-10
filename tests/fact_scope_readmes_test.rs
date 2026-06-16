@@ -59,9 +59,8 @@ fn fact_scope_readmes_document_registered_fact_modules_and_intents() {
             handlers: &[
                 "create_connection",
                 "maintain_connections",
-                "receive_network_frame",
                 "send_facts_on_connection",
-                "send_network_frame",
+                "queue_outgoing_frame",
             ],
         },
         ScopeDocs {

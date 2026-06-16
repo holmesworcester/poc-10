@@ -193,9 +193,8 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             &[
                 "create_connection",
                 "maintain_connections",
-                "receive_network_frame",
                 "send_facts_on_connection",
-                "send_network_frame",
+                "queue_outgoing_frame",
             ],
         ),
         ("content", &[]),
@@ -1375,7 +1374,7 @@ const NON_FACT_SCOPE_DIR_EXCEPTIONS: [&str; 0] = [];
 
 /// Scope-local helper files that are deliberately not intents or fact-family
 /// manifests. These must stay rare and named explicitly.
-const SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS: [&str; 0] = [];
+const SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS: [&str; 1] = ["connection/receive_network_frame.rs"];
 
 #[test]
 fn fact_family_directories_contain_only_standard_role_files() {
@@ -1539,8 +1538,9 @@ fn target_intents_are_self_contained_handler_files_without_driver_or_intent_subm
 /// The canonical intent verb vocabulary. Intent handler files are named
 /// `<verb>_<object>`; this set is deliberately small, and growing it is a
 /// deliberate act — add a verb here only when no existing verb fits.
-const INTENT_VERBS: [&str; 10] = [
+const INTENT_VERBS: [&str; 11] = [
     "add", "create", "send", "receive", "purge", "share", "seed", "unwrap", "update", "maintain",
+    "queue",
 ];
 
 /// A name is verb-first when it begins with `<verb>_` for a canonical intent
@@ -1607,6 +1607,14 @@ fn verb_named_scope_files_are_registered_intents() {
     let mut offenders = Vec::new();
     for scope_dir in scope_dirs(root) {
         for file in immediate_rust_files(&scope_dir) {
+            let relative = file
+                .strip_prefix(root.join("src/protocol"))
+                .unwrap()
+                .display()
+                .to_string();
+            if SCOPE_LOCAL_HELPER_FILE_EXCEPTIONS.contains(&relative.as_str()) {
+                continue;
+            }
             let verb_first = is_verb_first(file.file_stem().unwrap().to_str().unwrap());
             let shown = file.strip_prefix(root).unwrap().display().to_string();
             match (verb_first, intents.contains(&file)) {
@@ -2483,8 +2491,9 @@ fn create_connection_handler_only_creates_facts_and_chains_no_intents() {
         for forbidden in [
             ".intent(",
             ".local_intent(",
-            "network::send",
-            "send_network_frame",
+            "network::queue_outgoing",
+            "network::enqueue_outgoing",
+            "queue_outgoing_frame",
             "send_connection::",
         ] {
             if text.contains(forbidden) {

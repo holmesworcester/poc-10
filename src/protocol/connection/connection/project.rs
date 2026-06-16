@@ -749,10 +749,10 @@ use crate::protocol::connection::fact_receipt::fact::ReceiptPathInput;
 use crate::protocol::connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION;
 use crate::protocol::connection::fact_receipt::project::connection_fact_receipt_for_path;
 use crate::protocol::connection::frame_observation;
-use crate::protocol::connection::request;
-use crate::protocol::connection::send_network_frame::{
-    send_network_frame_intent, SendNetworkFrame,
+use crate::protocol::connection::queue_outgoing_frame::{
+    queue_outgoing_frame_intent, QueueOutgoingFrame,
 };
+use crate::protocol::connection::request;
 use crate::protocol::sync::seed_connection::{seed_connection_sync_intent, SeedConnectionSync};
 
 use super::fact::ConnectionFact;
@@ -865,7 +865,7 @@ impl ConnectionProjector {
                     .intent(seed_connection_sync_intent(SeedConnectionSync {
                         connection_id: fact.id,
                     }))
-                    .local_intent(send_network_frame_intent(SendNetworkFrame {
+                    .local_intent(queue_outgoing_frame_intent(QueueOutgoingFrame {
                         routing_key: fact.id,
                         frame: fact.body().to_vec(),
                     })))
@@ -1039,7 +1039,7 @@ impl ConnectionNeeds {
 mod tests {
     use super::*;
     use crate::core::project_fact::ProjectionMode;
-    use crate::protocol::connection::send_network_frame::SEND_NETWORK_FRAME;
+    use crate::protocol::connection::queue_outgoing_frame::QUEUE_OUTGOING_FRAME;
     use crate::protocol::sync::seed_connection::SEED_CONNECTION_SYNC;
 
     fn connection_fact() -> ConnectionFact {
@@ -1097,7 +1097,7 @@ mod tests {
             .effects
             .local_intents
             .iter()
-            .any(|intent| intent.kind.as_str() == SEND_NETWORK_FRAME));
+            .any(|intent| intent.kind.as_str() == QUEUE_OUTGOING_FRAME));
     }
 
     #[test]

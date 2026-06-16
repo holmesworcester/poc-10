@@ -202,8 +202,8 @@ protocol-declared inbound intake. The intake commits recognized wire frames as
 incoming facts plus observation facts through `RuntimeEffects`; core does not
 store a separate inbound byte queue. Network output is produced by protocol
 handlers as opaque frame bytes addressed to a `SocketAddr`. Core stores those
-bytes in memory-local `network_out` rows, keeps active peer addresses in
-`network_out_targets`, and lets the daemon TCP pump write and delete frames as
+bytes in memory-local `network_outgoing` rows, keeps active peer addresses in
+`network_outgoing_targets`, and lets the daemon TCP pump write and delete frames as
 socket capacity allows.
 
 ## Scope Layout
@@ -282,7 +282,7 @@ frames move bytes and produce receipts, while the owning fact projector
 validates every recovered fact.
 
 This keeps core's network interface minimal. Core owns TCP accept/write
-mechanics, the volatile outbound frame queue, and the active-target scheduling
+mechanics, the volatile outgoing frame queue, and the active-target scheduling
 index. It does not know whether a byte string is a bootstrap request, bootstrap
 response, established connection frame, auth fact, sync fact, or content fact.
 On ingress, the daemon hands accepted bytes to the protocol-declared inbound
@@ -293,15 +293,16 @@ path as child facts, and receipt facts record which connection delivered them.
 
 Egress is the same boundary in reverse. Sync may decide that a fact id should
 be sent to an authorized connection, but the connection scope decides how to
-load, filter, batch, seal, and address those facts as connection frames. The
-final `send_network_frame` intent gives core only a route and opaque frame
-bytes. The handler resolves that route to a `SocketAddr` and queues the bytes
-in `network_out`; `network_out_targets` records that the address has queued
-work. Core's daemon pump schedules active target addresses, writes
-length-prefixed frames from the per-target queue, and deletes each frame row
-only after it has been fully written. Connection facts preserve the durable
-relationship between those bytes, the session, recovered child facts, and
-receipts.
+load, filter, batch, seal, and address those facts as connection frames.
+Handlers that already know the peer address queue opaque bytes directly in
+`network_outgoing`; `network_outgoing_targets` records that the address has
+queued work. When projection has sealed bytes but no right to mutate core's
+network queue directly, it emits `queue_outgoing_frame`, which resolves the
+connection row to a `SocketAddr` and fills the same outgoing queue. Core's
+daemon pump schedules active target addresses, writes length-prefixed frames
+from the per-target queue, and deletes each frame row only after it has been
+fully written. Connection facts preserve the durable relationship between those
+bytes, the session, recovered child facts, and receipts.
 
 ### Simplicity Guardrails
 

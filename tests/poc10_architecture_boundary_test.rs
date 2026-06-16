@@ -123,9 +123,8 @@ fn intent_handler_files(root: &Path) -> Vec<PathBuf> {
             "connection",
             &[
                 "create_connection.rs",
-                "receive_network_frame.rs",
                 "send_facts_on_connection.rs",
-                "send_network_frame.rs",
+                "queue_outgoing_frame.rs",
             ],
         ),
         ("content", &[]),
@@ -218,7 +217,7 @@ fn poc10_success_criteria_are_recorded_in_architecture_doc() {
         "### Wire Layouts And Codecs",
         "### Connection Frames",
         "This keeps core's network interface minimal",
-        "Core owns TCP accept/write mechanics and stores inbound or outbound network payloads as opaque bytes",
+        "Core owns TCP accept/write mechanics and stores inbound or outgoing network payloads as opaque bytes",
         "the daemon hands accepted bytes to the protocol-declared inbound network intent",
         "the connection scope classifies the frame, emits the right local wrapper fact",
         "Opened payloads re-enter the normal fact admission path as child facts",
@@ -826,7 +825,7 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 
     assert!(
-        !accept_commands.contains("send_network_frame_intent"),
+        !accept_commands.contains("queue_outgoing_frame_intent"),
         "accept/link commands should create acceptance facts, not enqueue bootstrap IO directly"
     );
     assert!(
@@ -834,11 +833,11 @@ fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
         "accept/link commands should not create bootstrap request facts directly"
     );
     assert!(
-        maintenance.contains("send_network_frame_intent"),
-        "the live maintenance loop should schedule bootstrap IO for unanswered local requests"
+        maintenance.contains("network::queue_outgoing"),
+        "the live maintenance loop should queue bootstrap IO for unanswered local requests"
     );
     assert!(
-        !request_projector.contains("send_network_frame_intent"),
+        !request_projector.contains("queue_outgoing_frame_intent"),
         "request sends are driven by the maintenance loop so they survive replay; the request projector must not emit them"
     );
 }

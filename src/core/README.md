@@ -93,7 +93,7 @@ Protocol code enters core through declarations and effect values:
 Data leaves core through the same narrow surfaces: commands receive
 `CliOutput`, protocol queries read schema-owned rows through `Store`, daemon
 inbound intake receives length-prefixed frame bytes, and network sends consume
-opaque outbound rows from `network`.
+opaque outgoing rows from `network`.
 
 ## Data Flow
 
@@ -121,9 +121,9 @@ inbound intake hook with origin and receive-time metadata. Recognized frame
 bytes commit as `incoming_facts` plus local observation facts through the same
 `RuntimeEffects` admission path used by other runtime work. Incoming frame
 facts may be retained while they wait on observation, connection, or key
-context. Outbound bytes are produced by protocol handlers, staged as
-per-target `network_out` frame rows, and written by core's TCP pump without
-parsing frame payloads. A separate `network_out_targets` index names active
+context. Outgoing bytes are produced by protocol handlers, staged as
+per-target `network_outgoing` frame rows, and written by core's TCP pump without
+parsing frame payloads. A separate `network_outgoing_targets` index names active
 addresses so the pump schedules peers without scanning frame payloads. The pump
 writes length-prefixed frames as socket capacity allows and deletes each frame
 row only after its frame is written.
@@ -230,7 +230,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   `RuntimeEffects` instead of mutating runtime state directly.
 - `network.rs`: opaque network IO boundary. It owns listener setup, inbound
   length-prefixed frame reading, direct delivery to the daemon intake callback,
-  memory-local `network_out` frame rows, the `network_out_targets` active-peer
+  memory-local `network_outgoing` frame rows, the `network_outgoing_targets` active-peer
   index, deterministic route+bytes row keys, bounded TCP writes, and sent-row
   cleanup. It does not classify bootstrap frames, connection frames, auth facts,
   sync facts, or content facts.
