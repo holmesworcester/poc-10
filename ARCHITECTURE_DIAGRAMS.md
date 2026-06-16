@@ -6,41 +6,66 @@ the scope READMEs; the Rust modules remain the source of truth.
 
 ## 0) Runtime Boundaries
 
-Context has one protocol-neutral runtime and several protocol scopes. Core owns
-fact admission, context matching, queue mechanics, transaction boundaries, and
-opaque network bytes. Protocol scopes own fact meaning, projection, row
-materialization, and bounded intent handlers.
+Context has one protocol-neutral runtime assembled from protocol declarations.
+Core owns serialized turns, queue draining, context matching, transaction
+boundaries, time-wake admission, recurring schedule firing, and opaque network
+bytes. Protocol code supplies high-level hooks: command authors, inbound intake,
+the projector router, the handler registry, row schemas, and recurring intent
+builders.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    USER["CLI command"] --> APP["core app boundary"]
-    DAEMON["daemon tick"] --> RUNTIME["core runtime"]
-    APP --> RUNTIME
+    DECL["protocol declaration"] --> RUNTIME["core Runtime"]
+    DECL --> COMMANDS["protocol command authors"]
+    DECL --> INTAKE["inbound intake hook"]
+    DECL --> PROJECTOR["projector router"]
+    DECL --> HANDLERS["handler registry"]
+    DECL --> RECURRING["recurring intent builders"]
 
-    NET_IN["network_in opaque bytes"] --> DAEMON
-    RUNTIME --> WORKERS["core runtime workers"]
-    WORKERS --> STORE[("SQLite facts, context, rows, queues, time wakes")]
-    STORE --> WORKERS
+    CLI["CLI command or query"] --> TURN["serialized runtime turn"]
+    DAEMON["daemon loop"] --> TURN
+    TURN --> RUNTIME
 
-    subgraph SCOPES["Protocol scopes"]
-      AUTH["auth facts, keys, authority"]
-      CONTENT["content facts, opened rows, purge"]
-      CONNECTION["connection facts, frames, receipts"]
-      SYNC["sync facts, range summaries, visibility"]
+    RUNTIME <--> STORE[("runtime store and queues: facts, incoming_facts, context, time_wakes, intents, local_intents, rows")]
+
+    TURN --> COMMAND_PATH["command/query path"]
+    COMMAND_PATH --> COMMANDS
+    COMMANDS --> COMMAND_FACTS["authored facts"]
+    COMMAND_FACTS --> COMMIT["atomic fact/effect commit"]
+    COMMAND_PATH --> PREQUERY["query pre-settle: retained projection only"]
+    PREQUERY --> PROJECTOR
+
+    TURN --> DAEMON_PATH["daemon tick path"]
+    DAEMON_PATH --> FIRE["fire recurring local intents"]
+    FIRE --> RECURRING
+    RECURRING --> LOCAL_QUEUE["queue local_intents"]
+    LOCAL_QUEUE --> STORE
+    FIRE --> NET_IN["accept opaque TCP frames"]
+    NET_IN --> INTAKE
+    INTAKE --> COMMIT
+    NET_IN --> TIME["admit due time wakes"]
+    TIME --> STORE
+
+    subgraph DRAIN["runtime queue drain order"]
+      TIME --> PROJECTION_A["drain projection work"]
+      STORE --> PROJECTION_A
+      PROJECTION_A --> PROJECTOR
+      PROJECTOR --> PROJECTION_OUT["ProjectionOutput and RuntimeEffects"]
+      PROJECTION_OUT --> COMMIT
+      PROJECTION_A --> DISPATCH["dispatch intent queues"]
+      STORE --> DISPATCH
+      DISPATCH --> HANDLERS
+      HANDLERS --> HANDLER_OUT["handler RuntimeEffects"]
+      HANDLER_OUT --> COMMIT
+      DISPATCH --> PROJECTION_B["projection drain after handlers"]
+      PROJECTION_B --> PROJECTOR
     end
 
-    WORKERS --> AUTH
-    WORKERS --> CONTENT
-    WORKERS --> CONNECTION
-    WORKERS --> SYNC
-    AUTH --> WORKERS
-    CONTENT --> WORKERS
-    CONNECTION --> WORKERS
-    SYNC --> WORKERS
-
-    CONNECTION --> NET_OUT["network_outgoing opaque bytes"]
-    NET_OUT --> PEER["remote node"]
+    COMMIT --> STORE
+    PROJECTION_B --> NET_OUT["pump network_outgoing"]
+    STORE --> NET_OUT
+    NET_OUT --> PEER["remote peer"]
     PEER --> NET_IN
 ```
 
