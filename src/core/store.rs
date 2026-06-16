@@ -923,15 +923,7 @@ impl Store {
 // change it here. If a protocol wants to interpret the fact bytes, that logic
 // belongs in the protocol fact module and its projector.
 
-const OWNER_KEYED_FACT_PURGE_TABLES: &[TableName] = &[
-    CONTEXT_EDGES,
-    TIME_WAKES,
-    PENDING_TIME_RANGES,
-    PENDING_PROJECTION_MATCHES,
-    PENDING_PROJECTION,
-];
-
-const INCOMING_FACT_DELETE_TABLES: &[TableName] = &[
+const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
     CONTEXT_EDGES,
     TIME_WAKES,
     PENDING_TIME_RANGES,
@@ -1083,7 +1075,7 @@ pub(crate) fn delete_incoming_fact_in_tx(store: &Store, owner: FactId) -> rusqli
     let changed =
         store.delete_rows_by_blob_column_in_tx(INCOMING_FACTS, "id", owner.as_slice())? > 0;
     if changed {
-        delete_owner_rows_from_tables(store, INCOMING_FACT_DELETE_TABLES, owner)?;
+        delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_CLEANUP_TABLES, owner)?;
     }
     Ok(changed)
 }
@@ -1114,7 +1106,7 @@ pub(crate) fn purge_fact_in_tx(store: &Store, owner: FactId) -> rusqlite::Result
         "fact_id",
         owner.as_slice(),
     )? > 0;
-    changed |= delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_PURGE_TABLES, owner)? > 0;
+    changed |= delete_owner_rows_from_tables(store, OWNER_KEYED_FACT_CLEANUP_TABLES, owner)? > 0;
     changed |= store.delete_rows_by_blob_column_in_tx(
         PENDING_PROJECTION_MATCHES,
         "offer_owner",
@@ -1762,6 +1754,149 @@ CREATE TABLE IF NOT EXISTS "test.typed_events" (
             incoming_pending_fact_ids(&store, 10).expect("matched incoming ids"),
             vec![ready.id, blocked.id]
         );
+    }
+
+    #[test]
+    fn delete_incoming_fact_clears_owner_keyed_runtime_rows() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let fact = Fact::new(FactScope::Local, 1, b"incoming cleanup".to_vec());
+        let offer = Fact::new(FactScope::Local, 2, b"incoming offer".to_vec());
+
+        store
+            .write_transaction(|tx| {
+                insert_incoming_fact_in_tx(tx, &fact)?;
+                seed_owner_keyed_fact_rows(tx, fact.id, offer.id)
+            })
+            .expect("seed incoming owner rows");
+        assert_owner_keyed_fact_rows(&store, fact.id, 1);
+
+        assert!(store
+            .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact.id))
+            .expect("delete incoming fact"));
+
+        assert!(incoming_fact_by_id_in_tx(&store, &fact.id)
+            .expect("load incoming fact")
+            .is_none());
+        assert_owner_keyed_fact_rows(&store, fact.id, 0);
+    }
+
+    #[test]
+    fn purge_fact_clears_owner_keyed_and_offer_keyed_runtime_rows() {
+        let store =
+            Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open store");
+        let fact = Fact::new(FactScope::Local, 1, b"retained cleanup".to_vec());
+        let other = Fact::new(FactScope::Local, 2, b"other retained".to_vec());
+
+        store
+            .write_transaction(|tx| {
+                insert_retained_fact_in_tx(tx, &fact)?;
+                seed_owner_keyed_fact_rows(tx, fact.id, other.id)?;
+                seed_pending_match(tx, other.id, fact.id)
+            })
+            .expect("seed retained owner rows");
+        assert_owner_keyed_fact_rows(&store, fact.id, 1);
+        assert_eq!(pending_match_offer_count(&store, fact.id), 1);
+
+        assert!(store
+            .write_transaction(|tx| purge_fact_in_tx(tx, fact.id))
+            .expect("purge fact"));
+
+        assert!(fact_bytes_by_id_in_tx(&store, &fact.id)
+            .expect("load retained fact")
+            .is_none());
+        assert_owner_keyed_fact_rows(&store, fact.id, 0);
+        assert_eq!(pending_match_offer_count(&store, fact.id), 0);
+    }
+
+    fn seed_owner_keyed_fact_rows(
+        store: &Store,
+        owner: FactId,
+        offer_owner: FactId,
+    ) -> rusqlite::Result<()> {
+        store.conn().execute(
+            "INSERT INTO context_edges
+                (owner, direction, role, scope_key, start_key, end_key)
+             VALUES (?1, 'need', 'cleanup_role', ?2, ?3, ?4)",
+            params![
+                owner.as_slice(),
+                b"scope".as_slice(),
+                b"a".as_slice(),
+                b"z".as_slice()
+            ],
+        )?;
+        store.conn().execute(
+            "INSERT INTO time_wakes (timeline, at, owner)
+             VALUES ('cleanup_timeline', 1, ?1)",
+            params![owner.as_slice()],
+        )?;
+        store.conn().execute(
+            "INSERT INTO pending_time_ranges
+                (owner, timeline, has_start, start_exclusive, end_inclusive)
+             VALUES (?1, 'cleanup_timeline', 0, 0, 1)",
+            params![owner.as_slice()],
+        )?;
+        store.conn().execute(
+            "INSERT INTO pending_projection (owner, mode)
+             VALUES (?1, 'normal')",
+            params![owner.as_slice()],
+        )?;
+        seed_pending_match(store, owner, offer_owner)
+    }
+
+    fn seed_pending_match(
+        store: &Store,
+        owner: FactId,
+        offer_owner: FactId,
+    ) -> rusqlite::Result<()> {
+        store.conn().execute(
+            "INSERT INTO pending_projection_matches
+                (owner, need_role, need_scope_key, need_start_key, need_end_key,
+                 offer_owner, offer_start_key, offer_end_key)
+             VALUES (?1, 'cleanup_role', ?2, ?3, ?4, ?5, ?3, ?4)",
+            params![
+                owner.as_slice(),
+                b"scope".as_slice(),
+                b"a".as_slice(),
+                b"z".as_slice(),
+                offer_owner.as_slice()
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn assert_owner_keyed_fact_rows(store: &Store, owner: FactId, expected: i64) {
+        for table in OWNER_KEYED_FACT_CLEANUP_TABLES {
+            assert_eq!(
+                owner_row_count(store, *table, owner),
+                expected,
+                "owner rows in {}",
+                table.as_str()
+            );
+        }
+    }
+
+    fn owner_row_count(store: &Store, table: TableName, owner: FactId) -> i64 {
+        let table = quoted_table_name(table).expect("quote table");
+        store
+            .conn()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE owner = ?1"),
+                params![owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count owner rows")
+    }
+
+    fn pending_match_offer_count(store: &Store, offer_owner: FactId) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pending_projection_matches WHERE offer_owner = ?1",
+                params![offer_owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count offer rows")
     }
 
     #[test]

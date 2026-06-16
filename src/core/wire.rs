@@ -215,8 +215,7 @@ impl<const N: usize> FixedLayout for FixedSlot<N> {
             actual: self.len,
         })?;
         put_u32be(len, &mut out[..U32_BYTES])?;
-        out[U32_BYTES..].fill(0);
-        out[U32_BYTES..U32_BYTES + self.len].copy_from_slice(self.bytes());
+        out[U32_BYTES..].copy_from_slice(self.padded_bytes());
         Ok(())
     }
 
@@ -807,6 +806,16 @@ mod tests {
         let mut short = [0; FixedSlot::<3>::LEN - 1];
         assert!(slot.encode(&mut short).is_err());
         assert!(FixedSlot::<3>::decode(&[0; FixedSlot::<3>::LEN + 1]).is_err());
+    }
+
+    #[test]
+    fn fixed_slot_encode_preserves_valid_padded_bytes() {
+        let slot = FixedSlot::<5>::from_padded(3, [b'a', b'b', b'c', 0, 0]).unwrap();
+        let mut out = [0xff; FixedSlot::<5>::LEN];
+
+        slot.encode(&mut out).unwrap();
+
+        assert_eq!(&out, &[0, 0, 0, 3, b'a', b'b', b'c', 0, 0]);
     }
 
     #[test]

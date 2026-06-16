@@ -640,23 +640,20 @@ impl Drop for DaemonLock {
 }
 
 fn lock_path(db_path: &Path) -> PathBuf {
-    let mut path = db_path.to_path_buf();
-    let lock_name = db_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| format!("{name}.daemon.lock"))
-        .unwrap_or_else(|| "daemon.lock".to_string());
-    path.set_file_name(lock_name);
-    path
+    derived_lock_path(db_path, ".daemon.lock", "daemon.lock")
 }
 
 fn runtime_turn_lock_path(db_path: &Path) -> PathBuf {
+    derived_lock_path(db_path, ".runtime.lock", "runtime.lock")
+}
+
+fn derived_lock_path(db_path: &Path, suffix: &str, fallback: &str) -> PathBuf {
     let mut path = db_path.to_path_buf();
     let lock_name = db_path
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| format!("{name}.runtime.lock"))
-        .unwrap_or_else(|| "runtime.lock".to_string());
+        .map(|name| format!("{name}{suffix}"))
+        .unwrap_or_else(|| fallback.to_string());
     path.set_file_name(lock_name);
     path
 }
@@ -751,6 +748,25 @@ mod tests {
         let parsed = parse_start_options(CliArgs::new(&args)).expect("parse");
 
         assert_eq!(parsed.quiet_ms, 125);
+    }
+
+    #[test]
+    fn lock_paths_derive_from_database_path() {
+        let db_path = Path::new("/tmp/topo.db");
+
+        assert_eq!(
+            lock_path(db_path),
+            PathBuf::from("/tmp/topo.db.daemon.lock")
+        );
+        assert_eq!(
+            runtime_turn_lock_path(db_path),
+            PathBuf::from("/tmp/topo.db.runtime.lock")
+        );
+        assert_eq!(lock_path(Path::new("/")), PathBuf::from("/daemon.lock"));
+        assert_eq!(
+            runtime_turn_lock_path(Path::new("/")),
+            PathBuf::from("/runtime.lock")
+        );
     }
 
     #[test]

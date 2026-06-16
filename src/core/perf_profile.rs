@@ -122,13 +122,7 @@ pub fn measure_result<T, E>(
     phase: &'static str,
     work: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
-    if !is_generate_profile_active() {
-        return work();
-    }
-    let started = Instant::now();
-    let output = work();
-    add_duration(phase, started.elapsed());
-    output
+    measure(phase, work)
 }
 
 fn generate_profile_enabled() -> bool {
@@ -186,6 +180,16 @@ mod tests {
     fn generate_profile_measure_is_noop_without_active_profile() {
         let value = measure("phase", || 42);
         assert_eq!(value, 42);
+        assert!(!is_generate_profile_active());
+    }
+
+    #[test]
+    fn generate_profile_measure_result_preserves_inactive_output() {
+        assert_eq!(measure_result("phase", || Ok::<_, &str>(42)), Ok(42));
+        assert_eq!(
+            measure_result("phase", || Err::<u8, _>("failed")),
+            Err("failed")
+        );
         assert!(!is_generate_profile_active());
     }
 }

@@ -74,8 +74,10 @@ pub fn clear_logical_time(store: &Store) -> Result<(), String> {
 /// least the local logical clock. This makes the clock a lower bound rather
 /// than a source of truth that can override already-observed authored facts.
 pub fn next_timestamp(store: &Store, observed_max_timestamp: u64) -> Result<u64, String> {
-    let from_observed = observed_max_timestamp.saturating_add(1);
-    Ok(from_observed.max(logical_time(store)?.unwrap_or(0)))
+    Ok(next_timestamp_from_logical(
+        observed_max_timestamp,
+        logical_time(store)?,
+    ))
 }
 
 /// Run the generic `clock` CLI command against a store.
@@ -113,7 +115,7 @@ fn apply_cli_args(
     }
 
     let logical_time = logical_time(store)?;
-    let next_timestamp = next_timestamp(store, observed_max_timestamp)?;
+    let next_timestamp = next_timestamp_from_logical(observed_max_timestamp, logical_time);
     let logical_time = logical_time
         .map(|timestamp| timestamp.to_string())
         .unwrap_or_else(|| "unset".to_string());
@@ -122,6 +124,12 @@ fn apply_cli_args(
         format!("max_observed_timestamp: {observed_max_timestamp}"),
         format!("next_timestamp: {next_timestamp}"),
     ]))
+}
+
+fn next_timestamp_from_logical(observed_max_timestamp: u64, logical_time: Option<u64>) -> u64 {
+    observed_max_timestamp
+        .saturating_add(1)
+        .max(logical_time.unwrap_or(0))
 }
 
 fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
@@ -148,6 +156,14 @@ mod tests {
         set_logical_time(&store, 100).expect("set");
         assert_eq!(next_timestamp(&store, 7).expect("next"), 100);
         assert_eq!(next_timestamp(&store, 125).expect("next"), 126);
+    }
+
+    #[test]
+    fn next_timestamp_helper_uses_logical_lower_bound_without_overflow() {
+        assert_eq!(next_timestamp_from_logical(7, None), 8);
+        assert_eq!(next_timestamp_from_logical(7, Some(100)), 100);
+        assert_eq!(next_timestamp_from_logical(125, Some(100)), 126);
+        assert_eq!(next_timestamp_from_logical(u64::MAX, None), u64::MAX);
     }
 
     #[test]

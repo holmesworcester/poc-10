@@ -192,16 +192,13 @@ pub fn xchacha20poly1305_encrypt(
     nonce: &XChaCha20Poly1305Nonce,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
-    cipher
-        .encrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: plaintext,
-                aad: associated_data,
-            },
-        )
-        .map_err(|_| "encrypt xchacha20poly1305 payload".to_string())
+    xchacha20poly1305_seal(
+        key,
+        associated_data,
+        nonce,
+        plaintext,
+        "encrypt xchacha20poly1305 payload",
+    )
 }
 
 /// Decrypt bytes with XChaCha20-Poly1305 and caller-supplied associated data.
@@ -211,16 +208,13 @@ pub fn xchacha20poly1305_decrypt(
     nonce: &XChaCha20Poly1305Nonce,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
-    cipher
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad: associated_data,
-            },
-        )
-        .map_err(|_| "decrypt xchacha20poly1305 payload".to_string())
+    xchacha20poly1305_open(
+        key,
+        associated_data,
+        nonce,
+        ciphertext,
+        "decrypt xchacha20poly1305 payload",
+    )
 }
 
 /// Derive a shared key from X25519 and encrypt with XChaCha20-Poly1305.
@@ -233,16 +227,13 @@ pub fn x25519_xchacha20poly1305_encrypt(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, String> {
     let key = x25519_hkdf_sha256_key(local_secret, remote_public_key, purpose)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
-    cipher
-        .encrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: plaintext,
-                aad: associated_data,
-            },
-        )
-        .map_err(|_| "encrypt x25519 xchacha20poly1305 payload".to_string())
+    xchacha20poly1305_seal(
+        &key,
+        associated_data,
+        nonce,
+        plaintext,
+        "encrypt x25519 xchacha20poly1305 payload",
+    )
 }
 
 /// Derive a shared key from X25519 and decrypt with XChaCha20-Poly1305.
@@ -255,7 +246,42 @@ pub fn x25519_xchacha20poly1305_decrypt(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, String> {
     let key = x25519_hkdf_sha256_key(local_secret, remote_public_key, purpose)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+    xchacha20poly1305_open(
+        &key,
+        associated_data,
+        nonce,
+        ciphertext,
+        "decrypt x25519 xchacha20poly1305 payload",
+    )
+}
+
+fn xchacha20poly1305_seal(
+    key: &XChaCha20Poly1305Key,
+    associated_data: &[u8],
+    nonce: &XChaCha20Poly1305Nonce,
+    plaintext: &[u8],
+    error: &'static str,
+) -> Result<Vec<u8>, String> {
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad: associated_data,
+            },
+        )
+        .map_err(|_| error.to_string())
+}
+
+fn xchacha20poly1305_open(
+    key: &XChaCha20Poly1305Key,
+    associated_data: &[u8],
+    nonce: &XChaCha20Poly1305Nonce,
+    ciphertext: &[u8],
+    error: &'static str,
+) -> Result<Vec<u8>, String> {
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     cipher
         .decrypt(
             XNonce::from_slice(nonce),
@@ -264,7 +290,7 @@ pub fn x25519_xchacha20poly1305_decrypt(
                 aad: associated_data,
             },
         )
-        .map_err(|_| "decrypt x25519 xchacha20poly1305 payload".to_string())
+        .map_err(|_| error.to_string())
 }
 
 fn x25519_hkdf_sha256_key(
@@ -489,6 +515,18 @@ mod tests {
             purpose,
             b"wrong-aad",
             &nonce,
+            &ciphertext,
+        )
+        .is_err());
+
+        let mut wrong_nonce = nonce;
+        wrong_nonce[0] ^= 1;
+        assert!(x25519_xchacha20poly1305_decrypt(
+            &bob_secret,
+            &alice_public,
+            purpose,
+            aad,
+            &wrong_nonce,
             &ciphertext,
         )
         .is_err());
