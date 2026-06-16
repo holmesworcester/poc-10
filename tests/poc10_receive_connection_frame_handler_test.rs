@@ -18,7 +18,7 @@ use topo::core::wire::{FixedBytes, FixedSlot};
 use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 use topo::protocol::auth::endpoint::encode as endpoint_layout;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
-use topo::protocol::auth::invite::fact::InviteSecretFact;
+use topo::protocol::auth::invite_secret::fact::InviteSecretFact;
 use topo::protocol::auth::key_wrap::author as auth_create;
 use topo::protocol::auth::key_wrap::encode as auth_layout;
 use topo::protocol::auth::key_wrap::fact::{

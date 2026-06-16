@@ -124,7 +124,7 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     assert_eq!(accepted.bootstrap_endpoint_id, local_endpoint.endpoint);
     assert_eq!(
         accepted.bootstrap_hash,
-        topo::protocol::auth::invite::fact::bootstrap_secret_hash(&accepted.bootstrap_secret)
+        topo::protocol::auth::invite_secret::fact::bootstrap_secret_hash(&accepted.bootstrap_secret)
     );
 
     let user_fact = output

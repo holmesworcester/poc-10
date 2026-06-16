@@ -775,11 +775,11 @@ mod tests {
         let local_secret = [11; 32];
         let local_endpoint = crypto::x25519_public_key(&local_secret);
         let remote_endpoint = [2; 32];
-        let invite = auth::invite::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
+        let invite = auth::invite_secret::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
         let invite_fact = Fact::new(
             FactScope::Local,
             1,
-            auth::invite::encode::encode_fact(&invite).expect("encode invite"),
+            auth::invite_secret::encode::encode_fact(&invite).expect("encode invite"),
         );
         let initiator_ephemeral_private_key = [31; 32];
         let mut request = connection::request::fact::ConnectionRequestFact {
@@ -1268,7 +1268,7 @@ fn connection_workspaces(
         return Ok(workspace_ids);
     };
     if let Some(invite_secret) = persisted_fact(store, &invite_secret_id)? {
-        let invite = auth::invite::project::decode::decode_fact(&invite_secret.bytes)
+        let invite = auth::invite_secret::project::decode::decode_fact(&invite_secret.bytes)
             .map_err(|_| "connection invite context is not an invite secret".to_string())?;
         if let Some(workspace_id) = invite.workspace_id {
             workspace_ids.insert(workspace_id);

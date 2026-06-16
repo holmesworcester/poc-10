@@ -8,7 +8,7 @@ use topo::core::facts::{Fact, FactScope};
 use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::{encode as endpoint_layout, fact::EndpointFact};
-use topo::protocol::auth::invite::project::decode as invite_layout;
+use topo::protocol::auth::invite_secret::project::decode as invite_layout;
 use topo::protocol::connection::close::commands::close;
 use topo::protocol::connection::connection::{
     author::{build_responder_connection, BuildResponderConnection},

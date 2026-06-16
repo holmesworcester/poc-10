@@ -235,7 +235,7 @@ mod tests {
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-    use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
+    use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
     use crate::protocol::auth::{endpoint, invite_accepted};
     use crate::protocol::connection::{ephemeral_secret, request};
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;

@@ -821,7 +821,7 @@ fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents() {
 #[test]
 fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let accept_commands = source_text(&root.join("src/protocol/auth/invite/commands.rs"));
+    let accept_commands = source_text(&root.join("src/protocol/auth/invite_secret/commands.rs"));
     let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 

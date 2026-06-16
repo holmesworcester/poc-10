@@ -38,7 +38,7 @@ fn optional_id(id: FactId) -> Option<FactId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::auth::invite::fact::InviteSecretFact;
+    use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 
     #[test]
     fn invite_secret_row_roundtrips_through_schema() {

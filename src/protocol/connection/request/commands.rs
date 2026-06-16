@@ -64,7 +64,7 @@ pub fn create_bootstrap(
     let (invite_secret, invite_secret_fact) = match input.workspace_id {
         Some(workspace_id) => {
             validate_id("workspace_id", &workspace_id)?;
-            auth::invite::author::scoped_secret_fact(
+            auth::invite_secret::author::scoped_secret_fact(
                 input.bootstrap_secret,
                 workspace_id,
                 input.invite_fact_id,
@@ -72,7 +72,7 @@ pub fn create_bootstrap(
             )?
         }
         None => {
-            auth::invite::author::unscoped_secret_fact(input.bootstrap_secret, input.created_at_ms)?
+            auth::invite_secret::author::unscoped_secret_fact(input.bootstrap_secret, input.created_at_ms)?
         }
     };
     let (ephemeral, ephemeral_fact) = ephemeral_fact(

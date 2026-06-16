@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use crate::core::crypto::{x25519_public_key, X25519PrivateKey, X25519PublicKey};
 use crate::core::facts::{Fact, FactScope};
 use crate::protocol::auth::endpoint::fact::EndpointFact;
-use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 use crate::protocol::connection::request::fact::ConnectionRequestFact;
 
 use super::fact::ConnectionFact;

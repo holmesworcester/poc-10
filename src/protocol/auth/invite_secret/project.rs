@@ -50,7 +50,7 @@ pub mod decode {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::protocol::auth::invite::encode::{encode_fact, FACT_BYTES};
+        use crate::protocol::auth::invite_secret::encode::{encode_fact, FACT_BYTES};
 
         #[test]
         fn invite_secret_fact_roundtrips_fixed_width() {
@@ -139,8 +139,8 @@ pub mod authenticate {
     mod tests {
         use crate::core::facts::{Fact, FactScope};
         use crate::core::project_fact::ProjectionContext;
-        use crate::protocol::auth::invite::encode;
-        use crate::protocol::auth::invite::fact::InviteSecretFact;
+        use crate::protocol::auth::invite_secret::encode;
+        use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 
         fn canonical_fact() -> Fact {
             let invite_secret = InviteSecretFact::new([7; 32]);
@@ -233,7 +233,7 @@ use super::invite_secret_row;
 
 /// Projector route metadata for the invite fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
-    FactProjectorInfo::projector("auth::invite::project::InviteSecretProjector");
+    FactProjectorInfo::projector("auth::invite_secret::project::InviteSecretProjector");
 
 #[derive(Debug, Clone, Default)]
 pub struct InviteSecretProjector;

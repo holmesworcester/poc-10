@@ -18,7 +18,7 @@ use crate::core::crypto::{
     XCHACHA20_POLY1305_NONCE_BYTES, XCHACHA20_POLY1305_TAG_BYTES,
 };
 use crate::protocol::auth::endpoint::fact::EndpointFact;
-use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact;
 use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
 use crate::protocol::connection::request::fact::{

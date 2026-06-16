@@ -320,7 +320,7 @@ mod projector_tests {
     use crate::core::project_fact::MatchedContext;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
     use crate::protocol::auth::workspace::{author, encode, queries};
-    use crate::protocol::auth::{invite, invite_accepted};
+    use crate::protocol::auth::{invite_accepted, invite_secret};
     use std::collections::BTreeSet;
 
     #[test]
@@ -405,7 +405,7 @@ mod projector_tests {
         let (_accepted, accepted_fact) = invite_accepted::author::accepted_fact(
             workspace_id,
             invite_fact_id,
-            invite::fact::bootstrap_secret_hash(&[7; 32]),
+            invite_secret::fact::bootstrap_secret_hash(&[7; 32]),
             [7; 32],
             [5; 32],
             [6; 32],

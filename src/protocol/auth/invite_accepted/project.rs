@@ -78,7 +78,7 @@ pub mod decode {
             InviteAcceptedFact {
                 workspace_id: [1; 32],
                 invite_fact_id: [2; 32],
-                bootstrap_hash: crate::protocol::auth::invite::fact::bootstrap_secret_hash(
+                bootstrap_hash: crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash(
                     &[7; 32],
                 ),
                 bootstrap_secret: [7; 32],
@@ -123,7 +123,7 @@ pub mod authenticate {
 
     use crate::core::facts::Fact;
     use crate::core::project_fact::{verify_fact_id, ProjectionContext};
-    use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
+    use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
 
     use super::super::fact::InviteAcceptedFact;
 
@@ -162,7 +162,7 @@ pub mod authenticate {
         use crate::core::facts::{Fact, FactScope};
         use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-        use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
+        use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
         use crate::protocol::auth::invite_accepted::encode;
         use crate::protocol::auth::invite_accepted::fact::InviteAcceptedFact;
 
@@ -333,7 +333,7 @@ impl InviteAcceptedProjector {
 mod tests {
     use super::*;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-    use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
+    use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
 
     #[test]
     fn invite_accepted_offers_accepted_workspace_not_workspace_authority() {

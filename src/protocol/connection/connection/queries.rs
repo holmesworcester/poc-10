@@ -136,7 +136,7 @@ fn is_private_local_fact_tag(tag: u8) -> bool {
             | request::encode::TYPE_CONNECTION_REQUEST
             | super::encode::TYPE_CONNECTION
             | auth::endpoint::encode::TYPE_LOCAL_ENDPOINT
-            | auth::invite::encode::TYPE_INVITE_SECRET
+            | auth::invite_secret::encode::TYPE_INVITE_SECRET
             | auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET
             | auth::local_key_secret::encode::TYPE_LOCAL_KEY_SECRET
             | auth::local_history_node_secret::encode::TYPE_LOCAL_HISTORY_NODE_SECRET

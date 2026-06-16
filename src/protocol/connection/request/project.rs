@@ -310,7 +310,7 @@ pub mod authenticate {
     use crate::core::crypto::{self, Ed25519PublicKey};
     use crate::core::facts::{Fact, FactId, FactScope};
     use crate::core::project_fact::{verify_fact_id, ProjectionContext};
-    use crate::protocol::auth::{endpoint, endpoint_shared, invite, invite_accepted};
+    use crate::protocol::auth::{endpoint, endpoint_shared, invite_accepted, invite_secret};
     use crate::protocol::connection::ephemeral_secret;
 
     use super::super::encode;
@@ -479,7 +479,7 @@ pub mod authenticate {
 
     pub(crate) fn validate_invite_signature(
         request: &ConnectionRequestFact,
-        invite_secret: &invite::fact::InviteSecretFact,
+        invite_secret: &invite_secret::fact::InviteSecretFact,
     ) -> Result<(), String> {
         if request.mode != REQUEST_MODE_BOOTSTRAP {
             return Err("connection request invite validation requires bootstrap mode".to_string());
@@ -506,8 +506,8 @@ pub mod authenticate {
     pub(crate) fn invite_secret_from_context_fact(
         fact: &Fact,
         expected_invite_secret_id: FactId,
-    ) -> Result<invite::fact::InviteSecretFact, String> {
-        if let Ok(secret) = invite::decode_fact_payload(fact.body()) {
+    ) -> Result<invite_secret::fact::InviteSecretFact, String> {
+        if let Ok(secret) = invite_secret::decode_fact_payload(fact.body()) {
             if fact.id != expected_invite_secret_id {
                 return Err("connection invite context id does not match request".to_string());
             }
@@ -1141,7 +1141,7 @@ mod tests {
     use crate::core::intents::RowMutation;
     use crate::core::project_fact::{MatchedContext, ProjectionContext, ProjectionMode, Projector};
     use crate::protocol::auth::endpoint::fact::EndpointFact;
-    use crate::protocol::auth::invite::{encode as invite_encode, fact::InviteSecretFact};
+    use crate::protocol::auth::invite_secret::{encode as invite_encode, fact::InviteSecretFact};
     use crate::protocol::connection::ephemeral_secret::{
         encode as ephemeral_encode, fact::ConnectionEphemeralSecretFact,
     };

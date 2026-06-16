@@ -94,10 +94,10 @@ impl MatchCliContext {
 pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept")?)?;
     let output = ctx.with_command_inputs(|store, clock| {
-        auth::invite::cli::accept(store, clock, args, from_listen_addr)
+        auth::invite_secret::cli::accept(store, clock, args, from_listen_addr)
     })?;
     let receipt = ctx.submit_and_project(output)?;
-    Ok(auth::invite::cli::accept_output(&receipt))
+    Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
 pub(crate) fn accept_invite_server(
@@ -106,10 +106,10 @@ pub(crate) fn accept_invite_server(
 ) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept-invite-server")?)?;
     let output = ctx.with_command_inputs(|store, clock| {
-        auth::invite::cli::accept_invite_server(store, clock, args, from_listen_addr)
+        auth::invite_secret::cli::accept_invite_server(store, clock, args, from_listen_addr)
     })?;
     let receipt = ctx.submit_and_project(output)?;
-    Ok(auth::invite::cli::accept_output(&receipt))
+    Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
 pub(crate) fn accept_link(
@@ -118,10 +118,10 @@ pub(crate) fn accept_link(
 ) -> Result<CliOutput, String> {
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("accept-link")?)?;
     let output = ctx.with_command_inputs(|store, clock| {
-        auth::invite::cli::accept_link(store, clock, args, from_listen_addr)
+        auth::invite_secret::cli::accept_link(store, clock, args, from_listen_addr)
     })?;
     let receipt = ctx.submit_and_project(output)?;
-    Ok(auth::invite::cli::accept_output(&receipt))
+    Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
 pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
@@ -165,9 +165,9 @@ pub(crate) fn peers(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
 
 pub(crate) fn invite(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let output =
-        ctx.with_command_inputs(|store, clock| auth::invite::cli::invite(store, clock, args))?;
+        ctx.with_command_inputs(|store, clock| auth::invite_secret::cli::invite(store, clock, args))?;
     let receipt = ctx.submit_and_project(output)?;
-    Ok(auth::invite::cli::invite_output(&receipt))
+    Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
 pub(crate) fn invite_server(
@@ -175,16 +175,16 @@ pub(crate) fn invite_server(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let output = ctx
-        .with_command_inputs(|store, clock| auth::invite::cli::invite_server(store, clock, args))?;
+        .with_command_inputs(|store, clock| auth::invite_secret::cli::invite_server(store, clock, args))?;
     let receipt = ctx.submit_and_project(output)?;
-    Ok(auth::invite::cli::invite_output(&receipt))
+    Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
 pub(crate) fn link(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let output =
-        ctx.with_command_inputs(|store, clock| auth::invite::cli::link(store, clock, args))?;
+        ctx.with_command_inputs(|store, clock| auth::invite_secret::cli::link(store, clock, args))?;
     let receipt = ctx.submit_and_project(output)?;
-    Ok(auth::invite::cli::invite_output(&receipt))
+    Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
 pub(crate) fn create_workspace(

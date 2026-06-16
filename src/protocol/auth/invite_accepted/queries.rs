@@ -77,7 +77,7 @@ pub fn accepted_bootstrap_peers(store: &Store) -> Result<Vec<InviteAcceptedRow>,
 mod tests {
     use super::*;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-    use crate::protocol::auth::invite::fact::bootstrap_secret_hash;
+    use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
     use crate::protocol::auth::invite_accepted::fact::InviteAcceptedFact;
 
     #[test]

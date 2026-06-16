@@ -42,7 +42,7 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>,
         return Err("bootstrap_secret cannot be empty".to_string());
     }
 
-    let bootstrap_hash = auth::invite::fact::bootstrap_secret_hash(&input.bootstrap_secret);
+    let bootstrap_hash = auth::invite_secret::fact::bootstrap_secret_hash(&input.bootstrap_secret);
     let (_accepted, accepted_fact) = author::accepted_fact(
         input.workspace_id,
         input.invite_fact_id,

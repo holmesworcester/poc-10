@@ -8,7 +8,7 @@
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::auth::endpoint::fact::EndpointFact;
-use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 use crate::protocol::connection::ephemeral_secret::author as ephemeral_author;
 
 use super::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP, REQUEST_MODE_MEMBERSHIP};
@@ -43,7 +43,7 @@ pub fn create_bootstrap_attempt(
     validate_id("invite_fact_id", &input.invite_fact_id)?;
     let invite_secret = input.invite_secret.validate()?;
     let invite_secret_fact =
-        crate::protocol::auth::invite::author::secret_fact(invite_secret, input.created_at_ms)?;
+        crate::protocol::auth::invite_secret::author::secret_fact(invite_secret, input.created_at_ms)?;
     let (ephemeral, ephemeral_fact) = ephemeral_author::random_secret_fact(
         input.local_endpoint.endpoint,
         input.created_at_ms.saturating_add(1),

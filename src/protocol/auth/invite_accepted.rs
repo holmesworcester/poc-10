@@ -16,7 +16,7 @@ pub mod queries;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
 use crate::core::store::{TableName, TableRow};
-use crate::protocol::auth::invite::fact::InviteSecretFact;
+use crate::protocol::auth::invite_secret::fact::InviteSecretFact;
 use crate::protocol::connection::request::encode::{encode_optional_addr, ADDR_BLOCK_BYTES};
 
 pub const TYPE_INVITE_ACCEPTED: u8 = encode::TYPE_INVITE_ACCEPTED;
@@ -85,7 +85,7 @@ pub fn derived_invite_secret(fact: &fact::InviteAcceptedFact) -> InviteSecretFac
 
 pub fn derived_invite_secret_fact_id(fact: &fact::InviteAcceptedFact) -> Result<FactId, String> {
     let secret = derived_invite_secret(fact);
-    let bytes = crate::protocol::auth::invite::encode::encode_fact(&secret)?;
+    let bytes = crate::protocol::auth::invite_secret::encode::encode_fact(&secret)?;
     Ok(Fact::new(FactScope::Local, 0, bytes).id)
 }
 

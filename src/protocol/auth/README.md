@@ -38,7 +38,7 @@ author content, or whether a key wrap is decryptable.
 
 Auth owns rows that describe workspace authority, membership, invites,
 endpoint membership, recipient keys, removal frontiers, key wraps, and local
-private material. Shared rows such as workspace, user, admin, invite,
+private material. Shared rows such as workspace, user, admin, user-invite,
 endpoint-shared, recipient-key, removal-frontier, and key-wrap rows support
 auth queries and command output. Local rows such as endpoint secret, local
 signer, local recipient key, local key secret, local history node, invite
@@ -142,10 +142,11 @@ Auth fact families are grouped by protocol role:
 
 - `workspace` creates the shared namespace for users, endpoints, content, and
   sync.
-- `user`, `admin`, `user_invite`, `device_invite`, `invite`, and
-  `invite_server` form shared authority edges for joining and granting
-  workspace authority; `invite_accepted` is the local retained acceptance edge
-  that selects which workspace roots this store admits.
+- `user`, `admin`, `user_invite`, `device_invite`, and `invite_server` form
+  shared authority edges for joining and granting workspace authority.
+  `invite_secret` (the creator-side local bootstrap secret) and
+  `invite_accepted` (the local retained acceptance edge that selects which
+  workspace roots this store admits) are local edges.
 - `endpoint` and `endpoint_shared` hold local and shared endpoint identity
   material.
 - `removal_frontier` names a content-key frontier and its owner.

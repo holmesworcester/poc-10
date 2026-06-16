@@ -317,10 +317,10 @@ pub(crate) fn authenticate_fact_for_admission(fact: &Fact) -> Result<(), String>
             auth::endpoint::project::decode::decode_fact,
             auth::endpoint::project::authenticate::authenticate
         ),
-        auth::invite::encode::TYPE_INVITE_SECRET => authenticate_admission_arm!(
+        auth::invite_secret::encode::TYPE_INVITE_SECRET => authenticate_admission_arm!(
             fact,
-            auth::invite::project::decode::decode_fact,
-            auth::invite::project::authenticate::authenticate
+            auth::invite_secret::project::decode::decode_fact,
+            auth::invite_secret::project::authenticate::authenticate
         ),
         auth::workspace::encode::TYPE_WORKSPACE => authenticate_admission_arm!(
             fact,
@@ -466,7 +466,7 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     auth::invite_server::INVITE_SERVER_ROWS,
     auth::user_invite::USER_INVITE_ROWS,
     auth::device_invite::DEVICE_INVITE_ROWS,
-    auth::invite::INVITE_SECRET_ROWS,
+    auth::invite_secret::INVITE_SECRET_ROWS,
     sync::compare::SYNC_COMPARE_ROWS,
     sync::have_id::SYNC_HAVE_ID_ROWS,
     sync::need_id::SYNC_NEED_ID_ROWS,
@@ -636,7 +636,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::invite_server::INVITE_SERVER_ROWS,
         auth::user_invite::USER_INVITE_ROWS,
         auth::device_invite::DEVICE_INVITE_ROWS,
-        auth::invite::INVITE_SECRET_ROWS,
+        auth::invite_secret::INVITE_SECRET_ROWS,
         sync::compare::SYNC_COMPARE_ROWS,
         sync::have_id::SYNC_HAVE_ID_ROWS,
         sync::need_id::SYNC_NEED_ID_ROWS,
@@ -653,7 +653,7 @@ CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT N
         auth::device_invite::DEVICE_INVITE_ROW_SCHEMA,
         auth::user::USER_ROW_SCHEMA,
         auth::user_invite::USER_INVITE_ROW_SCHEMA,
-        auth::invite::INVITE_SECRET_ROW_SCHEMA,
+        auth::invite_secret::INVITE_SECRET_ROW_SCHEMA,
         auth::invite_server::INVITE_SERVER_ROW_SCHEMA,
         auth::invite_accepted::INVITE_ACCEPTED_ROW_SCHEMA,
         auth::endpoint_shared::ENDPOINT_SHARED_ROW_SCHEMA,
@@ -697,13 +697,13 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         auth::workspace::cli::CREATE_WORKSPACE_USAGE,
         create_workspace
     ),
-    cli_command!("invite", auth::invite::cli::INVITE_USAGE, invite),
+    cli_command!("invite", auth::invite_secret::cli::INVITE_USAGE, invite),
     cli_command!(
         "invite-server",
-        auth::invite::cli::INVITE_SERVER_USAGE,
+        auth::invite_secret::cli::INVITE_SERVER_USAGE,
         invite_server
     ),
-    cli_command!("accept", auth::invite::cli::ACCEPT_USAGE, accept),
+    cli_command!("accept", auth::invite_secret::cli::ACCEPT_USAGE, accept),
     cli_command!(
         "connect",
         connection::request::commands::CONNECT_USAGE,
@@ -711,13 +711,13 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
     ),
     cli_command!(
         "accept-invite-server",
-        auth::invite::cli::ACCEPT_INVITE_SERVER_USAGE,
+        auth::invite_secret::cli::ACCEPT_INVITE_SERVER_USAGE,
         accept_invite_server
     ),
-    cli_command!("link", auth::invite::cli::LINK_USAGE, link),
+    cli_command!("link", auth::invite_secret::cli::LINK_USAGE, link),
     cli_command!(
         "accept-link",
-        auth::invite::cli::ACCEPT_LINK_USAGE,
+        auth::invite_secret::cli::ACCEPT_LINK_USAGE,
         accept_link
     ),
     cli_command!(
@@ -859,7 +859,7 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
     auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
     auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
-    auth::invite::INVITE_SECRET_ROWS,
+    auth::invite_secret::INVITE_SECRET_ROWS,
     auth::invite_accepted::INVITE_ACCEPTED_ROWS,
     auth::invite_server::INVITE_SERVER_ROWS,
     auth::user::USER_ROWS,
@@ -941,7 +941,7 @@ projector_routes! {
     project_auth_key_wrap => auth::key_wrap::encode::TYPE_KEY_WRAP, auth::key_wrap::project::KeyWrapProjector, auth::key_wrap::project::PROJECTOR_INFO;
     project_auth_local_recipient_key => auth::local_recipient_key::encode::TYPE_LOCAL_RECIPIENT_KEY, auth::local_recipient_key::project::LocalRecipientKeyProjector, auth::local_recipient_key::project::PROJECTOR_INFO;
     project_endpoint => auth::endpoint::encode::TYPE_LOCAL_ENDPOINT, auth::endpoint::project::EndpointProjector, auth::endpoint::project::PROJECTOR_INFO;
-    project_invite => auth::invite::encode::TYPE_INVITE_SECRET, auth::invite::project::InviteSecretProjector, auth::invite::project::PROJECTOR_INFO;
+    project_invite_secret => auth::invite_secret::encode::TYPE_INVITE_SECRET, auth::invite_secret::project::InviteSecretProjector, auth::invite_secret::project::PROJECTOR_INFO;
     project_workspace => auth::workspace::encode::TYPE_WORKSPACE, auth::workspace::project::WorkspaceProjector, auth::workspace::project::PROJECTOR_INFO;
     project_auth_local_signer_secret => auth::local_signer_secret::encode::TYPE_LOCAL_SIGNER_SECRET, auth::local_signer_secret::project::LocalSignerSecretProjector, auth::local_signer_secret::project::PROJECTOR_INFO;
     project_device_invite => auth::device_invite::encode::TYPE_DEVICE_INVITE, auth::device_invite::project::DeviceInviteProjector, auth::device_invite::project::PROJECTOR_INFO;
