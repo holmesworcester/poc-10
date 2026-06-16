@@ -2791,15 +2791,14 @@ pub(crate) mod context_store {
         select_context_needs(
             store,
             r#"
-        SELECT n.owner, n.role, n.scope_key, n.start_key, n.end_key
-        FROM context_edges n
-        JOIN local_fact_admissions a ON a.fact_id = n.owner
-        WHERE n.direction = 'need'
-          AND n.role = :role
-          AND n.scope_key = :scope_key
-          AND n.start_key <= :offer_end
-          AND n.end_key >= :offer_start
-        ORDER BY a.received_at, n.owner, n.start_key, n.end_key
+        SELECT owner, role, scope_key, start_key, end_key
+        FROM context_edges
+        WHERE direction = 'need'
+          AND role = :role
+          AND scope_key = :scope_key
+          AND start_key <= :offer_end
+          AND end_key >= :offer_start
+        ORDER BY owner, start_key, end_key
         "#,
             &[
                 (":role", text(offer.role.as_str())),
