@@ -9,41 +9,29 @@ the scope READMEs; the Rust modules remain the source of truth.
 Context has one protocol-neutral runtime organized around serialized turns.
 Core owns turn locking, queue draining, context matching, transaction
 boundaries, time-wake admission, recurring schedule firing, and opaque network
-bytes. Protocol code participates through runtime-facing hooks: command authors,
-inbound intake, the projector router, the handler registry, and recurring intent
-builders.
+bytes. Protocol code participates when runtime turns call command authors,
+inbound intake, projectors, registered handlers, and recurring intent builders.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    CLI["CLI command or query"] --> TURN["serialized runtime turn"]
+    CLI["CLI command or query"] --> TURN["acquire serialized runtime turn"]
     DAEMON["daemon loop"] --> TURN
-    TURN --> RUNTIME["Runtime handle: store, projector, handler set"]
+    TURN <--> STORE[("runtime store and queues: facts, incoming_facts, context, time_wakes, intents, local_intents, rows")]
 
-    RUNTIME <--> STORE[("runtime store and queues: facts, incoming_facts, context, time_wakes, intents, local_intents, rows")]
-
-    subgraph HOOKS["runtime-facing protocol hooks"]
-      COMMANDS["protocol command authors"]
-      INTAKE["inbound intake hook"]
-      PROJECTOR["projector router"]
-      HANDLERS["handler registry"]
-      RECURRING["recurring intent builders"]
-    end
-
-    RUNTIME --> COMMAND_PATH["command/query path"]
-    COMMAND_PATH --> COMMANDS
+    TURN --> COMMAND_PATH["run command or query"]
+    COMMAND_PATH --> COMMANDS["call protocol command author"]
     COMMANDS --> COMMAND_FACTS["authored facts"]
     COMMAND_FACTS --> COMMIT["atomic fact/effect commit"]
-    COMMAND_PATH --> PREQUERY["query pre-settle: retained projection only"]
+    COMMAND_PATH --> PREQUERY["pre-query retained projection settle"]
     PREQUERY --> PROJECTOR
 
-    RUNTIME --> DAEMON_PATH["daemon tick path"]
-    DAEMON_PATH --> FIRE["fire recurring local intents"]
-    FIRE --> RECURRING
-    RECURRING --> LOCAL_QUEUE["queue local_intents"]
+    TURN --> DAEMON_PATH["run daemon tick"]
+    DAEMON_PATH --> FIRE["fire recurring intent builders"]
+    FIRE --> LOCAL_QUEUE["queue local_intents"]
     LOCAL_QUEUE --> STORE
     FIRE --> NET_IN["accept opaque TCP frames"]
-    NET_IN --> INTAKE
+    NET_IN --> INTAKE["call inbound intake hook"]
     INTAKE --> COMMIT
     NET_IN --> TIME["admit due time wakes"]
     TIME --> STORE
@@ -51,14 +39,12 @@ flowchart TD
     subgraph DRAIN["runtime queue drain order"]
       TIME --> PROJECTION_A["drain projection work"]
       STORE --> PROJECTION_A
-      PROJECTION_A --> PROJECTOR
-      PROJECTOR --> PROJECTION_OUT["ProjectionOutput and RuntimeEffects"]
-      PROJECTION_OUT --> COMMIT
+      PROJECTION_A --> PROJECTOR["run owning projector"]
+      PROJECTOR --> COMMIT
       PROJECTION_A --> DISPATCH["dispatch intent queues"]
       STORE --> DISPATCH
-      DISPATCH --> HANDLERS
-      HANDLERS --> HANDLER_OUT["handler RuntimeEffects"]
-      HANDLER_OUT --> COMMIT
+      DISPATCH --> HANDLERS["run registered handler"]
+      HANDLERS --> COMMIT
       DISPATCH --> PROJECTION_B["projection drain after handlers"]
       PROJECTION_B --> PROJECTOR
     end
