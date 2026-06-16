@@ -13,10 +13,11 @@ bytes. Protocol code participates when runtime turns call command authors,
 inbound intake, projectors, registered handlers, and recurring intent builders.
 Network ingress here is tick-scoped, not a background async receive path. A
 tick asks the nonblocking listener for ready streams; the work limit bounds
-accepted streams, and each accepted stream is read as length-prefixed frames.
-Each decoded frame is passed directly to inbound intake; recognized frames
-commit `RuntimeEffects` directly into runtime queues, including
-`incoming_facts`.
+accepted streams, and each accepted stream is read as length-prefixed opaque
+bytes. Each frame byte payload is passed directly to inbound intake; recognized
+handshake or established-frame bytes commit `RuntimeEffects` directly into
+runtime queues, including `incoming_facts`. Projectors later open connection
+frames and validate recovered child facts.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
@@ -37,10 +38,11 @@ flowchart TD
     FIRE --> LOCAL_QUEUE["queue local_intents"]
     LOCAL_QUEUE --> STORE
     FIRE --> NET_IN["drain ready TCP streams"]
-    NET_IN --> FRAME["decode length-prefixed frames"]
+    NET_IN --> FRAME["read length-prefixed opaque bytes"]
     FRAME --> INTAKE["call inbound intake hook"]
-    INTAKE --> COMMIT
-    NET_IN --> TIME["admit due time wakes"]
+    INTAKE --> RECOGNIZE["recognize frame family and stage effects"]
+    RECOGNIZE --> COMMIT
+    DAEMON_PATH --> TIME["admit due time wakes"]
     TIME --> STORE
 
     subgraph DRAIN["runtime queue drain order"]
