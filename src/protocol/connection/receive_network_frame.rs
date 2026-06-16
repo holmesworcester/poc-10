@@ -1,15 +1,16 @@
-//! Inbound network-frame intent.
+//! Inbound network-frame intake.
 //!
-//! The daemon turns each accepted TCP frame into this local intent with the raw
-//! bytes, observed origin address, and local receive time. The handler decodes
-//! and validates that boundary metadata, admits sealed handshake request,
-//! response, or established-frame bytes into the appropriate fact queue, then
-//! delegates fact admission to projectors; it does not open frames or validate
-//! child facts itself.
+//! The daemon turns each accepted TCP frame into this boundary input with the
+//! raw bytes, observed origin address, and local receive time. This module
+//! decodes and validates that boundary metadata, admits sealed handshake
+//! request, response, or established-frame bytes into the appropriate incoming
+//! fact queue, then delegates fact admission to projectors; it does not open
+//! frames or validate child facts itself.
 //!
 //! The intent key is deterministic over origin, receive time, and frame bytes
 //! so duplicate local submissions collapse while distinct observations remain
-//! separate. Change this file for receive-intent payload shape, metadata
+//! separate when this boundary is exercised through the generic handler
+//! interface. Change this file for receive payload shape, metadata
 //! normalization, or the choice of which received-frame fact family should
 //! stage an established connection frame.
 
@@ -94,10 +95,10 @@ fn payload_error(err: PayloadError) -> String {
     format!("invalid receive_network_frame payload: {err}")
 }
 
-// The handler is the incoming socket boundary. It has no input facts because
+// This module is the incoming socket boundary. It has no input facts because
 // raw network bytes are not authorized by context until projection. Sealed
-// handshake frames carry no separate envelope fact: the handler stages the
-// bytes as their own local incoming fact (whose type tag selects the owning
+// handshake frames carry no separate envelope fact: intake stages the bytes as
+// their own local incoming fact (whose type tag selects the owning
 // projector) plus a frame observation. Established connection frames use the
 // same incoming path. The boundary does no unsealing itself. The selected
 // projector opens bytes with context and emits recovered child facts plus
@@ -110,6 +111,54 @@ use crate::core::intents::{HandlerContext, HandlerFactId, HandlerResult, IntentH
 use crate::protocol::connection::{
     connection, frame_bundle, frame_file_slice, frame_observation, frame_small, request,
 };
+
+pub fn receive_network_frame_effects(input: ReceiveNetworkFrame) -> Result<RuntimeEffects, String> {
+    let input = normalized_input(input)?;
+    let observed_incoming = |frame_fact: core::facts::Fact| -> Result<RuntimeEffects, String> {
+        let observation = frame_observation::author::fact_from_observation(
+            frame_fact.id,
+            &input.origin_addr,
+            input.received_at_local_ms,
+        )?;
+        Ok(RuntimeEffects::new()
+            .fact(observation)
+            .incoming_fact(frame_fact))
+    };
+
+    // A sealed handshake frame is admitted as its own local fact (whose type
+    // tag is the sealed type) plus a frame observation. Its projector unseals it
+    // with the local endpoint secret from `auth_local_endpoint` context; the
+    // boundary does no unsealing itself.
+    if request::project::decode::is_sealed_fact(&input.frame) {
+        let fact =
+            request::author::fact_from_sealed_wire(&input.frame, input.received_at_local_ms)?;
+        return observed_incoming(fact);
+    }
+    if connection::project::decode::is_sealed_fact(&input.frame) {
+        let fact =
+            connection::author::fact_from_sealed_wire(&input.frame, input.received_at_local_ms)?;
+        return observed_incoming(fact);
+    }
+
+    if frame_small::project::decode::is_frame(&input.frame) {
+        observed_incoming(frame_small::author::fact_from_wire(
+            &input.frame,
+            input.received_at_local_ms,
+        )?)
+    } else if frame_file_slice::project::decode::is_frame(&input.frame) {
+        observed_incoming(frame_file_slice::author::fact_from_wire(
+            &input.frame,
+            input.received_at_local_ms,
+        )?)
+    } else if frame_bundle::project::decode::is_frame(&input.frame) {
+        observed_incoming(frame_bundle::author::fact_from_wire(
+            &input.frame,
+            input.received_at_local_ms,
+        )?)
+    } else {
+        Ok(RuntimeEffects::new())
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ReceiveNetworkFrameHandler;
@@ -131,51 +180,6 @@ impl IntentHandler for ReceiveNetworkFrameHandler {
         if context.is_replay() {
             return Ok(RuntimeEffects::new());
         }
-        let observed_incoming = |frame_fact: core::facts::Fact| -> Result<RuntimeEffects, String> {
-            let observation = frame_observation::author::fact_from_observation(
-                frame_fact.id,
-                &input.origin_addr,
-                input.received_at_local_ms,
-            )?;
-            Ok(RuntimeEffects::new()
-                .fact(observation)
-                .incoming_fact(frame_fact))
-        };
-
-        // A sealed handshake frame is admitted as its own local fact (whose
-        // type tag is the sealed type) plus a frame observation. Its projector
-        // unseals it with the local endpoint secret from `auth_local_endpoint`
-        // context — the boundary does no unsealing itself.
-        if request::project::decode::is_sealed_fact(&input.frame) {
-            let fact =
-                request::author::fact_from_sealed_wire(&input.frame, input.received_at_local_ms)?;
-            return Ok(observed_incoming(fact)?);
-        }
-        if connection::project::decode::is_sealed_fact(&input.frame) {
-            let fact = connection::author::fact_from_sealed_wire(
-                &input.frame,
-                input.received_at_local_ms,
-            )?;
-            return Ok(observed_incoming(fact)?);
-        }
-
-        Ok(if frame_small::project::decode::is_frame(&input.frame) {
-            observed_incoming(frame_small::author::fact_from_wire(
-                &input.frame,
-                input.received_at_local_ms,
-            )?)?
-        } else if frame_file_slice::project::decode::is_frame(&input.frame) {
-            observed_incoming(frame_file_slice::author::fact_from_wire(
-                &input.frame,
-                input.received_at_local_ms,
-            )?)?
-        } else if frame_bundle::project::decode::is_frame(&input.frame) {
-            observed_incoming(frame_bundle::author::fact_from_wire(
-                &input.frame,
-                input.received_at_local_ms,
-            )?)?
-        } else {
-            RuntimeEffects::new()
-        })
+        Ok(receive_network_frame_effects(input)?)
     }
 }

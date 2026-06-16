@@ -3640,11 +3640,11 @@ socket/stream recognizer only, NOT a routed-fact version byte.
 - **Setup:** A listening `core::network::Listener`; a peer that calls
   `write_frame_with_budget(stream, b"", ...)` (zero-length body, valid 4-byte
   length prefix = 0) then shuts down.
-- **Action:** `Listener::accept_available(&store, 1)`.
+- **Action:** `Listener::accept_available(1, on_frame)`.
 - **Expect:** `report.accepted_connections == 1`, `report.value.received_frames == 0`,
-  `claim_inbound(&store, 10).len() == 0`. The empty frame is dropped in
+  and `on_frame` is never called. The empty frame is dropped in
   `read_inbound_frames` (`if bytes.is_empty() { continue; }`), never becomes a
-  `receive_network_frame` intent.
+  `receive_network_frame` intake input.
 - **Defends:** "An empty TCP frame is a heartbeat not protocol input." Confirms the
   only non-fact layer is the length-prefix + heartbeat in `core/network.rs`.
 - **Refs:** `core/network.rs::read_inbound_frames` (empty continue), existing test

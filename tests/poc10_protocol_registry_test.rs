@@ -41,6 +41,7 @@ fn executable_protocol_tables_name_the_target_surfaces() {
         .handlers
         .iter()
         .any(|handler| handler.intent_kind == "receive_network_frame"));
+    assert!(MATCH_PROTOCOL.daemon.inbound_network_intake.is_some());
 }
 
 #[test]

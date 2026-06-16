@@ -2,7 +2,7 @@
 //!
 //! Replay rebuilds all non-fact runtime state from retained facts. It is the
 //! mechanism behind a safe upgrade: queued intents, projected rows, standing
-//! context, time wakes, incoming inputs, network queues, and local clock state
+//! context, time wakes, incoming inputs, outbound network queues, and local clock state
 //! are not protocol truth, so a process can drop them and reproject retained
 //! facts to recover read-model rows, standing context, semantic time wakes,
 //! sync indexes, and key material. The same entry point backs the
@@ -32,7 +32,7 @@ use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet};
 use crate::core::intents::HandlerMode;
-use crate::core::network::{INBOUND_TABLE, OUTBOUND_TABLE};
+use crate::core::network::OUTBOUND_TABLE;
 use crate::core::project_fact::{self, FactAdmissionFn, Projector, RuntimeEffectMode};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use crate::core::store::{Store, TableName};
@@ -255,7 +255,7 @@ pub fn run_replay(
     report.context_edges = table_count(store, CONTEXT_EDGES)?;
     report.row_mutations = materialized_row_count(store)?;
     let remaining_queued_work = table_count(store, INTENTS)? + table_count(store, LOCAL_INTENTS)?;
-    report.network_rows = table_count(store, OUTBOUND_TABLE)? + table_count(store, INBOUND_TABLE)?;
+    report.network_rows = table_count(store, OUTBOUND_TABLE)?;
 
     if remaining_queued_work > 0 {
         return Err(format!(

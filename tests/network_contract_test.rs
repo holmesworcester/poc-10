@@ -1,12 +1,10 @@
 use std::net::SocketAddr;
 
-use topo::core::network::{
-    self, InboundNetworkRow, NetworkSource, NetworkTarget, OutboundNetworkRow,
-};
+use topo::core::network::{self, NetworkTarget, OutboundNetworkRow};
 use topo::core::store::Store;
 
 #[test]
-fn network_rows_are_opaque_and_idempotent() {
+fn outbound_network_rows_are_opaque_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("network-queues.db");
     let store = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
@@ -14,7 +12,6 @@ fn network_rows_are_opaque_and_idempotent() {
     let other_addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
     let target = NetworkTarget::new(addr);
     let other_target = NetworkTarget::new(other_addr);
-    let source = NetworkSource::new(addr);
 
     let outbound = OutboundNetworkRow::new(target, b"opaque bytes".to_vec());
     let duplicate_outbound = OutboundNetworkRow::new(target, b"opaque bytes".to_vec());
@@ -57,18 +54,6 @@ fn network_rows_are_opaque_and_idempotent() {
     assert!(network::claim_outbound_for_target(&store, target, 16)
         .unwrap()
         .is_empty());
-
-    let inbound = InboundNetworkRow::new(source, b"received bytes".to_vec());
-    let duplicate_inbound = InboundNetworkRow::new(source, b"received bytes".to_vec());
-    assert_eq!(
-        network::enqueue_inbound(&store, &[inbound.clone(), duplicate_inbound]).unwrap(),
-        1
-    );
-    assert_eq!(
-        network::claim_inbound(&store, 16).unwrap(),
-        vec![inbound.clone()]
-    );
-    network::delete_inbound(&store, &[inbound]).expect("delete queued inbound bytes");
 
     let reopened = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
     assert!(

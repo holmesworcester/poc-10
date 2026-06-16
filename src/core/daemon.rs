@@ -4,27 +4,27 @@
 //! per-store lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
-//! convert inbound bytes to ephemeral intents, process declared time wakes,
-//! then drain projection/intent/projection work.
+//! commit protocol-classified incoming facts, process declared time wakes, then
+//! drain projection/intent/projection work.
 //!
 //! The daemon is the host for work that should keep happening without a user
 //! command on the stack. It does not decode connection frames or choose protocol
-//! actions itself. The protocol declaration turns inbound bytes into an
-//! ephemeral intent, declares which time-wake timelines should be admitted, and
-//! supplies the runtime handlers that consume queued work.
+//! actions itself. The protocol declaration turns inbound bytes into runtime
+//! effects, declares which time-wake timelines should be admitted, and supplies
+//! the runtime handlers that consume queued work.
 //!
 //! The order inside `tick` is part of the runtime contract. Network input is
-//! staged first, inbound frames become local queued work, due time ranges wake
-//! facts, and then the runtime drains projection, intent dispatch, and
-//! projection again. Change that order here only if the whole daemon scheduling
-//! policy changes; protocol handlers should adapt by emitting facts, time
-//! wakes, or intents rather than calling daemon steps directly.
+//! admitted first, due time ranges wake facts, and then the runtime drains
+//! projection, intent dispatch, and projection again. Change that order here
+//! only if the whole daemon scheduling policy changes; protocol handlers should
+//! adapt by emitting facts, time wakes, or intents rather than calling daemon
+//! steps directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
+use crate::core::effects::RuntimeEffects;
 use crate::core::handle_intent::{
     HandlerRoute, RecurringIntentBuilder, RecurringIntentContext, WorkStatus,
 };
-use crate::core::intents::Intent;
 use crate::core::network;
 use crate::core::project_fact::Timeline;
 use crate::core::runtime::Runtime;
@@ -64,14 +64,14 @@ pub struct StartOptions {
 /// Protocol declarations needed by the generic daemon tick.
 #[derive(Clone, Copy)]
 pub struct DaemonDescription {
-    /// Converter from inbound network bytes to an ephemeral intent.
-    pub inbound_network_intent: Option<InboundNetworkIntent>,
+    /// Converter from inbound network bytes to protocol-owned runtime effects.
+    pub inbound_network_intake: Option<InboundNetworkIntake>,
     /// Time-wake schedules the daemon should admit each tick.
     pub time_wakes: &'static [DaemonTimeWake],
 }
 
-/// Function that turns an inbound frame into ephemeral queued work.
-pub type InboundNetworkIntent = fn(InboundNetworkFrame) -> Result<Intent, String>;
+/// Function that turns an inbound frame into facts, rows, or follow-up work.
+pub type InboundNetworkIntake = fn(InboundNetworkFrame) -> Result<RuntimeEffects, String>;
 
 /// Opaque inbound TCP frame plus local receipt metadata.
 #[derive(Debug, Clone)]
@@ -95,9 +95,9 @@ pub struct DaemonTimeWake {
 
 /// Run one bounded daemon tick.
 ///
-/// The order is fixed: accept TCP, translate inbound bytes to local intents,
-/// admit time wakes, then drain projection/intent/projection work. Protocols
-/// should change their declarations rather than reordering this loop.
+/// The order is fixed: accept TCP, commit inbound intake effects, admit time
+/// wakes, then drain projection/intent/projection work. Protocols should
+/// change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
     runtime: &mut Runtime,
@@ -111,11 +111,6 @@ pub fn tick(
         listener,
         work_limit,
     )?);
-    status.merge(drain_inbound_network_intents(
-        description,
-        runtime,
-        work_limit,
-    )?);
     status.merge(drain_time_wakes(description, runtime, work_limit)?);
     status.merge(runtime.drain_daemon_queues_once(work_limit)?);
     Ok(status)
@@ -123,41 +118,29 @@ pub fn tick(
 
 fn drain_inbound_listener(
     description: DaemonDescription,
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     listener: &network::Listener,
     work_limit: usize,
 ) -> Result<WorkStatus, String> {
-    if description.inbound_network_intent.is_none() {
+    let Some(intake) = description.inbound_network_intake else {
         return Ok(WorkStatus::idle());
-    }
-    let accepted = listener.accept_available(runtime.store(), work_limit)?;
+    };
+    let accepted = listener.accept_available(work_limit, |source, frame| {
+        let effects = intake(InboundNetworkFrame {
+            frame,
+            origin_addr: source.addr(),
+            received_at_local_ms: now_ms(),
+        })?;
+        if !effects.is_empty() {
+            runtime.submit_runtime_effects(effects, "commit inbound network frame")?;
+        }
+        Ok(())
+    })?;
     Ok(WorkStatus::progressed(
         accepted.accepted_connections > 0
             || accepted.value.sent_frames > 0
             || accepted.value.received_frames > 0,
     ))
-}
-
-fn drain_inbound_network_intents(
-    description: DaemonDescription,
-    runtime: &mut Runtime,
-    work_limit: usize,
-) -> Result<WorkStatus, String> {
-    let Some(to_intent) = description.inbound_network_intent else {
-        return Ok(WorkStatus::idle());
-    };
-    let inbound = network::claim_inbound(runtime.store(), work_limit)?;
-    let received_at_local_ms = now_ms();
-    for row in &inbound {
-        runtime.submit_local_intent(to_intent(InboundNetworkFrame {
-            frame: row.bytes.clone(),
-            origin_addr: row.source.addr(),
-            received_at_local_ms,
-        })?)?;
-    }
-    // This is not gated on `!retried`: once the local intent is stored, it owns retry.
-    network::delete_inbound(runtime.store(), &inbound)?;
-    Ok(WorkStatus::progressed(!inbound.is_empty()))
 }
 
 fn drain_time_wakes(

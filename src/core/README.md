@@ -52,11 +52,11 @@ queue consumption. Retry leaves the row queued; success deletes the row with its
 effects.
 
 The daemon runs the same mechanics without a user command on the stack. Each
-tick stages accepted network bytes as local protocol intents, admits due
-time-wake ranges as pending projection, drains projection, dispatches intents,
-and drains projection again for handler-emitted facts. The runtime lock ensures
-this daemon work cannot race with a CLI command that is admitting new facts into
-the same store.
+tick accepts network frames, lets the protocol intake hook convert recognized
+bytes into `RuntimeEffects`, admits due time-wake ranges as pending projection,
+drains projection, dispatches intents, and drains projection again for
+handler-emitted facts. The runtime lock ensures this daemon work cannot race
+with a CLI command that is admitting new facts into the same store.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
@@ -92,7 +92,7 @@ Protocol code enters core through declarations and effect values:
 
 Data leaves core through the same narrow surfaces: commands receive
 `CliOutput`, protocol queries read schema-owned rows through `Store`, daemon
-handlers receive inbound frames as local intents, and network sends consume
+inbound intake receives length-prefixed frame bytes, and network sends consume
 opaque outbound rows from `network`.
 
 ## Data Flow
@@ -116,9 +116,11 @@ Runtime work can record incoming facts in `incoming_facts`, submit local
 (ephemeral, not-replayed) intents to `local_intents`, and mark facts whose
 scheduled wake-up time has arrived as pending projection work.
 
-Network bytes enter as `network_in` rows, become local protocol intents via the
-daemon declaration, then stage protocol frame facts as incoming facts. Incoming
-frame facts may be retained while they wait on observation, connection, or key
+Network bytes enter through the TCP listener and are handed to the protocol
+inbound intake hook with origin and receive-time metadata. Recognized frame
+bytes commit as `incoming_facts` plus local observation facts through the same
+`RuntimeEffects` admission path used by other runtime work. Incoming frame
+facts may be retained while they wait on observation, connection, or key
 context. Outbound bytes are produced by protocol handlers, staged as
 `network_out` rows, and written by core's TCP pump without parsing frame
 payloads.
@@ -207,9 +209,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   key lifetimes, authority checks, and semantic validation.
 - `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
   store lock, listener setup, readiness/stop/reset handling, inbound frame
-  staging, due time-wake admission, and bounded projection/intent/projection
-  drain loop. The protocol declaration decides how inbound bytes become local
-  intents and which time-wake timelines are active.
+  intake, due time-wake admission, and bounded projection/intent/projection
+  drain loop. The protocol declaration decides how inbound bytes become
+  runtime effects and which time-wake timelines are active.
 - `effects.rs`: shared effect language for projectors and handlers.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes

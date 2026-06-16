@@ -1,12 +1,21 @@
 //! Receive-network handler and connection-frame projector wiring tests.
 
+use std::io::Write;
+use std::net::{Shutdown, TcpStream};
+use std::time::Duration;
+
 use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
+use topo::core::daemon;
 use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
 use topo::core::intents::{HandlerContext, IntentHandler};
+use topo::core::network;
 use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
+use topo::core::runtime::Runtime;
+use topo::core::store::TableName;
 use topo::core::wire::{FixedBytes, FixedSlot};
+use topo::protocol::app::{MATCH_PROTOCOL, MATCH_RUNTIME};
 use topo::protocol::auth::endpoint::encode as endpoint_layout;
 use topo::protocol::auth::endpoint::fact::EndpointFact;
 use topo::protocol::auth::invite::fact::InviteSecretFact;
@@ -303,6 +312,51 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
         .expect("decode small connection frame");
     assert_eq!(input.frame, frame);
     assert_observation_fact(&output, output.incoming_facts[0].id);
+}
+
+#[test]
+fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
+    let (frame, _, _, _, _) = encrypted_small_frame();
+    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let listener = network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
+    let addr = listener.local_addr();
+    let writer = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        let len = u32::try_from(frame.len())
+            .expect("frame length")
+            .to_be_bytes();
+        stream.write_all(&len).expect("write frame length");
+        stream.write_all(&frame).expect("write frame body");
+        stream.shutdown(Shutdown::Write).expect("shutdown write");
+    });
+    std::thread::sleep(Duration::from_millis(50));
+
+    let status =
+        daemon::tick(MATCH_PROTOCOL.daemon, &mut runtime, &listener, 16).expect("daemon tick");
+    writer.join().expect("writer thread");
+
+    assert!(status.progressed);
+    assert!(
+        runtime
+            .facts()
+            .any(|fact| frame_small_layout_decode::decode_fact(fact.body()).is_ok()),
+        "wire frame should reach projection through direct incoming intake"
+    );
+    assert_eq!(
+        runtime
+            .store()
+            .table_row_count(TableName::new("local_intents"))
+            .expect("local intent count"),
+        0,
+        "wire frames should not be staged through receive_network_frame local intents"
+    );
+    assert!(
+        runtime
+            .store()
+            .table_row_count(TableName::new("network_in"))
+            .is_err(),
+        "core should not create an inbound network row table"
+    );
 }
 
 #[test]

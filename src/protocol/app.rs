@@ -6,19 +6,19 @@
 //!
 //! `protocol::registry` is the larger table of contents. This file chooses the
 //! pieces needed to run the protocol: schema sources, row mutation allowlist,
-//! projector, handler routes, daemon time wakes, and inbound-network intent
+//! projector, handler routes, daemon time wakes, and inbound-network intake
 //! conversion. If a new protocol capability needs to be
 //! visible to core, it is usually declared in the registry and wired into the
 //! `MATCH_RUNTIME` or `MATCH_PROTOCOL` constants here.
 //!
 //! Keep executable protocol policy out of this file. The conversion from a TCP
-//! frame to an intent is a small adapter; connection receive admission and
-//! frame interpretation live in connection intent and fact modules.
+//! frame to receive effects is a small adapter; connection receive admission
+//! and frame interpretation live in connection fact and intake modules.
 
 use crate::core::app::ProtocolDescription;
 use crate::core::clock;
 use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame};
-use crate::core::intents::Intent;
+use crate::core::effects::RuntimeEffects;
 use crate::core::runtime::RuntimeDescription;
 use crate::core::store::Store;
 use crate::protocol::registry::{
@@ -42,7 +42,7 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     command_name: "con",
     runtime: MATCH_RUNTIME,
     daemon: DaemonDescription {
-        inbound_network_intent: Some(receive_network_frame_intent),
+        inbound_network_intake: Some(receive_network_frame_effects),
         time_wakes: MATCH_DAEMON_TIME_WAKES,
     },
     commands: MATCH_COMMANDS,
@@ -70,8 +70,8 @@ pub const REPLAYABLE_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
     end_inclusive: current_message_expiration_minute,
 }];
 
-fn receive_network_frame_intent(input: InboundNetworkFrame) -> Result<Intent, String> {
-    connection::receive_network_frame::receive_network_frame_intent(
+fn receive_network_frame_effects(input: InboundNetworkFrame) -> Result<RuntimeEffects, String> {
+    connection::receive_network_frame::receive_network_frame_effects(
         connection::receive_network_frame::ReceiveNetworkFrame {
             frame: input.frame,
             origin_addr: connection::fact_receipt::fact::canonical_origin_addr_bytes(

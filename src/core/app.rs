@@ -3,8 +3,8 @@
 //! Core can launch any protocol that exports a `ProtocolDescription`: the
 //! description names its runtime declaration, daemon declarations, and command
 //! table. Core owns the fixed daemon cycle through `core::daemon`: accept
-//! network bytes, turn inbound bytes into ephemeral protocol intents,
-//! process declared time wakes, then drain projection/intent/projection work.
+//! network bytes, commit protocol intake effects, process declared time wakes,
+//! then drain projection/intent/projection work.
 //!
 //! Core still does not know command semantics. For non-daemon commands it opens
 //! the declared runtime, constructs the protocol-owned context, calls the

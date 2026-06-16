@@ -1092,7 +1092,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     let mut offenders = Vec::new();
     if durable_in_core_schema && memory_in_queue_module {
         offenders.push(
-            "network_in/network_out are declared both as durable core schema tables and ephemeral network memory tables",
+            "network row tables are declared both as durable core schema tables and ephemeral network memory tables",
         );
     }
     if memory_in_queue_module && !runtime_loads_queue_schema {
@@ -1120,7 +1120,7 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
 }
 
 #[test]
-fn cutover_network_io_intents_are_ephemeral_queue_work() {
+fn cutover_network_io_boundaries_are_live_only_work() {
     let root = root();
     let handle_intent = source_text(&root.join("src/core/handle_intent.rs"));
     let core_schema = source_text(&root.join("src/core/schema.rs"));
@@ -1128,10 +1128,8 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
     let send_facts_handler =
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
-    let network_io_files = [
-        "src/protocol/connection/send_network_frame.rs",
-        "src/protocol/connection/receive_network_frame.rs",
-    ];
+    let protocol_app = source_text(&root.join("src/protocol/app.rs"));
+    let network_io_files = ["src/protocol/connection/send_network_frame.rs"];
 
     let mut offenders = Vec::new();
     for relative in network_io_files {
@@ -1155,9 +1153,16 @@ fn cutover_network_io_intents_are_ephemeral_queue_work() {
             "send_facts_on_connection does not emit network frames as local intents".to_string(),
         );
     }
-    if !daemon.contains("runtime.submit_local_intent(to_intent") {
-        offenders
-            .push("daemon inbound network frames are not submitted as local intents".to_string());
+    if !daemon.contains("runtime.submit_runtime_effects(effects")
+        || !protocol_app.contains("inbound_network_intake: Some(receive_network_frame_effects)")
+    {
+        offenders.push(
+            "daemon inbound network frames are not committed through direct intake effects"
+                .to_string(),
+        );
+    }
+    if daemon.contains("runtime.submit_local_intent(to_intent") {
+        offenders.push("daemon still stages inbound network frames as local intents".to_string());
     }
     if !handle_intent.contains("LOCAL_INTENTS")
         || !core_schema.contains("CREATE TEMP TABLE IF NOT EXISTS local_intents")

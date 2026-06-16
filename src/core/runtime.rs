@@ -21,6 +21,7 @@
 //! command, daemon, and replay ordering.
 
 use crate::core::command::CommandOutput;
+use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_intents, HandlerSet};
 use crate::core::intents::{HandlerMode, Intent};
@@ -195,6 +196,27 @@ impl Runtime {
             self.description.fact_admission,
             "submit command output",
         )
+    }
+
+    /// Commit runtime effects that came from a live host boundary.
+    ///
+    /// This path is for daemon intake work that is already volatile, such as
+    /// accepted network frames. It uses the same validation and atomic effect
+    /// commit as projection and intent dispatch, but has no queued input row of
+    /// its own to consume.
+    pub(crate) fn submit_runtime_effects(
+        &mut self,
+        effects: RuntimeEffects,
+        label: &str,
+    ) -> Result<(), String> {
+        project_fact::commit_effects::commit_runtime_effects_to_store(
+            &self.store,
+            &effects,
+            self.description.row_mutation_tables,
+            self.description.fact_admission,
+            label,
+        )
+        .map(|_| ())
     }
 
     /// Drain retained local projection work, then run one query.

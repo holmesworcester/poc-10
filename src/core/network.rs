@@ -1,25 +1,25 @@
 //! Core-owned opaque network IO boundary and TCP frame pump.
 //!
-//! Protocol code hands opaque frame bytes to this module. Core stages those
-//! bytes in memory-local SQLite queue rows before TCP writes, and it records
-//! inbound TCP frames as memory-local queue rows before the runtime turns them
-//! into protocol receive intents.
+//! Protocol code hands opaque frame bytes to this module. Core stages outbound
+//! bytes in memory-local SQLite queue rows before TCP writes, and it delivers
+//! inbound TCP frames to a caller-provided intake callback as soon as the frame
+//! has been decoded.
 //!
 //! The queue rows are process-local operational state, not protocol truth.
 //! Durable work lives in projected facts, context, rows, and intents; network
 //! bytes are retried by re-running the intent that staged them.
 //!
-//! The queue key is intentionally deterministic: the same route and same bytes
-//! map to the same row. That gives the boundary a cheap idempotence property
-//! while callers are still free to retry after crashes. If this module starts
+//! The outbound queue key is intentionally deterministic: the same route and
+//! same bytes map to the same row. That gives the boundary a cheap idempotence
+//! property while callers are still free to retry after crashes. If this module starts
 //! parsing payloads, naming protocol concepts, or deciding when a row should be
 //! produced, it has crossed out of core and into a fact module.
 //!
 //! Outbound rows are produced by protocol intent handlers and consumed by the
-//! TCP pump. Inbound rows are produced by the TCP pump and consumed by the
-//! daemon, which converts them into ephemeral protocol intents. This separation
-//! keeps socket readiness, backpressure, and partial writes out of protocol
-//! handlers while also keeping protocol admission out of the network loop.
+//! TCP pump. Inbound frames are read by the TCP pump and handed directly to the
+//! daemon's protocol intake callback. This keeps socket readiness, backpressure,
+//! and partial writes out of protocol handlers while also keeping protocol
+//! admission out of this network module.
 //!
 //! Change this file for frame network mechanics: listener setup,
 //! length-prefix framing, queue idempotence, local row cleanup, or bounded IO.
@@ -35,12 +35,10 @@ use crate::core::store::{ReplayTables, SchemaSource, Store, TableName, TableRow}
 
 /// Ephemeral outbound network queue table.
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
-/// Ephemeral inbound network queue table.
-pub const INBOUND_TABLE: TableName = TableName::new("network_in");
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const WRITE_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
-/// Store declarations for the two core-owned byte queues.
+/// Store declaration for the core-owned outbound byte queue.
 ///
 /// Network rows are core IO state, so their schema source lives next to this
 /// queue code and the concrete runtime includes it like any other declaration.
@@ -52,16 +50,12 @@ CREATE TEMP TABLE IF NOT EXISTS network_out (
     row_key BLOB PRIMARY KEY NOT NULL,
     row_value BLOB NOT NULL
 );
-CREATE TEMP TABLE IF NOT EXISTS network_in (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
 "#,
-    row_tables: &[OUTBOUND_TABLE, INBOUND_TABLE],
+    row_tables: &[OUTBOUND_TABLE],
     row_schemas: &[],
     replay: ReplayTables {
         protected: &[],
-        reset: &[OUTBOUND_TABLE, INBOUND_TABLE],
+        reset: &[OUTBOUND_TABLE],
         summary: &[],
     },
 };
@@ -125,25 +119,6 @@ impl OutboundNetworkRow {
         Self {
             key: queue_key(b"outbound", target.addr(), &bytes),
             target,
-            bytes,
-        }
-    }
-}
-
-/// Memory-queued inbound frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundNetworkRow {
-    pub key: Vec<u8>,
-    pub source: NetworkSource,
-    pub bytes: Vec<u8>,
-}
-
-impl InboundNetworkRow {
-    /// Build a deterministic inbound queue row.
-    pub fn new(source: NetworkSource, bytes: Vec<u8>) -> Self {
-        Self {
-            key: queue_key(b"inbound", source.addr(), &bytes),
-            source,
             bytes,
         }
     }
@@ -219,45 +194,9 @@ pub fn delete_outbound(store: &Store, rows: &[OutboundNetworkRow]) -> Result<(),
         .map_err(|err| format!("delete outbound network rows: {err}"))
 }
 
-/// Insert inbound rows idempotently.
-pub fn enqueue_inbound(store: &Store, rows: &[InboundNetworkRow]) -> Result<usize, String> {
-    store
-        .insert_table_rows(rows.iter().map(inbound_table_row).collect())
-        .map_err(|err| format!("enqueue inbound network rows: {err}"))
-}
-
-/// Remove inbound rows after the caller has accepted responsibility for them.
-pub fn delete_inbound(store: &Store, rows: &[InboundNetworkRow]) -> Result<(), String> {
-    store
-        .delete_table_rows(
-            INBOUND_TABLE,
-            rows.iter().map(|row| row.key.clone()).collect(),
-        )
-        .map(|_| ())
-        .map_err(|err| format!("delete inbound network rows: {err}"))
-}
-
-/// Claim at most `limit` inbound byte rows, ordered by the deterministic queue key.
-pub fn claim_inbound(store: &Store, limit: usize) -> Result<Vec<InboundNetworkRow>, String> {
-    store
-        .table_rows_with_key_prefix(INBOUND_TABLE, &[], limit)
-        .map_err(|err| format!("claim inbound network rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_inbound(key, &value))
-        .collect()
-}
-
 fn outbound_table_row(row: &OutboundNetworkRow) -> TableRow {
     TableRow {
         table: OUTBOUND_TABLE,
-        key: row.key.clone(),
-        value: row.bytes.clone(),
-    }
-}
-
-fn inbound_table_row(row: &InboundNetworkRow) -> TableRow {
-    TableRow {
-        table: INBOUND_TABLE,
         key: row.key.clone(),
         value: row.bytes.clone(),
     }
@@ -268,15 +207,6 @@ fn decode_outbound(key: Vec<u8>, value: &[u8]) -> Result<OutboundNetworkRow, Str
     Ok(OutboundNetworkRow {
         key,
         target: NetworkTarget::new(addr),
-        bytes: value.to_vec(),
-    })
-}
-
-fn decode_inbound(key: Vec<u8>, value: &[u8]) -> Result<InboundNetworkRow, String> {
-    let addr = decode_addr_from_key(&key)?;
-    Ok(InboundNetworkRow {
-        key,
-        source: NetworkSource::new(addr),
         bytes: value.to_vec(),
     })
 }
@@ -341,7 +271,7 @@ fn queue_key(kind: &[u8], addr: SocketAddr, bytes: &[u8]) -> Vec<u8> {
 pub struct StreamReport {
     /// Frames written to a stream.
     pub sent_frames: usize,
-    /// Non-empty frames read from a stream and staged in the inbound queue.
+    /// Non-empty frames read from a stream and delivered to the intake callback.
     pub received_frames: usize,
 }
 
@@ -370,13 +300,15 @@ impl Listener {
     ///
     /// If no stream is ready, the returned report has zero accepted
     /// connections. This gives higher-level schedulers a nonblocking accept
-    /// step without moving any byte interpretation into core. Draining more
-    /// than one stream matters because higher layers may intentionally send
-    /// many short streams as independent idempotent work items.
+    /// step without moving any byte interpretation into core. The callback is
+    /// called once per non-empty decoded frame, before the next frame is read.
+    /// Draining more than one stream matters because higher layers may
+    /// intentionally send many short streams as independent idempotent work
+    /// items.
     pub fn accept_available(
         &self,
-        store: &Store,
         max_streams: usize,
+        mut on_frame: impl FnMut(NetworkSource, Vec<u8>) -> Result<(), String>,
     ) -> Result<AcceptReport<StreamReport>, String> {
         let mut accepted_connections = 0;
         let mut value = StreamReport::default();
@@ -392,7 +324,8 @@ impl Listener {
             stream
                 .set_nodelay(true)
                 .map_err(|err| format!("set stream nodelay: {err}"))?;
-            let report = read_inbound_frames(store, &mut stream, NetworkSource::new(source_addr))?;
+            let report =
+                read_inbound_frames(&mut stream, NetworkSource::new(source_addr), &mut on_frame)?;
             accepted_connections += 1;
             value.sent_frames += report.sent_frames;
             value.received_frames += report.received_frames;
@@ -451,9 +384,9 @@ pub fn send_once<T>(
 }
 
 fn read_inbound_frames(
-    store: &Store,
     stream: &mut TcpStream,
     source: NetworkSource,
+    on_frame: &mut impl FnMut(NetworkSource, Vec<u8>) -> Result<(), String>,
 ) -> Result<StreamReport, String> {
     let mut report = StreamReport::default();
     loop {
@@ -465,10 +398,8 @@ fn read_inbound_frames(
         if bytes.is_empty() {
             continue;
         }
+        on_frame(source, bytes)?;
         report.received_frames += 1;
-
-        let inbound = InboundNetworkRow::new(source, bytes);
-        enqueue_inbound(store, std::slice::from_ref(&inbound))?;
     }
 
     Ok(report)
@@ -647,7 +578,6 @@ mod tests {
 
     #[test]
     fn accept_available_drains_ready_streams_up_to_limit() {
-        let store = Store::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open store");
         let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
         let addr = listener.local_addr();
         let writers = (0..3)
@@ -663,11 +593,18 @@ mod tests {
             .collect::<Vec<_>>();
         thread::sleep(Duration::from_millis(50));
 
+        let mut frames = Vec::new();
         let first = listener
-            .accept_available(&store, 2)
+            .accept_available(2, |source, bytes| {
+                frames.push((source.addr(), bytes));
+                Ok(())
+            })
             .expect("accept first batch");
         let second = listener
-            .accept_available(&store, 2)
+            .accept_available(2, |source, bytes| {
+                frames.push((source.addr(), bytes));
+                Ok(())
+            })
             .expect("accept second batch");
         for writer in writers {
             writer.join().expect("writer thread");
@@ -677,12 +614,15 @@ mod tests {
         assert_eq!(first.value.received_frames, 2);
         assert_eq!(second.accepted_connections, 1);
         assert_eq!(second.value.received_frames, 1);
-        assert_eq!(claim_inbound(&store, 10).expect("claim inbound").len(), 3);
+        frames.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].1, vec![0]);
+        assert_eq!(frames[1].1, vec![1, 1]);
+        assert_eq!(frames[2].1, vec![2, 2, 2]);
     }
 
     #[test]
     fn empty_frame_is_tcp_heartbeat_not_protocol_input() {
-        let store = Store::open_memory_with_schema_sources(&[SCHEMA_SOURCE]).expect("open store");
         let listener = listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
         let addr = listener.local_addr();
         let writer = thread::spawn(move || {
@@ -693,13 +633,17 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(50));
 
+        let mut frames = Vec::new();
         let report = listener
-            .accept_available(&store, 1)
+            .accept_available(1, |source, bytes| {
+                frames.push((source.addr(), bytes));
+                Ok(())
+            })
             .expect("accept heartbeat");
         writer.join().expect("writer thread");
 
         assert_eq!(report.accepted_connections, 1);
         assert_eq!(report.value.received_frames, 0);
-        assert_eq!(claim_inbound(&store, 10).expect("claim inbound").len(), 0);
+        assert!(frames.is_empty());
     }
 }

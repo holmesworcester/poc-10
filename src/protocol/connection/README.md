@@ -26,8 +26,8 @@ Data enters core from three places:
 
 - connection commands and auth invite flows create local `ephemeral_secret`,
   `request`, and `close` facts;
-- the daemon queues `receive_network_frame` local intents from accepted TCP
-  frames;
+- the daemon hands accepted TCP frames to `receive_network_frame` intake, which
+  commits recognized frames as incoming facts plus observation facts;
 - sync and connection handlers queue outbound frame intents.
 
 Projection and handlers return child facts opened from established frames,
@@ -37,10 +37,11 @@ context offers such as `connection_ephemeral_secret`, `connection_request`,
 durable intents for connection creation, sync seeding, fact batching,
 maintenance, and socket writes.
 
-Core owns queueing, fact storage, local-intent retry/removal, socket table
-mechanics, and transaction boundaries. Connection owns packet classification,
-handshake transcript checks, connection secret use, frame sealing/opening, and
-which child facts may be emitted from received bytes.
+Core owns queueing, fact storage, local-intent retry/removal, outbound socket
+table mechanics, inbound frame delivery, and transaction boundaries. Connection
+owns packet classification, handshake transcript checks, connection secret use,
+frame sealing/opening, and which child facts may be emitted from received
+bytes.
 
 ## Managed Row State
 
@@ -136,11 +137,13 @@ facts.
 
 ## Intent Handlers
 
-`receive_network_frame` is the inbound socket boundary. It has no input facts.
-It normalizes origin metadata and admits sealed `request`, sealed `connection`,
-or established-frame bytes as typed incoming facts. It emits the matching
-`frame_observation` fact in the same handler output so the incoming frame and
-its receive metadata enter projection together. It does no unsealing itself.
+`receive_network_frame` is the inbound socket boundary. It normalizes origin
+metadata and admits sealed `request`, sealed `connection`, or
+established-frame bytes as typed incoming facts. It emits the matching
+`frame_observation` fact in the same effect batch so the incoming frame and its
+receive metadata enter projection together. It does no unsealing itself. The
+module also keeps an intent-handler wrapper for generic handler-level tests and
+queued callers, but the live daemon uses the direct intake effect path.
 
 `maintain_connections` drives outbound request sends from retryable request
 rows. The request command creates invite or membership authority, initiator
