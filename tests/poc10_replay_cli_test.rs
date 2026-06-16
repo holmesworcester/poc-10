@@ -382,7 +382,7 @@ fn state_summary_is_stable_and_exposes_per_area_digests() {
     assert!(
         !first
             .lines()
-            .any(|line| line.starts_with("area_network_out:")
+            .any(|line| line.starts_with("area_network_outgoing:")
                 || line.starts_with("area_intents:")
                 || line.starts_with("area_pending_projection:")),
         "state summary must exclude volatile scheduler and socket state: {first}"

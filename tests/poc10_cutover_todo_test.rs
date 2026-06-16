@@ -147,11 +147,10 @@ fn matching_lines_with_comment_mode(
 const SCOPE_NAMES: [&str; 4] = ["auth", "connection", "content", "sync"];
 
 /// Verb-named intent handler files that live directly inside each scope dir.
-const INTENT_HANDLER_FILES: [&str; 11] = [
+const INTENT_HANDLER_FILES: [&str; 10] = [
     "src/protocol/connection/create_connection.rs",
-    "src/protocol/connection/receive_network_frame.rs",
     "src/protocol/connection/send_facts_on_connection.rs",
-    "src/protocol/connection/send_network_frame.rs",
+    "src/protocol/connection/queue_outgoing_frame.rs",
     "src/protocol/auth/create_key_wrap.rs",
     "src/protocol/auth/unwrap_key_wrap.rs",
     "src/protocol/sync/seed_connection.rs",
@@ -441,7 +440,7 @@ fn cutover_connection_frame_send_has_no_not_yet_wired_or_shared_frame_policy() {
     let root = root();
     let paths = vec![
         root.join("src/protocol/connection/send_facts_on_connection.rs"),
-        root.join("src/protocol/connection/send_network_frame.rs"),
+        root.join("src/protocol/connection/queue_outgoing_frame.rs"),
         root.join("src/protocol/connection/frame_small/author.rs"),
         root.join("src/protocol/connection/frame_file_slice/author.rs"),
         root.join("src/protocol/connection/frame_bundle/author.rs"),
@@ -1022,8 +1021,8 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
     let root = root();
     let project_fact = source_text(&root.join("src/core/project_fact.rs"));
     let core_daemon = source_text(&root.join("src/core/daemon.rs"));
-    let send_network_frame =
-        source_text(&root.join("src/protocol/connection/send_network_frame.rs"));
+    let queue_outgoing_frame =
+        source_text(&root.join("src/protocol/connection/queue_outgoing_frame.rs"));
 
     let mut offenders = Vec::new();
     if project_fact.contains("apply_atomic_row_intents(&run.intents, store, allowed_tables)") {
@@ -1052,18 +1051,18 @@ fn cutover_runtime_step_commits_projection_context_rows_and_intents_atomically()
                 .to_string(),
         );
     }
-    if send_network_frame.contains("tcp::send_once")
-        && send_network_frame.contains(".is_err()")
-        && send_network_frame.contains("return Ok(RuntimeEffects::new())")
+    if queue_outgoing_frame.contains("tcp::send_once")
+        && queue_outgoing_frame.contains(".is_err()")
+        && queue_outgoing_frame.contains("return Ok(RuntimeEffects::new())")
     {
         offenders.push(
-            "src/protocol/connection/send_network_frame.rs swallows TCP send failures as an empty successful handler output"
+            "src/protocol/connection/queue_outgoing_frame.rs swallows TCP send failures as an empty successful handler output"
                 .to_string(),
         );
     }
-    if send_network_frame.contains("fn frame_digest(") {
+    if queue_outgoing_frame.contains("fn frame_digest(") {
         offenders.push(
-            "src/protocol/connection/send_network_frame.rs still carries cursor/ack digest scaffolding"
+            "src/protocol/connection/queue_outgoing_frame.rs still carries cursor/ack digest scaffolding"
                 .to_string(),
         );
     }
@@ -1083,10 +1082,10 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
     let registry = source_text(&root.join("src/protocol/registry.rs"));
 
     let durable_in_core_schema =
-        core_schema.contains("network_in") || core_schema.contains("network_out");
+        core_schema.contains("network_in") || core_schema.contains("network_outgoing");
     let memory_in_queue_module = network.contains("memory-local")
         || network.contains("ephemeral")
-        || network.contains("CREATE TEMP TABLE IF NOT EXISTS network_out");
+        || network.contains("CREATE TEMP TABLE IF NOT EXISTS network_outgoing");
     let runtime_loads_queue_schema = registry.contains("network::SCHEMA_SOURCE");
 
     let mut offenders = Vec::new();
@@ -1100,11 +1099,11 @@ fn cutover_network_row_storage_class_is_not_ambiguous() {
             "network declares memory schemas, but Runtime does not load network::SCHEMA_SOURCE",
         );
     }
-    if source_text(&root.join("src/protocol/connection/send_network_frame.rs"))
+    if source_text(&root.join("src/protocol/connection/queue_outgoing_frame.rs"))
         .contains("fn frame_digest")
     {
         offenders.push(
-            "send_network_frame frame_digest is unused ACK/cursor scaffolding; duplicate connection frames must stay harmless instead",
+            "queue_outgoing_frame frame_digest is unused ACK/cursor scaffolding; duplicate connection frames must stay harmless instead",
         );
     }
     if durable_in_core_schema == memory_in_queue_module {
@@ -1129,7 +1128,7 @@ fn cutover_network_io_boundaries_are_live_only_work() {
         source_text(&root.join("src/protocol/connection/send_facts_on_connection.rs"));
     let daemon = source_text(&root.join("src/core/daemon.rs"));
     let protocol_app = source_text(&root.join("src/protocol/app.rs"));
-    let network_io_files = ["src/protocol/connection/send_network_frame.rs"];
+    let network_io_files = ["src/protocol/connection/queue_outgoing_frame.rs"];
 
     let mut offenders = Vec::new();
     for relative in network_io_files {
@@ -1140,18 +1139,16 @@ fn cutover_network_io_boundaries_are_live_only_work() {
             ));
         }
     }
-    if !maintenance.contains(".local_intent(send_network_frame_intent") {
+    if !maintenance.contains("network::queue_outgoing") {
         offenders.push(
-            "connection maintenance does not emit bootstrap sends as local intents".to_string(),
+            "connection maintenance does not queue bootstrap sends directly to outgoing network"
+                .to_string(),
         );
     }
     let compact_send_facts_handler = send_facts_handler.split_whitespace().collect::<String>();
-    if !compact_send_facts_handler
-        .contains(".local_intent(send_network_frame::send_network_frame_intent")
-    {
-        offenders.push(
-            "send_facts_on_connection does not emit network frames as local intents".to_string(),
-        );
+    if !compact_send_facts_handler.contains("network::enqueue_outgoing") {
+        offenders
+            .push("send_facts_on_connection does not enqueue network frames directly".to_string());
     }
     if !daemon.contains("runtime.submit_runtime_effects(effects")
         || !protocol_app.contains("inbound_network_intake: Some(receive_network_frame_effects)")

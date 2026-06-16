@@ -3,25 +3,24 @@
 //! Sync chooses which fact ids should move on a connection; this handler decides
 //! how those fact bytes are packaged. It loads the named connection and payload
 //! facts, verifies local endpoint ownership and sendability, batches facts into
-//! fixed connection-frame budgets, seals each batch, and emits local
-//! `send_network_frame` intents.
+//! fixed connection-frame budgets, seals each batch, and queues outgoing bytes.
 //!
 //! This is not socket IO and it is not sync visibility policy. Sync owns the
-//! shareable index and requested ids, this handler owns byte-level sendability
-//! and frame-family selection, each frame fact family owns sealing, and
-//! `send_network_frame` owns the final opaque socket write.
+//! shareable index and requested ids, this handler owns byte-level sendability,
+//! frame-family selection, route lookup from connection rows, and outgoing
+//! queueing. Each frame fact family owns sealing.
 
 use crate::core::intents::{
-    HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
+    retry_intent, HandlerContext, HandlerError, HandlerFactId, HandlerResult, IntentHandler,
 };
 use crate::core::intents::{Intent, IntentKind};
+use crate::core::network::{self, NetworkTarget, OutgoingNetworkRow};
 use crate::core::wire::{
     Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter,
 };
 use crate::core::{effects::RuntimeEffects, facts::Fact};
 use crate::protocol::auth::endpoint;
 use crate::protocol::connection::connection as connection_fact;
-use crate::protocol::connection::send_network_frame::{self, SendNetworkFrame};
 use crate::protocol::connection::{frame_bundle, frame_file_slice, frame_small};
 use crate::protocol::content;
 use crate::protocol::sync::shared_fact;
@@ -280,17 +279,35 @@ impl IntentHandler for SendFactsOnConnectionHandler {
             endpoint::author::local_endpoint(context.store()?)?.ok_or_else(|| {
                 HandlerError::fatal("send_facts_on_connection requires local endpoint state")
             })?;
-        let (sender_endpoint, receiver_endpoint) = if local_endpoint.endpoint
+        let (sender_endpoint, receiver_endpoint, target) = if local_endpoint.endpoint
             == connection.from_endpoint
         {
-            (connection.from_endpoint, connection.to_endpoint)
+            let Some(addr) = connection.initiator_addr else {
+                return Err(retry_intent(
+                    "send_facts_on_connection route: missing initiator address",
+                ));
+            };
+            (
+                connection.from_endpoint,
+                connection.to_endpoint,
+                NetworkTarget::new(addr),
+            )
         } else if local_endpoint.endpoint == connection.to_endpoint {
-            (connection.to_endpoint, connection.from_endpoint)
+            let Some(addr) = connection.responder_addr else {
+                return Err(retry_intent(
+                    "send_facts_on_connection route: missing responder address",
+                ));
+            };
+            (
+                connection.to_endpoint,
+                connection.from_endpoint,
+                NetworkTarget::new(addr),
+            )
         } else {
             return Err("send_facts_on_connection local endpoint is not part of connection".into());
         };
 
-        let mut output = RuntimeEffects::new();
+        let mut outgoing = Vec::new();
         for batch in batches {
             let fact_ids = batch.iter().map(|fact| fact.id).collect::<Vec<_>>();
             let payloads = batch
@@ -305,14 +322,12 @@ impl IntentHandler for SendFactsOnConnectionHandler {
                 &fact_ids,
                 &payloads,
             )?;
-            output = output.local_intent(send_network_frame::send_network_frame_intent(
-                SendNetworkFrame {
-                    routing_key: connection_id,
-                    frame,
-                },
-            ));
+            outgoing.push(OutgoingNetworkRow::new(target, frame));
         }
-        Ok(output)
+        network::enqueue_outgoing(context.store()?, &outgoing).map_err(|err| {
+            HandlerError::fatal(format!("send_facts_on_connection queue outgoing: {err}"))
+        })?;
+        Ok(RuntimeEffects::new())
     }
 }
 

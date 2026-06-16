@@ -12,6 +12,7 @@ use crate::core::effects::RuntimeEffects;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerResult, Intent, IntentHandler, IntentKind, RowMutation,
 };
+use crate::core::network::{self, NetworkTarget, OutgoingFrame};
 use crate::core::runtime::RecurringIntentContext;
 use crate::core::store::Store;
 use crate::core::wire::{
@@ -27,9 +28,6 @@ use crate::protocol::connection::request::queries::{
     BootstrapConnectionAttemptRow,
 };
 use crate::protocol::connection::request::{self, encode::ADDR_BLOCK_BYTES};
-use crate::protocol::connection::send_network_frame::{
-    send_network_frame_intent, SendNetworkFrame,
-};
 
 pub const MAINTAIN_CONNECTIONS: &str = "maintain_connections";
 
@@ -135,10 +133,16 @@ impl IntentHandler for MaintainConnectionsHandler {
         let mut effects = RuntimeEffects::new();
 
         for pending in pending_connection_requests(store)? {
-            effects = effects.local_intent(send_network_frame_intent(SendNetworkFrame {
-                routing_key: pending.request_id,
-                frame: pending.sealed_request_bytes,
-            }));
+            network::queue_outgoing(
+                store,
+                NetworkTarget::new(pending.addr),
+                OutgoingFrame {
+                    bytes: pending.sealed_request_bytes,
+                },
+            )
+            .map_err(|err| {
+                HandlerError::fatal(format!("maintain_connections queue outgoing: {err}"))
+            })?;
         }
 
         let Some(local) = endpoint::author::local_endpoint(store)? else {
@@ -231,6 +235,7 @@ mod tests {
     use super::*;
     use crate::core::crypto;
     use crate::core::intents::IntentHandler;
+    use crate::core::network::{self, NetworkTarget};
     use crate::core::schema::CORE_SCHEMA_SOURCE;
     use crate::core::store::Store;
     use crate::protocol::auth::endpoint::fact::EndpointFact;
@@ -239,6 +244,51 @@ mod tests {
     use crate::protocol::auth::{endpoint, invite_accepted};
     use crate::protocol::connection::{ephemeral_secret, request};
     use crate::protocol::registry::FACTS_SCHEMA_SOURCE;
+
+    #[test]
+    fn pending_request_rows_are_queued_directly_to_outgoing_network() {
+        let store = Store::open_memory_with_schema_sources(&[
+            CORE_SCHEMA_SOURCE,
+            network::SCHEMA_SOURCE,
+            FACTS_SCHEMA_SOURCE,
+        ])
+        .expect("store");
+        let peer_addr = "127.0.0.1:41000".parse().unwrap();
+        let sealed = vec![7; request::encode::SEALED_FACT_BYTES];
+        store
+            .insert_table_rows(vec![request::connection_request_row(
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                Some(peer_addr),
+                &sealed,
+            )
+            .expect("connection request row")])
+            .expect("seed pending request row");
+
+        let intent = build_maintain_connections_intent(
+            &store,
+            RecurringIntentContext {
+                now_ms: 123,
+                local_addr: None,
+            },
+        )
+        .expect("build")
+        .expect("maintenance intent");
+        let effects = MaintainConnectionsHandler::new()
+            .handle(&intent, &HandlerContext::new().with_store(&store))
+            .expect("handle");
+
+        assert!(effects.local_intents.is_empty());
+        assert_eq!(
+            network::claim_outgoing_for_target(&store, NetworkTarget::new(peer_addr), 16)
+                .expect("claim queued request")
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect::<Vec<_>>(),
+            vec![sealed]
+        );
+    }
 
     #[test]
     fn accepted_invite_row_replays_enough_state_to_create_bootstrap_attempt() {

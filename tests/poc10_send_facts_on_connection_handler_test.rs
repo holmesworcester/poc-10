@@ -3,6 +3,7 @@
 use topo::core::crypto;
 use topo::core::facts::Fact;
 use topo::core::intents::{HandlerContext, IntentHandler};
+use topo::core::network::{self, NetworkTarget};
 use topo::core::schema::CORE_SCHEMA_SOURCE;
 use topo::core::store::Store;
 use topo::protocol::auth::endpoint as endpoint_rows;
@@ -15,11 +16,13 @@ use topo::protocol::connection::send_facts_on_connection::SendFactsOnConnectionH
 use topo::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
-use topo::protocol::connection::send_network_frame;
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 use topo::protocol::sync::shared_fact::{encode as shared_fact_layout, fact::SharedFact};
 
-fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionFact) {
+fn connection_fact(
+    local_endpoint: [u8; 32],
+    peer_addr: std::net::SocketAddr,
+) -> (Fact, ConnectionFact) {
     let connection = ConnectionFact {
         from_endpoint: local_endpoint,
         to_endpoint: [11; 32],
@@ -30,7 +33,7 @@ fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionFact) {
         handshake_hash: [17; 32],
         connection_secret: [18; 32],
         responder_addr: None,
-        initiator_addr: None,
+        initiator_addr: Some(peer_addr),
     };
     let fact = Fact::new(
         topo::core::facts::FactScope::Local,
@@ -41,10 +44,11 @@ fn connection_fact(local_endpoint: [u8; 32]) -> (Fact, ConnectionFact) {
 }
 
 #[test]
-fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
+fn well_formed_send_intent_packs_fixed_frame_into_outgoing_queue() {
     let store = store_with_local_endpoint();
     let local_endpoint = local_endpoint();
-    let (connection_fact, connection) = connection_fact(local_endpoint.endpoint);
+    let peer_addr = "127.0.0.1:41000".parse().expect("peer addr");
+    let (connection_fact, connection) = connection_fact(local_endpoint.endpoint, peer_addr);
     store
         .insert_table_rows(vec![connection_rows::connection_row(
             connection_rows::ConnectionRowFields {
@@ -85,12 +89,12 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
 
     assert!(output.facts.is_empty());
     assert!(output.intents.is_empty());
-    assert_eq!(output.local_intents.len(), 1);
-    let send = send_network_frame::decode_send_network_frame(&output.local_intents[0])
-        .expect("network send");
-    assert_eq!(send.routing_key, connection_fact.id);
+    assert!(output.local_intents.is_empty());
+    let queued = network::claim_outgoing_for_target(&store, NetworkTarget::new(peer_addr), 16)
+        .expect("claim outgoing frame");
+    assert_eq!(queued.len(), 1);
     let opened =
-        frame_small_project::open_connection_frame(&send.frame, &connection.connection_secret)
+        frame_small_project::open_connection_frame(&queued[0].bytes, &connection.connection_secret)
             .expect("open fixed connection::frame frame");
     assert_eq!(opened.connection_id, connection_fact.id);
     assert_eq!(opened.sender_endpoint_id, connection.from_endpoint);
@@ -99,8 +103,12 @@ fn well_formed_send_intent_packs_fixed_frame_for_send_network_frame() {
 }
 
 fn store_with_local_endpoint() -> Store {
-    let store = Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
-        .expect("store");
+    let store = Store::open_memory_with_schema_sources(&[
+        CORE_SCHEMA_SOURCE,
+        network::SCHEMA_SOURCE,
+        FACTS_SCHEMA_SOURCE,
+    ])
+    .expect("store");
     store
         .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
         .expect("seed local endpoint");

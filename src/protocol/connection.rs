@@ -35,5 +35,5 @@ pub mod request;
 // request over the network.
 pub mod create_connection;
 pub mod maintain_connections;
+pub mod queue_outgoing_frame;
 pub mod send_facts_on_connection;
-pub mod send_network_frame;

@@ -9,7 +9,6 @@ use topo::core::crypto;
 use topo::core::daemon;
 use topo::core::effects::RuntimeEffects;
 use topo::core::facts::{Fact, FactScope};
-use topo::core::intents::{HandlerContext, IntentHandler};
 use topo::core::network;
 use topo::core::project_fact::{MatchedContext, ProjectionContext, Projector};
 use topo::core::runtime::Runtime;
@@ -48,8 +47,7 @@ use topo::protocol::connection::frame_small::fact::ConnectionFrameSmallFact;
 use topo::protocol::connection::frame_small::project::decode as frame_small_layout_decode;
 use topo::protocol::connection::frame_small::project::ConnectionFrameSmallProjector;
 use topo::protocol::connection::receive_network_frame::{
-    receive_network_frame_intent, ReceiveNetworkFrame, ReceiveNetworkFrameHandler,
-    RECEIVE_NETWORK_FRAME,
+    receive_network_frame_effects, ReceiveNetworkFrame,
 };
 use topo::protocol::connection::request::encode as connection_request_layout_encode;
 use topo::protocol::connection::request::fact::{ConnectionRequestFact, REQUEST_MODE_BOOTSTRAP};
@@ -72,17 +70,17 @@ where
         .unwrap();
 }
 
-fn receive_intent(frame: Vec<u8>) -> topo::core::intents::Intent {
-    receive_intent_from_origin(frame, ORIGIN)
+fn receive_effects(frame: Vec<u8>) -> RuntimeEffects {
+    receive_effects_from_origin(frame, ORIGIN)
 }
 
-fn receive_intent_from_origin(frame: Vec<u8>, origin: &[u8]) -> topo::core::intents::Intent {
-    receive_network_frame_intent(ReceiveNetworkFrame {
+fn receive_effects_from_origin(frame: Vec<u8>, origin: &[u8]) -> RuntimeEffects {
+    receive_network_frame_effects(ReceiveNetworkFrame {
         frame,
         origin_addr: origin.to_vec(),
         received_at_local_ms: RECEIVED_AT,
     })
-    .expect("receive intent")
+    .expect("receive network frame effects")
 }
 
 fn connection_frame_small_fact(frame: Vec<u8>) -> Fact {
@@ -299,12 +297,7 @@ fn encrypted_small_frame() -> (Vec<u8>, Fact, ConnectionFact, EndpointFact, Vec<
 #[test]
 fn receive_handler_emits_ephemeral_connection_frame_small() {
     let (frame, _, _, _, _) = encrypted_small_frame();
-    let intent = receive_intent(frame.clone());
-    assert_eq!(intent.kind.as_str(), RECEIVE_NETWORK_FRAME);
-
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&intent, &HandlerContext::new())
-        .expect("receive intent becomes connection frame input");
+    let output = receive_effects(frame.clone());
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.incoming_facts.len(), 1);
@@ -348,7 +341,7 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
             .table_row_count(TableName::new("local_intents"))
             .expect("local intent count"),
         0,
-        "wire frames should not be staged through receive_network_frame local intents"
+        "wire frames should not be staged through local intents"
     );
     assert!(
         runtime
@@ -369,9 +362,7 @@ fn receive_handler_emits_ephemeral_connection_frame_file_slice() {
     .expect("file-slice frame");
     assert_eq!(frame.len(), CONNECTION_FRAME_FILE_SLICE_WIRE_BYTES);
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
-        .expect("receive intent becomes file-slice connection frame input");
+    let output = receive_effects(frame.clone());
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.incoming_facts.len(), 1);
@@ -391,9 +382,7 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
     .expect("bundle frame");
     assert_eq!(frame.len(), CONNECTION_FRAME_BUNDLE_WIRE_BYTES);
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
-        .expect("receive intent becomes bundle connection frame input");
+    let output = receive_effects(frame.clone());
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.incoming_facts.len(), 1);
@@ -407,9 +396,7 @@ fn receive_handler_emits_ephemeral_connection_frame_bundle() {
 fn sealed_request_frame_is_admitted_as_incoming_request_plus_observation() {
     let frame = sealed_request_frame();
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
-        .expect("receive sealed request");
+    let output = receive_effects(frame.clone());
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.incoming_facts.len(), 1);
@@ -430,9 +417,7 @@ fn raw_connection_request_bytes_are_discarded_at_the_network_boundary() {
     let request = plaintext_request();
     let frame = connection_request_layout_encode::encode_fact(&request).expect("request");
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame), &HandlerContext::new())
-        .expect("raw request is consumed");
+    let output = receive_effects(frame);
 
     assert!(output.facts.is_empty());
     assert!(output.incoming_facts.is_empty());
@@ -444,9 +429,7 @@ fn raw_connection_bytes_are_discarded_at_the_network_boundary() {
     let connection = plaintext_connection();
     let frame = connection_layout_encode::encode_fact(&connection).expect("response");
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame), &HandlerContext::new())
-        .expect("raw connection is consumed");
+    let output = receive_effects(frame);
 
     assert!(output.facts.is_empty());
     assert!(output.incoming_facts.is_empty());
@@ -471,9 +454,7 @@ fn sealed_connection_frame_is_admitted_as_incoming_connection_plus_observation()
     let frame = connection_layout_encode::seal_fact(&connection, &responder_ephemeral_private)
         .expect("seal connection");
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(frame.clone()), &HandlerContext::new())
-        .expect("receive sealed connection");
+    let output = receive_effects(frame.clone());
 
     assert_eq!(output.facts.len(), 1);
     assert_eq!(output.incoming_facts.len(), 1);
@@ -525,11 +506,7 @@ fn well_formed_frame_opens_key_wrap_and_records_fact_receipt() {
 #[test]
 fn friendly_origin_addr_is_normalized_before_receive_projection_input() {
     let (frame, _, _, _, _) = encrypted_small_frame();
-    let intent = receive_intent_from_origin(frame, b"127.0.0.1_41001");
-
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&intent, &HandlerContext::new())
-        .expect("receive connection::frame stages input");
+    let output = receive_effects_from_origin(frame, b"127.0.0.1_41001");
 
     let observation = assert_observation_fact(&output, output.incoming_facts[0].id);
     assert_eq!(observation.origin_addr, ORIGIN);
@@ -631,9 +608,7 @@ fn well_formed_bundle_frame_without_connection_context_emits_transient_need_only
 
 #[test]
 fn malformed_frame_header_is_discarded_by_receive_handler() {
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(vec![0u8; 32]), &HandlerContext::new())
-        .expect("malformed frame is consumed");
+    let output = receive_effects(vec![0u8; 32]);
 
     assert!(output.facts.is_empty());
     assert!(output.incoming_facts.is_empty());
@@ -645,9 +620,7 @@ fn truncated_small_frame_after_valid_header_is_discarded_by_receive_handler() {
     let (mut bytes, _, _, _, _) = encrypted_small_frame();
     bytes.truncate(bytes.len() - 1);
 
-    let output = ReceiveNetworkFrameHandler::new()
-        .handle(&receive_intent(bytes), &HandlerContext::new())
-        .expect("truncated frame is consumed");
+    let output = receive_effects(bytes);
 
     assert!(output.facts.is_empty());
     assert!(output.incoming_facts.is_empty());

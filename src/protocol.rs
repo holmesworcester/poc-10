@@ -13,7 +13,7 @@
 //!
 //! Each scope module root is the navigational map for that scope. Fact families
 //! are noun-named submodules (`message`, `key_wrap`); intents are verb-named
-//! submodules (`close`, `send_network_frame`). The current fact-family shape is
+//! submodules (`close`, `queue_outgoing_frame`). The current fact-family shape is
 //! `fact.rs` for typed payloads, `encode.rs` for canonical bytes, `project.rs`
 //! for projector-local decode/auth/adapt plus semantic projection and effects,
 //! `author.rs` for construction, and `queries.rs` for user-facing reads. Intents
