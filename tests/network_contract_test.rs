@@ -34,11 +34,29 @@ fn outbound_network_rows_are_opaque_and_idempotent() {
         2
     );
     assert_eq!(
+        network::queued_outbound_targets(&store, 16).unwrap(),
+        vec![target, other_target],
+        "the target scheduler index deduplicates active addresses"
+    );
+    assert_eq!(
+        store
+            .table_row_count(network::OUTBOUND_TARGETS_TABLE)
+            .unwrap(),
+        2
+    );
+    assert_eq!(
         network::claim_outbound_for_target(&store, target, 16).unwrap(),
         vec![outbound.clone()]
     );
     let later_outbound = OutboundNetworkRow::new(target, b"later target bytes".to_vec());
     network::enqueue_outbound(&store, std::slice::from_ref(&later_outbound)).unwrap();
+    assert_eq!(
+        store
+            .table_row_count(network::OUTBOUND_TARGETS_TABLE)
+            .unwrap(),
+        2,
+        "multiple frames for one address keep one active target row"
+    );
     assert_eq!(
         network::claim_outbound_for_target(&store, target, 1).unwrap(),
         vec![outbound.clone()]
@@ -56,6 +74,11 @@ fn outbound_network_rows_are_opaque_and_idempotent() {
     assert!(network::claim_outbound_for_target(&store, target, 16)
         .unwrap()
         .is_empty());
+    assert_eq!(
+        network::queued_outbound_targets(&store, 16).unwrap(),
+        vec![other_target],
+        "deleting the final frame for an address prunes its active target row"
+    );
 
     let reopened = Store::open_disk_with_schema_sources(&path, &[network::SCHEMA_SOURCE]).unwrap();
     assert!(
@@ -63,6 +86,12 @@ fn outbound_network_rows_are_opaque_and_idempotent() {
             .unwrap()
             .is_empty(),
         "network rows are process-local IO staging, not restart-durable protocol truth"
+    );
+    assert!(
+        network::queued_outbound_targets(&reopened, 16)
+            .unwrap()
+            .is_empty(),
+        "network target rows are process-local scheduling state"
     );
 }
 
@@ -106,6 +135,9 @@ fn outbound_pump_writes_queued_rows_and_deletes_sent_frames() {
     assert!(network::claim_outbound_for_target(&store, target, 16)
         .expect("claim after pump")
         .is_empty());
+    assert!(network::queued_outbound_targets(&store, 16)
+        .expect("targets after pump")
+        .is_empty());
 }
 
 #[test]
@@ -132,6 +164,10 @@ fn outbound_pump_leaves_rows_queued_when_target_is_unavailable() {
     assert_eq!(
         network::claim_outbound_for_target(&store, target, 16).expect("claim queued row"),
         vec![outbound]
+    );
+    assert_eq!(
+        network::queued_outbound_targets(&store, 16).expect("targets after deferred pump"),
+        vec![target]
     );
 }
 

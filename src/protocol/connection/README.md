@@ -164,10 +164,10 @@ and emits local `send_network_frame` intents.
 
 `send_network_frame` is the final protocol-owned outbound boundary. It resolves
 the route from a request row or connection row, validates frame size, and stages
-opaque bytes in the core `network_out` queue. Route failures retry the intent.
-TCP reachability and backpressure are core concerns: the daemon pump drains
-address-keyed queue rows and leaves rows queued when a target cannot accept
-bytes.
+opaque bytes in the core `network_out` frame queue. Route failures retry the
+intent. TCP reachability and backpressure are core concerns: the daemon pump
+schedules active addresses from `network_out_targets`, drains per-target frame
+rows, and leaves rows queued when a target cannot accept bytes.
 
 ## Facts
 

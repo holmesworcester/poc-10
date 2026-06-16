@@ -1,9 +1,10 @@
 //! Core-owned opaque network IO boundary and TCP frame pump.
 //!
 //! Protocol code hands opaque frame bytes to this module. Core stores outbound
-//! bytes in address-keyed memory-local SQLite queue rows, pumps those rows to
-//! TCP when a daemon tick has socket capacity, and delivers inbound TCP frames
-//! to a caller-provided intake callback as soon as the frame has been decoded.
+//! bytes in per-target memory-local SQLite queue rows, keeps a separate active
+//! target index for fair scheduling, pumps queued frames to TCP when a daemon
+//! tick has socket capacity, and delivers inbound TCP frames to a
+//! caller-provided intake callback as soon as the frame has been decoded.
 //!
 //! The queue rows are process-local operational state, not protocol truth.
 //! Durable work lives in projected facts, context, rows, and intents; network
@@ -34,8 +35,10 @@ use std::time::{Duration, Instant};
 
 use crate::core::store::{ReplayTables, SchemaSource, Store, TableName, TableRow};
 
-/// Ephemeral outbound network queue table.
+/// Ephemeral outbound network frame queue table.
 pub const OUTBOUND_TABLE: TableName = TableName::new("network_out");
+/// Ephemeral active-target index for the outbound network queue.
+pub const OUTBOUND_TARGETS_TABLE: TableName = TableName::new("network_out_targets");
 const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 const WRITE_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
@@ -51,12 +54,16 @@ CREATE TEMP TABLE IF NOT EXISTS network_out (
     row_key BLOB PRIMARY KEY NOT NULL,
     row_value BLOB NOT NULL
 );
+CREATE TEMP TABLE IF NOT EXISTS network_out_targets (
+    row_key BLOB PRIMARY KEY NOT NULL,
+    row_value BLOB NOT NULL
+);
 "#,
-    row_tables: &[OUTBOUND_TABLE],
+    row_tables: &[OUTBOUND_TABLE, OUTBOUND_TARGETS_TABLE],
     row_schemas: &[],
     replay: ReplayTables {
         protected: &[],
-        reset: &[OUTBOUND_TABLE],
+        reset: &[OUTBOUND_TABLE, OUTBOUND_TARGETS_TABLE],
         summary: &[],
     },
 };
@@ -134,12 +141,18 @@ pub fn send(store: &Store, target: NetworkTarget, frame: OutboundFrame) -> Resul
 
 /// Insert outbound rows idempotently.
 ///
-/// The store handles the transaction; this helper only converts typed queue
-/// rows to generic `TableRow`s. Deletion is a separate, explicit step so callers
-/// can commit their own "sent" bookkeeping at the right boundary.
+/// Frame rows and their active-target index rows become visible in one store
+/// transaction. The returned count is the number of new frame rows, not target
+/// index rows. Deletion is a separate, explicit step so callers can commit
+/// their own "sent" bookkeeping at the right boundary.
 pub fn enqueue_outbound(store: &Store, rows: &[OutboundNetworkRow]) -> Result<usize, String> {
     store
-        .insert_table_rows(rows.iter().map(outbound_table_row).collect())
+        .write_transaction(|tx| {
+            let inserted_frames =
+                tx.insert_table_rows_in_tx(rows.iter().map(outbound_table_row).collect())?;
+            tx.insert_table_rows_in_tx(outbound_target_table_rows(rows))?;
+            Ok(inserted_frames)
+        })
         .map_err(|err| format!("enqueue outbound network rows: {err}"))
 }
 
@@ -163,27 +176,19 @@ pub fn claim_outbound_for_target(
 
 /// Discover targets with queued outbound rows.
 ///
-/// The queue key starts with the target address, so a pump pass can discover
-/// distinct address prefixes without parsing protocol bytes or route rows.
+/// Core keeps this as a separate target index so a blocked peer with many
+/// queued frames does not make the scheduler scan frame rows to find the next
+/// address.
 pub fn queued_outbound_targets(store: &Store, limit: usize) -> Result<Vec<NetworkTarget>, String> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut targets = Vec::new();
-    for (key, _) in store
-        .table_rows(OUTBOUND_TABLE)
+    store
+        .table_rows_with_key_prefix(OUTBOUND_TARGETS_TABLE, &[], limit)
         .map_err(|err| format!("discover outbound network targets: {err}"))?
-    {
-        let target = NetworkTarget::new(decode_addr_from_key(&key)?);
-        if targets.contains(&target) {
-            continue;
-        }
-        targets.push(target);
-        if targets.len() == limit {
-            break;
-        }
-    }
-    Ok(targets)
+        .into_iter()
+        .map(|(key, _)| decode_target_key(&key).map(NetworkTarget::new))
+        .collect()
 }
 
 /// Counts observed while draining the queued outbound network rows.
@@ -257,10 +262,14 @@ pub fn claim_exact_outbound(
 /// Remove outbound rows that have been successfully handed off by the caller.
 pub fn delete_outbound(store: &Store, rows: &[OutboundNetworkRow]) -> Result<(), String> {
     store
-        .delete_table_rows(
-            OUTBOUND_TABLE,
-            rows.iter().map(|row| row.key.clone()).collect(),
-        )
+        .write_transaction(|tx| {
+            tx.delete_table_rows_in_tx(
+                OUTBOUND_TABLE,
+                rows.iter().map(|row| row.key.clone()).collect(),
+            )?;
+            prune_outbound_targets_in_tx(tx, rows)?;
+            Ok(())
+        })
         .map(|_| ())
         .map_err(|err| format!("delete outbound network rows: {err}"))
 }
@@ -271,6 +280,50 @@ fn outbound_table_row(row: &OutboundNetworkRow) -> TableRow {
         key: row.key.clone(),
         value: row.bytes.clone(),
     }
+}
+
+fn outbound_target_table_rows(rows: &[OutboundNetworkRow]) -> Vec<TableRow> {
+    let mut targets = Vec::new();
+    for row in rows {
+        if targets.contains(&row.target) {
+            continue;
+        }
+        targets.push(row.target);
+    }
+    targets.into_iter().map(outbound_target_table_row).collect()
+}
+
+fn outbound_target_table_row(target: NetworkTarget) -> TableRow {
+    TableRow {
+        table: OUTBOUND_TARGETS_TABLE,
+        key: target_prefix(target.addr()),
+        value: Vec::new(),
+    }
+}
+
+fn prune_outbound_targets_in_tx(
+    store: &Store,
+    rows: &[OutboundNetworkRow],
+) -> rusqlite::Result<()> {
+    let mut targets = Vec::new();
+    for row in rows {
+        if targets.contains(&row.target) {
+            continue;
+        }
+        targets.push(row.target);
+    }
+    for target in targets {
+        if store
+            .table_rows_with_key_prefix(OUTBOUND_TABLE, &target_prefix(target.addr()), 1)?
+            .is_empty()
+        {
+            store.delete_table_rows_in_tx(
+                OUTBOUND_TARGETS_TABLE,
+                vec![target_prefix(target.addr())],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn decode_outbound(key: Vec<u8>, value: &[u8]) -> Result<OutboundNetworkRow, String> {
@@ -292,6 +345,22 @@ fn target_prefix(addr: SocketAddr) -> Vec<u8> {
 }
 
 fn decode_addr_from_key(key: &[u8]) -> Result<SocketAddr, String> {
+    let (addr, addr_end) = decode_addr_prefix(key)?;
+    if key.len() != addr_end + 32 {
+        return Err("network row key has invalid length".to_string());
+    }
+    Ok(addr)
+}
+
+fn decode_target_key(key: &[u8]) -> Result<SocketAddr, String> {
+    let (addr, addr_end) = decode_addr_prefix(key)?;
+    if key.len() != addr_end {
+        return Err("network target key has invalid length".to_string());
+    }
+    Ok(addr)
+}
+
+fn decode_addr_prefix(key: &[u8]) -> Result<(SocketAddr, usize), String> {
     let mut offset = 0;
     let addr_len = read_u32(key, &mut offset)? as usize;
     let addr_end = offset
@@ -300,14 +369,12 @@ fn decode_addr_from_key(key: &[u8]) -> Result<SocketAddr, String> {
     let addr_bytes = key
         .get(offset..addr_end)
         .ok_or_else(|| "network row address is truncated".to_string())?;
-    if key.len() != addr_end + 32 {
-        return Err("network row key has invalid length".to_string());
-    }
-    std::str::from_utf8(addr_bytes)
+    let addr = std::str::from_utf8(addr_bytes)
         .map_err(|_| "network row address is not utf8".to_string())
         .and_then(|addr| {
             SocketAddr::from_str(addr).map_err(|_| "network row address is invalid".to_string())
-        })
+        })?;
+    Ok((addr, addr_end))
 }
 
 fn read_u32(value: &[u8], offset: &mut usize) -> Result<u32, String> {
@@ -524,6 +591,7 @@ fn pump_outbound_target(
 ) -> Result<TargetPumpOutcome, String> {
     let rows = claim_outbound_for_target(store, target, limit)?;
     if rows.is_empty() {
+        delete_outbound_target_if_empty(store, target)?;
         return Ok(TargetPumpOutcome::Drained { sent_frames: 0 });
     }
     let mut stream = match connect(target.addr()) {
@@ -541,6 +609,23 @@ fn pump_outbound_target(
     }
     let _ = stream.shutdown(Shutdown::Both);
     Ok(TargetPumpOutcome::Drained { sent_frames })
+}
+
+fn delete_outbound_target_if_empty(store: &Store, target: NetworkTarget) -> Result<(), String> {
+    store
+        .write_transaction(|tx| {
+            if tx
+                .table_rows_with_key_prefix(OUTBOUND_TABLE, &target_prefix(target.addr()), 1)?
+                .is_empty()
+            {
+                tx.delete_table_rows_in_tx(
+                    OUTBOUND_TARGETS_TABLE,
+                    vec![target_prefix(target.addr())],
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|err| format!("delete empty outbound target: {err}"))
 }
 
 fn ensure_target(target: NetworkTarget, rows: &[OutboundNetworkRow]) -> Result<(), String> {
