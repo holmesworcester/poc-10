@@ -16,7 +16,7 @@ builders.
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    DECL["protocol declaration"] --> RUNTIME["core Runtime"]
+    DECL["protocol declaration"] --> RUNTIME["Runtime handle: store, projector, handler set"]
     DECL --> COMMANDS["protocol command authors"]
     DECL --> INTAKE["inbound intake hook"]
     DECL --> PROJECTOR["projector router"]
@@ -29,14 +29,14 @@ flowchart TD
 
     RUNTIME <--> STORE[("runtime store and queues: facts, incoming_facts, context, time_wakes, intents, local_intents, rows")]
 
-    TURN --> COMMAND_PATH["command/query path"]
+    RUNTIME --> COMMAND_PATH["command/query path"]
     COMMAND_PATH --> COMMANDS
     COMMANDS --> COMMAND_FACTS["authored facts"]
     COMMAND_FACTS --> COMMIT["atomic fact/effect commit"]
     COMMAND_PATH --> PREQUERY["query pre-settle: retained projection only"]
     PREQUERY --> PROJECTOR
 
-    TURN --> DAEMON_PATH["daemon tick path"]
+    RUNTIME --> DAEMON_PATH["daemon tick path"]
     DAEMON_PATH --> FIRE["fire recurring local intents"]
     FIRE --> RECURRING
     RECURRING --> LOCAL_QUEUE["queue local_intents"]
@@ -71,60 +71,71 @@ flowchart TD
 
 ## 1) Fact Admission And Context Matching
 
-Facts enter from commands, inbound network intake, opened frames, and handlers.
-Core commits command-authored facts and `RuntimeEffects::facts` as retained
-`facts` with `pending_projection` rows. Core stages
-`RuntimeEffects::incoming_facts` in the temporary `incoming_facts` queue; the
-runtime drains those rows straight into the owning projector, and projector
-output decides whether core retains the incoming fact or deletes it. Projection
-emits the complete standing needs and offers for the fact being projected.
+Facts enter through the shared effect commit path, then projection drains the
+queues that commit created. Command output is normalized to
+`RuntimeEffects::facts`; handlers, inbound intake, and projector follow-up work
+already return `RuntimeEffects`. `commit_runtime_effects_in_tx` retains
+`RuntimeEffects::facts` and queues retained projection work, but only stages
+`RuntimeEffects::incoming_facts` in the temporary incoming queue. `drain_projection`
+selects retained work first, then ready incoming work. The owning projector is
+the decision point: `commit_projection_effects_in_tx` either clears retained
+work, retains an incoming fact, or deletes the incoming row, then writes the
+projector's declared context, time wakes, rows, intents, and follow-up effects.
+In code, durable effect facts use `insert_fact_and_pending_with_mode_in_tx`,
+incoming effect facts use `insert_incoming_fact_in_tx`, retained projection uses
+`pending_durable_projection_items`, incoming projection uses
+`incoming_pending_fact_ids`, and the incoming decision commits through
+`move_incoming_to_retained_in_tx` or `delete_incoming_fact_in_tx`.
 Context is a range relationship: an offer can satisfy many needs, and an offer
 may exist before a later fact creates the matching need.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    CMD["AuthoredCommand facts"] --> DURABLE_IN["durable fact commit"]
-    INTAKE["inbound network intake RuntimeEffects"] --> EFFECTS["RuntimeEffects"]
-    OPENED["opened child facts and receipts"] --> EFFECTS
-    HANDLER_OUT["handler RuntimeEffects"] --> EFFECTS
+    CMD["command-authored facts"] --> EFFECT_COMMIT["effect commit transaction"]
+    INTAKE["inbound intake effects"] --> EFFECT_COMMIT
+    HANDLER_OUT["handler effects"] --> EFFECT_COMMIT
+    PROJECTOR_EFFECTS["projector follow-up effects"] --> EFFECT_COMMIT
+    OPENED["opened frame child facts"] --> EFFECT_COMMIT
 
-    EFFECTS --> DURABLE_IN
-    EFFECTS --> INCOMING_STAGE["stage incoming fact"]
-    DURABLE_IN --> FACTS[("facts")]
-    DURABLE_IN --> PENDING[("pending_projection retained queue")]
-    INCOMING_STAGE --> INCOMING[("incoming_facts temporary queue")]
+    EFFECT_COMMIT --> RETAINED[("retained facts: facts + local_fact_admissions")]
+    EFFECT_COMMIT --> PENDING[("retained work queue: pending_projection")]
+    EFFECT_COMMIT --> INCOMING[("incoming work queue: incoming_facts")]
+    EFFECT_COMMIT --> ROWS[("scope-owned rows")]
+    EFFECT_COMMIT --> INTENTS[("intent queues: intents + local_intents")]
 
-    PENDING --> LOAD["load retained fact plus matched context"]
-    INCOMING --> INCOMING_READY["incoming ready scan"]
-    INCOMING_READY --> LOAD_INCOMING["load incoming fact plus matched context"]
-    LOAD_INCOMING --> PROJECTOR
-    LOAD --> PROJECTOR["owning projector"]
-    PROJECTOR --> NEEDS["context needs"]
-    PROJECTOR --> OFFERS["context offers"]
-    PROJECTOR --> ROWS["scope-owned rows"]
-    PROJECTOR --> INTENTS["durable or local intents"]
-    PROJECTOR --> TIME["time wakes"]
-    PROJECTOR --> INCOMING_DECISION["incoming projector output"]
-    INCOMING_DECISION --> RETAIN["retain incoming fact"]
-    INCOMING_DECISION --> DROP["delete incoming_facts row"]
+    subgraph DRAIN["projection drain"]
+      RETAINED --> RETAINED_ITEM["retained projection item"]
+      PENDING --> RETAINED_ITEM
+      MATCHES[("queued context matches")] --> RETAINED_ITEM
+      DUE_RANGES[("queued due time ranges")] --> RETAINED_ITEM
+      INCOMING --> INCOMING_ITEM["incoming projection item"]
+      RETAINED_ITEM --> PROJECTOR["owning projector"]
+      INCOMING_ITEM --> PROJECTOR
+    end
 
-    NEEDS --> CONTEXT[("context rows")]
-    OFFERS --> CONTEXT
-    CONTEXT --> MATCH["range-overlap matcher"]
-    MATCH --> WAKE["wake newly matched owners"]
-    WAKE --> PENDING
-    WAKE --> INCOMING_READY
+    PROJECTOR --> OUTPUT["projection output: context, time, rows, intents, effects, incoming decision"]
+    OUTPUT --> PROJECTION_COMMIT["projection commit transaction"]
 
-    INTENTS --> QUEUES[("intent queues")]
-    QUEUES --> HANDLER["registered intent handler"]
-    HANDLER --> HANDLER_OUT
+    PROJECTION_COMMIT -->|durable source| CONSUMED["clear consumed retained work"]
+    PROJECTION_COMMIT -->|retain incoming| RETAINED
+    PROJECTION_COMMIT -->|drop incoming| DROP_INCOMING["delete dropped incoming row"]
+    PROJECTION_COMMIT --> CONTEXT[("standing context: replacement needs + append-only offers")]
+    PROJECTION_COMMIT --> TIME_ROWS[("time_wakes")]
+    PROJECTION_COMMIT --> ROWS
+    PROJECTION_COMMIT --> INTENTS
+    PROJECTION_COMMIT --> PROJECTOR_EFFECTS
 
-    ROWS --> STORE[("read models and planning rows")]
-    RETAIN --> FACTS
-    TIME --> TIME_ROWS[("time_wakes")]
-    TIME_ROWS --> DUE["daemon admits due ranges"]
+    CONTEXT --> MATCHER["range matcher"]
+    MATCHER --> MATCHES
+    MATCHES --> PENDING
+
+    TIME_ROWS --> DUE["daemon due-time admission"]
+    DUE --> DUE_RANGES
     DUE --> PENDING
+
+    INTENTS --> HANDLER["intent dispatch"]
+    HANDLER --> HANDLER_OUT
 ```
 
 The lifecycle diagram above is the context diagram: it shows projectors
