@@ -102,7 +102,7 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "pre-query retained projection settle",
         "run daemon tick",
         "fire recurring intent builders",
-        "accept opaque TCP frames",
+        "drain available inbound TCP frames",
         "call inbound intake hook",
         "admit due time wakes",
         "runtime queue drain order",
@@ -247,6 +247,7 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "runtime-facing protocol hooks",
         "projector router",
         "handler registry",
+        "accept opaque TCP frames",
     ] {
         assert!(
             !diagrams.contains(removed),

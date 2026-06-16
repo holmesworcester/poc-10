@@ -30,7 +30,7 @@ flowchart TD
     DAEMON_PATH --> FIRE["fire recurring intent builders"]
     FIRE --> LOCAL_QUEUE["queue local_intents"]
     LOCAL_QUEUE --> STORE
-    FIRE --> NET_IN["accept opaque TCP frames"]
+    FIRE --> NET_IN["drain available inbound TCP frames"]
     NET_IN --> INTAKE["call inbound intake hook"]
     INTAKE --> COMMIT
     NET_IN --> TIME["admit due time wakes"]
