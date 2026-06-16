@@ -6,28 +6,29 @@ the scope READMEs; the Rust modules remain the source of truth.
 
 ## 0) Runtime Boundaries
 
-Context has one protocol-neutral runtime assembled from protocol declarations.
-Core owns serialized turns, queue draining, context matching, transaction
+Context has one protocol-neutral runtime organized around serialized turns.
+Core owns turn locking, queue draining, context matching, transaction
 boundaries, time-wake admission, recurring schedule firing, and opaque network
-bytes. Protocol code supplies high-level hooks: command authors, inbound intake,
-the projector router, the handler registry, row schemas, and recurring intent
+bytes. Protocol code participates through runtime-facing hooks: command authors,
+inbound intake, the projector router, the handler registry, and recurring intent
 builders.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 320}} }%%
 flowchart TD
-    DECL["protocol declaration"] --> RUNTIME["Runtime handle: store, projector, handler set"]
-    DECL --> COMMANDS["protocol command authors"]
-    DECL --> INTAKE["inbound intake hook"]
-    DECL --> PROJECTOR["projector router"]
-    DECL --> HANDLERS["handler registry"]
-    DECL --> RECURRING["recurring intent builders"]
-
     CLI["CLI command or query"] --> TURN["serialized runtime turn"]
     DAEMON["daemon loop"] --> TURN
-    TURN --> RUNTIME
+    TURN --> RUNTIME["Runtime handle: store, projector, handler set"]
 
     RUNTIME <--> STORE[("runtime store and queues: facts, incoming_facts, context, time_wakes, intents, local_intents, rows")]
+
+    subgraph HOOKS["runtime-facing protocol hooks"]
+      COMMANDS["protocol command authors"]
+      INTAKE["inbound intake hook"]
+      PROJECTOR["projector router"]
+      HANDLERS["handler registry"]
+      RECURRING["recurring intent builders"]
+    end
 
     RUNTIME --> COMMAND_PATH["command/query path"]
     COMMAND_PATH --> COMMANDS

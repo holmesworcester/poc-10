@@ -92,10 +92,10 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "# Architecture Diagrams",
         "GitHub-renderable Mermaid flowcharts",
         "## 0) Runtime Boundaries",
-        "protocol-neutral runtime assembled from protocol declarations",
-        "serialized turns, queue draining",
-        "Protocol code supplies high-level hooks",
-        "protocol declaration",
+        "protocol-neutral runtime organized around serialized turns",
+        "Core owns turn locking, queue draining",
+        "Protocol code participates through runtime-facing hooks",
+        "runtime-facing protocol hooks",
         "Runtime handle: store, projector, handler set",
         "protocol command authors",
         "inbound intake hook",
@@ -244,6 +244,8 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "auth facts, keys, authority",
         "content facts, opened rows, purge",
         "sync facts, range summaries, visibility",
+        "protocol declaration",
+        "assembled from protocol declarations",
     ] {
         assert!(
             !diagrams.contains(removed),
