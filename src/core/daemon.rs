@@ -5,7 +5,8 @@
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: accept network bytes,
 //! commit protocol-classified incoming facts, process declared time wakes, drain
-//! projection/intent/projection work, then pump queued outgoing network bytes.
+//! one projection batch and one intent batch, then pump queued outgoing network
+//! bytes.
 //!
 //! The daemon is the host for work that should keep happening without a user
 //! command on the stack. It does not decode connection frames or choose protocol
@@ -14,11 +15,12 @@
 //! the runtime handlers that consume queued work.
 //!
 //! The order inside `tick` is part of the runtime contract. Network input is
-//! admitted first, due time ranges wake facts, the runtime drains projection,
-//! intent dispatch, and projection again, and then queued outgoing TCP bytes are
-//! pumped by target address. Change that order here only if the whole daemon
-//! scheduling policy changes; protocol handlers should adapt by emitting facts,
-//! time wakes, or intents rather than calling daemon steps directly.
+//! admitted first, due time ranges wake facts, one runtime projection batch
+//! drains, one runtime intent batch drains, and then queued outgoing TCP bytes
+//! are pumped by target address. Handler-emitted facts remain queued for later
+//! projection work. Change that order here only if the whole daemon scheduling
+//! policy changes; protocol handlers should adapt by emitting facts, time
+//! wakes, or intents rather than calling daemon steps directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::effects::RuntimeEffects;
@@ -96,7 +98,8 @@ pub struct DaemonTimeWake {
 /// Run one bounded daemon tick.
 ///
 /// The order is fixed: accept TCP, commit inbound intake effects, admit time
-/// wakes, drain projection/intent/projection work, then pump outgoing TCP rows.
+/// wakes, drain one projection batch and one intent batch, then pump outgoing TCP
+/// rows.
 /// Protocols should change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
@@ -112,7 +115,8 @@ pub fn tick(
         work_limit,
     )?);
     status.merge(drain_time_wakes(description, runtime, work_limit)?);
-    status.merge(runtime.drain_daemon_queues_once(work_limit)?);
+    status.merge(runtime.drain_projection_once(work_limit)?);
+    status.merge(runtime.drain_intents_once(work_limit)?);
     status.merge(drain_outgoing_network(runtime, work_limit)?);
     Ok(status)
 }

@@ -38,20 +38,20 @@ flowchart TD
     EFFECTS --> PURGES["purge allowed exact facts"]
 ```
 
-## Daemon Queue Drain
+## Daemon Queue Steps
 
-`Runtime::drain_daemon_queues_once` is the daemon's queue-settling policy after
-network IO and time wakes have been handled. The full `project one fact` path
-above is represented here as a single node.
+After network IO and time wakes have been handled, the daemon runs two explicit
+runtime queue steps: one bounded projection batch and one bounded intent batch.
+The full `project one fact` path above is represented here as a single node.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
-    START["drain_daemon_queues_once(limit)"] --> PRE_PROJECT["process_projection_until_idle"]
+    START["daemon tick queue phase"] --> PRE_PROJECT["Runtime::drain_projection_once(limit)"]
     PRE_PROJECT --> PROJECT_ONE["project one pending fact"]
-    PROJECT_ONE --> MORE_PROJECTION{"pending projection remains and rounds remain?"}
+    PROJECT_ONE --> MORE_PROJECTION{"pending projection remains and batch budget remains?"}
     MORE_PROJECTION -- yes --> PROJECT_ONE
-    MORE_PROJECTION -- no --> DISPATCH["dispatch_intents with full handler set"]
+    MORE_PROJECTION -- no --> DISPATCH["Runtime::drain_intents_once(limit)"]
 
     DISPATCH --> NEXT_INTENT{"registered durable or local intent exists?"}
     NEXT_INTENT -- yes --> HANDLER["run one intent handler"]
@@ -59,13 +59,8 @@ flowchart TD
     RETRY -- yes --> STOP_DISPATCH["stop this bounded dispatch pass"]
     RETRY -- no --> COMMIT_HANDLER["commit handler output and consume intent"]
     COMMIT_HANDLER --> NEXT_INTENT
-    NEXT_INTENT -- no --> POST_PROJECT["process_projection_until_idle"]
-    STOP_DISPATCH --> POST_PROJECT
-
-    POST_PROJECT --> PROJECT_AFTER["project one pending fact"]
-    PROJECT_AFTER --> MORE_AFTER{"pending projection remains and rounds remain?"}
-    MORE_AFTER -- yes --> PROJECT_AFTER
-    MORE_AFTER -- no --> DONE["return WorkStatus"]
+    NEXT_INTENT -- no --> DONE["return WorkStatus"]
+    STOP_DISPATCH --> DONE
 ```
 
 ## Turns, Matches, And Intents
@@ -155,7 +150,7 @@ flowchart LR
         TCP_IN --> ACCEPT["accept_available"]
         ACCEPT --> INBOUND_ROWS["network inbound rows"]
         INBOUND_ROWS --> STAGE["convert inbound rows to local receive_network_frame intents"]
-        STAGE --> DRAIN["drain daemon queues"]
+        STAGE --> DRAIN["run projection batch, then intent batch"]
 
         DRAIN --> RECEIVE_HANDLER["receive_network_frame handler"]
         RECEIVE_HANDLER --> FRAME_FACT["connection frame fact"]

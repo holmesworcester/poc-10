@@ -4,7 +4,7 @@
 //! description names its runtime declaration, daemon declarations, and command
 //! table. Core owns the fixed daemon cycle through `core::daemon`: accept
 //! network bytes, commit protocol intake effects, process declared time wakes,
-//! then drain projection/intent/projection work.
+//! then drain one projection batch and one intent batch.
 //!
 //! Core still does not know command semantics. For non-daemon commands it opens
 //! the declared runtime, constructs the protocol-owned context, calls the

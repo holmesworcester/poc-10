@@ -54,9 +54,10 @@ effects.
 The daemon runs the same mechanics without a user command on the stack. Each
 tick accepts network frames, lets the protocol intake hook convert recognized
 bytes into `RuntimeEffects`, admits due time-wake ranges as pending projection,
-drains projection, dispatches intents, and drains projection again for
-handler-emitted facts. The runtime lock ensures this daemon work cannot race
-with a CLI command that is admitting new facts into the same store.
+drains one projection batch, drains one intent batch, and leaves any
+handler-emitted facts queued for later projection work. The runtime lock ensures
+this daemon work cannot race with a CLI command that is admitting new facts into
+the same store.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
@@ -215,9 +216,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   key lifetimes, authority checks, and semantic validation.
 - `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
   store lock, listener setup, readiness/stop/reset handling, inbound frame
-  intake, due time-wake admission, and bounded projection/intent/projection
-  drain loop. The protocol declaration decides how inbound bytes become
-  runtime effects and which time-wake timelines are active.
+  intake, due time-wake admission, and the bounded projection batch / intent
+  batch loop. The protocol declaration decides how inbound bytes become runtime
+  effects and which time-wake timelines are active.
 - `effects.rs`: shared effect language for projectors and handlers.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
@@ -260,8 +261,8 @@ use core syntax and contracts, but core must not import their semantic rules.
   core protocol row semantics.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits command-authored facts, runs
-  query pre-settle over retained projection, drains runtime projection and intent
-  queues, admits due time wakes, and composes `project_fact.rs` and
+  query pre-settle over retained projection, exposes bounded projection and
+  intent queue drains, admits due time wakes, and composes `project_fact.rs` and
   `handle_intent.rs` into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,

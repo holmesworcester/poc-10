@@ -118,7 +118,6 @@ fn architecture_diagrams_are_github_flowcharts_for_current_context_architecture(
         "run owning projector",
         "dispatch intent queues",
         "run registered handler",
-        "projection drain after handlers",
         "pump network_outgoing",
         "## 1) Fact Admission And Context Matching",
         "RuntimeEffects",

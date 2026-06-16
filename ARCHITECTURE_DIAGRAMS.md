@@ -55,12 +55,10 @@ flowchart TD
       STORE --> DISPATCH
       DISPATCH --> HANDLERS["run registered handler"]
       HANDLERS --> COMMIT
-      DISPATCH --> PROJECTION_B["projection drain after handlers"]
-      PROJECTION_B --> PROJECTOR
     end
 
     COMMIT --> STORE
-    PROJECTION_B --> NET_OUT["pump network_outgoing"]
+    DISPATCH --> NET_OUT["pump network_outgoing"]
     STORE --> NET_OUT
     NET_OUT --> PEER["remote peer"]
     PEER --> NET_IN

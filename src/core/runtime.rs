@@ -17,7 +17,7 @@
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. Runtime holds the concrete store, projector, and protocol
-//! description, and composes the one-item projection and intent workers into
+//! description, and composes the bounded projection and intent workers into
 //! command, daemon, and replay ordering.
 
 use crate::core::command::CommandOutput;
@@ -262,43 +262,39 @@ impl Runtime {
         )
     }
 
-    /// Run one daemon tick's queue order after IO and time wakes have been handled.
+    /// Drain at most `limit` queued projection items once.
     ///
-    /// Projection runs before and after intent dispatch because handlers often
-    /// emit facts that should become visible before the next quiet sleep.
-    pub fn drain_daemon_queues_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
-        let mut total = WorkStatus::idle();
-        total.merge(project_fact::process_projection_until_idle(
+    /// This is the daemon-facing projection step. It advances one bounded batch
+    /// and leaves any remaining projection work queued for a later runtime turn.
+    pub fn drain_projection_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        project_fact::drain_projection(
             &self.store,
             self.projector.as_ref(),
             self.description.row_mutation_tables,
             self.description.fact_admission,
             project_fact::ProjectionDrainScope::Runtime,
-            4,
             limit,
-        )?);
-        total.merge(
-            dispatch_intents(
-                &self.store,
-                &self.handlers,
-                self.description.row_mutation_tables,
-                self.description.fact_admission,
-                limit,
-                HandlerMode::Live,
-                RuntimeEffectMode::Live,
-            )?
-            .status,
-        );
-        total.merge(project_fact::process_projection_until_idle(
+        )
+        .map(|progress| progress.status)
+    }
+
+    /// Drain queued intents once using the live handler set.
+    ///
+    /// Handler-emitted facts are retained and queued durably by dispatch. A
+    /// caller that wants those facts projected should run projection in a later
+    /// runtime step. This advances at most `limit` intent rows and leaves
+    /// remaining work queued.
+    pub fn drain_intents_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        dispatch_intents(
             &self.store,
-            self.projector.as_ref(),
+            &self.handlers,
             self.description.row_mutation_tables,
             self.description.fact_admission,
-            project_fact::ProjectionDrainScope::Runtime,
-            4,
             limit,
-        )?);
-        Ok(total)
+            HandlerMode::Live,
+            RuntimeEffectMode::Live,
+        )
+        .map(|progress| progress.status)
     }
 
     /// Settle all projection and intent work using the protocol's full handler set.
@@ -508,8 +504,24 @@ mod tests {
         }
     }
 
+    struct EmitFactHandler;
+
+    impl IntentHandler for EmitFactHandler {
+        fn handle(&self, _intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            Ok(RuntimeEffects::new().fact(handler_emitted_fact()))
+        }
+    }
+
     fn counting_handler() -> Box<dyn IntentHandler> {
         Box::new(CountingHandler)
+    }
+
+    fn emit_fact_handler() -> Box<dyn IntentHandler> {
+        Box::new(EmitFactHandler)
+    }
+
+    fn handler_emitted_fact() -> Fact {
+        Fact::new(FactScope::Global, 8, b"handler-emitted".to_vec())
     }
 
     static HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -517,6 +529,12 @@ mod tests {
     const COUNTING_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
         intent_kind: "counting",
         factory: counting_handler,
+        recurrence: None,
+    }];
+
+    const EMIT_FACT_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "emit_fact",
+        factory: emit_fact_handler,
         recurrence: None,
     }];
 
@@ -553,6 +571,15 @@ mod tests {
         fact_routes: &[],
         fact_admission: None,
         handlers: COUNTING_HANDLERS,
+    };
+
+    const EMIT_FACT_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[],
+        row_mutation_tables: &[],
+        projector: noop_projector,
+        fact_routes: &[],
+        fact_admission: None,
+        handlers: EMIT_FACT_HANDLERS,
     };
 
     #[test]
@@ -678,6 +705,85 @@ mod tests {
 
         assert_eq!(pending_intents, 1);
         assert_eq!(HANDLER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn runtime_queue_drains_respect_one_batch_limit_each() {
+        HANDLER_CALLS.store(0, Ordering::SeqCst);
+        let mut projection_runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        projection_runtime
+            .submit_facts([
+                Fact::new(FactScope::Global, 7, b"first".to_vec()),
+                Fact::new(FactScope::Global, 7, b"second".to_vec()),
+            ])
+            .expect("submit facts");
+
+        projection_runtime
+            .drain_projection_once(1)
+            .expect("drain one projection");
+        assert_eq!(
+            projection_runtime.pending_fact_count(),
+            1,
+            "one projection batch should process at most its limit"
+        );
+
+        let mut intent_runtime = Runtime::open_memory(&HANDLER_RUNTIME).expect("runtime");
+        for key in [b"one".to_vec(), b"two".to_vec()] {
+            intent_runtime
+                .submit_intent(Intent::new(
+                    IntentKind::new("counting").expect("intent kind"),
+                    key,
+                    Vec::new(),
+                ))
+                .expect("submit intent");
+        }
+
+        intent_runtime
+            .drain_intents_once(1)
+            .expect("drain one intent");
+        assert_eq!(
+            HANDLER_CALLS.load(Ordering::SeqCst),
+            1,
+            "one intent batch should dispatch at most its limit"
+        );
+        assert_eq!(intent_runtime.pending_intent_count(), 1);
+    }
+
+    #[test]
+    fn intent_drain_leaves_handler_emitted_facts_for_later_projection() {
+        let mut runtime = Runtime::open_memory(&EMIT_FACT_RUNTIME).expect("runtime");
+        runtime
+            .submit_intent(Intent::new(
+                IntentKind::new("emit_fact").expect("intent kind"),
+                b"one".to_vec(),
+                Vec::new(),
+            ))
+            .expect("submit intent");
+
+        let first = runtime.drain_intents_once(8).expect("drain intent batch");
+
+        assert!(first.progressed);
+        assert_eq!(
+            runtime.pending_intent_count(),
+            0,
+            "the intent should be consumed when its handler output commits"
+        );
+        assert_eq!(
+            runtime.pending_fact_count(),
+            1,
+            "handler-emitted facts should stay queued for a later projection pass"
+        );
+
+        let second = runtime
+            .drain_projection_once(8)
+            .expect("drain later projection batch");
+
+        assert!(second.progressed);
+        assert_eq!(
+            runtime.pending_fact_count(),
+            0,
+            "the later projection batch should project the previously emitted fact"
+        );
     }
 
     #[test]
