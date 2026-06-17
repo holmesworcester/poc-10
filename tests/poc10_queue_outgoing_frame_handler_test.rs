@@ -27,7 +27,7 @@ fn well_formed_frame_resolves_route_and_queues_outbound_row() {
     let store = test_store();
     let local_endpoint = local_endpoint();
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
+        .insert_table_values(vec![endpoint_rows::local_endpoint_insert(&local_endpoint)])
         .expect("seed local endpoint");
     let (connection_fact, connection) = routed_connection(addr, local_endpoint.endpoint);
     seed_connection_route(&store, connection_fact.id, &connection);
@@ -81,7 +81,7 @@ fn resolved_route_queues_without_opening_tcp_peer() {
     let store = test_store();
     let local_endpoint = local_endpoint();
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
+        .insert_table_values(vec![endpoint_rows::local_endpoint_insert(&local_endpoint)])
         .expect("seed local endpoint");
     let (connection_fact, connection) = routed_connection(addr, local_endpoint.endpoint);
     seed_connection_route(&store, connection_fact.id, &connection);
@@ -112,7 +112,7 @@ fn missing_route_requests_retry_without_consuming_intent() {
     let store = test_store();
     let local_endpoint = local_endpoint();
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint))
+        .insert_table_values(vec![endpoint_rows::local_endpoint_insert(&local_endpoint)])
         .expect("seed local endpoint");
     let (connection_fact, connection) = connection_without_return_route(local_endpoint.endpoint);
     seed_connection_route(&store, connection_fact.id, &connection);
@@ -203,6 +203,6 @@ fn seed_connection_route(store: &Store, connection_id: [u8; 32], connection: &Co
         .expect("connection row"),
     ];
     store
-        .insert_table_rows(rows)
+        .insert_table_values(rows)
         .expect("seed connection route");
 }

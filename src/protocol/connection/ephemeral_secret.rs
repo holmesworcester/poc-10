@@ -18,8 +18,8 @@ pub mod project;
 
 use crate::core::crypto::{X25519PrivateKey, X25519PublicKey};
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{Store, TableInsert, TableName, TypedTableSchema, Value};
+use rusqlite::{params, OptionalExtension, Row};
 
 use fact::EndpointId;
 
@@ -30,19 +30,19 @@ use fact::EndpointId;
 pub const CONNECTION_EPHEMERAL_SECRET_ROWS: TableName =
     TableName::new("connection_ephemeral_secret_rows");
 
-const CONNECTION_EPHEMERAL_SECRET_ROW_KEY_FIELDS: &[RowField] = &[RowField::bytes32("secret_id")];
-const CONNECTION_EPHEMERAL_SECRET_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::bytes32("owner_endpoint"),
-    RowField::bytes32("ephemeral_private_key"),
-    RowField::bytes32("ephemeral_public_key"),
-    RowField::u64be("created_at_ms"),
+pub const CONNECTION_EPHEMERAL_SECRET_COLUMNS: &[&str] = &[
+    "secret_id",
+    "owner_endpoint",
+    "ephemeral_private_key",
+    "ephemeral_public_key",
+    "created_at_ms",
 ];
-
-pub const CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    CONNECTION_EPHEMERAL_SECRET_ROWS,
-    CONNECTION_EPHEMERAL_SECRET_ROW_KEY_FIELDS,
-    CONNECTION_EPHEMERAL_SECRET_ROW_VALUE_FIELDS,
-);
+pub const CONNECTION_EPHEMERAL_SECRET_KEY_COLUMNS: &[&str] = &["secret_id"];
+pub const CONNECTION_EPHEMERAL_SECRET_TABLE: TypedTableSchema = TypedTableSchema {
+    table: CONNECTION_EPHEMERAL_SECRET_ROWS,
+    columns: CONNECTION_EPHEMERAL_SECRET_COLUMNS,
+    key_columns: CONNECTION_EPHEMERAL_SECRET_KEY_COLUMNS,
+};
 
 pub fn connection_ephemeral_secret_key(secret_id: &FactId) -> Vec<u8> {
     secret_id.to_vec()
@@ -51,16 +51,14 @@ pub fn connection_ephemeral_secret_key(secret_id: &FactId) -> Vec<u8> {
 pub fn connection_ephemeral_secret_row(
     secret_id: FactId,
     fact: &fact::ConnectionEphemeralSecretFact,
-) -> Result<TableRow, String> {
-    CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA.row(
-        &[RowValue::Bytes(secret_id.to_vec())],
-        &[
-            RowValue::Bytes(fact.owner_endpoint.to_vec()),
-            RowValue::Bytes(fact.ephemeral_private_key.to_vec()),
-            RowValue::Bytes(fact.ephemeral_public_key.to_vec()),
-            RowValue::U64(fact.created_at_ms),
-        ],
-    )
+) -> TableInsert {
+    CONNECTION_EPHEMERAL_SECRET_TABLE.insert(vec![
+        Value::Bytes(secret_id.to_vec()),
+        Value::Bytes(fact.owner_endpoint.to_vec()),
+        Value::Bytes(fact.ephemeral_private_key.to_vec()),
+        Value::Bytes(fact.ephemeral_public_key.to_vec()),
+        Value::U64(fact.created_at_ms),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::ConnectionEphemeralSecretFact, String> {
@@ -82,39 +80,61 @@ pub struct ConnectionEphemeralSecretRow {
 }
 
 pub fn decode_connection_ephemeral_secret_row(
-    key: &[u8],
-    value: &[u8],
-) -> Result<ConnectionEphemeralSecretRow, String> {
-    let key_fields = CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA.decode_value(value)?;
+    row: &Row<'_>,
+) -> rusqlite::Result<ConnectionEphemeralSecretRow> {
     Ok(ConnectionEphemeralSecretRow {
-        secret_id: key_fields[0].as_bytes32("secret_id")?,
-        owner_endpoint: value_fields[0].as_bytes32("owner_endpoint")?,
-        ephemeral_private_key: value_fields[1].as_bytes32("ephemeral_private_key")?,
-        ephemeral_public_key: value_fields[2].as_bytes32("ephemeral_public_key")?,
-        created_at_ms: value_fields[3].as_u64("created_at_ms")?,
+        secret_id: row.get(0)?,
+        owner_endpoint: row.get(1)?,
+        ephemeral_private_key: row.get(2)?,
+        ephemeral_public_key: row.get(3)?,
+        created_at_ms: row.get::<_, i64>(4)? as u64,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub fn connection_ephemeral_secret_by_id(
+    store: &Store,
+    secret_id: FactId,
+) -> Result<Option<ConnectionEphemeralSecretRow>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT secret_id,
+                    owner_endpoint,
+                    ephemeral_private_key,
+                    ephemeral_public_key,
+                    created_at_ms
+             FROM connection_ephemeral_secret_rows
+             WHERE secret_id = ?1
+             LIMIT 1",
+            params![secret_id],
+            decode_connection_ephemeral_secret_row,
+        )
+        .optional()
+        .map_err(|err| format!("load ephemeral secret row: {err}"))
+}
 
-    #[test]
-    fn connection_ephemeral_secret_row_roundtrips_through_schema() {
-        let fact = fact::ConnectionEphemeralSecretFact {
-            owner_endpoint: [2; 32],
-            ephemeral_private_key: [3; 32],
-            ephemeral_public_key: [4; 32],
-            created_at_ms: 55,
-        };
-        let row = connection_ephemeral_secret_row([1; 32], &fact).expect("secret row");
-        let decoded = decode_connection_ephemeral_secret_row(&row.key, &row.value)
-            .expect("decode secret row");
-        assert_eq!(decoded.secret_id, [1; 32]);
-        assert_eq!(decoded.owner_endpoint, [2; 32]);
-        assert_eq!(decoded.ephemeral_private_key, [3; 32]);
-        assert_eq!(decoded.ephemeral_public_key, [4; 32]);
-        assert_eq!(decoded.created_at_ms, 55);
-    }
+pub fn connection_ephemeral_secret_rows(
+    store: &Store,
+) -> Result<Vec<ConnectionEphemeralSecretRow>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT secret_id,
+                    owner_endpoint,
+                    ephemeral_private_key,
+                    ephemeral_public_key,
+                    created_at_ms
+             FROM connection_ephemeral_secret_rows
+             ORDER BY secret_id
+             LIMIT ?1",
+        )
+        .map_err(|err| format!("load ephemeral secret rows: {err}"))?;
+    let rows = stmt
+        .query_map(
+            params![crate::core::store::DEFAULT_QUERY_LIMIT as i64],
+            decode_connection_ephemeral_secret_row,
+        )
+        .map_err(|err| format!("load ephemeral secret rows: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("decode ephemeral secret rows: {err}"))
 }

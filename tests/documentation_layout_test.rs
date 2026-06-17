@@ -594,7 +594,8 @@ fn architecture_docs_match_current_module_and_context_names() {
 
     for required in [
         "`replay.rs`: replay and replay-check entry point",
-        "`row_schema.rs`: schema-backed helper layer for opaque row table key/value bytes",
+        "`store.rs`: SQLite substrate below runtime policy",
+        "applies typed row mutations",
         "`versioning.rs`: protocol-neutral version ceiling and release-profile policy",
         "`pending_time_ranges` work table",
     ] {

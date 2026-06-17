@@ -7,7 +7,7 @@
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::FactId;
-use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use crate::core::store::Store;
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 use crate::protocol::{auth, content};
 
@@ -230,53 +230,24 @@ fn local_signing_material(
 ) -> Result<(FactId, Ed25519PublicKey, Ed25519PrivateKey), String> {
     auth::workspace::queries::local_membership(store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
-    let endpoint_id = local_endpoint_field(
-        store,
-        auth::endpoint::LOCAL_ENDPOINT_ROWS,
-        "local endpoint id",
-    )?;
-    let public_key = local_endpoint_field(
-        store,
-        auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-        "local endpoint signing public key",
-    )?;
-    let private_key = local_endpoint_field(
-        store,
-        auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-        "local endpoint signing secret",
-    )?;
+    let endpoint = auth::endpoint::author::local_endpoint(store)?
+        .ok_or_else(|| "local endpoint is missing".to_string())?;
+    let endpoint_id = endpoint.endpoint;
+    let public_key = endpoint.signing_public_key;
+    let private_key = endpoint.signing_secret;
     if crypto::ed25519_public_key(&private_key) != public_key {
         return Err("local endpoint signing public key does not match secret".to_string());
     }
     Ok((endpoint_id, public_key, private_key))
 }
 
-fn local_endpoint_field(
-    store: &Store,
-    table: crate::core::store::TableName,
-    label: &str,
-) -> Result<[u8; 32], String> {
-    let value = store
-        .table_row(table, auth::endpoint::LOCAL_KEY)
-        .map_err(|err| format!("load {label}: {err}"))?
-        .ok_or_else(|| format!("{label} is missing"))?;
-    value
-        .try_into()
-        .map_err(|_| format!("{label} row must be 32 bytes"))
-}
-
 fn local_admin_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, String> {
     let membership = auth::workspace::queries::local_membership(store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let user_id = membership.user_authority_fact_id;
-    let admin_rows = store
-        .table_rows_with_key_prefix(auth::admin::ADMIN_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("load admin rows: {err}"))?;
-    let is_admin = admin_rows.into_iter().any(|(key, value)| {
-        auth::admin::queries::decode_admin_row(&key, &value)
-            .map(|row| row.user_fact_id == user_id)
-            .unwrap_or(false)
-    });
+    let is_admin = auth::admin::queries::admin_rows_in_workspace(store, workspace_id)?
+        .into_iter()
+        .any(|row| row.user_fact_id == user_id);
     if !is_admin {
         return Err("local user is not an admin in this workspace".to_string());
     }

@@ -15,12 +15,10 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 use encode::NO_PREVIOUS_POLICY_ID;
-use fact::{PolicyId, RetentionPolicyFact, WorkspaceId};
+use fact::{PolicyId, RetentionPolicyFact};
 
 pub const TYPE_RETENTION_POLICY: u8 = encode::TYPE_RETENTION_POLICY;
 
@@ -33,60 +31,39 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::RetentionPolicyFact, St
 /// can scan a workspace, narrow by scope kind, and resolve the latest policy.
 pub const RETENTION_POLICY_ROWS: TableName = TableName::new("retention_policy_rows");
 
-const RETENTION_POLICY_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("workspace_id"),
-    RowField::u8("scope_kind"),
-    RowField::bytes32("scope_id"),
-    RowField::bytes32("policy_id"),
+pub const RETENTION_POLICY_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "scope_kind",
+    "scope_id",
+    "policy_id",
+    "created_at_ms",
+    "ttl_minutes",
+    "retire_minute",
+    "author_user_id",
+    "supersedes_policy_id",
 ];
-const RETENTION_POLICY_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("created_at_ms"),
-    RowField::bytes("ttl_minutes", 4),
-    RowField::u64be("retire_minute"),
-    RowField::bytes32("author_user_id"),
-    RowField::bytes32("supersedes_policy_id"),
-];
+pub const RETENTION_POLICY_KEY_COLUMNS: &[&str] =
+    &["workspace_id", "scope_kind", "scope_id", "policy_id"];
+pub const RETENTION_POLICY_TABLE: TypedTableSchema = TypedTableSchema {
+    table: RETENTION_POLICY_ROWS,
+    columns: RETENTION_POLICY_COLUMNS,
+    key_columns: RETENTION_POLICY_KEY_COLUMNS,
+};
 
-pub const RETENTION_POLICY_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    RETENTION_POLICY_ROWS,
-    RETENTION_POLICY_ROW_KEY_FIELDS,
-    RETENTION_POLICY_ROW_VALUE_FIELDS,
-);
-
-pub fn policy_key(
-    workspace_id: &WorkspaceId,
-    scope_kind: u8,
-    scope_id: &FactId,
-    policy_id: &PolicyId,
-) -> Vec<u8> {
-    RETENTION_POLICY_ROW_SCHEMA
-        .encode_key(&[
-            RowValue::Bytes(workspace_id.to_vec()),
-            RowValue::U8(scope_kind),
-            RowValue::Bytes(scope_id.to_vec()),
-            RowValue::Bytes(policy_id.to_vec()),
-        ])
-        .expect("retention policy row key")
-}
-
-pub fn policy_row(policy_id: PolicyId, fact: &RetentionPolicyFact) -> Result<TableRow, String> {
-    RETENTION_POLICY_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.workspace_id.to_vec()),
-            RowValue::U8(fact.scope_kind),
-            RowValue::Bytes(fact.scope_id.to_vec()),
-            RowValue::Bytes(policy_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.created_at_ms),
-            RowValue::Bytes(fact.ttl_minutes.to_be_bytes().to_vec()),
-            RowValue::U64(fact.retire_minute),
-            RowValue::Bytes(fact.author_user_id.to_vec()),
-            RowValue::Bytes(
-                fact.supersedes_policy_id
-                    .unwrap_or(NO_PREVIOUS_POLICY_ID)
-                    .to_vec(),
-            ),
-        ],
-    )
+pub fn policy_row(policy_id: PolicyId, fact: &RetentionPolicyFact) -> TableInsert {
+    RETENTION_POLICY_TABLE.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::U64(u64::from(fact.scope_kind)),
+        Value::Bytes(fact.scope_id.to_vec()),
+        Value::Bytes(policy_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::U64(u64::from(fact.ttl_minutes)),
+        Value::U64(fact.retire_minute),
+        Value::Bytes(fact.author_user_id.to_vec()),
+        Value::Bytes(
+            fact.supersedes_policy_id
+                .unwrap_or(NO_PREVIOUS_POLICY_ID)
+                .to_vec(),
+        ),
+    ])
 }

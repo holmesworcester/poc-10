@@ -333,11 +333,11 @@ impl UserProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::PutRow(user_row(
+                .row_mutation(RowMutation::InsertValues(user_row(
                     fact.id,
                     user_invite_id,
                     &user,
-                )?)),
+                ))),
             user.workspace_id,
             fact,
             context_have,

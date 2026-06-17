@@ -530,7 +530,9 @@ fn materialized_output(
     let device_invite_key = device_invite_key(invite.user_authority_fact_id, invite.public_key);
     Ok(share_fact_with_sync(
         output
-            .row_mutation(RowMutation::PutRow(device_invite_row(fact.id, invite)?))
+            .row_mutation(RowMutation::InsertValues(device_invite_row(
+                fact.id, invite,
+            )))
             .offer(crate::core::context::ContextOffer::range(
                 fact.id,
                 "auth_device_invite",

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use cli_harness::*;
 use topo::core::cli::decode_hex_32;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::{Store, DEFAULT_QUERY_LIMIT};
+use topo::core::store::Store;
 use topo::protocol::auth::{admin, workspace as auth_workspace};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -874,11 +874,7 @@ fn local_admin_visible(db: &str, workspace_id: [u8; 32]) -> Result<bool, String>
             .map_err(|err| format!("open store: {err}"))?;
     let membership = auth_workspace::queries::local_membership(&store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined workspace".to_string())?;
-    let rows = store
-        .table_rows_with_key_prefix(admin::ADMIN_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("load admin rows: {err}"))?;
-    for (key, value) in rows {
-        let row = admin::queries::decode_admin_row(&key, &value)?;
+    for row in admin::queries::admin_rows_in_workspace(&store, workspace_id)? {
         if row.user_fact_id == membership.user_authority_fact_id {
             return Ok(true);
         }

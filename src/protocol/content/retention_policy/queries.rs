@@ -9,11 +9,11 @@
 use crate::core::facts::FactId;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
+use rusqlite::{params, Row};
 use std::collections::BTreeSet;
 
 use super::encode::NO_PREVIOUS_POLICY_ID;
 use super::fact::{AuthorUserId, PolicyId, WorkspaceId, SCOPE_KIND_WORKSPACE};
-use super::{RETENTION_POLICY_ROWS, RETENTION_POLICY_ROW_SCHEMA};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionPolicyRow {
@@ -42,26 +42,18 @@ pub struct StatusReport {
     pub message_tombstones: usize,
 }
 
-pub fn decode_policy_row(key: &[u8], value: &[u8]) -> Result<RetentionPolicyRow, String> {
-    let key_fields = RETENTION_POLICY_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = RETENTION_POLICY_ROW_SCHEMA.decode_value(value)?;
-    let ttl_bytes = value_fields[1].as_bytes("ttl_minutes")?;
-    let ttl_minutes = u32::from_be_bytes(
-        ttl_bytes
-            .try_into()
-            .map_err(|_| "ttl_minutes must be 4 bytes".to_string())?,
-    );
-    let supersedes_raw = value_fields[4].as_bytes32("supersedes_policy_id")?;
+pub fn decode_policy_row(row: &Row<'_>) -> rusqlite::Result<RetentionPolicyRow> {
+    let supersedes_raw = row.get(8)?;
     let supersedes_policy_id = (supersedes_raw != NO_PREVIOUS_POLICY_ID).then_some(supersedes_raw);
     Ok(RetentionPolicyRow {
-        workspace_id: key_fields[0].as_bytes32("workspace_id")?,
-        scope_kind: key_fields[1].as_u8("scope_kind")?,
-        scope_id: key_fields[2].as_bytes32("scope_id")?,
-        policy_id: key_fields[3].as_bytes32("policy_id")?,
-        created_at_ms: value_fields[0].as_u64("created_at_ms")?,
-        ttl_minutes,
-        retire_minute: value_fields[2].as_u64("retire_minute")?,
-        author_user_id: value_fields[3].as_bytes32("author_user_id")?,
+        workspace_id: row.get(0)?,
+        scope_kind: row.get::<_, i64>(1)? as u8,
+        scope_id: row.get(2)?,
+        policy_id: row.get(3)?,
+        created_at_ms: row.get::<_, i64>(4)? as u64,
+        ttl_minutes: row.get::<_, i64>(5)? as u32,
+        retire_minute: row.get::<_, i64>(6)? as u64,
+        author_user_id: row.get(7)?,
         supersedes_policy_id,
     })
 }
@@ -99,16 +91,39 @@ pub fn policies_for_scope(
     scope_kind: u8,
     scope_id: FactId,
 ) -> Result<Vec<RetentionPolicyRow>, String> {
-    let mut prefix = Vec::with_capacity(65);
-    prefix.extend_from_slice(&workspace_id);
-    prefix.push(scope_kind);
-    prefix.extend_from_slice(&scope_id);
-    store
-        .table_rows_with_key_prefix(RETENTION_POLICY_ROWS, &prefix, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("read retention policy rows: {err}"))?
-        .into_iter()
-        .map(|(key, value)| decode_policy_row(&key, &value))
-        .collect()
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT workspace_id,
+                    scope_kind,
+                    scope_id,
+                    policy_id,
+                    created_at_ms,
+                    ttl_minutes,
+                    retire_minute,
+                    author_user_id,
+                    supersedes_policy_id
+             FROM retention_policy_rows
+             WHERE workspace_id = ?1
+               AND scope_kind = ?2
+               AND scope_id = ?3
+             ORDER BY policy_id
+             LIMIT ?4",
+        )
+        .map_err(|err| format!("read retention policy rows: {err}"))?;
+    let rows = stmt
+        .query_map(
+            params![
+                workspace_id,
+                i64::from(scope_kind),
+                scope_id,
+                DEFAULT_QUERY_LIMIT as i64
+            ],
+            decode_policy_row,
+        )
+        .map_err(|err| format!("read retention policy rows: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("decode retention policy rows: {err}"))
 }
 
 pub fn count_messages_below_minute(
@@ -191,10 +206,11 @@ mod tests {
         let new = policy(workspace_id, Some(old_id), 5, 95, 100);
 
         store
-            .insert_table_rows(vec![
-                policy_row(old_id, &old).expect("old row"),
-                policy_row(new_id, &new).expect("new row"),
-            ])
+            .write_transaction(|tx| {
+                tx.insert_values_in_tx(&policy_row(old_id, &old))?;
+                tx.insert_values_in_tx(&policy_row(new_id, &new))?;
+                Ok(())
+            })
             .expect("insert rows");
 
         let active = active_for_workspace(&store, workspace_id)

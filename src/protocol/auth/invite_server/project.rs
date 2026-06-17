@@ -464,7 +464,9 @@ fn materialized_output(
                 invite.public_key.to_vec(),
                 invite.public_key,
             ))
-            .row_mutation(RowMutation::PutRow(invite_server_row(fact.id, invite)?)),
+            .row_mutation(RowMutation::InsertValues(invite_server_row(
+                fact.id, invite,
+            ))),
         invite.workspace_id,
         fact,
         context_have,

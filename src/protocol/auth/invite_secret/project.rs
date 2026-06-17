@@ -284,6 +284,6 @@ impl InviteSecretProjector {
                 fact.id,
                 fact.id,
             ))
-            .row_mutation(RowMutation::PutRow(invite_secret_row(&invite_secret)?)))
+            .row_mutation(RowMutation::InsertValues(invite_secret_row(&invite_secret))))
     }
 }

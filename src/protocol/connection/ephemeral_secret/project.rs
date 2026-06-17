@@ -222,15 +222,12 @@ pub mod adapt {
 // offer.
 
 use crate::core::facts::{Fact, FactScope};
-use crate::core::intents::{RowMutation, TableDelete};
+use crate::core::intents::{RowMutation, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 
-use super::{
-    connection_ephemeral_secret_key, connection_ephemeral_secret_row,
-    CONNECTION_EPHEMERAL_SECRET_ROWS,
-};
+use super::{connection_ephemeral_secret_row, CONNECTION_EPHEMERAL_SECRET_TABLE};
 use crate::protocol::connection::close;
 
 /// Projector route metadata for the ephemeral_secret fact.
@@ -287,10 +284,10 @@ impl ConnectionEphemeralSecretProjector {
                 return Err("connection ephemeral close context has empty connection".to_string());
             }
             return Ok(ProjectionOutput::new()
-                .row_mutation(RowMutation::DeleteRow(TableDelete {
-                    table: CONNECTION_EPHEMERAL_SECRET_ROWS,
-                    key: connection_ephemeral_secret_key(&fact.id),
-                }))
+                .row_mutation(RowMutation::DeleteWhere(
+                    CONNECTION_EPHEMERAL_SECRET_TABLE
+                        .delete_by_key(vec![Value::Bytes(fact.id.to_vec())]),
+                ))
                 .purge_self(fact.id));
         }
 
@@ -304,8 +301,8 @@ impl ConnectionEphemeralSecretProjector {
                 fact.id,
                 fact.id,
             ))
-            .row_mutation(RowMutation::PutRow(connection_ephemeral_secret_row(
+            .row_mutation(RowMutation::InsertValues(connection_ephemeral_secret_row(
                 fact.id, &secret,
-            )?)))
+            ))))
     }
 }

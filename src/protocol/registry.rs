@@ -455,9 +455,6 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     auth::removal_frontier::REMOVAL_FRONTIER_ROWS,
     auth::user::USER_ROWS,
     auth::endpoint::LOCAL_ENDPOINT_ROWS,
-    auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
-    auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-    auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
     auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
     auth::admin::ADMIN_ROWS,
     read_models::CONTENT_MESSAGE_ROWS,
@@ -522,16 +519,72 @@ CREATE TABLE IF NOT EXISTS file_slice_rows (
 CREATE INDEX IF NOT EXISTS file_slice_rows_by_fact
     ON file_slice_rows (slice_fact_id);
 
-CREATE TABLE IF NOT EXISTS workspace_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS key_wrap_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS user_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS local_endpoint_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS local_endpoint_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS local_endpoint_signing_public_key_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS local_endpoint_signing_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS auth_endpoint_shared_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS workspace_rows (
+    workspace_id BLOB PRIMARY KEY NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    name BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS key_wrap_rows (
+    workspace_id BLOB NOT NULL,
+    frontier_id BLOB NOT NULL,
+    recipient_key_id BLOB NOT NULL,
+    wrapped_secret_kind INTEGER NOT NULL,
+    range_start INTEGER NOT NULL,
+    range_width INTEGER NOT NULL,
+    bit_depth INTEGER NOT NULL,
+    fact_id_prefix BLOB NOT NULL,
+    key_wrap_id BLOB NOT NULL,
+    signer_public_key BLOB NOT NULL,
+    wrap BLOB NOT NULL,
+    PRIMARY KEY (
+        workspace_id,
+        frontier_id,
+        recipient_key_id,
+        wrapped_secret_kind,
+        range_start,
+        range_width,
+        bit_depth,
+        fact_id_prefix
+    )
+);
+CREATE TABLE IF NOT EXISTS user_rows (
+    workspace_id BLOB NOT NULL,
+    user_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    user_invite_id BLOB NOT NULL,
+    username BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS local_endpoint_rows (
+    local_key BLOB PRIMARY KEY NOT NULL,
+    endpoint_id BLOB NOT NULL,
+    secret BLOB NOT NULL,
+    signing_public_key BLOB NOT NULL,
+    signing_secret BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_endpoint_shared_rows (
+    workspace_id BLOB NOT NULL,
+    endpoint_shared_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    endpoint_id BLOB NOT NULL,
+    signing_public_key BLOB NOT NULL,
+    endpoint_role INTEGER NOT NULL,
+    user_authority_fact_id BLOB NOT NULL,
+    device_name BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, endpoint_shared_id)
+);
 
-CREATE TABLE IF NOT EXISTS admin_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS admin_rows (
+    workspace_id BLOB NOT NULL,
+    admin_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    authority_fact_id BLOB NOT NULL,
+    user_fact_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, admin_id)
+);
 
 CREATE TABLE IF NOT EXISTS content_messages (
     workspace_id BLOB NOT NULL,
@@ -652,24 +705,163 @@ CREATE TABLE IF NOT EXISTS removal_frontier_rows (
     signer_public_key BLOB NOT NULL,
     PRIMARY KEY (workspace_id, frontier_id)
 );
-CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS bootstrap_connection_attempt_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS connection_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS invite_accepted_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS invite_server_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS user_invite_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS device_invite_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS invite_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_compare_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_have_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_need_id_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_negentropy_node_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_local_setting_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS connection_fact_receipt_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (
+    secret_id BLOB PRIMARY KEY NOT NULL,
+    owner_endpoint BLOB NOT NULL,
+    ephemeral_private_key BLOB NOT NULL,
+    ephemeral_public_key BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bootstrap_connection_attempt_rows (
+    invite_accepted_fact_id BLOB PRIMARY KEY NOT NULL,
+    request_id BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connection_request_rows (
+    request_id BLOB PRIMARY KEY NOT NULL,
+    request_sent_id BLOB NOT NULL,
+    initiator_ephemeral_secret_fact_id BLOB NOT NULL,
+    peer_addr BLOB NOT NULL,
+    sealed_request_bytes BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connection_rows (
+    connection_id BLOB PRIMARY KEY NOT NULL,
+    from_endpoint BLOB NOT NULL,
+    to_endpoint BLOB NOT NULL,
+    request_id BLOB NOT NULL,
+    responder_ephemeral_public_key BLOB NOT NULL,
+    handshake_hash BLOB NOT NULL,
+    connection_secret BLOB NOT NULL,
+    responder_addr BLOB NOT NULL,
+    initiator_addr BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS connection_rows_by_request
+    ON connection_rows (request_id);
+CREATE TABLE IF NOT EXISTS invite_accepted_rows (
+    accepted_endpoint_id BLOB NOT NULL,
+    workspace_id BLOB NOT NULL,
+    invite_fact_id BLOB NOT NULL,
+    invite_accepted_fact_id BLOB NOT NULL,
+    bootstrap_hash BLOB NOT NULL,
+    bootstrap_secret BLOB NOT NULL,
+    bootstrap_endpoint_id BLOB NOT NULL,
+    bootstrap_addr BLOB NOT NULL,
+    user_authority_fact_id_or_zero BLOB NOT NULL,
+    endpoint_role INTEGER NOT NULL,
+    identity_scope INTEGER NOT NULL,
+    PRIMARY KEY (accepted_endpoint_id, workspace_id, invite_fact_id)
+);
+CREATE INDEX IF NOT EXISTS invite_accepted_rows_by_bootstrap
+    ON invite_accepted_rows (bootstrap_hash, workspace_id, invite_fact_id);
+
+CREATE TABLE IF NOT EXISTS invite_server_rows (
+    workspace_id BLOB NOT NULL,
+    invite_server_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    authority_fact_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, invite_server_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_invite_rows (
+    workspace_id BLOB NOT NULL,
+    user_invite_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    authority_fact_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, user_invite_id)
+);
+
+CREATE TABLE IF NOT EXISTS device_invite_rows (
+    workspace_id BLOB NOT NULL,
+    device_invite_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    user_authority_fact_id BLOB NOT NULL,
+    user_invite_fact_id BLOB NOT NULL,
+    public_key BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, device_invite_id)
+);
+
+CREATE TABLE IF NOT EXISTS invite_secret_rows (
+    bootstrap_hash BLOB NOT NULL,
+    workspace_id_or_zero BLOB NOT NULL,
+    invite_fact_id_or_zero BLOB NOT NULL,
+    bootstrap_secret BLOB NOT NULL,
+    PRIMARY KEY (bootstrap_hash, workspace_id_or_zero, invite_fact_id_or_zero)
+);
+CREATE TABLE IF NOT EXISTS sync_compare_rows (
+    connection_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL,
+    range_start BLOB NOT NULL,
+    range_end BLOB NOT NULL,
+    count INTEGER NOT NULL,
+    fingerprint BLOB NOT NULL,
+    response_requested INTEGER NOT NULL,
+    PRIMARY KEY (connection_id, fact_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_have_id_rows (
+    connection_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL,
+    timestamp INTEGER NOT NULL,
+    advertised_fact_id BLOB NOT NULL,
+    PRIMARY KEY (connection_id, fact_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_need_id_rows (
+    connection_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL,
+    requested_fact_id BLOB NOT NULL,
+    PRIMARY KEY (connection_id, fact_id)
+);
+CREATE TABLE IF NOT EXISTS sync_shareable_fact_rows (
+    workspace_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, fact_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_negentropy_leaf_rows (
+    workspace_id BLOB NOT NULL,
+    owner_fact_id BLOB NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    contribution_fingerprint BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, owner_fact_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_negentropy_context_have_rows (
+    workspace_id BLOB NOT NULL,
+    owner_fact_id BLOB NOT NULL,
+    context_fact_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, owner_fact_id, context_fact_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_negentropy_node_rows (
+    workspace_id BLOB NOT NULL,
+    level INTEGER NOT NULL,
+    start_timestamp_ms INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    fingerprint BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, level, start_timestamp_ms)
+);
+CREATE TABLE IF NOT EXISTS sync_local_setting_rows (
+    setting_fact_id BLOB PRIMARY KEY NOT NULL,
+    mode INTEGER NOT NULL,
+    effective_at_ms INTEGER NOT NULL,
+    start_ms BLOB NOT NULL,
+    end_ms BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sync_local_setting_rows_by_effective
+    ON sync_local_setting_rows (effective_at_ms, setting_fact_id);
+CREATE TABLE IF NOT EXISTS connection_fact_receipt_rows (
+    received_fact_id BLOB NOT NULL,
+    receipt_fact_id BLOB NOT NULL,
+    has_connection INTEGER NOT NULL,
+    connection_id BLOB NOT NULL,
+    PRIMARY KEY (received_fact_id, receipt_fact_id)
+);
 
 CREATE TABLE IF NOT EXISTS message_deletion_rows (
     workspace_id BLOB NOT NULL,
@@ -693,59 +885,19 @@ CREATE TABLE IF NOT EXISTS file_deletion_rows (
 CREATE INDEX IF NOT EXISTS file_deletion_rows_by_deletion
     ON file_deletion_rows (deletion_id);
 
-CREATE TABLE IF NOT EXISTS retention_policy_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS retention_policy_rows (
+    workspace_id BLOB NOT NULL,
+    scope_kind INTEGER NOT NULL,
+    scope_id BLOB NOT NULL,
+    policy_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    ttl_minutes INTEGER NOT NULL,
+    retire_minute INTEGER NOT NULL,
+    author_user_id BLOB NOT NULL,
+    supersedes_policy_id BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, scope_kind, scope_id, policy_id)
+);
 "#,
-    row_tables: &[
-        auth::key_wrap::KEY_WRAP_ROWS,
-        auth::user::USER_ROWS,
-        auth::endpoint::LOCAL_ENDPOINT_ROWS,
-        auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
-        auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-        auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-        auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
-        auth::admin::ADMIN_ROWS,
-        connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
-        connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROWS,
-        connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROWS,
-        connection::request::CONNECTION_REQUEST_ROWS,
-        connection::connection::CONNECTION_ROWS,
-        auth::invite_accepted::INVITE_ACCEPTED_ROWS,
-        auth::invite_server::INVITE_SERVER_ROWS,
-        auth::user_invite::USER_INVITE_ROWS,
-        auth::device_invite::DEVICE_INVITE_ROWS,
-        auth::invite_secret::INVITE_SECRET_ROWS,
-        sync::compare::SYNC_COMPARE_ROWS,
-        sync::have_id::SYNC_HAVE_ID_ROWS,
-        sync::need_id::SYNC_NEED_ID_ROWS,
-        sync::shared_fact::index::SHAREABLE_FACT_ROWS,
-        sync::shared_fact::index::NEGENTROPY_LEAF_ROWS,
-        sync::shared_fact::index::NEGENTROPY_CONTEXT_HAVE_ROWS,
-        sync::shared_fact::index::NEGENTROPY_NODE_ROWS,
-        sync::local_setting::SYNC_LOCAL_SETTING_ROWS,
-        content::retention_policy::RETENTION_POLICY_ROWS,
-    ],
-    row_schemas: &[
-        auth::workspace::WORKSPACE_ROW_SCHEMA,
-        auth::admin::ADMIN_ROW_SCHEMA,
-        auth::device_invite::DEVICE_INVITE_ROW_SCHEMA,
-        auth::user::USER_ROW_SCHEMA,
-        auth::user_invite::USER_INVITE_ROW_SCHEMA,
-        auth::invite_secret::INVITE_SECRET_ROW_SCHEMA,
-        auth::invite_server::INVITE_SERVER_ROW_SCHEMA,
-        auth::invite_accepted::INVITE_ACCEPTED_ROW_SCHEMA,
-        auth::endpoint_shared::ENDPOINT_SHARED_ROW_SCHEMA,
-        auth::key_wrap::KEY_WRAP_ROW_SCHEMA,
-        connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROW_SCHEMA,
-        connection::fact_receipt::CONNECTION_FACT_RECEIPT_ROW_SCHEMA,
-        connection::request::BOOTSTRAP_CONNECTION_ATTEMPT_ROW_SCHEMA,
-        connection::request::CONNECTION_REQUEST_ROW_SCHEMA,
-        connection::connection::CONNECTION_ROW_SCHEMA,
-        sync::compare::SYNC_COMPARE_ROW_SCHEMA,
-        sync::have_id::SYNC_HAVE_ID_ROW_SCHEMA,
-        sync::need_id::SYNC_NEED_ID_ROW_SCHEMA,
-        sync::local_setting::SYNC_LOCAL_SETTING_ROW_SCHEMA,
-        content::retention_policy::RETENTION_POLICY_ROW_SCHEMA,
-    ],
     replay: ReplayTables {
         protected: &[],
         reset: FACT_REPLAY_TABLES,
@@ -933,9 +1085,6 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     auth::admin::ADMIN_ROWS,
     auth::device_invite::DEVICE_INVITE_ROWS,
     auth::endpoint::LOCAL_ENDPOINT_ROWS,
-    auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
-    auth::endpoint::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-    auth::endpoint::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
     auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
     auth::invite_secret::INVITE_SECRET_ROWS,
     auth::invite_accepted::INVITE_ACCEPTED_ROWS,

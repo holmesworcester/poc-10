@@ -189,49 +189,18 @@ VALUES
 The simplification is not to delete context. The simplification is to keep
 context as plain typed data and keep all matching SQL in `project_fact`.
 
-## `row_schema.rs`
+## Projected Tables
 
-The simplest target is to eliminate `row_schema.rs`.
+Projected fact-family tables use explicit SQL columns. SQLite is the row query
+engine: `queries.rs` can filter, order, join, count, and page directly on named
+columns without decoding row blobs or consulting a generic row-schema layer.
 
-`row_schema.rs` currently exists to encode and decode opaque protocol row
-tables shaped like:
-
-```sql
-CREATE TABLE some_family_rows (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
-```
-
-Keeping that shape forces every useful query to decode blobs or to duplicate
-index tables. Since protocol `queries.rs` should use full SQL, projected tables
-should instead use explicit SQL columns. Then SQLite can filter, order, join,
-count, and page directly on the stored columns.
-
-The preferred migration is:
-
-1. Give every projected fact-family table explicit SQL columns.
-2. Replace `RowTableSchema` constants with lightweight `ProjectedTableSchema`
-   declarations in the fact-family root.
-3. Replace `TableRow { key, value }` mutations with typed insert/delete
-   mutations that name columns.
-4. Move any remaining validation metadata into `schema.rs`.
-5. Delete `row_schema.rs`.
-
-The old opaque mutation shape should disappear:
+Projectors still do not execute SQL. A fact-family root owns the table name,
+column order, logical key columns, and row builder. Projectors emit typed
+mutations through those helpers:
 
 ```rust
-RowMutation::Put(TableRow {
-    table: RECIPIENT_KEY_ROWS,
-    key: recipient_key_key(workspace_id, recipient_key_id)?,
-    value: recipient_key_value(&recipient)?,
-})
-```
-
-Use typed table mutations instead:
-
-```rust
-RowMutation::Insert {
+RowMutation::InsertValues(TableInsert {
     table: RECIPIENT_KEY_ROWS,
     columns: &[
         "workspace_id",
@@ -243,31 +212,30 @@ RowMutation::Insert {
         "signer_public_key",
     ],
     values: vec![
-        SqlValue::Blob(workspace_id.to_vec()),
-        SqlValue::Blob(recipient_key_id.to_vec()),
-        SqlValue::Blob(recipient.endpoint_id.to_vec()),
-        SqlValue::Blob(recipient.recipient_key.to_vec()),
-        SqlValue::Blob(recipient.previous_recipient_key_id.to_vec()),
-        SqlValue::U64(recipient.created_at_ms),
-        SqlValue::Blob(recipient.signer_public_key.to_vec()),
+        Value::Bytes(workspace_id.to_vec()),
+        Value::Bytes(recipient_key_id.to_vec()),
+        Value::Bytes(recipient.endpoint_id.to_vec()),
+        Value::Bytes(recipient.recipient_key.to_vec()),
+        Value::Bytes(recipient.previous_recipient_key_id.to_vec()),
+        Value::U64(recipient.created_at_ms),
+        Value::Bytes(recipient.signer_public_key.to_vec()),
     ],
-}
+})
 ```
 
 `project_fact` commits typed mutations directly:
 
 ```sql
-INSERT OR REPLACE INTO recipient_key_rows
+INSERT OR IGNORE INTO recipient_key_rows
     (workspace_id, recipient_key_id, endpoint_id, recipient_key,
      previous_recipient_key_id, created_at_ms, signer_public_key)
 VALUES
     (?1, ?2, ?3, ?4, ?5, ?6, ?7);
 ```
 
-Typed tables are probably simpler if queries use full SQL, because query SQL can
-filter, order, join, and count on named columns without decoding row blobs.
-That makes `row_schema.rs` a migration aid to remove, not a permanent
-architecture component.
+An ignored insert is accepted only when the existing row has exactly the same
+column values. Replacement state uses an explicit `DeleteWhere` followed by
+`InsertValues` in projector output order.
 
 ## `db.rs`
 
@@ -538,29 +506,30 @@ queues, so direct SQL belongs with the queue policy.
 Enqueue frame and target index:
 
 ```sql
-INSERT OR IGNORE INTO network_outgoing (row_key, row_value)
-VALUES (?1, ?2);
+INSERT OR IGNORE INTO network_outgoing
+    (queue_key, target_addr, frame_bytes)
+VALUES
+    (?1, ?2, ?3);
 
-INSERT OR IGNORE INTO network_outgoing_targets (row_key, row_value)
-VALUES (?1, ?2);
+INSERT OR IGNORE INTO network_outgoing_targets (target_addr)
+VALUES (?1);
 ```
 
 Claim a bounded batch for one target:
 
 ```sql
-SELECT row_key, row_value
+SELECT queue_key, frame_bytes
 FROM network_outgoing
-WHERE row_key >= ?1
-  AND row_key < ?2
-ORDER BY row_key
-LIMIT ?3;
+WHERE target_addr = ?1
+ORDER BY queue_key
+LIMIT ?2;
 ```
 
 Delete sent rows:
 
 ```sql
 DELETE FROM network_outgoing
-WHERE row_key = ?1;
+WHERE queue_key = ?1;
 ```
 
 Prune a target when no queued rows remain:
@@ -568,12 +537,11 @@ Prune a target when no queued rows remain:
 ```sql
 SELECT 1
 FROM network_outgoing
-WHERE row_key >= ?1
-  AND row_key < ?2
+WHERE target_addr = ?1
 LIMIT 1;
 
 DELETE FROM network_outgoing_targets
-WHERE row_key = ?3;
+WHERE target_addr = ?1;
 ```
 
 ## `replay.rs`

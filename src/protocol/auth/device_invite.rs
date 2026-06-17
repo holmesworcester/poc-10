@@ -9,11 +9,9 @@ pub mod author;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod queries;
 
 use crate::core::facts::FactId;
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_DEVICE_INVITE: u8 = encode::TYPE_DEVICE_INVITE;
 
@@ -22,39 +20,30 @@ pub const TYPE_DEVICE_INVITE: u8 = encode::TYPE_DEVICE_INVITE;
 /// projected.
 pub const DEVICE_INVITE_ROWS: TableName = TableName::new("device_invite_rows");
 
-const DEVICE_INVITE_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("workspace_id"),
-    RowField::bytes32("device_invite_id"),
+pub const DEVICE_INVITE_COLUMNS: &[&str] = &[
+    "workspace_id",
+    "device_invite_id",
+    "created_at_ms",
+    "user_authority_fact_id",
+    "user_invite_fact_id",
+    "public_key",
 ];
-const DEVICE_INVITE_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u64be("created_at_ms"),
-    RowField::bytes32("user_authority_fact_id"),
-    RowField::bytes32("user_invite_fact_id"),
-    RowField::bytes32("public_key"),
-];
+pub const DEVICE_INVITE_KEY_COLUMNS: &[&str] = &["workspace_id", "device_invite_id"];
+pub const DEVICE_INVITE_TABLE: TypedTableSchema = TypedTableSchema {
+    table: DEVICE_INVITE_ROWS,
+    columns: DEVICE_INVITE_COLUMNS,
+    key_columns: DEVICE_INVITE_KEY_COLUMNS,
+};
 
-pub const DEVICE_INVITE_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    DEVICE_INVITE_ROWS,
-    DEVICE_INVITE_ROW_KEY_FIELDS,
-    DEVICE_INVITE_ROW_VALUE_FIELDS,
-);
-
-pub fn device_invite_row(
-    device_invite_id: FactId,
-    fact: &fact::DeviceInviteFact,
-) -> Result<TableRow, String> {
-    DEVICE_INVITE_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.workspace_id.to_vec()),
-            RowValue::Bytes(device_invite_id.to_vec()),
-        ],
-        &[
-            RowValue::U64(fact.created_at_ms),
-            RowValue::Bytes(fact.user_authority_fact_id.to_vec()),
-            RowValue::Bytes(fact.user_invite_fact_id.unwrap_or([0; 32]).to_vec()),
-            RowValue::Bytes(fact.public_key.to_vec()),
-        ],
-    )
+pub fn device_invite_row(device_invite_id: FactId, fact: &fact::DeviceInviteFact) -> TableInsert {
+    DEVICE_INVITE_TABLE.insert(vec![
+        Value::Bytes(fact.workspace_id.to_vec()),
+        Value::Bytes(device_invite_id.to_vec()),
+        Value::U64(fact.created_at_ms),
+        Value::Bytes(fact.user_authority_fact_id.to_vec()),
+        Value::Bytes(fact.user_invite_fact_id.unwrap_or([0; 32]).to_vec()),
+        Value::Bytes(fact.public_key.to_vec()),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::DeviceInviteFact, String> {

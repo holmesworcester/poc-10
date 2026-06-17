@@ -12,7 +12,7 @@ pub mod fact;
 pub mod project;
 pub mod queries;
 
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 pub const TYPE_LOCAL_ENDPOINT: u8 = encode::TYPE_LOCAL_ENDPOINT;
 
@@ -25,43 +25,35 @@ pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::EndpointFact, String> {
 // ---------------------------------------------------------------------------
 // Local endpoint projection rows.
 //
-// State is module-owned and keyed under the stable `b"local"` key. The
-// separation across four tables keeps endpoint id, connection-frame secret,
-// signing public key, and signing secret independently addressable by command
-// capabilities and tests. The rows carry private material, so this row surface
-// stays in the family module rather than the public `queries.rs` read model.
+// State is module-owned and keyed under the stable `b"local"` key. The row
+// carries private material, so private reads stay behind `author::local_endpoint`
+// while `queries.rs` exposes only public endpoint identity.
 // ---------------------------------------------------------------------------
 
 pub const LOCAL_ENDPOINT_ROWS: TableName = TableName::new("local_endpoint_rows");
-pub const LOCAL_ENDPOINT_SECRET_ROWS: TableName = TableName::new("local_endpoint_secret_rows");
-pub const LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS: TableName =
-    TableName::new("local_endpoint_signing_public_key_rows");
-pub const LOCAL_ENDPOINT_SIGNING_SECRET_ROWS: TableName =
-    TableName::new("local_endpoint_signing_secret_rows");
 
 pub const LOCAL_KEY: &[u8] = b"local";
 
-pub fn endpoint_rows(fact: &fact::EndpointFact) -> Vec<TableRow> {
-    vec![
-        TableRow {
-            table: LOCAL_ENDPOINT_ROWS,
-            key: LOCAL_KEY.to_vec(),
-            value: fact.endpoint.to_vec(),
-        },
-        TableRow {
-            table: LOCAL_ENDPOINT_SECRET_ROWS,
-            key: LOCAL_KEY.to_vec(),
-            value: fact.secret.to_vec(),
-        },
-        TableRow {
-            table: LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-            key: LOCAL_KEY.to_vec(),
-            value: fact.signing_public_key.to_vec(),
-        },
-        TableRow {
-            table: LOCAL_ENDPOINT_SIGNING_SECRET_ROWS,
-            key: LOCAL_KEY.to_vec(),
-            value: fact.signing_secret.to_vec(),
-        },
-    ]
+pub const LOCAL_ENDPOINT_COLUMNS: &[&str] = &[
+    "local_key",
+    "endpoint_id",
+    "secret",
+    "signing_public_key",
+    "signing_secret",
+];
+pub const LOCAL_ENDPOINT_KEY_COLUMNS: &[&str] = &["local_key"];
+pub const LOCAL_ENDPOINT_TABLE: TypedTableSchema = TypedTableSchema {
+    table: LOCAL_ENDPOINT_ROWS,
+    columns: LOCAL_ENDPOINT_COLUMNS,
+    key_columns: LOCAL_ENDPOINT_KEY_COLUMNS,
+};
+
+pub fn local_endpoint_insert(fact: &fact::EndpointFact) -> TableInsert {
+    LOCAL_ENDPOINT_TABLE.insert(vec![
+        Value::Bytes(LOCAL_KEY.to_vec()),
+        Value::Bytes(fact.endpoint.to_vec()),
+        Value::Bytes(fact.secret.to_vec()),
+        Value::Bytes(fact.signing_public_key.to_vec()),
+        Value::Bytes(fact.signing_secret.to_vec()),
+    ])
 }

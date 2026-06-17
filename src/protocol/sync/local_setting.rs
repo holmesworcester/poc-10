@@ -11,8 +11,8 @@ use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
     verify_fact_id, FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{Store, TableName, TableRow, DEFAULT_QUERY_LIMIT};
+use crate::core::store::{Store, TableInsert, TableName, TypedTableSchema, Value};
+use rusqlite::{OptionalExtension, Row};
 
 use super::compare::fact::TimestampRange;
 
@@ -63,19 +63,19 @@ pub const PROJECTOR_INFO: FactProjectorInfo =
 /// row with `(effective_at_ms, setting_fact_id)` ordering.
 pub const SYNC_LOCAL_SETTING_ROWS: TableName = TableName::new("sync_local_setting_rows");
 
-const SYNC_LOCAL_SETTING_ROW_KEY_FIELDS: &[RowField] = &[RowField::bytes32("setting_fact_id")];
-const SYNC_LOCAL_SETTING_ROW_VALUE_FIELDS: &[RowField] = &[
-    RowField::u8("mode"),
-    RowField::u64be("effective_at_ms"),
-    RowField::u64be("start_ms"),
-    RowField::u64be("end_ms"),
+pub const SYNC_LOCAL_SETTING_COLUMNS: &[&str] = &[
+    "setting_fact_id",
+    "mode",
+    "effective_at_ms",
+    "start_ms",
+    "end_ms",
 ];
-
-pub const SYNC_LOCAL_SETTING_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    SYNC_LOCAL_SETTING_ROWS,
-    SYNC_LOCAL_SETTING_ROW_KEY_FIELDS,
-    SYNC_LOCAL_SETTING_ROW_VALUE_FIELDS,
-);
+pub const SYNC_LOCAL_SETTING_KEY_COLUMNS: &[&str] = &["setting_fact_id"];
+pub const SYNC_LOCAL_SETTING_TABLE: TypedTableSchema = TypedTableSchema {
+    table: SYNC_LOCAL_SETTING_ROWS,
+    columns: SYNC_LOCAL_SETTING_COLUMNS,
+    key_columns: SYNC_LOCAL_SETTING_KEY_COLUMNS,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncLocalSettingProjector;
@@ -98,7 +98,7 @@ impl Projector for SyncLocalSettingProjector {
             return Err("sync local setting fact must have local scope".to_string());
         }
         Ok(ProjectionOutput::new()
-            .row_mutation(RowMutation::PutRow(setting_row(fact.id, &setting)?)))
+            .row_mutation(RowMutation::InsertValues(setting_row(fact.id, &setting))))
     }
 }
 
@@ -176,20 +176,18 @@ pub fn setting_fact(effective_at_ms: u64, mode: SyncSettingMode) -> Result<Fact,
 }
 
 pub fn current_setting(store: &Store) -> Result<Option<SyncSettingRow>, String> {
-    let mut current = None;
-    for (key, value) in store
-        .table_rows_page(SYNC_LOCAL_SETTING_ROWS, DEFAULT_QUERY_LIMIT)
-        .map_err(|err| format!("read sync local setting rows: {err}"))?
-    {
-        let row = decode_setting_row(&key, &value)?;
-        if current
-            .as_ref()
-            .is_none_or(|active: &SyncSettingRow| setting_order(row) > setting_order(*active))
-        {
-            current = Some(row);
-        }
-    }
-    Ok(current)
+    store
+        .conn()
+        .query_row(
+            "SELECT setting_fact_id, mode, effective_at_ms, start_ms, end_ms
+             FROM sync_local_setting_rows
+             ORDER BY effective_at_ms DESC, setting_fact_id DESC
+             LIMIT 1",
+            [],
+            decode_setting_row,
+        )
+        .optional()
+        .map_err(|err| format!("read sync local setting row: {err}"))
 }
 
 pub fn active_range(store: &Store) -> Result<TimestampRange, String> {
@@ -291,43 +289,43 @@ fn decode_fact(bytes: &[u8]) -> Result<SyncLocalSettingFact, String> {
     })
 }
 
-fn setting_row(
-    setting_fact_id: FactId,
-    setting: &SyncLocalSettingFact,
-) -> Result<TableRow, String> {
+fn setting_row(setting_fact_id: FactId, setting: &SyncLocalSettingFact) -> TableInsert {
     let range = mode_range(setting.mode);
-    SYNC_LOCAL_SETTING_ROW_SCHEMA.row(
-        &[RowValue::Bytes(setting_fact_id.to_vec())],
-        &[
-            RowValue::U8(mode_byte(setting.mode)),
-            RowValue::U64(setting.effective_at_ms),
-            RowValue::U64(range.start),
-            RowValue::U64(range.end),
-        ],
-    )
+    SYNC_LOCAL_SETTING_TABLE.insert(vec![
+        Value::Bytes(setting_fact_id.to_vec()),
+        Value::U64(u64::from(mode_byte(setting.mode))),
+        Value::U64(setting.effective_at_ms),
+        Value::Bytes(range.start.to_be_bytes().to_vec()),
+        Value::Bytes(range.end.to_be_bytes().to_vec()),
+    ])
 }
 
-fn decode_setting_row(key: &[u8], value: &[u8]) -> Result<SyncSettingRow, String> {
-    let key_fields = SYNC_LOCAL_SETTING_ROW_SCHEMA.decode_key(key)?;
-    let value_fields = SYNC_LOCAL_SETTING_ROW_SCHEMA.decode_value(value)?;
-    let mode = match value_fields[0].as_u8("mode")? {
+fn decode_setting_row(row: &Row<'_>) -> rusqlite::Result<SyncSettingRow> {
+    let mode = match row.get::<_, i64>(1)? as u8 {
         MODE_ALL => SyncSettingMode::All,
         MODE_RANGE => SyncSettingMode::Range(TimestampRange {
-            start: value_fields[2].as_u64("start_ms")?,
-            end: value_fields[3].as_u64("end_ms")?,
+            start: u64_be_column(row.get::<_, Vec<u8>>(3)?, "start_ms")?,
+            end: u64_be_column(row.get::<_, Vec<u8>>(4)?, "end_ms")?,
         }),
-        _ => return Err("sync local setting row mode is invalid".to_string()),
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "sync local setting row mode is invalid".to_string(),
+            ))
+        }
     };
-    validate_mode(mode)?;
+    validate_mode(mode).map_err(rusqlite::Error::InvalidParameterName)?;
     Ok(SyncSettingRow {
-        setting_fact_id: key_fields[0].as_bytes32("setting_fact_id")?,
-        effective_at_ms: value_fields[1].as_u64("effective_at_ms")?,
+        setting_fact_id: row.get(0)?,
+        effective_at_ms: row.get::<_, i64>(2)? as u64,
         mode,
     })
 }
 
-fn setting_order(row: SyncSettingRow) -> (u64, FactId) {
-    (row.effective_at_ms, row.setting_fact_id)
+fn u64_be_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<u64> {
+    let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
+        rusqlite::Error::InvalidParameterName(format!("sync setting {name} column is malformed"))
+    })?;
+    Ok(u64::from_be_bytes(bytes))
 }
 
 fn validate_mode(mode: SyncSettingMode) -> Result<(), String> {
@@ -401,8 +399,10 @@ mod tests {
             .row_mutations
             .into_iter()
             .for_each(|mutation| {
-                if let RowMutation::PutRow(row) = mutation {
-                    store.insert_table_rows(vec![row]).expect("insert older");
+                if let RowMutation::InsertValues(row) = mutation {
+                    store
+                        .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+                        .expect("insert older");
                 }
             });
         SyncLocalSettingProjector::new()
@@ -412,8 +412,10 @@ mod tests {
             .row_mutations
             .into_iter()
             .for_each(|mutation| {
-                if let RowMutation::PutRow(row) = mutation {
-                    store.insert_table_rows(vec![row]).expect("insert newer");
+                if let RowMutation::InsertValues(row) = mutation {
+                    store
+                        .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+                        .expect("insert newer");
                 }
             });
 

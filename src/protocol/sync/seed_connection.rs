@@ -197,20 +197,21 @@ mod tests {
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("store");
         let connection_id = [8; 32];
+        let row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [7; 32],
+                [8; 32],
+                [9; 32],
+            ),
+        )
+        .expect("connection row");
         store
-            .insert_table_rows(vec![connection::connection::connection_row(
-                connection::connection::ConnectionRowFields::without_addresses(
-                    connection_id,
-                    [1; 32],
-                    [2; 32],
-                    [3; 32],
-                    [7; 32],
-                    [8; 32],
-                    [9; 32],
-                ),
-            )
-            .expect("connection row")])
-            .expect("insert rows");
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("insert row");
         let intent = seed_connection_sync_intent(SeedConnectionSync { connection_id });
         let handler = SeedConnectionSyncHandler::new();
 
@@ -255,26 +256,29 @@ mod tests {
             42,
             vec![1, 2, 3],
         );
+        let connection_row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [7; 32],
+                [8; 32],
+                [9; 32],
+            ),
+        )
+        .expect("connection row");
+        let shareable_row = shared_fact::shareable_fact_row(shared_fact::ShareableFactRow {
+            workspace_id,
+            fact_id: fact.id,
+            timestamp_ms: fact.timestamp,
+        });
         store
-            .insert_table_rows(vec![
-                connection::connection::connection_row(
-                    connection::connection::ConnectionRowFields::without_addresses(
-                        connection_id,
-                        [1; 32],
-                        [2; 32],
-                        [3; 32],
-                        [7; 32],
-                        [8; 32],
-                        [9; 32],
-                    ),
-                )
-                .expect("connection row"),
-                shared_fact::shareable_fact_row(shared_fact::ShareableFactRow {
-                    workspace_id,
-                    fact_id: fact.id,
-                    timestamp_ms: fact.timestamp,
-                }),
-            ])
+            .write_transaction(|tx| {
+                tx.insert_values_in_tx(&connection_row)?;
+                tx.insert_values_in_tx(&shareable_row)?;
+                Ok(())
+            })
             .expect("insert rows");
 
         let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
@@ -295,20 +299,21 @@ mod tests {
                 .expect("store");
         let connection_id = [8; 32];
         let range = sync::compare::fact::TimestampRange { start: 10, end: 20 };
+        let row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                [7; 32],
+                [8; 32],
+                [9; 32],
+            ),
+        )
+        .expect("connection row");
         store
-            .insert_table_rows(vec![connection::connection::connection_row(
-                connection::connection::ConnectionRowFields::without_addresses(
-                    connection_id,
-                    [1; 32],
-                    [2; 32],
-                    [3; 32],
-                    [7; 32],
-                    [8; 32],
-                    [9; 32],
-                ),
-            )
-            .expect("connection row")])
-            .expect("insert rows");
+            .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+            .expect("insert row");
         project_sync_range_setting(&store, 500, range);
 
         let output = advertise_connection_shareable_facts(&store, connection_id).expect("seed");
@@ -341,44 +346,48 @@ mod tests {
                 Ok(())
             })
             .expect("persist facts");
-        let mut rows = endpoint_rows::endpoint_rows(&EndpointFact {
+        let row = endpoint_rows::local_endpoint_insert(&EndpointFact {
             endpoint: local_endpoint,
             secret: local_secret,
             signing_public_key: crypto::ed25519_public_key(&[13; 32]),
             signing_secret: [13; 32],
         });
-        rows.push(
-            connection::connection::connection_row(
-                connection::connection::ConnectionRowFields::without_addresses(
-                    connection_id,
-                    local_endpoint,
-                    remote_endpoint,
-                    [3; 32],
-                    [7; 32],
-                    [8; 32],
-                    [9; 32],
-                ),
-            )
-            .expect("connection row"),
+        store
+            .insert_table_values(vec![row])
+            .expect("seed endpoint row");
+        let connection_row = connection::connection::connection_row(
+            connection::connection::ConnectionRowFields::without_addresses(
+                connection_id,
+                local_endpoint,
+                remote_endpoint,
+                [3; 32],
+                [7; 32],
+                [8; 32],
+                [9; 32],
+            ),
+        )
+        .expect("connection row");
+        let endpoint_shared_row = endpoint_shared_rows::endpoint_shared_row(
+            [5; 32],
+            &EndpointSharedFact {
+                created_at_ms: 1,
+                workspace_id,
+                user_authority_fact_id: [6; 32],
+                endpoint_id: remote_endpoint,
+                signing_public_key: [7; 32],
+                endpoint_role: EndpointRole::Device,
+                device_name: EndpointDeviceName::new("remote").expect("device name"),
+                signer_id: [6; 32],
+                signer_public_key: crypto::ed25519_public_key(&[17; 32]),
+            },
         );
-        rows.push(
-            endpoint_shared_rows::endpoint_shared_row(
-                [5; 32],
-                &EndpointSharedFact {
-                    created_at_ms: 1,
-                    workspace_id,
-                    user_authority_fact_id: [6; 32],
-                    endpoint_id: remote_endpoint,
-                    signing_public_key: [7; 32],
-                    endpoint_role: EndpointRole::Device,
-                    device_name: EndpointDeviceName::new("remote").expect("device name"),
-                    signer_id: [6; 32],
-                    signer_public_key: crypto::ed25519_public_key(&[17; 32]),
-                },
-            )
-            .expect("endpoint shared row"),
-        );
-        store.insert_table_rows(rows).expect("seed rows");
+        store
+            .write_transaction(|tx| {
+                tx.insert_values_in_tx(&connection_row)?;
+                tx.insert_values_in_tx(&endpoint_shared_row)?;
+                Ok(())
+            })
+            .expect("seed typed rows");
         record_share(&store, workspace_id, &context_fact, Vec::new());
         record_share(&store, workspace_id, &owner_fact, vec![context_fact.id]);
         project_sync_range_setting(
@@ -451,10 +460,17 @@ mod tests {
             .row_mutations
             .into_iter()
             .filter_map(|mutation| match mutation {
-                RowMutation::PutRow(row) => Some(row),
+                RowMutation::InsertValues(row) => Some(row),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        store.insert_table_rows(rows).expect("insert setting rows");
+        store
+            .write_transaction(|tx| {
+                for row in &rows {
+                    tx.insert_values_in_tx(row)?;
+                }
+                Ok(())
+            })
+            .expect("insert setting rows");
     }
 }

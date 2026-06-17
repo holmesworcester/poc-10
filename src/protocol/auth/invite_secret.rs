@@ -11,10 +11,8 @@ pub mod cli;
 pub mod encode;
 pub mod fact;
 pub mod project;
-pub mod queries;
 
-use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{TableName, TableRow};
+use crate::core::store::{TableInsert, TableName, TypedTableSchema, Value};
 
 /// Invite-secret projection rows, keyed by
 /// `bootstrap_hash || workspace_id_or_zero || invite_fact_id_or_zero`. A
@@ -23,28 +21,30 @@ use crate::core::store::{TableName, TableRow};
 /// workspace/invite acceptances without row conflicts.
 pub const INVITE_SECRET_ROWS: TableName = TableName::new("invite_secret_rows");
 
-const INVITE_SECRET_ROW_KEY_FIELDS: &[RowField] = &[
-    RowField::bytes32("bootstrap_hash"),
-    RowField::bytes32("workspace_id_or_zero"),
-    RowField::bytes32("invite_fact_id_or_zero"),
+pub const INVITE_SECRET_COLUMNS: &[&str] = &[
+    "bootstrap_hash",
+    "workspace_id_or_zero",
+    "invite_fact_id_or_zero",
+    "bootstrap_secret",
 ];
-const INVITE_SECRET_ROW_VALUE_FIELDS: &[RowField] = &[RowField::bytes32("bootstrap_secret")];
+pub const INVITE_SECRET_KEY_COLUMNS: &[&str] = &[
+    "bootstrap_hash",
+    "workspace_id_or_zero",
+    "invite_fact_id_or_zero",
+];
+pub const INVITE_SECRET_TABLE: TypedTableSchema = TypedTableSchema {
+    table: INVITE_SECRET_ROWS,
+    columns: INVITE_SECRET_COLUMNS,
+    key_columns: INVITE_SECRET_KEY_COLUMNS,
+};
 
-pub const INVITE_SECRET_ROW_SCHEMA: RowTableSchema = RowTableSchema::new(
-    INVITE_SECRET_ROWS,
-    INVITE_SECRET_ROW_KEY_FIELDS,
-    INVITE_SECRET_ROW_VALUE_FIELDS,
-);
-
-pub fn invite_secret_row(fact: &fact::InviteSecretFact) -> Result<TableRow, String> {
-    INVITE_SECRET_ROW_SCHEMA.row(
-        &[
-            RowValue::Bytes(fact.bootstrap_hash.to_vec()),
-            RowValue::Bytes(fact.workspace_id.unwrap_or([0; 32]).to_vec()),
-            RowValue::Bytes(fact.invite_fact_id.unwrap_or([0; 32]).to_vec()),
-        ],
-        &[RowValue::Bytes(fact.bootstrap_secret.to_vec())],
-    )
+pub fn invite_secret_row(fact: &fact::InviteSecretFact) -> TableInsert {
+    INVITE_SECRET_TABLE.insert(vec![
+        Value::Bytes(fact.bootstrap_hash.to_vec()),
+        Value::Bytes(fact.workspace_id.unwrap_or([0; 32]).to_vec()),
+        Value::Bytes(fact.invite_fact_id.unwrap_or([0; 32]).to_vec()),
+        Value::Bytes(fact.bootstrap_secret.to_vec()),
+    ])
 }
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::InviteSecretFact, String> {

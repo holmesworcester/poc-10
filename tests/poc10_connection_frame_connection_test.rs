@@ -46,7 +46,7 @@ fn connection_fact() -> (Fact, ConnectionFact) {
 
 fn seed_connection_row(store: &Store, connection_id: [u8; 32], connection: &ConnectionFact) {
     store
-        .insert_table_rows(vec![connection_rows::connection_row(
+        .insert_table_values(vec![connection_rows::connection_row(
             connection_rows::ConnectionRowFields {
                 connection_id,
                 from_endpoint: connection.from_endpoint,
@@ -237,7 +237,9 @@ fn store_with_local_endpoint() -> Store {
     ])
     .expect("store");
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
+        .insert_table_values(vec![
+            endpoint_rows::local_endpoint_insert(&local_endpoint()),
+        ])
         .expect("seed local endpoint");
     store
 }

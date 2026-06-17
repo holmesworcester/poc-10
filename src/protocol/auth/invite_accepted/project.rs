@@ -316,7 +316,7 @@ impl InviteAcceptedProjector {
                 invite_secret_id,
                 invite_secret_id,
             ))
-            .row_mutation(RowMutation::PutRow(invite_accepted_row(
+            .row_mutation(RowMutation::InsertValues(invite_accepted_row(
                 fact.id, &accepted,
             )?));
         if accepted.identity_scope {

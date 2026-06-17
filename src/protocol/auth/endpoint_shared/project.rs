@@ -381,7 +381,9 @@ impl EndpointSharedProjector {
                     fact.id,
                     fact.id,
                 ))
-                .row_mutation(RowMutation::PutRow(endpoint_shared_row(fact.id, &shared)?)),
+                .row_mutation(RowMutation::InsertValues(endpoint_shared_row(
+                    fact.id, &shared,
+                ))),
             shared.workspace_id,
             fact,
             context_have,

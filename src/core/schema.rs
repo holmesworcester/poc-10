@@ -177,8 +177,6 @@ CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);
 
 "#,
-    row_tables: &[],
-    row_schemas: &[],
     replay: ReplayTables {
         protected: CORE_REPLAY_PROTECTED_TABLES,
         reset: CORE_REPLAY_RESET_TABLES,

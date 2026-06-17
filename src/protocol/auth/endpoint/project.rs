@@ -205,8 +205,8 @@ pub mod adapt {
 //      public keys from the stored private keys.
 //   2. CONTEXT. No remote context is accepted; this is local identity secret
 //      material.
-//   3. MATERIALIZE. Write the four local endpoint rows for public/secret and
-//      signing public/secret material, and publish local endpoint context keyed
+//   3. MATERIALIZE. Write the local endpoint row for public/secret and signing
+//      public/secret material, and publish local endpoint context keyed
 //      by the endpoint id for bootstrap receive projection.
 
 use crate::core::facts::{Fact, FactScope};
@@ -215,7 +215,7 @@ use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 
-use super::endpoint_rows;
+use super::local_endpoint_insert;
 
 /// Projector route metadata for the endpoint fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -292,9 +292,7 @@ impl EndpointProjector {
             endpoint.endpoint,
         ));
         output = output.offer(daemon_endpoint_offer(fact.id));
-        for row in endpoint_rows(&endpoint) {
-            output = output.row_mutation(RowMutation::PutRow(row));
-        }
+        output = output.row_mutation(RowMutation::InsertValues(local_endpoint_insert(&endpoint)));
         Ok(output)
     }
 }

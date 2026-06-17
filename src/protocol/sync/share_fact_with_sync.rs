@@ -278,64 +278,68 @@ mod tests {
             42,
             vec![99],
         );
-        let mut rows = endpoint_rows::endpoint_rows(&EndpointFact {
+        let row = endpoint_rows::local_endpoint_insert(&EndpointFact {
             endpoint: local_endpoint,
             secret: local_secret,
             signing_public_key: crypto::ed25519_public_key(&[13; 32]),
             signing_secret: [13; 32],
         });
-        rows.push(
-            endpoint_shared_rows::endpoint_shared_row(
-                [5; 32],
-                &EndpointSharedFact {
-                    created_at_ms: 1,
-                    workspace_id,
-                    user_authority_fact_id: [6; 32],
-                    endpoint_id: remote_endpoint,
-                    signing_public_key: [7; 32],
-                    endpoint_role: EndpointRole::Device,
-                    device_name: EndpointDeviceName::new("remote").expect("device name"),
-                    signer_id: [6; 32],
-                    signer_public_key: crypto::ed25519_public_key(&[17; 32]),
-                },
-            )
-            .expect("endpoint shared row"),
+        store
+            .insert_table_values(vec![row])
+            .expect("seed endpoint row");
+        let endpoint_shared_row = endpoint_shared_rows::endpoint_shared_row(
+            [5; 32],
+            &EndpointSharedFact {
+                created_at_ms: 1,
+                workspace_id,
+                user_authority_fact_id: [6; 32],
+                endpoint_id: remote_endpoint,
+                signing_public_key: [7; 32],
+                endpoint_role: EndpointRole::Device,
+                device_name: EndpointDeviceName::new("remote").expect("device name"),
+                signer_id: [6; 32],
+                signer_public_key: crypto::ed25519_public_key(&[17; 32]),
+            },
         );
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&endpoint_shared_row).map(|_| ()))
+            .expect("seed endpoint shared row");
         for connection_id in [origin_connection_id, other_connection_id] {
-            rows.push(
-                connection::connection::connection_row(
-                    connection::connection::ConnectionRowFields::without_addresses(
-                        connection_id,
-                        local_endpoint,
-                        remote_endpoint,
-                        [8; 32],
-                        [12; 32],
-                        [13; 32],
-                        [14; 32],
-                    ),
-                )
-                .expect("connection row"),
-            );
-        }
-        rows.push(
-            connection::fact_receipt::connection_fact_receipt_row(
-                [15; 32],
-                &connection::fact_receipt::fact::ConnectionFactReceipt {
-                    received_fact_id: owner.id,
-                    origin_addr: connection::fact_receipt::fact::OriginAddr::new(b"127.0.0.1:1")
-                        .expect("origin addr"),
-                    local_endpoint_id: local_endpoint,
-                    sender_endpoint_id: remote_endpoint,
-                    receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
-                    connection_id: Some(origin_connection_id),
-                    request_id: Some([8; 32]),
-                    frame_hash: [16; 32],
-                    received_at_local_ms: 43,
-                },
+            let row = connection::connection::connection_row(
+                connection::connection::ConnectionRowFields::without_addresses(
+                    connection_id,
+                    local_endpoint,
+                    remote_endpoint,
+                    [8; 32],
+                    [12; 32],
+                    [13; 32],
+                    [14; 32],
+                ),
             )
-            .expect("connection fact receipt row"),
-        );
-        store.insert_table_rows(rows).expect("seed rows");
+            .expect("connection row");
+            store
+                .write_transaction(|tx| tx.insert_values_in_tx(&row).map(|_| ()))
+                .expect("seed connection row");
+        }
+        let receipt_row = connection::fact_receipt::connection_fact_receipt_row(
+            [15; 32],
+            &connection::fact_receipt::fact::ConnectionFactReceipt {
+                received_fact_id: owner.id,
+                origin_addr: connection::fact_receipt::fact::OriginAddr::new(b"127.0.0.1:1")
+                    .expect("origin addr"),
+                local_endpoint_id: local_endpoint,
+                sender_endpoint_id: remote_endpoint,
+                receive_path: connection::fact_receipt::fact::RECEIVE_PATH_CONNECTION_FRAME,
+                connection_id: Some(origin_connection_id),
+                request_id: Some([8; 32]),
+                frame_hash: [16; 32],
+                received_at_local_ms: 43,
+            },
+        )
+        .expect("connection fact receipt row");
+        store
+            .write_transaction(|tx| tx.insert_values_in_tx(&receipt_row).map(|_| ()))
+            .expect("seed receipt row");
 
         let intent = share_fact_with_sync_intent_for_fact(
             workspace_id,

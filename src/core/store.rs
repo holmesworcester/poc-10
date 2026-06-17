@@ -1,25 +1,17 @@
 //! A small SQLite-backed row store.
 //!
 //! Store is the lowest runtime layer above SQLite. It knows how to apply SQL
-//! schema batches, run transactions, read or write keyed byte rows, and persist
+//! schema batches, run transactions, apply typed row mutations, and persist
 //! protocol-neutral fact bytes plus local admission metadata. It does not know
 //! protocol-specific meanings: fact families, payload tags, validation rules,
 //! network targets, and sync work are all layered on top of these primitives.
-//!
-//! There are two row shapes in the project. Typed tables declare their own SQL
-//! columns and are usually queried by the module that owns them, with store
-//! supplying small table/column helpers for mechanical reads and deletes.
-//! Opaque row tables use the generic `(row_key, row_value)` shape and flow
-//! through the helpers in this file. `SchemaSource::row_tables` is the allowlist
-//! that tells store which opaque tables are safe for those helpers; it is not a
-//! semantic registry.
 //!
 //! The critical path is short:
 //! 1. Open a store with the SQL schema batches declared by core IO and the
 //!    selected protocol's module scopes.
 //! 2. Use `write_transaction` to group rows that must become visible together.
-//! 3. Use row helpers for opaque row tables, typed-table helpers for simple
-//!    table/column operations, and fact helpers for content-addressed bytes.
+//! 3. Use typed-table helpers for projected rows and fact helpers for
+//!    content-addressed bytes.
 //!
 //! All atomicity comes from callers choosing the transaction closure. Store
 //! supplies `BEGIN IMMEDIATE`, rollback, quoting, allowlist checks, and
@@ -33,7 +25,6 @@
 
 use crate::core::facts::{fact_id, Fact, FactId, FactScope, ScopeKind};
 use crate::core::project_fact::ProjectionMode;
-use crate::core::row_schema::RowTableSchema;
 use crate::core::schema::{
     CONTEXT_EDGES, FACTS, INCOMING_FACTS, INTENTS, LOCAL_FACT_ADMISSIONS, LOCAL_INTENTS,
     PENDING_PROJECTION, PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
@@ -92,21 +83,11 @@ impl ReplayTables {
     };
 }
 
-/// One executable schema batch plus the opaque row tables it declares.
-///
-/// Typed tables live entirely in `ddl`. The `row_tables` list is only the
-/// allowlist for the remaining `TableRow` helpers; it does not validate table
-/// shape on open.
+/// One executable schema batch plus replay lifecycle declarations.
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaSource {
     /// SQL batch applied when the store opens.
     pub ddl: &'static str,
-    /// Opaque row tables this source makes available to row helpers.
-    pub row_tables: &'static [TableName],
-    /// Schema-backed opaque row tables this source makes available to row
-    /// helpers. These are the migration target for handwritten `rows.rs`
-    /// modules; store still persists them through the same key/value boundary.
-    pub row_schemas: &'static [RowTableSchema],
     /// Replay reset and summary lifecycle declarations for this source's
     /// tables.
     pub replay: ReplayTables,
@@ -156,17 +137,6 @@ where
         .map(|columns| columns.join(", "))
 }
 
-/// One opaque key/value row in one declared table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableRow {
-    /// Declared opaque row table.
-    pub table: TableName,
-    /// Opaque row key.
-    pub key: Vec<u8>,
-    /// Opaque row value.
-    pub value: Vec<u8>,
-}
-
 /// SQLite value carried by typed-table row mutations and internal SQL helpers.
 ///
 /// Protocol row builders choose these values from their fact layout and table
@@ -195,21 +165,11 @@ impl Value {
     }
 }
 
-/// Delete one opaque row by key from a row table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableDelete {
-    /// Table to delete from.
-    pub table: TableName,
-    /// Opaque row key to delete.
-    pub key: Vec<u8>,
-}
-
 /// Insert a typed-table row by column values.
 ///
-/// This is for schema-declared tables whose key is not the generic
-/// `row_key/row_value` shape. The insert is idempotent only when an existing
-/// row has exactly the same column values. To change typed projection state,
-/// emit a matching `DeleteWhere` before the replacement insert.
+/// The insert is idempotent only when an existing row has exactly the same
+/// column values. To change projected state, emit a matching `DeleteWhere`
+/// before the replacement insert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInsert {
     /// Typed table to insert into.
@@ -273,14 +233,8 @@ impl TypedTableSchema {
 /// mutation commits. The module that constructs the mutation owns the row
 /// layout and semantic meaning.
 ///
-/// `PutRow` is an idempotent insert into an opaque key/value row table, not an
-/// upsert. Re-emitting the same key with different bytes is a conflict. Use
-/// typed-table mutations when projection needs explicit delete-then-insert
-/// state changes for the same logical row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowMutation {
-    PutRow(TableRow),
-    DeleteRow(TableDelete),
     InsertValues(TableInsert),
     DeleteWhere(TableDeleteWhere),
 }
@@ -322,19 +276,6 @@ pub(crate) enum IntentWorkRowOrder {
 
 fn store_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
-}
-
-fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut upper = prefix.to_vec();
-    let idx = upper.iter().rposition(|byte| *byte != u8::MAX)?;
-    upper[idx] += 1;
-    upper.truncate(idx + 1);
-    Some(upper)
-}
-
-fn sqlite_limit(limit: usize) -> i64 {
-    // Callers use usize::MAX for unbounded scans; SQLite treats LIMIT -1 as no limit.
-    i64::try_from(limit).unwrap_or(-1)
 }
 
 fn unique_table_names(tables: impl IntoIterator<Item = TableName>) -> Vec<TableName> {
@@ -416,8 +357,6 @@ fn hash_cell(hasher: &mut blake3::Hasher, value: ValueRef<'_>) {
 /// single SQL path, and `write_transaction` rollback covers both classes.
 pub struct Store {
     conn: SqliteConnection,
-    row_tables: Vec<TableName>,
-    row_schemas: Vec<RowTableSchema>,
     replay_protected_tables: Vec<TableName>,
     replay_reset_tables: Vec<TableName>,
     replay_summary_tables: Vec<TableName>,
@@ -471,17 +410,6 @@ impl Store {
         conn: SqliteConnection,
         sources: &[SchemaSource],
     ) -> rusqlite::Result<Self> {
-        let row_tables = unique_table_names(sources.iter().flat_map(|source| {
-            source
-                .row_tables
-                .iter()
-                .copied()
-                .chain(source.row_schemas.iter().map(|schema| schema.table))
-        }));
-        let row_schemas = sources
-            .iter()
-            .flat_map(|source| source.row_schemas.iter().copied())
-            .collect();
         let replay_protected_tables = unique_table_names(
             sources
                 .iter()
@@ -500,8 +428,6 @@ impl Store {
         validate_replay_lifecycle(&replay_protected_tables, &replay_reset_tables)?;
         let store = Self::from_connection_parts(
             conn,
-            row_tables,
-            row_schemas,
             replay_protected_tables,
             replay_reset_tables,
             replay_summary_tables,
@@ -514,8 +440,6 @@ impl Store {
 
     fn from_connection_parts(
         conn: SqliteConnection,
-        row_tables: Vec<TableName>,
-        row_schemas: Vec<RowTableSchema>,
         replay_protected_tables: Vec<TableName>,
         replay_reset_tables: Vec<TableName>,
         replay_summary_tables: Vec<TableName>,
@@ -527,17 +451,10 @@ impl Store {
         )?;
         Ok(Self {
             conn,
-            row_tables,
-            row_schemas,
             replay_protected_tables,
             replay_reset_tables,
             replay_summary_tables,
         })
-    }
-
-    /// Schema-backed opaque row declarations registered for this store.
-    pub fn row_schemas(&self) -> &[RowTableSchema] {
-        &self.row_schemas
     }
 
     /// Tables protected from replay reset.
@@ -600,16 +517,6 @@ impl Store {
             .map_err(|err| format!("snapshot store: {err}"))
     }
 
-    fn quoted_row_table_name(&self, table: TableName) -> rusqlite::Result<String> {
-        if !self.row_tables.contains(&table) {
-            return Err(store_error(format!(
-                "table {} is not an opaque row table",
-                table.as_str()
-            )));
-        }
-        quoted_table_name(table)
-    }
-
     /// Count retained fact byte rows.
     pub fn fact_count(&self) -> rusqlite::Result<usize> {
         self.table_row_count(FACTS)
@@ -653,76 +560,18 @@ impl Store {
         }
     }
 
-    // Row writes: these are intentionally table/key/value operations. Any
-    // richer meaning belongs to the module that constructed the `TableRow`.
-    /// Insert rows idempotently in their declared tables.
-    pub fn insert_table_rows(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
-        self.write_transaction(|store| store.insert_table_rows_in_tx(rows))
+    /// Insert typed table rows idempotently in their declared tables.
+    pub fn insert_table_values(&self, rows: Vec<TableInsert>) -> rusqlite::Result<usize> {
+        self.write_transaction(|store| {
+            let mut inserted = 0;
+            for row in rows {
+                inserted += store.insert_values_in_tx(&row)?;
+            }
+            Ok(inserted)
+        })
     }
 
-    /// Transaction-local form of `insert_table_rows`.
-    pub fn insert_table_rows_in_tx(&self, rows: Vec<TableRow>) -> rusqlite::Result<usize> {
-        let mut inserted = 0;
-        for row in rows {
-            let table_name = self.quoted_row_table_name(row.table)?;
-            let changed = self.conn.execute(
-                &format!(
-                    "INSERT OR IGNORE INTO {table_name}
-                        (row_key, row_value)
-                     VALUES (?1, ?2)"
-                ),
-                params![row.key.as_slice(), row.value.as_slice()],
-            )?;
-            inserted += usize::from(verify_idempotent_insert(
-                changed,
-                || {
-                    self.conn
-                        .query_row(
-                            &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
-                            params![row.key.as_slice()],
-                            |row| row.get::<_, Vec<u8>>(0),
-                        )
-                        .optional()
-                },
-                |existing| existing.as_slice() == row.value.as_slice(),
-                format!("conflicting row for {}", row.table.as_str()),
-            )?);
-        }
-        Ok(inserted)
-    }
-
-    /// Delete rows by key from one declared row table inside a transaction.
-    pub fn delete_table_rows_in_tx(
-        &self,
-        table: TableName,
-        keys: Vec<Vec<u8>>,
-    ) -> rusqlite::Result<usize> {
-        let mut deleted = 0;
-        let table_name = self.quoted_row_table_name(table)?;
-        for key in keys {
-            deleted += self.conn.execute(
-                &format!("DELETE FROM {table_name} WHERE row_key = ?1"),
-                params![key],
-            )?;
-        }
-        Ok(deleted)
-    }
-
-    // Row reads: exact lookup, count, full scan, bounded prefix scan, and
-    // bounded key-range scan are the complete read surface core exposes.
-    /// Fetch one row value by exact key.
-    pub fn table_row(&self, table: TableName, key: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
-        let table_name = self.quoted_row_table_name(table)?;
-        self.conn
-            .query_row(
-                &format!("SELECT row_value FROM {table_name} WHERE row_key = ?1"),
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()
-    }
-
-    /// Count rows in one declared typed or opaque table.
+    /// Count rows in one declared table.
     pub fn table_row_count(&self, table: TableName) -> rusqlite::Result<usize> {
         let table_name = quoted_table_name(table)?;
         self.conn
@@ -984,85 +833,14 @@ impl Store {
             .map_err(|err| format!("read columns: {err}"))
     }
 
-    /// Read a bounded page from one declared row table in key order.
-    pub fn table_rows_page(
-        &self,
-        table: TableName,
-        limit: usize,
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.table_rows_with_key_prefix(table, &[], limit)
-    }
-
-    /// Scan one declared table by lexicographic key prefix.
-    pub fn table_rows_with_key_prefix(
-        &self,
-        table: TableName,
-        prefix: &[u8],
-        limit: usize,
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let table_name = self.quoted_row_table_name(table)?;
-        let limit = sqlite_limit(limit);
-        let Some(upper) = prefix_upper_bound(prefix) else {
-            return self.query_key_value_rows(
-                &format!(
-                    "SELECT row_key, row_value FROM {table_name}
-                         WHERE row_key >= ?1
-                         ORDER BY row_key
-                         LIMIT ?2"
-                ),
-                params![prefix, limit],
-            );
-        };
-        self.query_key_value_rows(
-            &format!(
-                "SELECT row_key, row_value FROM {table_name}
-                     WHERE row_key >= ?1 AND row_key < ?2
-                     ORDER BY row_key
-                     LIMIT ?3"
-            ),
-            params![prefix, upper, limit],
-        )
-    }
-
-    fn query_key_value_rows<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>>
-    where
-        P: rusqlite::Params,
-    {
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params, |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-        rows.collect()
-    }
-
     /// Apply validated row mutations inside the caller's transaction.
     ///
     /// Projection and dispatch own the larger commit order. Store owns the SQL
-    /// mechanics for opaque row tables and typed table inserts/deletes.
+    /// mechanics for typed table inserts/deletes.
     pub(crate) fn apply_row_mutations_in_tx(
         &self,
         mutations: &[RowMutation],
     ) -> rusqlite::Result<()> {
-        let mut rows = Vec::new();
-        let mut row_deletes = Vec::new();
-        for mutation in mutations {
-            match mutation {
-                RowMutation::PutRow(row) => rows.push(row.clone()),
-                RowMutation::DeleteRow(delete) => row_deletes.push(delete.clone()),
-                RowMutation::InsertValues(_) | RowMutation::DeleteWhere(_) => {}
-            }
-        }
-        self.insert_table_rows_in_tx(rows)?;
-        for delete in row_deletes {
-            self.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
-        }
         for mutation in mutations {
             match mutation {
                 RowMutation::InsertValues(insert) => {
@@ -1071,7 +849,6 @@ impl Store {
                 RowMutation::DeleteWhere(delete) => {
                     self.delete_where_in_tx(delete)?;
                 }
-                RowMutation::PutRow(_) | RowMutation::DeleteRow(_) => {}
             }
         }
         Ok(())
@@ -1636,33 +1413,7 @@ mod tests {
     use super::*;
     use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 
-    const TEST_ROWS: TableName = TableName::new("test.rows");
-    const MEMORY_ROWS: TableName = TableName::new("test.memory_rows");
     const TYPED_EVENTS: TableName = TableName::new("test.typed_events");
-
-    const TEST_ROWS_SCHEMA: SchemaSource = SchemaSource {
-        ddl: r#"
-CREATE TABLE IF NOT EXISTS "test.rows" (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
-"#,
-        row_tables: &[TEST_ROWS],
-        row_schemas: &[],
-        replay: ReplayTables::EMPTY,
-    };
-
-    const MEMORY_ROWS_SCHEMA: SchemaSource = SchemaSource {
-        ddl: r#"
-CREATE TEMP TABLE IF NOT EXISTS "test.memory_rows" (
-    row_key BLOB PRIMARY KEY NOT NULL,
-    row_value BLOB NOT NULL
-);
-"#,
-        row_tables: &[MEMORY_ROWS],
-        row_schemas: &[],
-        replay: ReplayTables::EMPTY,
-    };
 
     const TYPED_EVENTS_SCHEMA: SchemaSource = SchemaSource {
         ddl: r#"
@@ -1673,200 +1424,8 @@ CREATE TABLE IF NOT EXISTS "test.typed_events" (
     PRIMARY KEY (owner, seq)
 );
 "#,
-        row_tables: &[],
-        row_schemas: &[],
         replay: ReplayTables::EMPTY,
     };
-
-    #[test]
-    fn duplicate_row_insert_is_idempotent_but_conflicting_value_rejects() {
-        let store =
-            Store::open_memory_with_schema_sources(&[TEST_ROWS_SCHEMA]).expect("open store");
-        let row = TableRow {
-            table: TEST_ROWS,
-            key: b"k".to_vec(),
-            value: b"one".to_vec(),
-        };
-
-        assert_eq!(
-            store.insert_table_rows(vec![row.clone()]).expect("insert"),
-            1
-        );
-        assert_eq!(
-            store
-                .insert_table_rows(vec![row.clone()])
-                .expect("idempotent insert"),
-            0
-        );
-
-        let err = store
-            .insert_table_rows(vec![TableRow {
-                value: b"two".to_vec(),
-                ..row
-            }])
-            .expect_err("conflicting insert must reject");
-
-        assert!(err.to_string().contains("conflicting row for test.rows"));
-    }
-
-    #[test]
-    fn memory_rows_are_connection_local_temp_tables() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("memory-rows.db");
-        let sources = [MEMORY_ROWS_SCHEMA];
-
-        let store_a = Store::open_disk_with_schema_sources(&path, &sources).expect("open store a");
-        store_a
-            .insert_table_rows(vec![TableRow {
-                table: MEMORY_ROWS,
-                key: b"k".to_vec(),
-                value: b"v".to_vec(),
-            }])
-            .expect("insert memory row");
-        assert_eq!(store_a.table_row_count(MEMORY_ROWS).expect("count a"), 1);
-
-        let store_b = Store::open_disk_with_schema_sources(&path, &sources).expect("open store b");
-        assert_eq!(
-            store_b.table_row_count(MEMORY_ROWS).expect("count b"),
-            0,
-            "memory rows should be local to one Store handle"
-        );
-
-        assert!(
-            store_a
-                .conn
-                .query_row(
-                    "SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name = ?1",
-                    [MEMORY_ROWS.as_str()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .expect("query temp schema")
-                .is_some(),
-            "memory row tables are SQLite TEMP tables"
-        );
-    }
-
-    #[test]
-    fn memory_rows_roll_back_with_write_transaction() {
-        let store =
-            Store::open_memory_with_schema_sources(&[MEMORY_ROWS_SCHEMA]).expect("open store");
-
-        let err = store
-            .write_transaction(|store| {
-                store.insert_table_rows_in_tx(vec![TableRow {
-                    table: MEMORY_ROWS,
-                    key: b"k".to_vec(),
-                    value: b"v".to_vec(),
-                }])?;
-                Err::<(), _>(rusqlite::Error::InvalidParameterName(
-                    "force rollback".to_string(),
-                ))
-            })
-            .expect_err("transaction should roll back");
-
-        assert!(err.to_string().contains("force rollback"));
-        assert_eq!(
-            store
-                .table_row_count(MEMORY_ROWS)
-                .expect("count after rollback"),
-            0
-        );
-    }
-
-    #[test]
-    fn memory_prefix_scan_is_key_ordered_and_limited() {
-        let store =
-            Store::open_memory_with_schema_sources(&[MEMORY_ROWS_SCHEMA]).expect("open store");
-        store
-            .insert_table_rows(vec![
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: b"b/2".to_vec(),
-                    value: b"two".to_vec(),
-                },
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: b"b/1".to_vec(),
-                    value: b"one".to_vec(),
-                },
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: b"c/1".to_vec(),
-                    value: b"skip".to_vec(),
-                },
-            ])
-            .expect("insert rows");
-
-        let rows = store
-            .table_rows_with_key_prefix(MEMORY_ROWS, b"b/", 1)
-            .expect("scan prefix");
-        assert_eq!(rows, vec![(b"b/1".to_vec(), b"one".to_vec())]);
-    }
-
-    #[test]
-    fn memory_prefix_scan_without_upper_bound_is_limited_by_sql() {
-        let store =
-            Store::open_memory_with_schema_sources(&[MEMORY_ROWS_SCHEMA]).expect("open store");
-        store
-            .insert_table_rows(vec![
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: vec![0xfe],
-                    value: b"before".to_vec(),
-                },
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: vec![0xff],
-                    value: b"root".to_vec(),
-                },
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: vec![0xff, 0x00],
-                    value: b"child-0".to_vec(),
-                },
-                TableRow {
-                    table: MEMORY_ROWS,
-                    key: vec![0xff, 0x01],
-                    value: b"child-1".to_vec(),
-                },
-            ])
-            .expect("insert rows");
-
-        let rows = store
-            .table_rows_with_key_prefix(MEMORY_ROWS, &[0xff], 2)
-            .expect("scan all-ff prefix");
-        assert_eq!(
-            rows,
-            vec![
-                (vec![0xff], b"root".to_vec()),
-                (vec![0xff, 0x00], b"child-0".to_vec()),
-            ]
-        );
-
-        let rows = store
-            .table_rows_with_key_prefix(MEMORY_ROWS, &[], 2)
-            .expect("scan empty prefix");
-        assert_eq!(
-            rows,
-            vec![
-                (vec![0xfe], b"before".to_vec()),
-                (vec![0xff], b"root".to_vec()),
-            ]
-        );
-
-        let rows = store
-            .table_rows_with_key_prefix(MEMORY_ROWS, &[0xff], DEFAULT_QUERY_LIMIT)
-            .expect("scan bounded all-ff prefix");
-        assert_eq!(
-            rows,
-            vec![
-                (vec![0xff], b"root".to_vec()),
-                (vec![0xff, 0x00], b"child-0".to_vec()),
-                (vec![0xff, 0x01], b"child-1".to_vec()),
-            ]
-        );
-    }
 
     #[test]
     fn typed_rows_by_blob_column_are_filtered_and_ordered() {

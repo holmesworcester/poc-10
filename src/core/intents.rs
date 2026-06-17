@@ -33,9 +33,7 @@ use crate::core::store::{IntentWorkRow, Store};
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub use crate::core::store::{
-    RowMutation, TableDelete, TableDeleteWhere, TableInsert, TypedTableSchema, Value,
-};
+pub use crate::core::store::{RowMutation, TableDeleteWhere, TableInsert, TypedTableSchema, Value};
 
 /// Stable queue routing key for an intent handler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -310,7 +308,7 @@ pub trait IntentHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{TableName, TableRow};
+    use crate::core::store::TableName;
     use rusqlite::types::Value as SqliteValue;
 
     const TEST_TABLE: TableName = TableName::new("test.rows");
@@ -333,19 +331,23 @@ mod tests {
 
     #[test]
     fn runtime_effects_track_row_mutations_separately_from_intents() {
-        let row_a = TableRow {
+        let insert = TableInsert {
             table: TEST_TABLE,
-            key: b"row-key".to_vec(),
-            value: b"value-a".to_vec(),
+            columns: &["owner", "value"],
+            values: vec![
+                Value::Bytes(b"row-key".to_vec()),
+                Value::Bytes(b"a".to_vec()),
+            ],
         };
-        let delete = TableDelete {
+        let delete = TableDeleteWhere {
             table: TEST_TABLE,
-            key: b"row-key".to_vec(),
+            columns: &["owner"],
+            values: vec![Value::Bytes(b"row-key".to_vec())],
         };
 
         let output = RuntimeEffects::new()
-            .row_mutation(RowMutation::PutRow(row_a.clone()))
-            .row_mutation(RowMutation::DeleteRow(delete.clone()))
+            .row_mutation(RowMutation::InsertValues(insert.clone()))
+            .row_mutation(RowMutation::DeleteWhere(delete.clone()))
             .intent(Intent::new(
                 IntentKind::new("followup").unwrap(),
                 b"key",
@@ -354,7 +356,10 @@ mod tests {
 
         assert_eq!(
             output.row_mutations,
-            vec![RowMutation::PutRow(row_a), RowMutation::DeleteRow(delete)]
+            vec![
+                RowMutation::InsertValues(insert),
+                RowMutation::DeleteWhere(delete)
+            ]
         );
         assert_eq!(output.intents.len(), 1);
         assert!(output.local_intents.is_empty());

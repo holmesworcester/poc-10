@@ -9,6 +9,7 @@
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
 use crate::core::store::Store;
+use rusqlite::{params, OptionalExtension};
 
 use super::encode;
 use super::fact::EndpointFact;
@@ -41,53 +42,47 @@ pub fn endpoint_fact(created_at_ms: u64, endpoint: EndpointFact) -> Result<Fact,
 
 pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
     let endpoint = store
-        .table_row(super::LOCAL_ENDPOINT_ROWS, super::LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint: {err}"))?;
-    let secret = store
-        .table_row(super::LOCAL_ENDPOINT_SECRET_ROWS, super::LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint secret: {err}"))?;
-    let signing_public_key = store
-        .table_row(
-            super::LOCAL_ENDPOINT_SIGNING_PUBLIC_KEY_ROWS,
-            super::LOCAL_KEY,
+        .conn()
+        .query_row(
+            "SELECT endpoint_id, secret, signing_public_key, signing_secret
+             FROM local_endpoint_rows
+             WHERE local_key = ?1
+             LIMIT 1",
+            params![super::LOCAL_KEY],
+            decode_local_endpoint,
         )
-        .map_err(|err| format!("load local endpoint signing public key: {err}"))?;
-    let signing_secret = store
-        .table_row(super::LOCAL_ENDPOINT_SIGNING_SECRET_ROWS, super::LOCAL_KEY)
-        .map_err(|err| format!("load local endpoint signing secret: {err}"))?;
+        .optional()
+        .map_err(|err| format!("load local endpoint: {err}"))?;
 
-    match (endpoint, secret, signing_public_key, signing_secret) {
-        (None, None, None, None) => Ok(None),
-        (Some(endpoint), Some(secret), Some(signing_public_key), Some(signing_secret)) => {
-            let endpoint = id32(&endpoint, "local endpoint")?;
-            let secret = id32(&secret, "local endpoint secret")?;
-            let signing_public_key =
-                id32(&signing_public_key, "local endpoint signing public key")?;
-            let signing_secret = id32(&signing_secret, "local endpoint signing secret")?;
-            if crypto::x25519_public_key(&secret) != endpoint {
-                return Err("stored endpoint does not match local endpoint secret".to_string());
-            }
-            if crypto::ed25519_public_key(&signing_secret) != signing_public_key {
-                return Err(
-                    "stored endpoint signing key does not match local signing secret".to_string(),
-                );
-            }
-            Ok(Some(EndpointFact {
-                endpoint,
-                secret,
-                signing_public_key,
-                signing_secret,
-            }))
+    if let Some(endpoint) = endpoint {
+        if crypto::x25519_public_key(&endpoint.secret) != endpoint.endpoint {
+            return Err("stored endpoint does not match local endpoint secret".to_string());
         }
-        (None, _, _, _) => Err("local endpoint public key is missing".to_string()),
-        (_, None, _, _) => Err("local endpoint secret is missing".to_string()),
-        (_, _, None, _) => Err("local endpoint signing public key is missing".to_string()),
-        (_, _, _, None) => Err("local endpoint signing secret is missing".to_string()),
+        if crypto::ed25519_public_key(&endpoint.signing_secret) != endpoint.signing_public_key {
+            return Err(
+                "stored endpoint signing key does not match local signing secret".to_string(),
+            );
+        }
+        Ok(Some(endpoint))
+    } else {
+        Ok(None)
     }
 }
 
-fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {
+fn decode_local_endpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<EndpointFact> {
+    Ok(EndpointFact {
+        endpoint: id32(&row.get::<_, Vec<u8>>(0)?, "local endpoint")?,
+        secret: id32(&row.get::<_, Vec<u8>>(1)?, "local endpoint secret")?,
+        signing_public_key: id32(
+            &row.get::<_, Vec<u8>>(2)?,
+            "local endpoint signing public key",
+        )?,
+        signing_secret: id32(&row.get::<_, Vec<u8>>(3)?, "local endpoint signing secret")?,
+    })
+}
+
+fn id32(value: &[u8], label: &str) -> rusqlite::Result<[u8; 32]> {
     value
         .try_into()
-        .map_err(|_| format!("{label} row must be 32 bytes"))
+        .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{label} row must be 32 bytes")))
 }

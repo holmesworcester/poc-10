@@ -251,10 +251,6 @@ use core syntax and contracts, but core must not import their semantic rules.
   schema-declared derived state, reprojects retained facts in canonical,
   reverse, or deterministic scrambled order, computes state summaries, and
   enforces replay constraints such as no network rows.
-- `row_schema.rs`: schema-backed helper layer for opaque row table key/value
-  bytes. It defines row fields, table schemas, runtime row values, and
-  encode/decode helpers that protocol-owned row helpers can use without giving
-  core protocol row semantics.
 - `runtime.rs`: executable engine for one selected protocol description. It
   opens stores, applies declared schemas, submits authored facts, exposes
   bounded projection and intent queue drains, admits due time wakes, and
@@ -265,10 +261,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   queues, local network
   tables, and replay reset groups. Protocol rows live in protocol schema sources.
 - `store.rs`: SQLite substrate below runtime policy. It applies schema batches,
-  opens transactions, quotes identifiers, validates opaque row-table allowlists,
-  provides immutable fact storage primitives, and provides generic keyed row
-  helpers. It does not know what a fact tag, context role, network frame, or
-  protocol row means.
+  opens transactions, quotes identifiers, applies typed row mutations, and
+  provides immutable fact storage primitives. It does not know what a fact tag,
+  context role, network frame, or protocol row means.
 - `versioning.rs`: protocol-neutral version ceiling and release-profile policy.
   It computes read/admit ceilings, maps protocol bundles to family versions,
   decides which versions a release may author, and classifies received bytes as

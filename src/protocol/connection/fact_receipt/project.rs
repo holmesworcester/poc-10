@@ -407,8 +407,8 @@ impl ConnectionFactReceiptProjector {
                 received.received_fact_id,
                 received.received_fact_id,
             ))
-            .row_mutation(RowMutation::PutRow(super::connection_fact_receipt_row(
-                fact.id, &received,
-            )?)))
+            .row_mutation(RowMutation::InsertValues(
+                super::connection_fact_receipt_row(fact.id, &received)?,
+            )))
     }
 }

@@ -242,7 +242,7 @@ use crate::protocol::auth::workspace;
 use crate::protocol::auth::workspace::fact::WorkspaceFact;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::admin_row;
+use super::admin_insert;
 
 /// Projector route metadata for the admin-grant fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -551,7 +551,7 @@ fn materialized_output(
                 admin.user_fact_id,
                 admin.user_fact_id,
             ))
-            .row_mutation(RowMutation::PutRow(admin_row(fact.id, admin)?)),
+            .row_mutation(RowMutation::InsertValues(admin_insert(fact.id, admin))),
         admin.workspace_id,
         fact,
         context_have,

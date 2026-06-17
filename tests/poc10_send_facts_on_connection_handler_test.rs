@@ -50,7 +50,7 @@ fn well_formed_send_intent_packs_fixed_frame_into_outgoing_queue() {
     let peer_addr = "127.0.0.1:41000".parse().expect("peer addr");
     let (connection_fact, connection) = connection_fact(local_endpoint.endpoint, peer_addr);
     store
-        .insert_table_rows(vec![connection_rows::connection_row(
+        .insert_table_values(vec![connection_rows::connection_row(
             connection_rows::ConnectionRowFields {
                 connection_id: connection_fact.id,
                 from_endpoint: connection.from_endpoint,
@@ -110,7 +110,9 @@ fn store_with_local_endpoint() -> Store {
     ])
     .expect("store");
     store
-        .insert_table_rows(endpoint_rows::endpoint_rows(&local_endpoint()))
+        .insert_table_values(vec![
+            endpoint_rows::local_endpoint_insert(&local_endpoint()),
+        ])
         .expect("seed local endpoint");
     store
 }
