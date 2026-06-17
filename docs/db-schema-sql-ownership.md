@@ -46,7 +46,7 @@ It owns:
 - core `CREATE TABLE` and index SQL
 - `SchemaSource`
 - `SchemaRegistry`
-- replay-retained, replay-reset, and replay-summary table sets
+- replay-retained and replay-reset table sets
 - table-name validation and quoting
 - table and column metadata used to validate protocol row mutations
 
@@ -65,7 +65,6 @@ pub struct SchemaRegistry {
     projected_tables: BTreeMap<TableName, ProjectedTableSchema>,
     replay_retained: BTreeSet<TableName>,
     replay_reset: BTreeSet<TableName>,
-    replay_summary: BTreeSet<TableName>,
 }
 
 impl SchemaRegistry {
@@ -74,7 +73,6 @@ impl SchemaRegistry {
     pub fn quoted_table(&self, table: TableName) -> Result<String, SchemaError>;
     pub fn quoted_column(&self, table: TableName, column: &str) -> Result<String, SchemaError>;
     pub fn replay_reset_tables(&self) -> impl Iterator<Item = TableName>;
-    pub fn replay_summary_tables(&self) -> impl Iterator<Item = TableName>;
 }
 ```
 
@@ -582,9 +580,10 @@ WHERE row_key = ?3;
 
 ## `replay.rs`
 
-Replay owns derived-state reset, replay enqueue, projection/intent driving, and
-state summaries. It should call `project_fact` and `handle_intent` for normal
-work, and use direct SQL for replay-specific setup and diagnostics.
+Replay owns derived-state reset, replay enqueue, and projection/intent driving.
+It should call `project_fact` and `handle_intent` for normal work, and use
+direct SQL only for replay-specific setup. Replay does not need to own state
+summary hashing as part of its primary operation.
 
 Wipe replay-reset tables from the schema registry:
 
@@ -630,23 +629,36 @@ INSERT OR IGNORE INTO pending_projection (owner, mode)
 VALUES (?1, 'replay');
 ```
 
-Replay summary hashing can scan schema-declared summary tables because replay
-diagnostics intentionally summarize whole derived state. This scan must stay in
-replay/debug code and must not become a general store API.
+Replay should return basic counters and assert that replay did not produce
+forbidden live output, such as network rows. Full-state hashing belongs in a
+separate diagnostic/test module.
 
-```sql
-SELECT row_key, row_value
-FROM some_replay_summary_table
-ORDER BY row_key;
-```
+## `replay_check.rs`
 
-For typed SQL tables, summary code should select every column in canonical
-order and hash row values without materializing the table:
+`replay_check.rs` owns replay diagnostics. It may run replay in multiple orders
+and hash selected tables after each run to prove replay determinism. This keeps
+whole-table summary scans out of replay's primary rebuild path.
+
+`replay_check.rs` can maintain its own diagnostic table list or accept one from
+the CLI/test harness. That list does not need to be first-class core schema
+metadata unless production code needs it, which it should not.
+
+Diagnostic summary scans are allowed here because they are explicitly
+debug/test behavior and do not become general query APIs.
 
 ```sql
 SELECT col_a, col_b, col_c
-FROM some_typed_summary_table
+FROM some_diagnostic_table
 ORDER BY col_a, col_b, col_c;
+```
+
+The diagnostic should stream rows through a hasher, not materialize the table:
+
+```rust
+let mut rows = stmt.query([])?;
+while let Some(row) = rows.next()? {
+    hash_row(&mut hasher, row)?;
+}
 ```
 
 ## Protocol Queries
