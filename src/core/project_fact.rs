@@ -21,10 +21,11 @@
 //! SQL atomicity is the safety mechanism. Submitting a fact inserts bytes,
 //! admission metadata, the pending row, and any already matched context in one
 //! transaction. Projecting a queued fact then consumes that pending work,
-//! replaces owned needs/time wakes, appends offers, records newly woken owners,
-//! applies row mutations, records intents, and moves/drops incoming rows in one
-//! transaction. If SQLite rolls back, the old queue state remains. If it
-//! commits, the projector output is visible as a complete unit.
+//! replaces owned needs/time wakes, appends offers, compares the output with
+//! current standing context, records newly woken owners, applies row mutations,
+//! records intents, and moves/drops incoming rows in one transaction. If SQLite
+//! rolls back, the old queue state remains. If it commits, the projector output
+//! is visible as a complete unit.
 //!
 //! Projectors do not query the database for missing context during a run. Matched
 //! payload facts arrive through `ProjectionContext` because the pending row
@@ -44,7 +45,7 @@ use self::context_db::{
     stored_context_for_owner, wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
-use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
+use crate::core::context::{ContextSet, ContextSetDelta};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
@@ -72,7 +73,6 @@ pub(crate) enum ProjectionSource {
 pub(crate) struct PendingFact {
     source: ProjectionSource,
     fact: Fact,
-    previous_context: ContextSet,
     projection_context: ProjectionContext,
 }
 
@@ -84,7 +84,6 @@ struct PreparedProjection {
     retain_self: bool,
     context: ContextSet,
     time_wakes: Vec<TimeWake>,
-    context_delta: ContextSetDelta,
     runtime_effects: RuntimeEffects,
 }
 
@@ -214,7 +213,6 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<FactId>, String> {
 
 /// Load everything projection needs for one fact.
 ///
-/// `previous_context` is the fact's standing context before this run.
 /// `projection_context` is the matched input context exposed to the projector
 /// for this run, including any due time ranges.
 pub(crate) fn load_pending_fact(
@@ -253,9 +251,6 @@ pub(crate) fn load_pending_fact(
     let Some(fact) = fact else {
         return Ok(None);
     };
-    let previous_context = perf::measure_result("projection_load_previous_context", || {
-        stored_context_for_owner(store, &fact_id)
-    })?;
     let projection_context = match source {
         ProjectionSource::Durable => {
             let time_ranges = perf::measure_result("projection_load_pending_time_ranges", || {
@@ -272,7 +267,6 @@ pub(crate) fn load_pending_fact(
     Ok(Some(PendingFact {
         source,
         fact,
-        previous_context,
         projection_context,
     }))
 }
@@ -281,8 +275,8 @@ pub(crate) fn load_pending_fact(
 ///
 /// Projection output replaces current needs and appends durable offers for this
 /// fact. This helper enforces that projectors only own their own context/time
-/// rows and may purge only their own fact, then computes the context delta that
-/// will wake dependent facts after commit.
+/// rows and may purge only their own fact. Standing-context comparison happens
+/// later inside the commit transaction.
 fn prepare_projection(
     projector: &(impl Projector + ?Sized),
     pending_fact: PendingFact,
@@ -292,25 +286,13 @@ fn prepare_projection(
     let PendingFact {
         source,
         fact,
-        previous_context,
         projection_context,
     } = pending_fact;
     let output = perf::measure_result("projection_projector_cpu", || {
         projector.project(&fact, &projection_context)
     })?;
     enforce_owner_is_self(&fact, &output)?;
-    let output_context = output.context_set();
-    let context = ContextSet {
-        needs: output_context.needs,
-        offers: previous_context
-            .offers
-            .iter()
-            .cloned()
-            .chain(output_context.offers)
-            .collect(),
-    }
-    .normalized();
-    let context_delta = diff_context_sets(&previous_context, &context);
+    let context = output.context_set();
     let runtime_effects = output.effects;
     perf::measure_result("projection_validate_effects", || {
         validate_runtime_effects_for_admission(&runtime_effects, allowed_tables, fact_admission)
@@ -320,7 +302,6 @@ fn prepare_projection(
         fact,
         retain_self: output.retain_self,
         context,
-        context_delta,
         time_wakes: output.time_wakes,
         runtime_effects,
     })
@@ -417,14 +398,14 @@ fn commit_projection_effects_in_tx(
     }
 
     if keep_projection_state {
-        perf::measure_result("projection_replace_context", || {
+        let context_delta = perf::measure_result("projection_replace_context", || {
             replace_needs_and_append_offers_for_owner(tx, fact_id, &projection.context)
         })?;
         perf::measure_result("projection_replace_time_wakes", || {
             replace_stored_time_wake_owner_rows(tx, fact_id, &projection.time_wakes)
         })?;
         perf::measure_result("projection_wake_context_matches", || {
-            wake_context_matches_in_tx(tx, &projection.context_delta).map_err(sqlite_string_error)
+            wake_context_matches_in_tx(tx, &context_delta).map_err(sqlite_string_error)
         })?;
     }
 
@@ -481,17 +462,47 @@ fn delete_rows_by_owner_in_tx(
     )
 }
 
-/// Replace this fact's standing needs and append its offers.
+/// Replace this fact's standing needs, append its offers, and report additions.
 ///
 /// Needs are current subscriptions, so each successful durable projection
 /// replaces the owner's need rows. Offers are durable evidence emitted by an
 /// immutable fact, so they are inserted idempotently and remain until the fact
-/// is purged.
+/// is purged. The delta is computed against current stored context inside the
+/// commit transaction rather than against queue-time projection state.
 fn replace_needs_and_append_offers_for_owner(
     store: &Db,
     owner: FactId,
     context: &ContextSet,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<ContextSetDelta> {
+    let previous =
+        stored_context_for_owner(store, &owner).map_err(rusqlite::Error::InvalidParameterName)?;
+    let previous_needs = previous
+        .needs
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let next_needs = context
+        .needs
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let previous_offers = previous
+        .offers
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let next_offers = context
+        .offers
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let delta = ContextSetDelta {
+        added_needs: next_needs.difference(&previous_needs).cloned().collect(),
+        removed_needs: previous_needs.difference(&next_needs).cloned().collect(),
+        added_offers: next_offers.difference(&previous_offers).cloned().collect(),
+        removed_offers: Vec::new(),
+    };
+
     store.conn().execute(
         "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'need'",
         params![owner.as_slice()],
@@ -502,7 +513,7 @@ fn replace_needs_and_append_offers_for_owner(
     for offer in &context.offers {
         insert_context_offer_in_tx(store, offer)?;
     }
-    Ok(())
+    Ok(delta)
 }
 
 /// Replace all time wakes owned by this fact.
@@ -982,10 +993,10 @@ pub(crate) mod context_db {
     //!
     //! This module is where that model becomes SQL. The public vocabulary lives in
     //! `core::context`: needs, offers, roles, keys, scopes, and normalized
-    //! `ContextSet`s. Protocol projectors produce those sets. The
-    //! projection step calls this file to load previous standing context, assemble
-    //! matched `ProjectionContext`, replace stored needs, append stored offers, and
-    //! fan out wakeups to facts that may now make progress.
+    //! `ContextSet`s. Protocol projectors produce those sets. The projection
+    //! step calls this file to assemble matched `ProjectionContext`, replace stored
+    //! needs, append stored offers, compare output with current standing context,
+    //! and fan out wakeups to facts that may now make progress.
     //!
     //! The stored shape is one `context_edges` row per standing need or offer. The
     //! `owner` column is always the fact whose projection emitted the row. For
@@ -2377,6 +2388,7 @@ mod contract_tests {
     use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
     use rusqlite::OptionalExtension;
+    use std::cell::Cell;
 
     fn submit_fact_to_db(store: &Db, fact: Fact) -> Result<bool, String> {
         submit_facts_to_db(store, [fact]).map(|inserted| inserted > 0)
@@ -2385,7 +2397,6 @@ mod contract_tests {
     fn run_projection(
         projector: &(impl Projector + ?Sized),
         fact: &Fact,
-        previous_context: &ContextSet,
         projection_context: ProjectionContext,
     ) -> Result<PreparedProjection, String> {
         prepare_projection(
@@ -2393,7 +2404,6 @@ mod contract_tests {
             PendingFact {
                 source: ProjectionSource::Durable,
                 fact: fact.clone(),
-                previous_context: previous_context.clone(),
                 projection_context,
             },
             &[],
@@ -2414,13 +2424,8 @@ mod contract_tests {
             }))
         });
 
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign offer owner");
+        let err = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect_err("projection should reject foreign offer owner");
 
         assert!(err.contains("projector emitted offer with owner"));
     }
@@ -2438,13 +2443,8 @@ mod contract_tests {
             }))
         });
 
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign need owner");
+        let err = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect_err("projection should reject foreign need owner");
 
         assert!(err.contains("projector emitted need with owner"));
     }
@@ -2460,13 +2460,8 @@ mod contract_tests {
             }))
         });
 
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign time-wake owner");
+        let err = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect_err("projection should reject foreign time-wake owner");
 
         assert!(err.contains("projector emitted time wake"));
     }
@@ -2478,13 +2473,8 @@ mod contract_tests {
             Ok(ProjectionOutput::new().purge_self([9; 32]))
         });
 
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign purge owner");
+        let err = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect_err("projection should reject foreign purge owner");
 
         assert!(err.contains("projector tried to purge fact"));
     }
@@ -2496,44 +2486,25 @@ mod contract_tests {
             Ok(ProjectionOutput::new().purge_self(fact.id))
         });
 
-        let run = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("projection should allow self purge");
+        let run = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect("projection should allow self purge");
 
         assert_eq!(run.runtime_effects.purged_facts, vec![fact.id]);
     }
 
     #[test]
-    fn projection_run_diffs_standing_context_without_self_waking() {
+    fn projection_prepare_records_only_projector_output_context() {
         let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([9; 32]);
         let projector = need_until_offer(role, key, IntentKind::new("followup").unwrap());
 
-        let first = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("first run");
-        assert_eq!(first.context_delta.added_needs.len(), 1);
-        assert_eq!(first.context_delta.removed_needs.len(), 0);
+        let projection = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
+            .expect("prepare projection");
 
-        let second = run_projection(
-            &projector,
-            &fact,
-            &first.context,
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("second run");
-        assert!(second.context_delta.is_empty());
-        assert_eq!(second.context, first.context);
-        assert!(second.runtime_effects.intents.is_empty());
+        assert_eq!(projection.context.needs.len(), 1);
+        assert!(projection.context.offers.is_empty());
+        assert!(projection.runtime_effects.intents.is_empty());
     }
 
     #[test]
@@ -2546,14 +2517,6 @@ mod contract_tests {
             key.clone(),
             IntentKind::new("followup").unwrap(),
         );
-        let previous = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("previous projection")
-        .context;
         let offer = ContextOffer {
             owner: [2; 32],
             role,
@@ -2562,44 +2525,12 @@ mod contract_tests {
             end_key: key,
         };
 
-        let next = run_projection(
-            &projector,
-            &fact,
-            &previous,
-            ProjectionContext::new(vec![offer]),
-        )
-        .expect("projection with context");
+        let next = run_projection(&projector, &fact, ProjectionContext::new(vec![offer]))
+            .expect("projection with context");
 
         assert!(next.context.needs.is_empty());
-        assert_eq!(next.context_delta.removed_needs, previous.needs);
-        assert_eq!(next.context_delta.added_needs.len(), 0);
         assert_eq!(next.runtime_effects.intents.len(), 1);
         assert_eq!(next.runtime_effects.intents[0].kind.as_str(), "followup");
-    }
-
-    #[test]
-    fn projection_run_keeps_previous_offers_when_projector_stops_emitting_them() {
-        let fact = Fact::new(FactScope::Global, 1, b"offer-evidence".to_vec());
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([4; 32]);
-        let previous_offer = offer_for(&fact, &role, &key);
-        let previous = ContextSet {
-            needs: Vec::new(),
-            offers: vec![previous_offer.clone()],
-        }
-        .normalized();
-        let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
-
-        let next = run_projection(
-            &projector,
-            &fact,
-            &previous,
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("projection without re-emitting old offer");
-
-        assert_eq!(next.context.offers, vec![previous_offer]);
-        assert!(next.context_delta.removed_offers.is_empty());
     }
 
     #[test]
@@ -2704,6 +2635,67 @@ mod contract_tests {
             intent_payload_for(&store, "ready", &target.id),
             offered.id.to_vec()
         );
+    }
+
+    #[test]
+    fn projection_commit_wakes_readded_need_against_current_context() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"readded-need-target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"readded-need-offer".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_db(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+
+        let role = Role::new("readded_need").unwrap();
+        let key = ContextKey::from_bytes(b"same-need");
+        let projector = ReaddedNeedProjector {
+            target_id: target.id,
+            role: role.clone(),
+            key: key.clone(),
+            step: Cell::new(0),
+        };
+
+        drain_projection(&projector, &store, &[], None, 1).expect("park on initial need");
+        assert_eq!(
+            stored_context_for_owner(&store, &target.id)
+                .expect("initial context")
+                .needs
+                .len(),
+            1
+        );
+
+        store
+            .write_transaction(|tx| insert_pending_owner_in_tx(tx, target.id).map(|_| ()))
+            .expect("queue target for need removal");
+        drain_projection(&projector, &store, &[], None, 1).expect("remove initial need");
+        assert!(stored_context_for_owner(&store, &target.id)
+            .expect("removed context")
+            .needs
+            .is_empty());
+
+        let offer = offer_for(&offered, &role, &key);
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert offer after need removal");
+        store
+            .write_transaction(|tx| insert_pending_owner_in_tx(tx, target.id).map(|_| ()))
+            .expect("queue target for need re-add");
+
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("re-added need wakes");
+
+        assert!(progress.status.progressed);
+        assert_eq!(
+            intent_payload_for(&store, "readded_ready", &target.id),
+            offered.id.to_vec()
+        );
+        assert_eq!(pending_projection_count(&store, target.id), 0);
     }
 
     #[test]
@@ -3496,6 +3488,44 @@ mod contract_tests {
                 fact.id,
                 payload,
             )))
+        }
+    }
+
+    struct ReaddedNeedProjector {
+        target_id: FactId,
+        role: Role,
+        key: ContextKey,
+        step: Cell<usize>,
+    }
+
+    impl Projector for ReaddedNeedProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id != self.target_id {
+                return Ok(ProjectionOutput::new());
+            }
+
+            let need = need_for(fact, &self.role, &self.key);
+            let step = self.step.get();
+            self.step.set(step + 1);
+            match step {
+                0 => Ok(ProjectionOutput::new().need(need)),
+                1 => Ok(ProjectionOutput::new()),
+                _ => {
+                    if let Some(payload) = context.payload_for(&need) {
+                        Ok(ProjectionOutput::new().intent(Intent::new(
+                            IntentKind::new("readded_ready").unwrap(),
+                            fact.id,
+                            payload.id,
+                        )))
+                    } else {
+                        Ok(ProjectionOutput::new().need(need))
+                    }
+                }
+            }
         }
     }
 

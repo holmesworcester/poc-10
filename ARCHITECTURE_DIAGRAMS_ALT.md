@@ -16,20 +16,17 @@ context, time wakes, rows, facts, and intents.
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
     PENDING["pending_projection or ephemeral_projection_inputs"] --> LOAD["load pending fact"]
-    LOAD --> PREVIOUS["load previous standing context"]
-    PREVIOUS --> MATCHED["load matched offers and pending time ranges"]
+    LOAD --> MATCHED["load matched offers and pending time ranges"]
     MATCHED --> RUN["run protocol projector"]
     RUN --> VALIDATE["validate row mutations and effects"]
-    VALIDATE --> FIXED_POINT{"newly declared needs match stored offers?"}
-    FIXED_POINT -- yes --> EXTEND["extend in-memory ProjectionContext"]
-    EXTEND --> RUN
-    FIXED_POINT -- no --> OUTPUT["settled ProjectionOutput"]
+    VALIDATE --> OUTPUT["ProjectionOutput"]
 
     OUTPUT --> COMMIT["commit_projection_effects transaction"]
     COMMIT --> CLEAR["clear pending row and pending time ranges"]
     COMMIT --> REPLACE_CONTEXT["replace owner context edges"]
+    REPLACE_CONTEXT --> DELTA["compare output to current context_edges"]
     COMMIT --> REPLACE_WAKES["replace owner time wakes"]
-    COMMIT --> WAKE["wake newly matched dependent facts"]
+    DELTA --> WAKE["wake newly matched dependent facts"]
     COMMIT --> EFFECTS["commit PipelineEffects"]
 
     EFFECTS --> CHILD_FACTS["project emitted child facts inline"]
