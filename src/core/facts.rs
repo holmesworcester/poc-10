@@ -155,6 +155,15 @@ pub fn fact_id(bytes: &[u8]) -> FactId {
     *blake3::hash(bytes).as_bytes()
 }
 
+/// Check a fact's content id against its own bytes.
+pub fn verify_fact_id(fact: &Fact) -> Result<(), String> {
+    if fact.id == fact_id(&fact.bytes) {
+        Ok(())
+    } else {
+        Err("fact id does not match fact bytes".to_string())
+    }
+}
+
 /// Decode a fact row after a SQL owner selects the standard fact storage columns.
 pub(crate) fn fact_from_storage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Fact> {
     let id = fact_id_column(row.get::<_, Vec<u8>>(0)?, "id")?;

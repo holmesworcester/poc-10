@@ -59,12 +59,8 @@ use crate::core::schema::{
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
 
+pub use crate::core::facts::verify_fact_id;
 pub(crate) use commit_effects::commit_runtime_effects_to_db;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PendingProjectionItem {
-    fact_id: FactId,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectionSource {
@@ -75,7 +71,6 @@ pub(crate) enum ProjectionSource {
 /// A fact that has been claimed from the pending queue and is ready to project.
 pub(crate) struct PendingFact {
     source: ProjectionSource,
-    fact_id: FactId,
     fact: Fact,
     previous_context: ContextSet,
     projection_context: ProjectionContext,
@@ -86,7 +81,6 @@ pub(crate) struct PendingFact {
 struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
-    fact_id: FactId,
     retain_self: bool,
     context: ContextSet,
     time_wakes: Vec<TimeWake>,
@@ -94,7 +88,7 @@ struct PreparedProjection {
     runtime_effects: RuntimeEffects,
 }
 
-/// Project one queued item from the selected projection source.
+/// Run and commit one queued projection item from the selected source.
 ///
 /// The caller owns queue order and batching. This function owns the mechanics
 /// for one selected queue item: load the queued fact and context, run its
@@ -109,14 +103,14 @@ pub(crate) fn project_one(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<WorkStatus, String> {
-    let Some(item) = perf::measure_result("projection_queue_load", || {
-        next_projection_item(store, source)
+    let Some(fact_id) = perf::measure_result("projection_queue_load", || match source {
+        ProjectionSource::Durable => next_durable_projection_item(store),
+        ProjectionSource::Incoming => next_incoming_projection_item(store),
     })?
     else {
         return Ok(WorkStatus::idle());
     };
 
-    let fact_id = item.fact_id;
     let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
         load_pending_fact(store, source, fact_id, mode)
     })?
@@ -134,31 +128,42 @@ pub(crate) fn project_one(
         return Ok(WorkStatus::progressed(true));
     };
 
-    process_projection_item(
-        store,
-        projector,
-        pending_fact,
-        allowed_tables,
-        fact_admission,
-    )?;
+    let source = pending_fact.source;
+    let fact_id = pending_fact.fact.id;
+    let projection = match perf::measure_result("projection_prepare_effects", || {
+        prepare_projection(projector, pending_fact, allowed_tables, fact_admission)
+    }) {
+        Ok(projection) => projection,
+        Err(_rejection) => {
+            match source {
+                ProjectionSource::Durable => store
+                    .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
+                    .map_err(|err| format!("clear rejected durable projection: {err}"))?,
+                ProjectionSource::Incoming => store
+                    .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
+                    .map(|_| ())
+                    .map_err(|err| format!("drop rejected incoming fact: {err}"))?,
+            }
+            return Ok(WorkStatus::progressed(true));
+        }
+    };
+    perf::measure_result("projection_commit_effects", || {
+        store
+            .write_transaction(|tx| {
+                perf::measure_result("projection_commit_tx_body", || {
+                    commit_projection_effects_in_tx(tx, &projection, allowed_tables, fact_admission)
+                })
+            })
+            .map_err(|err| format!("commit projection effects: {err}"))
+    })?;
     Ok(WorkStatus::progressed(true))
-}
-
-fn next_projection_item(
-    store: &Db,
-    source: ProjectionSource,
-) -> Result<Option<PendingProjectionItem>, String> {
-    match source {
-        ProjectionSource::Durable => next_durable_projection_item(store),
-        ProjectionSource::Incoming => next_incoming_projection_item(store),
-    }
 }
 
 /// Read the oldest durable pending fact id without mutating the queue.
 ///
 /// The item commit removes the row only after projection succeeds. Missing
 /// facts are handled by the queue driver as stale pending rows.
-fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
+fn next_durable_projection_item(store: &Db) -> Result<Option<FactId>, String> {
     store
         .conn()
         .query_row(
@@ -169,11 +174,7 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionIt
             LIMIT 1
             "#,
             [],
-            |row| {
-                Ok(PendingProjectionItem {
-                    fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-                })
-            },
+            |row| fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner"),
         )
         .optional()
         .map_err(|err| format!("load pending projection: {err}"))
@@ -183,7 +184,7 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionIt
 ///
 /// Incoming rows do not have separate pending queue rows. A standing need parks
 /// the incoming owner until context fanout records a pending match for it.
-fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
+fn next_incoming_projection_item(store: &Db) -> Result<Option<FactId>, String> {
     store
         .conn()
         .query_row(
@@ -205,11 +206,7 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionI
             LIMIT 1
             "#,
             [],
-            |row| {
-                Ok(PendingProjectionItem {
-                    fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")?,
-                })
-            },
+            |row| fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id"),
         )
         .optional()
         .map_err(|err| format!("load incoming facts: {err}"))
@@ -274,55 +271,10 @@ pub(crate) fn load_pending_fact(
     };
     Ok(Some(PendingFact {
         source,
-        fact_id,
         fact,
         previous_context,
         projection_context,
     }))
-}
-
-/// Run and commit one queued projection item.
-///
-/// Projection rejection consumes the queued item according to its source:
-/// durable facts keep their bytes and lose only their queued work; incoming
-/// facts are dropped because they are one-shot. Projectors that want to remove
-/// durable bytes must emit `ProjectionOutput::purge_self`.
-pub(crate) fn process_projection_item(
-    store: &Db,
-    projector: &(impl Projector + ?Sized),
-    pending_fact: PendingFact,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-) -> Result<(), String> {
-    let source = pending_fact.source;
-    let fact_id = pending_fact.fact_id;
-    let projection = match perf::measure_result("projection_prepare_effects", || {
-        prepare_projection(projector, pending_fact, allowed_tables, fact_admission)
-    }) {
-        Ok(projection) => projection,
-        Err(_rejection) => {
-            match source {
-                ProjectionSource::Durable => store
-                    .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
-                    .map_err(|err| format!("clear rejected durable projection: {err}"))?,
-                ProjectionSource::Incoming => store
-                    .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                    .map(|_| ())
-                    .map_err(|err| format!("drop rejected incoming fact: {err}"))?,
-            }
-            return Ok(());
-        }
-    };
-    perf::measure_result("projection_commit_effects", || {
-        store
-            .write_transaction(|tx| {
-                perf::measure_result("projection_commit_tx_body", || {
-                    commit_projection_effects_in_tx(tx, &projection, allowed_tables, fact_admission)
-                })
-            })
-            .map_err(|err| format!("commit projection effects: {err}"))
-    })?;
-    Ok(())
 }
 
 /// Call the protocol projector and normalize the output for SQL commit.
@@ -339,7 +291,6 @@ fn prepare_projection(
 ) -> Result<PreparedProjection, String> {
     let PendingFact {
         source,
-        fact_id,
         fact,
         previous_context,
         projection_context,
@@ -367,7 +318,6 @@ fn prepare_projection(
     Ok(PreparedProjection {
         source,
         fact,
-        fact_id,
         retain_self: output.retain_self,
         context,
         context_delta,
@@ -380,38 +330,33 @@ fn prepare_projection(
 /// fact being projected.
 fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
     for purged in &output.effects.purged_facts {
-        if *purged != fact.id {
-            return Err(format!(
-                "projector tried to purge fact {:x?} while projecting {:x?}",
-                purged, fact.id
-            ));
-        }
+        enforce_projected_owner("projector tried to purge fact", *purged, fact.id)?;
     }
     for need in &output.needs {
-        if need.owner != fact.id {
-            return Err(format!(
-                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
-                need.owner, fact.id
-            ));
-        }
+        enforce_projected_owner("projector emitted need with owner", need.owner, fact.id)?;
     }
     for offer in &output.offers {
-        if offer.owner != fact.id {
-            return Err(format!(
-                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
-                offer.owner, fact.id
-            ));
-        }
+        enforce_projected_owner("projector emitted offer with owner", offer.owner, fact.id)?;
     }
     for wake in &output.time_wakes {
-        if wake.owner != fact.id {
-            return Err(format!(
-                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
-                wake.owner, fact.id
-            ));
-        }
+        enforce_projected_owner(
+            "projector emitted time wake with owner",
+            wake.owner,
+            fact.id,
+        )?;
     }
     Ok(())
+}
+
+fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Result<(), String> {
+    if owner == fact_id {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} {:x?} that is not the projected fact {:x?}",
+            owner, fact_id
+        ))
+    }
 }
 
 /// Commit one pending fact's complete projection result.
@@ -443,10 +388,8 @@ fn commit_projection_effects_in_tx(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
-    let purges_self = projection
-        .runtime_effects
-        .purged_facts
-        .contains(&projection.fact_id);
+    let fact_id = projection.fact.id;
+    let purges_self = projection.runtime_effects.purged_facts.contains(&fact_id);
     let keep_projection_state = match projection.source {
         ProjectionSource::Durable => !purges_self,
         ProjectionSource::Incoming => projection.retain_self && !purges_self,
@@ -455,7 +398,7 @@ fn commit_projection_effects_in_tx(
     match projection.source {
         ProjectionSource::Durable => {
             perf::measure_result("projection_clear_pending_work", || {
-                clear_pending_projection_work_in_tx(tx, projection.fact_id)
+                clear_pending_projection_work_in_tx(tx, fact_id)
             })?;
         }
         ProjectionSource::Incoming => {
@@ -464,10 +407,10 @@ fn commit_projection_effects_in_tx(
             } else {
                 validate_dropped_incoming_projection(projection).map_err(sqlite_string_error)?;
                 perf::measure_result("projection_replace_context", || {
-                    delete_rows_by_owner_in_tx(tx, CONTEXT_EDGES, projection.fact_id)
+                    delete_rows_by_owner_in_tx(tx, CONTEXT_EDGES, fact_id)
                 })?;
                 perf::measure_result("projection_delete_incoming_fact", || {
-                    delete_incoming_fact_in_tx(tx, projection.fact_id)
+                    delete_incoming_fact_in_tx(tx, fact_id)
                 })?;
             }
         }
@@ -475,10 +418,10 @@ fn commit_projection_effects_in_tx(
 
     if keep_projection_state {
         perf::measure_result("projection_replace_context", || {
-            replace_needs_and_append_offers_for_owner(tx, projection.fact_id, &projection.context)
+            replace_needs_and_append_offers_for_owner(tx, fact_id, &projection.context)
         })?;
         perf::measure_result("projection_replace_time_wakes", || {
-            replace_stored_time_wake_owner_rows(tx, projection.fact_id, &projection.time_wakes)
+            replace_stored_time_wake_owner_rows(tx, fact_id, &projection.time_wakes)
         })?;
         perf::measure_result("projection_wake_context_matches", || {
             wake_context_matches_in_tx(tx, &projection.context_delta).map_err(sqlite_string_error)
@@ -649,9 +592,10 @@ pub(crate) mod commit_effects {
     use crate::core::schema::{INTENTS, LOCAL_INTENTS};
     use std::collections::BTreeMap;
 
-    use super::context_db::record_pending_matches_for_stored_needs_in_tx;
     use super::route::FactAdmissionFn;
-    use super::{insert_fact_and_pending_in_tx, insert_incoming_fact_in_tx, purge_fact_in_tx};
+    use super::{
+        insert_facts_and_record_matches_in_tx, insert_incoming_fact_in_tx, purge_fact_in_tx,
+    };
 
     /// Counts of newly inserted follow-up work after an effect commit.
     ///
@@ -700,10 +644,11 @@ pub(crate) mod commit_effects {
         let Some(fact_admission) = fact_admission else {
             return Ok(());
         };
-        for fact in effects.facts.iter().chain(effects.incoming_facts.iter()) {
-            fact_admission(fact)?;
-        }
-        Ok(())
+        effects
+            .facts
+            .iter()
+            .chain(effects.incoming_facts.iter())
+            .try_for_each(fact_admission)
     }
 
     /// Validate that a batch can be written to one intent queue.
@@ -745,28 +690,20 @@ pub(crate) mod commit_effects {
         mutations: &[RowMutation],
         allowed_tables: &[TableName],
     ) -> Result<(), String> {
-        for mutation in mutations {
-            validate_row_mutation_table(mutation, allowed_tables)?;
-        }
-        Ok(())
-    }
-
-    fn validate_row_mutation_table(
-        mutation: &RowMutation,
-        allowed_tables: &[TableName],
-    ) -> Result<(), String> {
-        let table = match mutation {
-            RowMutation::InsertValues(insert) => insert.table,
-            RowMutation::DeleteWhere(delete) => delete.table,
-        };
-        if allowed_tables.contains(&table) {
-            Ok(())
-        } else {
-            Err(format!(
-                "row mutation table {} is not registered",
-                table.as_str()
-            ))
-        }
+        mutations.iter().try_for_each(|mutation| {
+            let table = match mutation {
+                RowMutation::InsertValues(insert) => insert.table,
+                RowMutation::DeleteWhere(delete) => delete.table,
+            };
+            if allowed_tables.contains(&table) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "row mutation table {} is not registered",
+                    table.as_str()
+                ))
+            }
+        })
     }
 
     /// Adapt a `String` error into the [`rusqlite::Error`] a transaction closure
@@ -817,14 +754,7 @@ pub(crate) mod commit_effects {
             purge_fact_in_tx(tx, *purged)?;
         }
 
-        let mut facts = 0usize;
-        for fact in &effects.facts {
-            if insert_fact_and_pending_in_tx(tx, fact)? {
-                record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
-                    .map_err(sqlite_string_error)?;
-                facts += 1;
-            }
-        }
+        let facts = insert_facts_and_record_matches_in_tx(tx, &effects.facts)?;
 
         for fact in &effects.incoming_facts {
             insert_incoming_fact_in_tx(tx, fact)?;
@@ -834,33 +764,32 @@ pub(crate) mod commit_effects {
             .map_err(sqlite_string_error)?;
         tx.apply_row_mutations_in_tx(&effects.row_mutations)?;
 
-        let mut intents = 0usize;
-        for intent in &effects.intents {
-            if crate::core::handle_intent::insert_intent_work_row_in_tx(
-                tx,
-                INTENTS,
-                &intent.work_row(),
-            )? {
-                intents += 1;
-            }
-        }
-
-        let mut local_intents = 0usize;
-        for intent in &effects.local_intents {
-            if crate::core::handle_intent::insert_intent_work_row_in_tx(
-                tx,
-                LOCAL_INTENTS,
-                &intent.work_row(),
-            )? {
-                local_intents += 1;
-            }
-        }
+        let intents = insert_intents_in_tx(tx, INTENTS, &effects.intents)?;
+        let local_intents = insert_intents_in_tx(tx, LOCAL_INTENTS, &effects.local_intents)?;
 
         Ok(RuntimeEffectCounts {
             facts,
             intents,
             local_intents,
         })
+    }
+
+    fn insert_intents_in_tx(
+        tx: &Db,
+        table: TableName,
+        intents: &[Intent],
+    ) -> rusqlite::Result<usize> {
+        let mut inserted = 0usize;
+        for intent in intents {
+            if crate::core::handle_intent::insert_intent_work_row_in_tx(
+                tx,
+                table,
+                &intent.work_row(),
+            )? {
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
     }
 }
 pub mod context {
@@ -925,11 +854,8 @@ pub mod context {
         /// prefer the matched-payload helpers when a proof depends on a need.
         pub fn new(offers: Vec<ContextOffer>) -> Self {
             Self {
-                mode: ProjectionMode::Normal,
                 offers,
-                matched: Vec::new(),
-                matched_by_need: BTreeMap::new(),
-                time_ranges: Vec::new(),
+                ..Self::default()
             }
         }
 
@@ -943,11 +869,10 @@ pub mod context {
             offers.dedup();
             let matched_by_need = index_matches_by_need(&matched);
             Self {
-                mode: ProjectionMode::Normal,
                 offers,
                 matched,
                 matched_by_need,
-                time_ranges: Vec::new(),
+                ..Self::default()
             }
         }
 
@@ -1608,13 +1533,7 @@ pub mod effects {
         scope: crate::core::facts::FactScope,
         key: ContextKey,
     ) -> ContextNeed {
-        ContextNeed {
-            owner,
-            role: fact_purged_role(),
-            scope,
-            start_key: key.clone(),
-            end_key: key,
-        }
+        fact_purged_range_need(owner, scope, key.clone(), key)
     }
 
     pub fn fact_purged_offer(
@@ -1622,13 +1541,7 @@ pub mod effects {
         scope: crate::core::facts::FactScope,
         key: ContextKey,
     ) -> ContextOffer {
-        ContextOffer {
-            owner,
-            role: fact_purged_role(),
-            scope,
-            start_key: key.clone(),
-            end_key: key,
-        }
+        fact_purged_range_offer(owner, scope, key.clone(), key)
     }
 
     pub fn fact_purged_range_need(
@@ -2046,6 +1959,18 @@ pub(crate) fn insert_fact_and_pending_in_tx(store: &Db, fact: &Fact) -> rusqlite
     Ok(inserted)
 }
 
+fn insert_facts_and_record_matches_in_tx(store: &Db, facts: &[Fact]) -> rusqlite::Result<usize> {
+    let mut inserted = 0;
+    for fact in facts {
+        if insert_fact_and_pending_in_tx(store, fact)? {
+            context_db::record_pending_matches_for_stored_needs_in_tx(store, fact.id)
+                .map_err(commit_effects::sqlite_string_error)?;
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
+}
+
 fn insert_pending_owner_in_tx(store: &Db, owner: FactId) -> rusqlite::Result<usize> {
     store.conn().execute(
         "INSERT OR IGNORE INTO pending_projection (owner, queued_at) VALUES (?1, ?2)",
@@ -2122,11 +2047,6 @@ fn insert_retained_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool>
     let fact_bytes_inserted = insert_fact_bytes_in_tx(store, fact)?;
     let admission_inserted = insert_local_fact_admission_in_tx(store, fact)? > 0;
     Ok(fact_bytes_inserted || admission_inserted)
-}
-
-#[cfg(test)]
-fn incoming_fact_by_id(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
-    incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
 }
 
 fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
@@ -2250,10 +2170,9 @@ fn delete_owner_rows_from_tables(
 }
 
 pub(crate) fn pending_fact_count(store: &Db) -> usize {
-    let durable = store
+    store
         .table_row_count(PENDING_PROJECTION)
-        .expect("pending projection count should load from database");
-    durable
+        .expect("pending projection count should load from database")
         + store
             .table_row_count(INCOMING_FACTS)
             .expect("incoming fact count should load from database")
@@ -2265,10 +2184,7 @@ pub(crate) fn submit_fact_with_admission(
     fact: Fact,
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
-    if let Some(admit) = fact_admission {
-        admit(&fact)?;
-    }
-    submit_fact_to_db(store, fact)
+    submit_facts_with_admission(store, [fact], fact_admission).map(|inserted| inserted > 0)
 }
 
 /// Admit many facts after the runtime's protocol admission check.
@@ -2279,9 +2195,7 @@ pub(crate) fn submit_facts_with_admission(
 ) -> Result<usize, String> {
     let facts = facts.into_iter().collect::<Vec<_>>();
     if let Some(admit) = fact_admission {
-        for fact in &facts {
-            admit(fact)?;
-        }
+        facts.iter().try_for_each(admit)?;
     }
     submit_facts_to_db(store, facts)
 }
@@ -2295,8 +2209,10 @@ pub(crate) fn submit_authored_facts_to_db<T>(
     label: &str,
 ) -> Result<T, String> {
     let (receipt, facts) = output.into_parts();
-    let mut effects = RuntimeEffects::new();
-    effects.facts = facts;
+    let effects = RuntimeEffects {
+        facts,
+        ..RuntimeEffects::new()
+    };
     commit_runtime_effects_to_db(store, &effects, allowed_tables, fact_admission, label)?;
     Ok(receipt)
 }
@@ -2323,41 +2239,15 @@ pub(crate) fn process_due_time_range(
         .map_err(|err| format!("process due time range: {err}"))
 }
 
-/// Insert a fact and mark it pending in the same transaction.
-pub(crate) fn submit_fact_to_db(store: &Db, fact: Fact) -> Result<bool, String> {
-    let inserted = store
-        .write_transaction(|tx| {
-            let inserted = insert_fact_and_pending_in_tx(tx, &fact)?;
-            if inserted {
-                context_db::record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
-                    .map_err(commit_effects::sqlite_string_error)?;
-            }
-            Ok(inserted)
-        })
-        .map_err(|err| format!("submit fact: {err}"))?;
-    Ok(inserted)
-}
-
 /// Bulk insert facts with one transaction and one pending row per insert.
 pub(crate) fn submit_facts_to_db(
     store: &Db,
     facts: impl IntoIterator<Item = Fact>,
 ) -> Result<usize, String> {
     let facts = facts.into_iter().collect::<Vec<_>>();
-    let inserted = store
-        .write_transaction(|tx| {
-            let mut inserted = 0;
-            for fact in &facts {
-                if insert_fact_and_pending_in_tx(tx, fact)? {
-                    context_db::record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
-                        .map_err(commit_effects::sqlite_string_error)?;
-                    inserted += 1;
-                }
-            }
-            Ok(inserted)
-        })
-        .map_err(|err| format!("submit facts: {err}"))?;
-    Ok(inserted)
+    store
+        .write_transaction(|tx| insert_facts_and_record_matches_in_tx(tx, &facts))
+        .map_err(|err| format!("submit facts: {err}"))
 }
 
 fn enqueue_due_time_wakes_in_tx(
@@ -2480,27 +2370,17 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
         .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
 }
 
-/// Check a fact's content id against its own bytes.
-///
-/// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally
-/// holds. Protocol-local validation helpers re-check it when they need a
-/// self-contained proof over raw bytes.
-pub fn verify_fact_id(fact: &crate::core::facts::Fact) -> Result<(), String> {
-    if fact.id == crate::core::facts::fact_id(&fact.bytes) {
-        Ok(())
-    } else {
-        Err("fact id does not match fact bytes".to_string())
-    }
-}
-
 #[cfg(test)]
 mod contract_tests {
     use super::*;
     use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
     use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
-    use crate::core::project_fact::{submit_fact_to_db, submit_facts_to_db};
     use rusqlite::OptionalExtension;
+
+    fn submit_fact_to_db(store: &Db, fact: Fact) -> Result<bool, String> {
+        submit_facts_to_db(store, [fact]).map(|inserted| inserted > 0)
+    }
 
     fn run_projection(
         projector: &(impl Projector + ?Sized),
@@ -2512,7 +2392,6 @@ mod contract_tests {
             projector,
             PendingFact {
                 source: ProjectionSource::Durable,
-                fact_id: fact.id,
                 fact: fact.clone(),
                 previous_context: previous_context.clone(),
                 projection_context,
@@ -3364,6 +3243,10 @@ mod contract_tests {
         Ok(progress)
     }
 
+    fn incoming_fact_by_id(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+        incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
+    }
+
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     struct TestProjectionDrain {
         status: WorkStatus,
@@ -3884,9 +3767,7 @@ mod tests {
         .expect("seed incoming facts");
 
         assert_eq!(
-            next_incoming_projection_item(&db)
-                .expect("next incoming")
-                .map(|item| item.fact_id),
+            next_incoming_projection_item(&db).expect("next incoming"),
             Some(ready.id)
         );
 
@@ -3907,9 +3788,7 @@ mod tests {
             .expect("record pending match");
 
         assert_eq!(
-            next_incoming_projection_item(&db)
-                .expect("matched incoming")
-                .map(|item| item.fact_id),
+            next_incoming_projection_item(&db).expect("matched incoming"),
             Some(blocked.id)
         );
     }
