@@ -13,8 +13,9 @@
 //!   `local_fact_admissions`, or drops them.
 //! - `pending_projection` is the work queue keyed by fact id (`owner`) plus the
 //!   time the owner entered the queue.
-//! - `pending_projection_matches` and `pending_time_ranges` carry the context
-//!   that woke a queued owner. They are consumed with the owner row.
+//! - `pending_projection_matches` and `pending_time_ranges` are pending input
+//!   tables: they carry context matches and time ranges that woke an owner.
+//!   They are consumed with the owner row.
 //! - `context_edges` stores standing needs/offers, and `time_wakes` stores
 //!   standing future wake requests emitted by durable projection.
 //!
@@ -40,12 +41,16 @@
 use self::commit_effects::{
     commit_runtime_effects_in_tx, sqlite_string_error, validate_runtime_effects_for_admission,
 };
+#[cfg(test)]
 use self::context_db::{
-    insert_context_need_in_tx, insert_context_offer_in_tx, pending_matching_context_for_owner,
-    stored_context_for_owner, wake_context_matches_in_tx,
+    insert_context_need_in_tx, insert_context_offer_in_tx, stored_context_for_owner,
+};
+use self::context_db::{
+    pending_projection_input_context_for_owner, replace_context_for_owner_in_tx,
+    wake_context_matches_in_tx,
 };
 use crate::core::command::AuthoredFacts;
-use crate::core::context::{ContextSet, ContextSetDelta};
+use crate::core::context::ContextSet;
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{
@@ -65,7 +70,9 @@ pub(crate) use commit_effects::commit_runtime_effects_to_db;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectionSource {
+    /// Retained facts loaded from durable fact storage and local admission rows.
     Durable,
+    /// Volatile process-local intake. Projection either retains or drops it.
     Incoming,
 }
 
@@ -73,7 +80,7 @@ pub(crate) enum ProjectionSource {
 pub(crate) struct PendingFact {
     source: ProjectionSource,
     fact: Fact,
-    projection_context: ProjectionContext,
+    pending_inputs: ProjectionContext,
 }
 
 /// A projector result plus the pending-fact metadata needed to commit it.
@@ -82,12 +89,70 @@ struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
     retain_self: bool,
-    context: ContextSet,
+    projected_context: ContextSet,
     time_wakes: Vec<TimeWake>,
     runtime_effects: RuntimeEffects,
 }
 
-/// Run and commit one queued projection item from the selected source.
+enum DrainResult {
+    Idle,
+    CleanedStaleInput,
+    Ready(PendingFact),
+}
+
+enum ProjectResult {
+    Rejected,
+    Ready(PreparedProjection),
+}
+
+// =============================================================================
+// Central Procedure
+// =============================================================================
+
+/// Project one fact-like input.
+///
+/// Run and commit one queued projection item.
+///
+/// This is the whole projection worker in miniature:
+///
+/// 1. Drain one pending input from SQL into an in-memory `PendingFact`.
+/// 2. Run exactly one protocol projector over that fact plus pending inputs.
+/// 3. Commit the projector output in one SQL transaction.
+///
+/// Everything below this function exists to keep those three stages precise.
+/// Drain owns queue selection and stale cleanup. Project owns pure projector
+/// execution and output validation. Commit owns all durable state changes,
+/// including current-context comparison and wake fanout.
+fn project_one_fact(
+    store: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    mode: ProjectionMode,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<WorkStatus, String> {
+    let pending_fact = match drain_one_projection_input(store, source, mode)? {
+        DrainResult::Idle => return Ok(WorkStatus::idle()),
+        DrainResult::CleanedStaleInput => return Ok(WorkStatus::progressed(true)),
+        DrainResult::Ready(pending_fact) => pending_fact,
+    };
+
+    let projected_fact = match project_pending_fact(
+        store,
+        projector,
+        pending_fact,
+        allowed_tables,
+        fact_admission,
+    )? {
+        ProjectResult::Rejected => return Ok(WorkStatus::progressed(true)),
+        ProjectResult::Ready(projected_fact) => projected_fact,
+    };
+
+    commit_projected_fact(store, &projected_fact, allowed_tables, fact_admission)?;
+    Ok(WorkStatus::progressed(true))
+}
+
+/// Runtime-facing wrapper for the central projection procedure.
 ///
 /// The caller owns queue order and batching. This function owns the mechanics
 /// for one selected queue item: load the queued fact and context, run its
@@ -102,31 +167,60 @@ pub(crate) fn project_one(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<WorkStatus, String> {
-    let Some(fact_id) = perf::measure_result("projection_queue_load", || match source {
-        ProjectionSource::Durable => next_durable_projection_item(store),
-        ProjectionSource::Incoming => next_incoming_projection_item(store),
-    })?
+    project_one_fact(
+        store,
+        projector,
+        source,
+        mode,
+        allowed_tables,
+        fact_admission,
+    )
+}
+
+// =============================================================================
+// Stages
+// =============================================================================
+
+/// Stage 1: drain one pending projection input.
+///
+/// Durable projection drains from `pending_projection`; incoming projection
+/// drains directly from volatile `incoming_facts`. In either case this stage
+/// returns only a ready-to-project fact plus pending inputs, or consumes stale
+/// work that no longer has bytes behind it.
+fn drain_one_projection_input(
+    store: &Db,
+    source: ProjectionSource,
+    mode: ProjectionMode,
+) -> Result<DrainResult, String> {
+    let Some(fact_id) =
+        perf::measure_result("projection_queue_load", || source.next_pending_owner(store))?
     else {
-        return Ok(WorkStatus::idle());
+        return Ok(DrainResult::Idle);
     };
 
     let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
         load_pending_fact(store, source, fact_id, mode)
     })?
     else {
-        match source {
-            ProjectionSource::Durable => store
-                .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
-                .map(|_| ())
-                .map_err(|err| format!("purge stale durable pending fact: {err}"))?,
-            ProjectionSource::Incoming => store
-                .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                .map(|_| ())
-                .map_err(|err| format!("purge stale incoming fact: {err}"))?,
-        }
-        return Ok(WorkStatus::progressed(true));
+        source.clear_missing_pending(store, fact_id)?;
+        return Ok(DrainResult::CleanedStaleInput);
     };
 
+    Ok(DrainResult::Ready(pending_fact))
+}
+
+/// Stage 2: run the protocol projector and validate its uncommitted output.
+///
+/// A projector rejection consumes the current pending work but keeps retained
+/// fact bytes as evidence. A successful projector run returns a normalized
+/// `PreparedProjection`; it has not modified SQL yet.
+fn project_pending_fact(
+    store: &Db,
+    projector: &(impl Projector + ?Sized),
+    pending_fact: PendingFact,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<ProjectResult, String> {
     let source = pending_fact.source;
     let fact_id = pending_fact.fact.id;
     let projection = match perf::measure_result("projection_prepare_effects", || {
@@ -134,28 +228,129 @@ pub(crate) fn project_one(
     }) {
         Ok(projection) => projection,
         Err(_rejection) => {
-            match source {
-                ProjectionSource::Durable => store
-                    .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
-                    .map_err(|err| format!("clear rejected durable projection: {err}"))?,
-                ProjectionSource::Incoming => store
-                    .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                    .map(|_| ())
-                    .map_err(|err| format!("drop rejected incoming fact: {err}"))?,
-            }
-            return Ok(WorkStatus::progressed(true));
+            source.clear_rejected_pending(store, fact_id)?;
+            return Ok(ProjectResult::Rejected);
         }
     };
+    Ok(ProjectResult::Ready(projection))
+}
+
+/// Stage 3: commit one projector output as a single durable boundary.
+///
+/// The projector has already returned all desired effects. Commit is where those
+/// effects become visible: source queue/intake rows are consumed, standing
+/// projection state is replaced, newly visible context wakes dependent facts,
+/// and runtime effects are admitted last.
+///
+/// This is the `commit_projection_effects` boundary from the old pipeline shape,
+/// kept as a named stage so the central procedure stays drain -> project -> commit.
+fn commit_projected_fact(
+    store: &Db,
+    projection: &PreparedProjection,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<(), String> {
     perf::measure_result("projection_commit_effects", || {
         store
             .write_transaction(|tx| {
                 perf::measure_result("projection_commit_tx_body", || {
-                    commit_projection_effects_in_tx(tx, &projection, allowed_tables, fact_admission)
+                    commit_projected_fact_in_tx(tx, projection, allowed_tables, fact_admission)
                 })
             })
             .map_err(|err| format!("commit projection effects: {err}"))
-    })?;
-    Ok(WorkStatus::progressed(true))
+    })
+}
+
+// =============================================================================
+// Drain Stage Helpers
+// =============================================================================
+
+impl ProjectionSource {
+    fn next_pending_owner(self, store: &Db) -> Result<Option<FactId>, String> {
+        match self {
+            ProjectionSource::Durable => next_durable_projection_item(store),
+            ProjectionSource::Incoming => next_incoming_projection_item(store),
+        }
+    }
+
+    fn load_fact(self, store: &Db, fact_id: FactId) -> Result<Option<Fact>, String> {
+        match self {
+            ProjectionSource::Durable => store
+                .conn()
+                .query_row(
+                    "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+                     FROM facts f
+                     JOIN local_fact_admissions m ON m.fact_id = f.id
+                     WHERE f.id = ?1
+                     LIMIT 1",
+                    params![fact_id.as_slice()],
+                    validate_fact_query_result,
+                )
+                .optional()
+                .map_err(|err| format!("load durable projection fact: {err}")),
+            ProjectionSource::Incoming => store
+                .conn()
+                .query_row(
+                    "SELECT id, scope, scope_kind, scope_id, received_at, bytes
+                     FROM incoming_facts
+                     WHERE id = ?1
+                     LIMIT 1",
+                    params![fact_id.as_slice()],
+                    validate_fact_query_result,
+                )
+                .optional()
+                .map_err(|err| format!("load incoming projection fact: {err}")),
+        }
+    }
+
+    fn load_pending_inputs(
+        self,
+        store: &Db,
+        fact_id: FactId,
+        mode: ProjectionMode,
+    ) -> Result<ProjectionContext, String> {
+        match self {
+            ProjectionSource::Durable => {
+                let time_ranges =
+                    perf::measure_result("projection_load_pending_time_inputs", || {
+                        pending_time_ranges_for_owner(store, fact_id)
+                    })?;
+                Ok(
+                    perf::measure_result("projection_load_pending_context_inputs", || {
+                        pending_projection_input_context_for_owner(store, &fact_id)
+                    })?
+                    .with_time_ranges(time_ranges)
+                    .with_mode(mode),
+                )
+            }
+            ProjectionSource::Incoming => Ok(ProjectionContext::default().with_mode(mode)),
+        }
+    }
+
+    fn clear_missing_pending(self, store: &Db, fact_id: FactId) -> Result<(), String> {
+        match self {
+            ProjectionSource::Durable => store
+                .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
+                .map(|_| ())
+                .map_err(|err| format!("purge stale durable pending fact: {err}")),
+            ProjectionSource::Incoming => store
+                .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
+                .map(|_| ())
+                .map_err(|err| format!("purge stale incoming fact: {err}")),
+        }
+    }
+
+    fn clear_rejected_pending(self, store: &Db, fact_id: FactId) -> Result<(), String> {
+        match self {
+            ProjectionSource::Durable => store
+                .write_transaction(|tx| clear_pending_projection_work_in_tx(tx, fact_id))
+                .map_err(|err| format!("clear rejected durable projection: {err}")),
+            ProjectionSource::Incoming => store
+                .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
+                .map(|_| ())
+                .map_err(|err| format!("drop rejected incoming fact: {err}")),
+        }
+    }
 }
 
 /// Read the oldest durable pending fact id without mutating the queue.
@@ -213,63 +408,29 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<FactId>, String> {
 
 /// Load everything projection needs for one fact.
 ///
-/// `projection_context` is the matched input context exposed to the projector
-/// for this run, including any due time ranges.
+/// `pending_inputs` is the matched context and due time ranges exposed to the
+/// projector for this run.
 pub(crate) fn load_pending_fact(
     store: &Db,
     source: ProjectionSource,
     fact_id: FactId,
     mode: ProjectionMode,
 ) -> Result<Option<PendingFact>, String> {
-    let fact = perf::measure_result("projection_load_fact", || match source {
-        ProjectionSource::Durable => store
-            .conn()
-            .query_row(
-                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-                 FROM facts f
-                 JOIN local_fact_admissions m ON m.fact_id = f.id
-                 WHERE f.id = ?1
-                 LIMIT 1",
-                params![fact_id.as_slice()],
-                validate_fact_query_result,
-            )
-            .optional()
-            .map_err(|err| format!("load durable projection fact: {err}")),
-        ProjectionSource::Incoming => store
-            .conn()
-            .query_row(
-                "SELECT id, scope, scope_kind, scope_id, received_at, bytes
-                 FROM incoming_facts
-                 WHERE id = ?1
-                 LIMIT 1",
-                params![fact_id.as_slice()],
-                validate_fact_query_result,
-            )
-            .optional()
-            .map_err(|err| format!("load incoming projection fact: {err}")),
-    })?;
+    let fact = perf::measure_result("projection_load_fact", || source.load_fact(store, fact_id))?;
     let Some(fact) = fact else {
         return Ok(None);
     };
-    let projection_context = match source {
-        ProjectionSource::Durable => {
-            let time_ranges = perf::measure_result("projection_load_pending_time_ranges", || {
-                pending_time_ranges_for_owner(store, fact_id)
-            })?;
-            perf::measure_result("projection_load_pending_matches", || {
-                pending_matching_context_for_owner(store, &fact_id)
-            })?
-            .with_time_ranges(time_ranges)
-            .with_mode(mode)
-        }
-        ProjectionSource::Incoming => ProjectionContext::default().with_mode(mode),
-    };
+    let pending_inputs = source.load_pending_inputs(store, fact_id, mode)?;
     Ok(Some(PendingFact {
         source,
         fact,
-        projection_context,
+        pending_inputs,
     }))
 }
+
+// =============================================================================
+// Project Stage Helpers
+// =============================================================================
 
 /// Call the protocol projector and normalize the output for SQL commit.
 ///
@@ -286,13 +447,13 @@ fn prepare_projection(
     let PendingFact {
         source,
         fact,
-        projection_context,
+        pending_inputs,
     } = pending_fact;
     let output = perf::measure_result("projection_projector_cpu", || {
-        projector.project(&fact, &projection_context)
+        projector.project(&fact, &pending_inputs)
     })?;
     enforce_owner_is_self(&fact, &output)?;
-    let context = output.context_set();
+    let projected_context = output.context_set();
     let runtime_effects = output.effects;
     perf::measure_result("projection_validate_effects", || {
         validate_runtime_effects_for_admission(&runtime_effects, allowed_tables, fact_admission)
@@ -301,7 +462,7 @@ fn prepare_projection(
         source,
         fact,
         retain_self: output.retain_self,
-        context,
+        projected_context,
         time_wakes: output.time_wakes,
         runtime_effects,
     })
@@ -340,6 +501,10 @@ fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Resul
     }
 }
 
+// =============================================================================
+// Commit Stage Helpers
+// =============================================================================
+
 /// Commit one pending fact's complete projection result.
 ///
 /// This is the projection boundary, the same way `commit_handler_output` is the
@@ -360,55 +525,33 @@ fn enforce_projected_owner(label: &str, owner: FactId, fact_id: FactId) -> Resul
 /// - Record durable intents.
 /// - Record ephemeral intents in the temp local queue.
 ///
-/// Incoming facts are one-shot. They may emit needs as transient probes, but
-/// they cannot leave standing offers or time wakes behind after the projection
-/// commits.
-fn commit_projection_effects_in_tx(
+/// Incoming rows are volatile one-shot intake. They may emit needs as transient
+/// probes, but they cannot leave standing offers or time wakes behind unless
+/// projection explicitly retains them as normal facts.
+fn commit_projected_fact_in_tx(
     tx: &Db,
     projection: &PreparedProjection,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> rusqlite::Result<()> {
     let fact_id = projection.fact.id;
-    let purges_self = projection.runtime_effects.purged_facts.contains(&fact_id);
-    let keep_projection_state = match projection.source {
-        ProjectionSource::Durable => !purges_self,
-        ProjectionSource::Incoming => projection.retain_self && !purges_self,
-    };
+    let keep_projection_state = projection_keeps_standing_state(projection);
 
-    match projection.source {
-        ProjectionSource::Durable => {
-            perf::measure_result("projection_clear_pending_work", || {
-                clear_pending_projection_work_in_tx(tx, fact_id)
-            })?;
-        }
-        ProjectionSource::Incoming => {
-            if keep_projection_state {
-                move_incoming_to_retained_in_tx(tx, &projection.fact)?;
-            } else {
-                validate_dropped_incoming_projection(projection).map_err(sqlite_string_error)?;
-                perf::measure_result("projection_replace_context", || {
-                    delete_rows_by_owner_in_tx(tx, CONTEXT_EDGES, fact_id)
-                })?;
-                perf::measure_result("projection_delete_incoming_fact", || {
-                    delete_incoming_fact_in_tx(tx, fact_id)
-                })?;
-            }
-        }
-    }
+    // First consume the source marker. Durable inputs clear pending work.
+    // Volatile incoming inputs either move into retained fact storage or
+    // disappear. No projected state is published before this boundary is settled.
+    commit_projection_source_boundary_in_tx(tx, projection, fact_id, keep_projection_state)?;
 
     if keep_projection_state {
-        let context_delta = perf::measure_result("projection_replace_context", || {
-            replace_needs_and_append_offers_for_owner(tx, fact_id, &projection.context)
-        })?;
-        perf::measure_result("projection_replace_time_wakes", || {
-            replace_stored_time_wake_owner_rows(tx, fact_id, &projection.time_wakes)
-        })?;
-        perf::measure_result("projection_wake_context_matches", || {
-            wake_context_matches_in_tx(tx, &context_delta).map_err(sqlite_string_error)
-        })?;
+        // Then publish standing projection state. Context replacement computes
+        // additions against the transaction's current `context_edges`; only those
+        // additions can wake dependent owners.
+        commit_standing_projection_state_in_tx(tx, projection, fact_id)?;
     }
 
+    // Finally commit ordinary runtime effects. Facts, row mutations, and intents
+    // become visible only after the queue/intake row and projection-owned state
+    // have committed successfully.
     perf::measure_result("projection_commit_runtime_effects", || {
         commit_runtime_effects_in_tx(
             tx,
@@ -420,18 +563,82 @@ fn commit_projection_effects_in_tx(
     Ok(())
 }
 
+fn projection_keeps_standing_state(projection: &PreparedProjection) -> bool {
+    let fact_id = projection.fact.id;
+    let purges_self = projection.runtime_effects.purged_facts.contains(&fact_id);
+    match projection.source {
+        ProjectionSource::Durable => !purges_self,
+        ProjectionSource::Incoming => projection.retain_self && !purges_self,
+    }
+}
+
+/// Consume the input source row without publishing projection-owned state yet.
+///
+/// Durable inputs clear pending work. Incoming inputs are volatile: projection
+/// either retains them as ordinary facts or drops them. Dropping validates that
+/// no durable context/time state escapes from the volatile row.
+fn commit_projection_source_boundary_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    fact_id: FactId,
+    keep_projection_state: bool,
+) -> rusqlite::Result<()> {
+    match projection.source {
+        ProjectionSource::Durable => perf::measure_result("projection_clear_pending_work", || {
+            clear_pending_projection_work_in_tx(tx, fact_id)
+        }),
+        ProjectionSource::Incoming if keep_projection_state => {
+            // Retention is the only path from volatile intake to durable fact
+            // storage. `move_incoming_to_retained_in_tx` also clears transient
+            // owner rows before the retained projection state is written below.
+            move_incoming_to_retained_in_tx(tx, &projection.fact).map(|_| ())
+        }
+        ProjectionSource::Incoming => {
+            // A dropped incoming row is allowed to produce effects only when it
+            // has no unresolved transient needs and leaves no durable projection
+            // state behind.
+            validate_dropped_incoming_projection(projection).map_err(sqlite_string_error)?;
+            perf::measure_result("projection_delete_incoming_fact", || {
+                delete_incoming_fact_in_tx(tx, fact_id).map(|_| ())
+            })
+        }
+    }
+}
+
+/// Publish owner-scoped projection state and wake dependents from additions.
+///
+/// Context comes first because wake fanout needs the current `context_edges`
+/// view. Time wakes are also replacement state, but they do not influence
+/// context fanout.
+fn commit_standing_projection_state_in_tx(
+    tx: &Db,
+    projection: &PreparedProjection,
+    fact_id: FactId,
+) -> rusqlite::Result<()> {
+    let context_additions = perf::measure_result("projection_replace_context", || {
+        replace_context_for_owner_in_tx(tx, fact_id, &projection.projected_context)
+    })?;
+    perf::measure_result("projection_replace_time_wakes", || {
+        replace_stored_time_wake_owner_rows(tx, fact_id, &projection.time_wakes)
+    })?;
+    perf::measure_result("projection_wake_context_matches", || {
+        wake_context_matches_in_tx(tx, &context_additions).map_err(sqlite_string_error)
+    })?;
+    Ok(())
+}
+
 fn validate_dropped_incoming_projection(projection: &PreparedProjection) -> Result<(), String> {
     // A dropped incoming fact is a one-shot input: it cannot leave standing
     // projection state behind. Runtime effects are allowed only after all
     // transient needs are resolved; otherwise core would commit effects from a
     // projection that explicitly said it still lacked context.
-    if !projection.context.offers.is_empty() {
+    if !projection.projected_context.offers.is_empty() {
         return Err("dropped incoming fact cannot emit durable offers".to_string());
     }
     if !projection.time_wakes.is_empty() {
         return Err("dropped incoming fact cannot emit time wakes".to_string());
     }
-    if !projection.context.needs.is_empty() && !projection.runtime_effects.is_empty() {
+    if !projection.projected_context.needs.is_empty() && !projection.runtime_effects.is_empty() {
         return Err(
             "dropped incoming fact cannot emit effects while transient needs remain".to_string(),
         );
@@ -460,60 +667,6 @@ fn delete_rows_by_owner_in_tx(
         &format!("DELETE FROM {table} WHERE owner = ?1"),
         params![owner.as_slice()],
     )
-}
-
-/// Replace this fact's standing needs, append its offers, and report additions.
-///
-/// Needs are current subscriptions, so each successful durable projection
-/// replaces the owner's need rows. Offers are durable evidence emitted by an
-/// immutable fact, so they are inserted idempotently and remain until the fact
-/// is purged. The delta is computed against current stored context inside the
-/// commit transaction rather than against queue-time projection state.
-fn replace_needs_and_append_offers_for_owner(
-    store: &Db,
-    owner: FactId,
-    context: &ContextSet,
-) -> rusqlite::Result<ContextSetDelta> {
-    let previous =
-        stored_context_for_owner(store, &owner).map_err(rusqlite::Error::InvalidParameterName)?;
-    let previous_needs = previous
-        .needs
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let next_needs = context
-        .needs
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let previous_offers = previous
-        .offers
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let next_offers = context
-        .offers
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let delta = ContextSetDelta {
-        added_needs: next_needs.difference(&previous_needs).cloned().collect(),
-        removed_needs: previous_needs.difference(&next_needs).cloned().collect(),
-        added_offers: next_offers.difference(&previous_offers).cloned().collect(),
-        removed_offers: Vec::new(),
-    };
-
-    store.conn().execute(
-        "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'need'",
-        params![owner.as_slice()],
-    )?;
-    for need in &context.needs {
-        insert_context_need_in_tx(store, need)?;
-    }
-    for offer in &context.offers {
-        insert_context_offer_in_tx(store, offer)?;
-    }
-    Ok(delta)
 }
 
 /// Replace all time wakes owned by this fact.
@@ -1013,7 +1166,8 @@ pub(crate) mod context_db {
     //! domain-owned key encoders/validators.
 
     use crate::core::context::{
-        scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet, ContextSetDelta, Role,
+        context_set_additions, scope_key, ContextKey, ContextNeed, ContextOffer, ContextSet,
+        ContextSetAdditions, Role,
     };
     use crate::core::db::Db;
     use crate::core::facts::{Fact, FactId, FactScope, ScopeKind};
@@ -1036,6 +1190,35 @@ pub(crate) mod context_db {
             offers: stored_offers_for_owner(store, owner)?,
         }
         .normalized())
+    }
+
+    /// Replace this fact's standing needs, append its offers, and report additions.
+    ///
+    /// Needs are current subscriptions, so each successful durable projection
+    /// replaces the owner's need rows. Offers are durable evidence emitted by an
+    /// immutable fact, so they are inserted idempotently and remain until the fact
+    /// is purged. The additions are computed against current stored context inside
+    /// the commit transaction rather than against queue-time projection state.
+    pub(crate) fn replace_context_for_owner_in_tx(
+        store: &Db,
+        owner: FactId,
+        context: &ContextSet,
+    ) -> rusqlite::Result<ContextSetAdditions> {
+        let previous = stored_context_for_owner(store, &owner)
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+        let additions = context_set_additions(&previous, context);
+
+        store.conn().execute(
+            "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'need'",
+            params![owner.as_slice()],
+        )?;
+        for need in &context.needs {
+            insert_context_need_in_tx(store, need)?;
+        }
+        for offer in &context.offers {
+            insert_context_offer_in_tx(store, offer)?;
+        }
+        Ok(additions)
     }
 
     pub(crate) fn insert_context_need_in_tx(
@@ -1289,12 +1472,12 @@ pub(crate) mod context_db {
         }
     }
 
-    /// Load context matches already attached to one pending projection row.
+    /// Load context matches already attached as pending projection input.
     ///
     /// Context fanout records these rows when it queues the owner. Loading a
     /// pending item therefore does not have to search standing context for the
     /// owner's old needs before the first projector run.
-    pub(crate) fn pending_matching_context_for_owner(
+    pub(crate) fn pending_projection_input_context_for_owner(
         store: &Db,
         owner: &FactId,
     ) -> Result<ProjectionContext, String> {
@@ -1414,15 +1597,15 @@ pub(crate) mod context_db {
     /// to one queue-and-record pass.
     pub(crate) fn wake_context_matches_in_tx(
         store: &Db,
-        delta: &ContextSetDelta,
+        additions: &ContextSetAdditions,
     ) -> Result<usize, String> {
         let mut owners = BTreeSet::new();
-        for need in &delta.added_needs {
+        for need in &additions.needs {
             if !stored_overlapping_offers_for_need(store, need)?.is_empty() {
                 owners.insert(need.owner);
             }
         }
-        for offer in &delta.added_offers {
+        for offer in &additions.offers {
             for need in stored_overlapping_needs_for_offer(store, offer)? {
                 owners.insert(need.owner);
             }
@@ -1431,8 +1614,8 @@ pub(crate) mod context_db {
         let mut changed = 0usize;
         for owner in owners {
             let queued = insert_pending_owner_in_tx(store, owner)
-                .map_err(|err| format!("queue pending projection match: {err}"))?;
-            let recorded = record_pending_matches_for_stored_needs_in_tx(store, owner)?;
+                .map_err(|err| format!("queue pending projection input: {err}"))?;
+            let recorded = record_pending_context_inputs_for_stored_needs_in_tx(store, owner)?;
             changed += usize::from(queued > 0 || recorded > 0);
         }
         Ok(changed)
@@ -1464,31 +1647,31 @@ pub(crate) mod context_db {
         )
     }
 
-    /// Record matches for every standing need an owner currently holds.
+    /// Record pending context inputs for every standing need an owner currently holds.
     ///
     /// Used both by context wake fanout and by direct queueing paths (due time
-    /// wakes, duplicate fact admission) that attach matches for an owner's existing
-    /// needs. Idempotent: every match row is an `INSERT OR IGNORE`.
-    pub(super) fn record_pending_matches_for_stored_needs_in_tx(
+    /// wakes, duplicate fact admission) that attach context to an owner's existing
+    /// needs. Idempotent: every input row is an `INSERT OR IGNORE`.
+    pub(super) fn record_pending_context_inputs_for_stored_needs_in_tx(
         store: &Db,
         owner: FactId,
     ) -> Result<usize, String> {
         let mut changed = 0usize;
         for need in stored_needs_for_owner(store, &owner)? {
             for offer in stored_overlapping_offers_for_need(store, &need)? {
-                changed += record_pending_projection_match_in_tx(store, &need, &offer)?;
+                changed += record_pending_context_input_in_tx(store, &need, &offer)?;
             }
         }
         Ok(changed)
     }
 
-    fn record_pending_projection_match_in_tx(
+    fn record_pending_context_input_in_tx(
         store: &Db,
         need: &ContextNeed,
         offer: &ContextOffer,
     ) -> Result<usize, String> {
         if need.role != offer.role || need.scope != offer.scope {
-            return Err("pending projection match role/scope mismatch".to_string());
+            return Err("pending projection context input role/scope mismatch".to_string());
         }
         let scope_key = scope_key(&need.scope);
         store
@@ -1974,7 +2157,7 @@ fn insert_facts_and_record_matches_in_tx(store: &Db, facts: &[Fact]) -> rusqlite
     let mut inserted = 0;
     for fact in facts {
         if insert_fact_and_pending_in_tx(store, fact)? {
-            context_db::record_pending_matches_for_stored_needs_in_tx(store, fact.id)
+            context_db::record_pending_context_inputs_for_stored_needs_in_tx(store, fact.id)
                 .map_err(commit_effects::sqlite_string_error)?;
             inserted += 1;
         }
@@ -2275,9 +2458,9 @@ fn enqueue_due_time_wakes_in_tx(
     let mut inserted = 0;
     for owner in owners {
         inserted += insert_pending_owner_in_tx(store, owner)?;
-        context_db::record_pending_matches_for_stored_needs_in_tx(store, owner).map_err(|err| {
-            rusqlite::Error::InvalidParameterName(format!("queue time wake matches: {err}"))
-        })?;
+        context_db::record_pending_context_inputs_for_stored_needs_in_tx(store, owner).map_err(
+            |err| rusqlite::Error::InvalidParameterName(format!("queue time wake matches: {err}")),
+        )?;
         store.conn().execute(
             "INSERT OR IGNORE INTO pending_time_ranges
                 (owner, timeline, has_start, start_exclusive, end_inclusive)
@@ -2384,7 +2567,7 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
-    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, ContextSetAdditions, Role};
     use crate::core::facts::{FactId, FactScope};
     use crate::core::intents::{Intent, IntentKind};
     use rusqlite::OptionalExtension;
@@ -2397,14 +2580,14 @@ mod contract_tests {
     fn run_projection(
         projector: &(impl Projector + ?Sized),
         fact: &Fact,
-        projection_context: ProjectionContext,
+        pending_inputs: ProjectionContext,
     ) -> Result<PreparedProjection, String> {
         prepare_projection(
             projector,
             PendingFact {
                 source: ProjectionSource::Durable,
                 fact: fact.clone(),
-                projection_context,
+                pending_inputs,
             },
             &[],
             None,
@@ -2502,8 +2685,8 @@ mod contract_tests {
         let projection = run_projection(&projector, &fact, ProjectionContext::new(Vec::new()))
             .expect("prepare projection");
 
-        assert_eq!(projection.context.needs.len(), 1);
-        assert!(projection.context.offers.is_empty());
+        assert_eq!(projection.projected_context.needs.len(), 1);
+        assert!(projection.projected_context.offers.is_empty());
         assert!(projection.runtime_effects.intents.is_empty());
     }
 
@@ -2528,7 +2711,7 @@ mod contract_tests {
         let next = run_projection(&projector, &fact, ProjectionContext::new(vec![offer]))
             .expect("projection with context");
 
-        assert!(next.context.needs.is_empty());
+        assert!(next.projected_context.needs.is_empty());
         assert_eq!(next.runtime_effects.intents.len(), 1);
         assert_eq!(next.runtime_effects.intents[0].kind.as_str(), "followup");
     }
@@ -2763,9 +2946,9 @@ mod contract_tests {
                 insert_context_offer_in_tx(tx, &offer)?;
                 wake_context_matches_in_tx(
                     tx,
-                    &ContextSetDelta {
-                        added_offers: vec![offer.clone()],
-                        ..ContextSetDelta::default()
+                    &ContextSetAdditions {
+                        offers: vec![offer.clone()],
+                        ..ContextSetAdditions::default()
                     },
                 )
                 .map_err(sqlite_string_error)?;

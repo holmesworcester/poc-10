@@ -386,48 +386,38 @@ impl ContextSet {
     }
 }
 
-/// The added and removed relationships from replacing one owner's context set.
+/// Relationships newly visible after replacing one owner's context set.
 ///
-/// Wake fanout only considers additions. Removals are still
-/// recorded so tests and persistence can prove that projection replacement is
-/// exact.
+/// Wake fanout only cares about additions: new needs may match existing offers,
+/// and new offers may match existing needs. Removed needs or offers never wake
+/// another projection item.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ContextSetDelta {
+pub struct ContextSetAdditions {
     /// Needs newly visible after replacement.
-    pub added_needs: Vec<ContextNeed>,
-    /// Needs removed by replacement.
-    pub removed_needs: Vec<ContextNeed>,
+    pub needs: Vec<ContextNeed>,
     /// Offers newly visible after replacement.
-    pub added_offers: Vec<ContextOffer>,
-    /// Offers removed by replacement.
-    pub removed_offers: Vec<ContextOffer>,
+    pub offers: Vec<ContextOffer>,
 }
 
-impl ContextSetDelta {
+impl ContextSetAdditions {
     pub fn is_empty(&self) -> bool {
-        self.added_needs.is_empty()
-            && self.removed_needs.is_empty()
-            && self.added_offers.is_empty()
-            && self.removed_offers.is_empty()
+        self.needs.is_empty() && self.offers.is_empty()
     }
 }
 
-/// Compare relationship sets as durable facts, not queue entries.
+/// Return relationships in `next` that are not present in `previous`.
 ///
-/// Projection commit uses this after every projection. Re-emitting the same
-/// need or offer is a no-op; changing it is represented as removal plus
-/// addition so wake fanout sees only genuinely new possible matches.
-pub fn diff_context_sets(previous: &ContextSet, next: &ContextSet) -> ContextSetDelta {
+/// Projection commit uses this after every projection. Re-emitting the same need
+/// or offer is a no-op; adding one exposes a new possible match to wake fanout.
+pub fn context_set_additions(previous: &ContextSet, next: &ContextSet) -> ContextSetAdditions {
     let previous_needs = previous.needs.iter().cloned().collect::<BTreeSet<_>>();
     let next_needs = next.needs.iter().cloned().collect::<BTreeSet<_>>();
     let previous_offers = previous.offers.iter().cloned().collect::<BTreeSet<_>>();
     let next_offers = next.offers.iter().cloned().collect::<BTreeSet<_>>();
 
-    ContextSetDelta {
-        added_needs: next_needs.difference(&previous_needs).cloned().collect(),
-        removed_needs: previous_needs.difference(&next_needs).cloned().collect(),
-        added_offers: next_offers.difference(&previous_offers).cloned().collect(),
-        removed_offers: previous_offers.difference(&next_offers).cloned().collect(),
+    ContextSetAdditions {
+        needs: next_needs.difference(&previous_needs).cloned().collect(),
+        offers: next_offers.difference(&previous_offers).cloned().collect(),
     }
 }
 
@@ -548,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_context_sets_reports_only_real_replacements() {
+    fn context_set_additions_reports_only_new_relationships() {
         let id = [1; 32];
         let role = Role::new("exact").unwrap();
         let stable = ContextNeed {
@@ -574,16 +564,14 @@ mod tests {
             .need(stable)
             .need(added.clone())
             .normalized();
-        let delta = diff_context_sets(&previous, &next);
+        let additions = context_set_additions(&previous, &next);
 
-        assert_eq!(delta.added_needs, vec![added]);
-        assert!(delta.removed_needs.is_empty());
-        assert!(delta.added_offers.is_empty());
-        assert!(delta.removed_offers.is_empty());
+        assert_eq!(additions.needs, vec![added]);
+        assert!(additions.offers.is_empty());
     }
 
     #[test]
-    fn identical_context_sets_have_empty_delta() {
+    fn identical_context_sets_have_no_additions() {
         let id = [1; 32];
         let role = Role::new("exact").unwrap();
         let key = ContextKey::from_bytes([2; 32]);
@@ -604,6 +592,6 @@ mod tests {
             })
             .normalized();
 
-        assert!(diff_context_sets(&set, &set).is_empty());
+        assert!(context_set_additions(&set, &set).is_empty());
     }
 }
