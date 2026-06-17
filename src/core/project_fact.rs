@@ -47,7 +47,9 @@ use crate::core::command::AuthoredFacts;
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
-use crate::core::facts::{fact_from_storage_row, fact_id, Fact, FactId};
+use crate::core::facts::{
+    fact_from_storage_row as validate_fact_query_result, fact_id, Fact, FactId,
+};
 use crate::core::handle_intent::WorkStatus;
 use crate::core::perf_profile as perf;
 use crate::core::schema::{
@@ -157,7 +159,8 @@ fn next_projection_item(
 /// Read the next durable pending fact id without mutating the queue.
 ///
 /// The item commit removes the row only after projection succeeds. Missing
-/// facts are handled by the queue driver as stale pending rows.
+/// facts are handled by the queue driver as stale pending rows. The admission
+/// join is left-sided so stale owners stay visible and can be purged.
 fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
     store
         .conn()
@@ -165,8 +168,8 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionIt
             r#"
             SELECT p.owner, p.mode
             FROM pending_projection p
-            LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
-            ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
+            LEFT JOIN local_fact_admissions admission ON admission.fact_id = p.owner
+            ORDER BY admission.received_at IS NULL, admission.received_at, p.owner
             LIMIT 1
             "#,
             [],
@@ -182,6 +185,10 @@ fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionIt
         .map_err(|err| format!("load pending projection: {err}"))
 }
 
+/// Read the next incoming fact that is not parked on missing context.
+///
+/// Incoming rows do not have separate pending queue rows. A standing need parks
+/// the incoming owner until context fanout records a pending match for it.
 fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
     store
         .conn()
@@ -227,8 +234,31 @@ pub(crate) fn load_pending_fact(
     mode: ProjectionMode,
 ) -> Result<Option<PendingFact>, String> {
     let fact = perf::measure_result("projection_load_fact", || match source {
-        ProjectionSource::Durable => retained_fact(store, &fact_id),
-        ProjectionSource::Incoming => incoming_fact_by_id(store, &fact_id),
+        ProjectionSource::Durable => store
+            .conn()
+            .query_row(
+                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+                 FROM facts f
+                 JOIN local_fact_admissions m ON m.fact_id = f.id
+                 WHERE f.id = ?1
+                 LIMIT 1",
+                params![fact_id.as_slice()],
+                validate_fact_query_result,
+            )
+            .optional()
+            .map_err(|err| format!("load durable projection fact: {err}")),
+        ProjectionSource::Incoming => store
+            .conn()
+            .query_row(
+                "SELECT id, scope, scope_kind, scope_id, received_at, bytes
+                 FROM incoming_facts
+                 WHERE id = ?1
+                 LIMIT 1",
+                params![fact_id.as_slice()],
+                validate_fact_query_result,
+            )
+            .optional()
+            .map_err(|err| format!("load incoming projection fact: {err}")),
     })?;
     let Some(fact) = fact else {
         return Ok(None);
@@ -2060,7 +2090,7 @@ fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
              WHERE f.id = ?1
              LIMIT 1",
             params![id.as_slice()],
-            fact_from_storage_row,
+            validate_fact_query_result,
         )
         .optional()
         .map_err(|err| format!("load retained fact: {err}"))
@@ -2170,6 +2200,7 @@ fn insert_retained_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool>
     Ok(fact_bytes_inserted || admission_inserted)
 }
 
+#[cfg(test)]
 fn incoming_fact_by_id(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
     incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
 }
@@ -2244,7 +2275,7 @@ fn incoming_fact_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option
              WHERE id = ?1
              LIMIT 1",
             params![id.as_slice()],
-            fact_from_storage_row,
+            validate_fact_query_result,
         )
         .optional()
 }
