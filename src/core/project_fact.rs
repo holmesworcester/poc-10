@@ -43,13 +43,300 @@ use self::context_db::{
     insert_context_need_in_tx, insert_context_offer_in_tx, pending_matching_context_for_owner,
     stored_context_for_owner, wake_context_matches_in_tx,
 };
+use crate::core::command::AuthoredFacts;
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{fact_from_storage_row, fact_id, Fact, FactId};
+use crate::core::handle_intent::WorkStatus;
 use crate::core::perf_profile as perf;
+use crate::core::schema::{
+    CONTEXT_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION,
+    PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
+};
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
+
+pub(crate) use commit_effects::{commit_runtime_effects_to_db, RuntimeEffectMode};
+
+/// Projection progress from one bounded drain pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProjectionProgress {
+    /// Number of facts that completed projection.
+    pub(crate) projected: usize,
+    /// Whether the pass made progress or hit a retry.
+    pub(crate) status: WorkStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingProjectionItem {
+    fact_id: FactId,
+    mode: ProjectionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectionSource {
+    Durable,
+    Incoming,
+}
+
+/// A fact that has been claimed from the pending queue and is ready to project.
+pub(crate) struct PendingFact {
+    source: ProjectionSource,
+    fact_id: FactId,
+    mode: ProjectionMode,
+    fact: Fact,
+    previous_context: ContextSet,
+    projection_context: ProjectionContext,
+}
+
+/// A projector result plus the pending-fact metadata needed to commit it.
+struct PreparedProjection {
+    source: ProjectionSource,
+    fact: Fact,
+    fact_id: FactId,
+    mode: ProjectionMode,
+    retain_self: bool,
+    context: ContextSet,
+    time_wakes: Vec<TimeWake>,
+    context_delta: ContextSetDelta,
+    runtime_effects: RuntimeEffects,
+}
+
+/// The pure result of running one projector before any SQL writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectedOutput {
+    retain_self: bool,
+    context: ContextSet,
+    context_delta: ContextSetDelta,
+    time_wakes: Vec<TimeWake>,
+    runtime_effects: RuntimeEffects,
+}
+
+/// Drive one bounded projection drain pass.
+pub(crate) fn drain_projection(
+    store: &Db,
+    projector: &(impl Projector + ?Sized),
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    limit: usize,
+) -> Result<ProjectionProgress, String> {
+    let mut total = ProjectionProgress::default();
+    while total.projected < limit {
+        let remaining = limit - total.projected;
+        let mut progress = ProjectionProgress::default();
+
+        let durable_items = perf::measure_result("projection_pending_load", || {
+            pending_durable_projection_items(store, remaining)
+        })?;
+        drain_projection_items(
+            store,
+            projector,
+            ProjectionSource::Durable,
+            durable_items,
+            &mut progress,
+            allowed_tables,
+            fact_admission,
+            remaining,
+        )?;
+
+        if progress.projected < remaining {
+            let incoming_fact_ids = perf::measure_result("projection_incoming_load", || {
+                incoming_pending_fact_ids(store, remaining - progress.projected)
+            })?;
+            drain_projection_items(
+                store,
+                projector,
+                ProjectionSource::Incoming,
+                incoming_fact_ids
+                    .into_iter()
+                    .map(|fact_id| PendingProjectionItem {
+                        fact_id,
+                        mode: ProjectionMode::Normal,
+                    })
+                    .collect(),
+                &mut progress,
+                allowed_tables,
+                fact_admission,
+                remaining,
+            )?;
+        }
+
+        let projected = progress.projected > 0;
+        total.projected += progress.projected;
+        total.status.merge(progress.status);
+        if !projected {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+fn drain_projection_items(
+    store: &Db,
+    projector: &(impl Projector + ?Sized),
+    source: ProjectionSource,
+    items: Vec<PendingProjectionItem>,
+    progress: &mut ProjectionProgress,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    limit: usize,
+) -> Result<(), String> {
+    for item in items {
+        if progress.projected >= limit {
+            break;
+        }
+        let fact_id = item.fact_id;
+        let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
+            load_pending_fact(store, source, fact_id, item.mode)
+        })?
+        else {
+            match source {
+                ProjectionSource::Durable => store
+                    .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
+                    .map(|_| ())
+                    .map_err(|err| format!("purge stale durable pending fact: {err}"))?,
+                ProjectionSource::Incoming => store
+                    .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
+                    .map(|_| ())
+                    .map_err(|err| format!("purge stale incoming fact: {err}"))?,
+            }
+            continue;
+        };
+        let projected = process_projection_item(
+            store,
+            projector,
+            pending_fact,
+            allowed_tables,
+            fact_admission,
+        )?;
+        if projected {
+            progress.projected += 1;
+            progress.status.progressed = true;
+        }
+    }
+    Ok(())
+}
+
+/// Read the next durable pending fact ids without mutating the queue.
+///
+/// The item commit removes the row only after projection succeeds. Missing
+/// facts are handled by the queue driver as stale pending rows.
+fn pending_durable_projection_items(
+    store: &Db,
+    limit: usize,
+) -> Result<Vec<PendingProjectionItem>, String> {
+    let limit =
+        i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
+    let mut stmt = store
+        .conn()
+        .prepare(
+            r#"
+            SELECT p.owner, p.mode
+            FROM pending_projection p
+            LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
+            ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok(PendingProjectionItem {
+                fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+                mode: ProjectionMode::from_str(&row.get::<_, String>(1)?)
+                    .map_err(rusqlite::Error::InvalidParameterName)?,
+            })
+        })
+        .map_err(|err| format!("load pending projection: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load pending projection: {err}"))
+}
+
+fn incoming_pending_fact_ids(store: &Db, limit: usize) -> Result<Vec<FactId>, String> {
+    let limit = i64::try_from(limit).map_err(|_| "incoming fact limit exceeds i64".to_string())?;
+    let sql = incoming_ready_sql("e.id", "ORDER BY e.received_at, e.id LIMIT ?1")?;
+    let mut stmt = store
+        .conn()
+        .prepare(&sql)
+        .map_err(|err| format!("load incoming facts: {err}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")
+        })
+        .map_err(|err| format!("load incoming facts: {err}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|err| format!("load incoming facts: {err}"))
+}
+
+fn incoming_ready_sql(select: &str, suffix: &str) -> Result<String, String> {
+    let incoming_facts = quoted_table_name(INCOMING_FACTS).map_err(|err| err.to_string())?;
+    let context_edges = quoted_table_name(CONTEXT_EDGES).map_err(|err| err.to_string())?;
+    let pending_matches =
+        quoted_table_name(PENDING_PROJECTION_MATCHES).map_err(|err| err.to_string())?;
+    Ok(format!(
+        r#"
+        SELECT {select}
+        FROM {incoming_facts} e
+        WHERE NOT EXISTS (
+                SELECT 1
+                FROM {context_edges} n
+                WHERE n.owner = e.id
+                  AND n.direction = 'need'
+            )
+           OR EXISTS (
+                SELECT 1
+                FROM {pending_matches} m
+                WHERE m.owner = e.id
+            )
+        {suffix}
+        "#
+    ))
+}
+
+/// Load everything projection needs for one fact.
+///
+/// `previous_context` is the fact's standing context before this run.
+/// `projection_context` is the matched input context exposed to the projector
+/// for this run, including any due time ranges.
+pub(crate) fn load_pending_fact(
+    store: &Db,
+    source: ProjectionSource,
+    fact_id: FactId,
+    mode: ProjectionMode,
+) -> Result<Option<PendingFact>, String> {
+    let fact = perf::measure_result("projection_load_fact", || match source {
+        ProjectionSource::Durable => retained_fact(store, &fact_id),
+        ProjectionSource::Incoming => incoming_fact_by_id(store, &fact_id),
+    })?;
+    let Some(fact) = fact else {
+        return Ok(None);
+    };
+    let previous_context = perf::measure_result("projection_load_previous_context", || {
+        stored_context_for_owner(store, &fact_id)
+    })?;
+    let projection_context = match source {
+        ProjectionSource::Durable => {
+            let time_ranges = perf::measure_result("projection_load_pending_time_ranges", || {
+                pending_time_ranges_for_owner(store, fact_id)
+            })?;
+            perf::measure_result("projection_load_pending_matches", || {
+                pending_matching_context_for_owner(store, &fact_id)
+            })?
+            .with_time_ranges(time_ranges)
+            .with_mode(mode)
+        }
+        ProjectionSource::Incoming => ProjectionContext::default().with_mode(mode),
+    };
+    Ok(Some(PendingFact {
+        source,
+        fact_id,
+        mode,
+        fact,
+        previous_context,
+        projection_context,
+    }))
+}
 
 /// Run and commit one queued projection item.
 ///
@@ -122,23 +409,77 @@ pub(crate) fn process_projection_item(
     Ok(true)
 }
 
-/// A projector result plus the pending-fact metadata needed to commit it.
-struct PreparedProjection {
-    source: ProjectionSource,
-    fact: Fact,
-    fact_id: FactId,
-    mode: ProjectionMode,
-    retain_self: bool,
-    context: ContextSet,
-    time_wakes: Vec<TimeWake>,
-    context_delta: ContextSetDelta,
-    runtime_effects: RuntimeEffects,
+/// Call the protocol projector and normalize the output for SQL commit.
+///
+/// Projection output replaces current needs and appends durable offers for this
+/// fact. This helper enforces that projectors only own their own context/time
+/// rows and may purge only their own fact, then computes the context delta that
+/// will wake dependent facts after commit.
+fn run_projection(
+    projector: &(impl Projector + ?Sized),
+    fact: &Fact,
+    previous_context: &ContextSet,
+    context: ProjectionContext,
+) -> Result<ProjectedOutput, String> {
+    let output = projector.project(fact, &context)?;
+    enforce_owner_is_self(fact, &output)?;
+    let output_context = output.context_set();
+    let context = ContextSet {
+        needs: output_context.needs,
+        offers: previous_context
+            .offers
+            .iter()
+            .cloned()
+            .chain(output_context.offers)
+            .collect(),
+    }
+    .normalized();
+    let context_delta = diff_context_sets(previous_context, &context);
+    Ok(ProjectedOutput {
+        retain_self: output.retain_self,
+        context,
+        context_delta,
+        time_wakes: output.time_wakes,
+        runtime_effects: output.effects,
+    })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectionSource {
-    Durable,
-    Incoming,
+/// Reject any projected need, offer, time wake, or purge whose owner is not the
+/// fact being projected.
+fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
+    for purged in &output.effects.purged_facts {
+        if *purged != fact.id {
+            return Err(format!(
+                "projector tried to purge fact {:x?} while projecting {:x?}",
+                purged, fact.id
+            ));
+        }
+    }
+    for need in &output.needs {
+        if need.owner != fact.id {
+            return Err(format!(
+                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
+                need.owner, fact.id
+            ));
+        }
+    }
+    for offer in &output.offers {
+        if offer.owner != fact.id {
+            return Err(format!(
+                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
+                offer.owner, fact.id
+            ));
+        }
+    }
+    for wake in &output.time_wakes {
+        if wake.owner != fact.id {
+            return Err(format!(
+                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
+                wake.owner, fact.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Commit one pending fact's complete projection result.
@@ -316,1349 +657,6 @@ fn replace_stored_time_wake_owner_rows(
     Ok(())
 }
 
-/// A fact that has been claimed from the pending queue and is ready to project.
-pub(crate) struct PendingFact {
-    source: ProjectionSource,
-    fact_id: FactId,
-    mode: ProjectionMode,
-    fact: Fact,
-    previous_context: ContextSet,
-    projection_context: ProjectionContext,
-}
-
-/// Load everything projection needs for one fact.
-///
-/// `previous_context` is the fact's standing context before this run.
-/// `projection_context` is the matched input context exposed to the projector
-/// for this run, including any due time ranges.
-pub(crate) fn load_pending_fact(
-    store: &Db,
-    source: ProjectionSource,
-    fact_id: FactId,
-    mode: ProjectionMode,
-) -> Result<Option<PendingFact>, String> {
-    let fact = perf::measure_result("projection_load_fact", || match source {
-        ProjectionSource::Durable => retained_fact(store, &fact_id),
-        ProjectionSource::Incoming => incoming_fact_by_id(store, &fact_id),
-    })?;
-    let Some(fact) = fact else {
-        return Ok(None);
-    };
-    let previous_context = perf::measure_result("projection_load_previous_context", || {
-        stored_context_for_owner(store, &fact_id)
-    })?;
-    let projection_context = match source {
-        ProjectionSource::Durable => {
-            let time_ranges = perf::measure_result("projection_load_pending_time_ranges", || {
-                pending_time_ranges_for_owner(store, fact_id)
-            })?;
-            perf::measure_result("projection_load_pending_matches", || {
-                pending_matching_context_for_owner(store, &fact_id)
-            })?
-            .with_time_ranges(time_ranges)
-            .with_mode(mode)
-        }
-        ProjectionSource::Incoming => ProjectionContext::default().with_mode(mode),
-    };
-    Ok(Some(PendingFact {
-        source,
-        fact_id,
-        mode,
-        fact,
-        previous_context,
-        projection_context,
-    }))
-}
-
-/// The pure result of running one projector before any SQL writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectedOutput {
-    retain_self: bool,
-    context: ContextSet,
-    context_delta: ContextSetDelta,
-    time_wakes: Vec<TimeWake>,
-    runtime_effects: RuntimeEffects,
-}
-
-/// Call the protocol projector and normalize the output for SQL commit.
-///
-/// Projection output replaces current needs and appends durable offers for this
-/// fact. This helper enforces that projectors only own their own context/time
-/// rows and may purge only their own fact, then computes the context delta that
-/// will wake dependent facts after commit.
-fn run_projection(
-    projector: &(impl Projector + ?Sized),
-    fact: &Fact,
-    previous_context: &ContextSet,
-    context: ProjectionContext,
-) -> Result<ProjectedOutput, String> {
-    let output = projector.project(fact, &context)?;
-    enforce_owner_is_self(fact, &output)?;
-    let output_context = output.context_set();
-    let context = ContextSet {
-        needs: output_context.needs,
-        offers: previous_context
-            .offers
-            .iter()
-            .cloned()
-            .chain(output_context.offers)
-            .collect(),
-    }
-    .normalized();
-    let context_delta = diff_context_sets(previous_context, &context);
-    Ok(ProjectedOutput {
-        retain_self: output.retain_self,
-        context,
-        context_delta,
-        time_wakes: output.time_wakes,
-        runtime_effects: output.effects,
-    })
-}
-
-/// Reject any projected need, offer, time wake, or purge whose owner is not the
-/// fact being projected.
-fn enforce_owner_is_self(fact: &Fact, output: &ProjectionOutput) -> Result<(), String> {
-    for purged in &output.effects.purged_facts {
-        if *purged != fact.id {
-            return Err(format!(
-                "projector tried to purge fact {:x?} while projecting {:x?}",
-                purged, fact.id
-            ));
-        }
-    }
-    for need in &output.needs {
-        if need.owner != fact.id {
-            return Err(format!(
-                "projector emitted need with owner {:x?} that is not the projected fact {:x?}",
-                need.owner, fact.id
-            ));
-        }
-    }
-    for offer in &output.offers {
-        if offer.owner != fact.id {
-            return Err(format!(
-                "projector emitted offer with owner {:x?} that is not the projected fact {:x?}",
-                offer.owner, fact.id
-            ));
-        }
-    }
-    for wake in &output.time_wakes {
-        if wake.owner != fact.id {
-            return Err(format!(
-                "projector emitted time wake with owner {:x?} that is not the projected fact {:x?}",
-                wake.owner, fact.id
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
-    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
-    use crate::core::facts::{FactId, FactScope};
-    use crate::core::intents::{Intent, IntentKind};
-    use crate::core::project_fact::{submit_fact_to_db, submit_facts_to_db};
-    use rusqlite::OptionalExtension;
-
-    #[test]
-    fn projection_run_rejects_offer_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
-            Ok(ProjectionOutput::new().offer(ContextOffer {
-                owner: [9; 32],
-                role: Role::new("exact").unwrap(),
-                scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(fact.id),
-                end_key: ContextKey::from_bytes(fact.id),
-            }))
-        });
-
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign offer owner");
-
-        assert!(err.contains("projector emitted offer with owner"));
-    }
-
-    #[test]
-    fn projection_run_rejects_need_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
-            Ok(ProjectionOutput::new().need(ContextNeed {
-                owner: [9; 32],
-                role: Role::new("exact").unwrap(),
-                scope: fact.scope.clone(),
-                start_key: ContextKey::from_bytes(fact.id),
-                end_key: ContextKey::from_bytes(fact.id),
-            }))
-        });
-
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign need owner");
-
-        assert!(err.contains("projector emitted need with owner"));
-    }
-
-    #[test]
-    fn projection_run_rejects_time_wake_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
-            Ok(ProjectionOutput::new().time_wake(TimeWake {
-                owner: [9; 32],
-                timeline: Timeline::new("test").unwrap(),
-                at: 1,
-            }))
-        });
-
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign time-wake owner");
-
-        assert!(err.contains("projector emitted time wake"));
-    }
-
-    #[test]
-    fn projection_run_rejects_purge_owned_by_another_fact() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
-            Ok(ProjectionOutput::new().purge_self([9; 32]))
-        });
-
-        let err = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect_err("projection should reject foreign purge owner");
-
-        assert!(err.contains("projector tried to purge fact"));
-    }
-
-    #[test]
-    fn projection_run_allows_self_purge() {
-        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
-        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
-            Ok(ProjectionOutput::new().purge_self(fact.id))
-        });
-
-        let run = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("projection should allow self purge");
-
-        assert_eq!(run.runtime_effects.purged_facts, vec![fact.id]);
-    }
-
-    #[test]
-    fn projection_run_diffs_standing_context_without_self_waking() {
-        let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([9; 32]);
-        let projector = need_until_offer(role, key, IntentKind::new("followup").unwrap());
-
-        let first = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("first run");
-        assert_eq!(first.context_delta.added_needs.len(), 1);
-        assert_eq!(first.context_delta.removed_needs.len(), 0);
-
-        let second = run_projection(
-            &projector,
-            &fact,
-            &first.context,
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("second run");
-        assert!(second.context_delta.is_empty());
-        assert_eq!(second.context, first.context);
-        assert!(second.runtime_effects.intents.is_empty());
-    }
-
-    #[test]
-    fn projection_run_replaces_need_with_intent_when_context_appears() {
-        let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([9; 32]);
-        let projector = need_until_offer(
-            role.clone(),
-            key.clone(),
-            IntentKind::new("followup").unwrap(),
-        );
-        let previous = run_projection(
-            &projector,
-            &fact,
-            &ContextSet::new(),
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("previous projection")
-        .context;
-        let offer = ContextOffer {
-            owner: [2; 32],
-            role,
-            scope: FactScope::Global,
-            start_key: key.clone(),
-            end_key: key,
-        };
-
-        let next = run_projection(
-            &projector,
-            &fact,
-            &previous,
-            ProjectionContext::new(vec![offer]),
-        )
-        .expect("projection with context");
-
-        assert!(next.context.needs.is_empty());
-        assert_eq!(next.context_delta.removed_needs, previous.needs);
-        assert_eq!(next.context_delta.added_needs.len(), 0);
-        assert_eq!(next.runtime_effects.intents.len(), 1);
-        assert_eq!(next.runtime_effects.intents[0].kind.as_str(), "followup");
-    }
-
-    #[test]
-    fn projection_run_keeps_previous_offers_when_projector_stops_emitting_them() {
-        let fact = Fact::new(FactScope::Global, 1, b"offer-evidence".to_vec());
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([4; 32]);
-        let previous_offer = offer_for(&fact, &role, &key);
-        let previous = ContextSet {
-            needs: Vec::new(),
-            offers: vec![previous_offer.clone()],
-        }
-        .normalized();
-        let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
-
-        let next = run_projection(
-            &projector,
-            &fact,
-            &previous,
-            ProjectionContext::new(Vec::new()),
-        )
-        .expect("projection without re-emitting old offer");
-
-        assert_eq!(next.context.offers, vec![previous_offer]);
-        assert!(next.context_delta.removed_offers.is_empty());
-    }
-
-    #[test]
-    fn projection_commit_keeps_existing_offer_when_owner_reprojects_without_it() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let fact = Fact::new(FactScope::Global, 1, b"stored-offer-evidence".to_vec());
-        submit_fact_to_db(&store, fact.clone()).expect("persist fact");
-
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([5; 32]);
-        let offer = offer_for(&fact, &role, &key);
-        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
-            .expect("insert old offer");
-
-        let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
-        let progress = drain_projection(&projector, &store, &[], None, 1)
-            .expect("drain projection without re-emitting old offer");
-
-        assert_eq!(progress.projected, 1);
-        let context = stored_context_for_owner(&store, &fact.id).expect("stored context");
-        assert!(context.needs.is_empty());
-        assert_eq!(context.offers, vec![offer]);
-    }
-
-    #[test]
-    fn projection_drain_resolves_new_need_that_matches_existing_offer() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
-        let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
-        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
-        submit_fact_to_db(&store, target.clone()).expect("persist target");
-        store
-            .conn()
-            .execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                rusqlite::params![offered.id.as_slice()],
-            )
-            .expect("clear offered fact pending row");
-
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([7; 32]);
-        let offer = ContextOffer {
-            owner: offered.id,
-            role: role.clone(),
-            scope: target.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        };
-        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
-            .expect("insert stored offer");
-
-        let projector = need_until_payload(role, key, "ready", Some("premature"));
-        let progress =
-            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
-
-        assert_eq!(progress.projected, 2);
-        assert_eq!(
-            intent_payload_for(&store, "ready", &target.id),
-            offered.id.to_vec()
-        );
-        let target_context = stored_context_for_owner(&store, &target.id).expect("target context");
-        assert!(target_context.needs.is_empty());
-        assert_eq!(pending_projection_count(&store, target.id), 0);
-    }
-
-    #[test]
-    fn projection_drain_resolves_new_range_need_that_matches_existing_offer() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
-        let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
-        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
-        submit_fact_to_db(&store, target.clone()).expect("persist target");
-        store
-            .conn()
-            .execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                rusqlite::params![offered.id.as_slice()],
-            )
-            .expect("clear offered fact pending row");
-
-        let role = Role::new("range").unwrap();
-        let key = ContextKey::from_bytes(b"m");
-        let offer = ContextOffer {
-            owner: offered.id,
-            role: role.clone(),
-            scope: target.scope.clone(),
-            start_key: ContextKey::from_bytes(b"a"),
-            end_key: ContextKey::from_bytes(b"z"),
-        };
-        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
-            .expect("insert stored offer");
-
-        let projector = need_until_payload(role, key, "ready", Some("premature"));
-        let progress =
-            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
-
-        assert_eq!(progress.projected, 2);
-        assert_eq!(
-            intent_payload_for(&store, "ready", &target.id),
-            offered.id.to_vec()
-        );
-    }
-
-    #[test]
-    fn projection_drain_revisits_dependent_after_offer_commits() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let offered = Fact::new(FactScope::Global, 1, b"queue-offer".to_vec());
-        let dependent = Fact::new(FactScope::Global, 2, b"queue-dependent".to_vec());
-        submit_fact_to_db(&store, dependent.clone()).expect("submit dependent first");
-
-        let role = Role::new("queue_dep").unwrap();
-        let key = ContextKey::from_bytes(b"shared-key");
-        let projector = QueueDependencyProjector {
-            offered_id: offered.id,
-            dependent_id: dependent.id,
-            role: role.clone(),
-            key: key.clone(),
-        };
-        let first = drain_projection(&projector, &store, &[], None, 1)
-            .expect("dependent parks on missing offer");
-
-        assert_eq!(first.projected, 1);
-        assert_eq!(pending_projection_count(&store, dependent.id), 0);
-        let parked_context = stored_context_for_owner(&store, &dependent.id).expect("parked");
-        assert_eq!(parked_context.needs.len(), 1);
-
-        submit_fact_to_db(&store, offered.clone()).expect("submit offer");
-        let progress =
-            drain_projection(&projector, &store, &[], None, 3).expect("drain queued dependency");
-
-        assert_eq!(progress.projected, 2);
-        let payload = intent_payload_for(&store, "queue_ready", &dependent.id);
-        assert_eq!(payload, offered.id.to_vec());
-        let dependent_context =
-            stored_context_for_owner(&store, &dependent.id).expect("dependent context");
-        assert!(dependent_context.needs.is_empty());
-        assert_eq!(pending_projection_count(&store, offered.id), 0);
-        assert_eq!(pending_projection_count(&store, dependent.id), 0);
-    }
-
-    #[test]
-    fn projection_drain_uses_context_attached_to_pending_queue() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let target = Fact::new(FactScope::Global, 1, b"queued-context-target".to_vec());
-        let offered = Fact::new(FactScope::Global, 2, b"queued-context-payload".to_vec());
-        submit_facts_to_db(&store, vec![target.clone(), offered.clone()]).expect("persist facts");
-        for fact in [&target, &offered] {
-            store
-                .conn()
-                .execute(
-                    "DELETE FROM pending_projection WHERE owner = ?1",
-                    rusqlite::params![fact.id.as_slice()],
-                )
-                .expect("clear initial pending row");
-        }
-
-        let role = Role::new("queued_ctx").unwrap();
-        let key = ContextKey::from_bytes(b"queued-key");
-        let need = need_for(&target, &role, &key);
-        let offer = offer_for(&offered, &role, &key);
-        store
-            .write_transaction(|tx| {
-                insert_context_need_in_tx(tx, &need)?;
-                insert_context_offer_in_tx(tx, &offer)?;
-                wake_context_matches_in_tx(
-                    tx,
-                    &ContextSetDelta {
-                        added_offers: vec![offer.clone()],
-                        ..ContextSetDelta::default()
-                    },
-                    ProjectionMode::Normal,
-                )
-                .map_err(sqlite_string_error)?;
-                tx.conn().execute(
-                    "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'offer'",
-                    rusqlite::params![offered.id.as_slice()],
-                )?;
-                Ok(())
-            })
-            .expect("queue match then remove standing offer");
-
-        assert_eq!(pending_projection_match_count(&store, target.id), 1);
-        let projector = need_until_payload(role, key, "queued_context_ready", None);
-        let progress =
-            drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
-
-        assert_eq!(progress.projected, 1);
-        assert_eq!(
-            intent_payload_for(&store, "queued_context_ready", &target.id),
-            offered.id.to_vec()
-        );
-        assert_eq!(pending_projection_match_count(&store, target.id), 0);
-    }
-
-    #[test]
-    fn projection_drain_attaches_all_satisfied_context_when_later_need_wakes() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let target = Fact::new(FactScope::Global, 1, b"multi-stage-target".to_vec());
-        let first_offer = Fact::new(FactScope::Global, 2, b"multi-stage-first".to_vec());
-        let second_offer = Fact::new(FactScope::Global, 3, b"multi-stage-second".to_vec());
-        submit_fact_to_db(&store, target.clone()).expect("submit target");
-
-        let projector = MultiStageDependencyProjector {
-            target_id: target.id,
-            first_offer_id: first_offer.id,
-            second_offer_id: second_offer.id,
-            first_role: Role::new("stage_first").unwrap(),
-            first_key: ContextKey::from_bytes(b"first"),
-            second_role: Role::new("stage_second").unwrap(),
-            second_key: ContextKey::from_bytes(b"second"),
-        };
-        let first =
-            drain_projection(&projector, &store, &[], None, 1).expect("target parks on first");
-
-        assert_eq!(first.projected, 1);
-        assert_eq!(pending_projection_count(&store, target.id), 0);
-
-        submit_fact_to_db(&store, first_offer.clone()).expect("submit first offer");
-        let second =
-            drain_projection(&projector, &store, &[], None, 2).expect("first offer wakes target");
-
-        assert_eq!(second.projected, 2);
-        assert!(intent_payload_for_maybe(&store, "multi_stage_ready", &target.id).is_none());
-        let staged_context = stored_context_for_owner(&store, &target.id).expect("target context");
-        assert_eq!(staged_context.needs.len(), 2);
-
-        submit_fact_to_db(&store, second_offer.clone()).expect("submit second offer");
-        let third = drain_projection(&projector, &store, &[], None, 3)
-            .expect("second offer wakes target with complete context");
-
-        assert_eq!(third.projected, 2);
-        let mut expected = first_offer.id.to_vec();
-        expected.extend_from_slice(&second_offer.id);
-        assert_eq!(
-            intent_payload_for(&store, "multi_stage_ready", &target.id),
-            expected
-        );
-        assert_eq!(pending_projection_count(&store, target.id), 0);
-        assert!(stored_context_for_owner(&store, &target.id)
-            .expect("target context")
-            .needs
-            .is_empty());
-    }
-
-    #[test]
-    fn projection_drain_isolates_a_failed_fact_without_rolling_back_previous_items() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let offered = Fact::new(FactScope::Global, 1, b"rollback-queue-offer".to_vec());
-        let failing = Fact::new(FactScope::Global, 2, b"rollback-queue-fail".to_vec());
-        assert_eq!(
-            submit_facts_to_db(&store, vec![offered.clone(), failing.clone()])
-                .expect("submit pending facts"),
-            2
-        );
-
-        let progress = drain_projection(
-            &ProjectionFailureProjector {
-                offered_id: offered.id,
-                failing_id: failing.id,
-                role: Role::new("rollback_dep").unwrap(),
-                key: ContextKey::from_bytes(b"rollback-key"),
-            },
-            &store,
-            &[],
-            None,
-            2,
-        )
-        .expect("a failed fact must not undo earlier projected items");
-
-        // The healthy fact committed — its neighbor's failure did not roll it back.
-        assert_eq!(progress.projected, 1);
-        assert_eq!(pending_projection_count(&store, offered.id), 0);
-        assert!(context_edge_count(&store, offered.id) > 0);
-
-        // Projector errors are not retried, but core keeps durable bytes. A
-        // projector-owned delete must be emitted as `purge_self`.
-        assert_eq!(pending_projection_count(&store, failing.id), 0);
-        assert!(retained_fact(&store, &failing.id)
-            .expect("load failing fact")
-            .is_some());
-    }
-
-    #[test]
-    fn projection_drain_keeps_a_context_inconsistent_fact_as_evidence() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let offered = Fact::new(FactScope::Global, 1, b"inconsistent-offer".to_vec());
-        let failing = Fact::new(FactScope::Global, 2, b"inconsistent-dependent".to_vec());
-        assert_eq!(
-            submit_facts_to_db(&store, vec![offered.clone(), failing.clone()])
-                .expect("submit pending facts"),
-            2
-        );
-
-        let progress = drain_projection(
-            &ContextInconsistentProjector {
-                offered_id: offered.id,
-                failing_id: failing.id,
-                role: Role::new("inconsistent_dep").unwrap(),
-                key: ContextKey::from_bytes(b"inconsistent-key"),
-            },
-            &store,
-            &[],
-            None,
-            3,
-        )
-        .expect("a context-inconsistent fact must not undo earlier projected items");
-
-        assert_eq!(progress.projected, 2);
-        assert_eq!(pending_projection_count(&store, offered.id), 0);
-
-        // Projector errors do not let core infer a purge decision. The durable
-        // bytes are retained and only the pending retry marker is cleared.
-        assert_eq!(pending_projection_count(&store, failing.id), 0);
-        assert!(retained_fact(&store, &failing.id)
-            .expect("load failing fact")
-            .is_some());
-    }
-
-    #[test]
-    fn projection_drain_can_keep_watch_need_after_it_matches() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let target = Fact::new(FactScope::Global, 1, b"watcher".to_vec());
-        let offered = Fact::new(FactScope::Global, 2, b"watched".to_vec());
-        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
-        submit_fact_to_db(&store, target.clone()).expect("persist target");
-        store
-            .conn()
-            .execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                rusqlite::params![offered.id.as_slice()],
-            )
-            .expect("clear offered fact pending row");
-
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([8; 32]);
-        let offer = ContextOffer {
-            owner: offered.id,
-            role: role.clone(),
-            scope: target.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        };
-        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
-            .expect("insert stored offer");
-
-        let projector = watch_need(role, key, "observed");
-        let progress =
-            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
-
-        assert_eq!(progress.projected, 2);
-        assert_eq!(
-            intent_payload_for(&store, "observed", &target.id),
-            b"watched".to_vec()
-        );
-        let target_context = stored_context_for_owner(&store, &target.id).expect("target context");
-        assert_eq!(target_context.needs.len(), 1);
-        assert_eq!(pending_projection_count(&store, target.id), 0);
-    }
-
-    #[test]
-    fn ephemeral_input_queues_child_fact_for_projection() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
-        let child = Fact::new(FactScope::Global, 2, b"child-offer".to_vec());
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let progress = drain_projection(
-            &ParentChildProjector {
-                parent_id: parent.id,
-                child: child.clone(),
-                child_mode: ChildMode::Offer,
-            },
-            &store,
-            &[],
-            None,
-            10,
-        )
-        .expect("drain projection");
-
-        assert_eq!(progress.projected, 2);
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load ephemeral")
-            .is_none());
-        assert_eq!(
-            retained_fact(&store, &child.id)
-                .expect("load child")
-                .as_ref(),
-            Some(&child)
-        );
-        let child_context = stored_context_for_owner(&store, &child.id).expect("child context");
-        assert_eq!(child_context.offers.len(), 1);
-        assert!(child_context.needs.is_empty());
-    }
-
-    #[test]
-    fn incoming_fact_missing_context_is_retained_and_parked() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-need".to_vec());
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([7; 32]);
-        let projector = need_only(role.clone(), key.clone());
-        let progress =
-            drain_projection(&projector, &store, &[], None, 10).expect("incoming parks on needs");
-
-        assert_eq!(progress.projected, 1);
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load incoming")
-            .is_none());
-        assert!(retained_fact(&store, &parent.id)
-            .expect("load retained incoming")
-            .is_some());
-        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
-        assert_eq!(context.needs.len(), 1);
-        assert!(context.offers.is_empty());
-    }
-
-    #[test]
-    fn ephemeral_input_can_use_existing_durable_context() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-context".to_vec());
-        let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
-        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
-        store
-            .conn()
-            .execute(
-                "DELETE FROM pending_projection WHERE owner = ?1",
-                rusqlite::params![offered.id.as_slice()],
-            )
-            .expect("clear offered fact pending row");
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([8; 32]);
-        let offer = ContextOffer {
-            owner: offered.id,
-            role: role.clone(),
-            scope: parent.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        };
-        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
-            .expect("insert stored offer");
-
-        let projector = need_until_payload(role.clone(), key.clone(), "ephemeral_ready", None);
-        let progress =
-            drain_projection(&projector, &store, &[], None, 10).expect("drain projection");
-
-        assert_eq!(progress.projected, 2);
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load incoming")
-            .is_none());
-        assert!(retained_fact(&store, &parent.id)
-            .expect("load retained incoming")
-            .is_some());
-        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
-        assert!(context.needs.is_empty());
-        assert!(context.offers.is_empty());
-        assert_eq!(
-            intent_payload_for(&store, "ephemeral_ready", &parent.id),
-            offered.id.to_vec()
-        );
-    }
-
-    #[test]
-    fn ephemeral_input_cannot_emit_effects_while_transient_needs_remain() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-partial".to_vec());
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let role = Role::new("exact").unwrap();
-        let key = ContextKey::from_bytes([9; 32]);
-        let projector = test_projector(move |fact, _context| {
-            Ok(ProjectionOutput::new()
-                .drop_incoming()
-                .need(need_for(fact, &role, &key))
-                .intent(Intent::new(
-                    IntentKind::new("ephemeral_partial").unwrap(),
-                    fact.id,
-                    Vec::new(),
-                )))
-        });
-        let err = drain_projection(&projector, &store, &[], None, 10)
-            .expect_err("dropped incoming facts cannot partially succeed with unresolved probes");
-
-        assert!(err.contains("transient needs remain"), "{err}");
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load incoming")
-            .is_some());
-        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
-        assert!(context.needs.is_empty());
-        assert!(context.offers.is_empty());
-    }
-
-    #[test]
-    fn ephemeral_input_cannot_emit_durable_offers() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-offer".to_vec());
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let role = Role::new("ephemeral_offer").unwrap();
-        let projector = test_projector(move |fact, _context| {
-            let key = ContextKey::from_bytes(fact.id);
-            Ok(ProjectionOutput::new()
-                .drop_incoming()
-                .offer(offer_for(fact, &role, &key)))
-        });
-        let err = drain_projection(&projector, &store, &[], None, 10)
-            .expect_err("dropped incoming offers should fail");
-
-        assert!(err.contains("dropped incoming fact cannot emit durable offers"));
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load incoming")
-            .is_some());
-    }
-
-    #[test]
-    fn child_fact_parking_counts_as_successful_parent_projection() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
-        let child = Fact::new(FactScope::Global, 2, b"child-need".to_vec());
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let progress = drain_projection(
-            &ParentChildProjector {
-                parent_id: parent.id,
-                child: child.clone(),
-                child_mode: ChildMode::Need,
-            },
-            &store,
-            &[],
-            None,
-            10,
-        )
-        .expect("drain projection");
-
-        assert_eq!(progress.projected, 2);
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load ephemeral")
-            .is_none());
-        assert!(retained_fact(&store, &child.id)
-            .expect("load child")
-            .is_some());
-        let child_context = stored_context_for_owner(&store, &child.id).expect("child context");
-        assert_eq!(child_context.needs.len(), 1);
-        assert!(child_context.offers.is_empty());
-    }
-
-    #[test]
-    fn child_fact_projection_error_isolated_after_parent_commits() {
-        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
-            .expect("open db");
-        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
-        let child = Fact::new(FactScope::Global, 2, b"child-error".to_vec());
-        store
-            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
-            .expect("insert incoming fact");
-
-        let progress = drain_projection(
-            &ParentChildProjector {
-                parent_id: parent.id,
-                child: child.clone(),
-                child_mode: ChildMode::Error,
-            },
-            &store,
-            &[],
-            None,
-            10,
-        )
-        .expect("child projection rejection is isolated");
-
-        assert_eq!(progress.projected, 1);
-        assert!(incoming_fact_by_id(&store, &parent.id)
-            .expect("load ephemeral")
-            .is_none());
-        assert_eq!(pending_projection_count(&store, child.id), 0);
-        assert!(retained_fact(&store, &child.id)
-            .expect("load child")
-            .is_some());
-    }
-
-    fn drain_projection(
-        projector: &impl Projector,
-        store: &Db,
-        allowed_tables: &[TableName],
-        fact_admission: Option<FactAdmissionFn>,
-        limit: usize,
-    ) -> Result<crate::core::project_fact::ProjectionProgress, String> {
-        crate::core::project_fact::drain_projection(
-            store,
-            projector,
-            allowed_tables,
-            fact_admission,
-            limit,
-        )
-    }
-
-    fn intent_payload_for(store: &Db, kind: &str, key: &FactId) -> Vec<u8> {
-        intent_payload_for_maybe(store, kind, key).expect("load intent payload")
-    }
-
-    fn intent_payload_for_maybe(store: &Db, kind: &str, key: &FactId) -> Option<Vec<u8>> {
-        store
-            .conn()
-            .query_row(
-                "SELECT payload FROM intents WHERE kind = ?1 AND idempotence_key = ?2",
-                rusqlite::params![kind, key.as_slice()],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("load optional intent payload")
-    }
-
-    fn pending_projection_count(store: &Db, owner: FactId) -> i64 {
-        store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM pending_projection WHERE owner = ?1",
-                rusqlite::params![owner.as_slice()],
-                |row| row.get(0),
-            )
-            .expect("count pending projection")
-    }
-
-    fn pending_projection_match_count(store: &Db, owner: FactId) -> i64 {
-        store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM pending_projection_matches WHERE owner = ?1",
-                rusqlite::params![owner.as_slice()],
-                |row| row.get(0),
-            )
-            .expect("count pending projection matches")
-    }
-
-    fn context_edge_count(store: &Db, owner: FactId) -> i64 {
-        store
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM context_edges WHERE owner = ?1",
-                rusqlite::params![owner.as_slice()],
-                |row| row.get(0),
-            )
-            .expect("count context edges")
-    }
-
-    fn need_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextNeed {
-        ContextNeed {
-            owner: fact.id,
-            role: role.clone(),
-            scope: fact.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        }
-    }
-
-    fn offer_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextOffer {
-        ContextOffer {
-            owner: fact.id,
-            role: role.clone(),
-            scope: fact.scope.clone(),
-            start_key: key.clone(),
-            end_key: key.clone(),
-        }
-    }
-
-    struct TestProjector<F> {
-        project: F,
-    }
-
-    impl<F> Projector for TestProjector<F>
-    where
-        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
-    {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            (self.project)(fact, context)
-        }
-    }
-
-    fn test_projector<F>(project: F) -> TestProjector<F>
-    where
-        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
-    {
-        TestProjector { project }
-    }
-
-    fn need_until_offer(role: Role, key: ContextKey, intent_kind: IntentKind) -> impl Projector {
-        test_projector(move |fact, context| {
-            if context.offers().is_empty() {
-                Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
-            } else {
-                Ok(ProjectionOutput::new().intent(Intent::new(
-                    intent_kind.clone(),
-                    fact.id,
-                    context
-                        .offers()
-                        .first()
-                        .map(|offer| offer.owner)
-                        .unwrap_or(fact.id),
-                )))
-            }
-        })
-    }
-
-    fn need_until_payload(
-        role: Role,
-        key: ContextKey,
-        ready_kind: &'static str,
-        premature_kind: Option<&'static str>,
-    ) -> impl Projector {
-        test_projector(move |fact, context| {
-            let need = need_for(fact, &role, &key);
-            if let Some(payload) = context.payload_for(&need) {
-                Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new(ready_kind).unwrap(),
-                    fact.id,
-                    payload.id,
-                )))
-            } else {
-                let mut output = ProjectionOutput::new().need(need);
-                if let Some(kind) = premature_kind {
-                    output = output.intent(Intent::new(
-                        IntentKind::new(kind).unwrap(),
-                        fact.id,
-                        b"missing".to_vec(),
-                    ));
-                }
-                Ok(output)
-            }
-        })
-    }
-
-    fn watch_need(role: Role, key: ContextKey, intent_kind: &'static str) -> impl Projector {
-        test_projector(move |fact, context| {
-            let need = need_for(fact, &role, &key);
-            let mut output = ProjectionOutput::new().need(need.clone());
-            if context.payload_for(&need).is_some() {
-                output = output.intent(Intent::new(
-                    IntentKind::new(intent_kind).unwrap(),
-                    fact.id,
-                    b"watched".to_vec(),
-                ));
-            }
-            Ok(output)
-        })
-    }
-
-    fn need_only(role: Role, key: ContextKey) -> impl Projector {
-        test_projector(move |fact, _context| {
-            Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
-        })
-    }
-
-    struct QueueDependencyProjector {
-        offered_id: FactId,
-        dependent_id: FactId,
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for QueueDependencyProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.id == self.offered_id {
-                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
-            }
-
-            if fact.id != self.dependent_id {
-                return Ok(ProjectionOutput::new());
-            }
-
-            let need = need_for(fact, &self.role, &self.key);
-            if let Some(payload) = context.payload_for(&need) {
-                Ok(ProjectionOutput::new().intent(Intent::new(
-                    IntentKind::new("queue_ready").unwrap(),
-                    fact.id,
-                    payload.id,
-                )))
-            } else {
-                Ok(ProjectionOutput::new().need(need))
-            }
-        }
-    }
-
-    struct MultiStageDependencyProjector {
-        target_id: FactId,
-        first_offer_id: FactId,
-        second_offer_id: FactId,
-        first_role: Role,
-        first_key: ContextKey,
-        second_role: Role,
-        second_key: ContextKey,
-    }
-
-    impl Projector for MultiStageDependencyProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.id == self.first_offer_id {
-                return Ok(ProjectionOutput::new().offer(offer_for(
-                    fact,
-                    &self.first_role,
-                    &self.first_key,
-                )));
-            }
-            if fact.id == self.second_offer_id {
-                return Ok(ProjectionOutput::new().offer(offer_for(
-                    fact,
-                    &self.second_role,
-                    &self.second_key,
-                )));
-            }
-            if fact.id != self.target_id {
-                return Ok(ProjectionOutput::new());
-            }
-
-            let first_need = need_for(fact, &self.first_role, &self.first_key);
-            let Some(first_payload) = context.payload_for(&first_need) else {
-                return Ok(ProjectionOutput::new().need(first_need));
-            };
-            let second_need = need_for(fact, &self.second_role, &self.second_key);
-            let Some(second_payload) = context.payload_for(&second_need) else {
-                return Ok(ProjectionOutput::new().need(first_need).need(second_need));
-            };
-
-            let mut payload = first_payload.id.to_vec();
-            payload.extend_from_slice(&second_payload.id);
-            Ok(ProjectionOutput::new().intent(Intent::new(
-                IntentKind::new("multi_stage_ready").unwrap(),
-                fact.id,
-                payload,
-            )))
-        }
-    }
-
-    struct ProjectionFailureProjector {
-        offered_id: FactId,
-        failing_id: FactId,
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for ProjectionFailureProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.id == self.offered_id {
-                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
-            }
-            if fact.id == self.failing_id {
-                return Err("projection failed".to_string());
-            }
-            Ok(ProjectionOutput::new())
-        }
-    }
-
-    /// `failing_id` authenticates fine (it parks when its context is absent) but
-    /// errors once its dependency context is present — an authentic fact with
-    /// inconsistent context.
-    struct ContextInconsistentProjector {
-        offered_id: FactId,
-        failing_id: FactId,
-        role: Role,
-        key: ContextKey,
-    }
-
-    impl Projector for ContextInconsistentProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.id == self.offered_id {
-                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
-            }
-            if fact.id == self.failing_id {
-                let need = need_for(fact, &self.role, &self.key);
-                if context.payload_for(&need).is_some() {
-                    return Err("context inconsistent".to_string());
-                }
-                return Ok(ProjectionOutput::new().need(need));
-            }
-            Ok(ProjectionOutput::new())
-        }
-    }
-
-    enum ChildMode {
-        Offer,
-        Need,
-        Error,
-    }
-
-    struct ParentChildProjector {
-        parent_id: FactId,
-        child: Fact,
-        child_mode: ChildMode,
-    }
-
-    impl Projector for ParentChildProjector {
-        fn project(
-            &self,
-            fact: &Fact,
-            _context: &ProjectionContext,
-        ) -> Result<ProjectionOutput, String> {
-            if fact.id == self.parent_id {
-                return Ok(ProjectionOutput::new().fact(self.child.clone()));
-            }
-            if fact.id != self.child.id {
-                return Ok(ProjectionOutput::new());
-            }
-            match self.child_mode {
-                ChildMode::Offer => {
-                    let role = Role::new("child_ready").unwrap();
-                    let key = ContextKey::from_bytes(fact.id);
-                    Ok(ProjectionOutput::new().offer(offer_for(fact, &role, &key)))
-                }
-                ChildMode::Need => {
-                    let role = Role::new("missing_child_context").unwrap();
-                    let key = ContextKey::from_bytes(fact.id);
-                    Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
-                }
-                ChildMode::Error => Err("child projection failed".to_string()),
-            }
-        }
-    }
-}
-
-// Core fact lifecycle and SQL-backed runtime projection.
-//
-// This module owns the reusable fact projection contract and queue worker.
-// Core routes raw facts to protocol projectors:
-//
-// ```text
-// route -> project -> effects/needs/offers -> commit
-// ```
-//
-// Core owns queueing, matched context loading, need/offer parking, and commit
-// boundaries. Protocol fact families own raw byte decoding, signature/context
-// validation, legacy adaptation, semantic projection, row construction, and
-// user-facing commands. Keeping the projector contract here lets core
-// projection stay protocol-neutral without teaching it what a workspace, message,
-// invite, key wrap, sync range, or connection fact means.
-//
-// The SQL-backed worker below owns one queued fact at a time: matched context
-// loading, projector execution, incoming retention, context wake fanout,
-// time-wake replacement, and projection effect commit.
-
-/// Check a fact's content id against its own bytes.
-///
-/// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally
-/// holds. Protocol-local validation helpers re-check it when they need a
-/// self-contained proof over raw bytes.
-pub fn verify_fact_id(fact: &crate::core::facts::Fact) -> Result<(), String> {
-    if fact.id == crate::core::facts::fact_id(&fact.bytes) {
-        Ok(())
-    } else {
-        Err("fact id does not match fact bytes".to_string())
-    }
-}
 pub(crate) mod commit_effects {
     //! Atomic commit path for shared runtime effects.
     //!
@@ -3113,30 +2111,6 @@ pub use route::{
     ProjectorFn, RouterProjector,
 };
 
-use crate::core::command::AuthoredFacts;
-use crate::core::handle_intent::WorkStatus;
-use crate::core::schema::{
-    CONTEXT_EDGES, FACTS, INCOMING_FACTS, LOCAL_FACT_ADMISSIONS, PENDING_PROJECTION,
-    PENDING_PROJECTION_MATCHES, PENDING_TIME_RANGES, TIME_WAKES,
-};
-
-pub(crate) use commit_effects::RuntimeEffectMode;
-
-/// Projection progress from one bounded drain pass.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ProjectionProgress {
-    /// Number of facts that completed projection.
-    pub(crate) projected: usize,
-    /// Whether the pass made progress or hit a retry.
-    pub(crate) status: WorkStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PendingProjectionItem {
-    fact_id: FactId,
-    mode: ProjectionMode,
-}
-
 const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
     CONTEXT_EDGES,
     TIME_WAKES,
@@ -3284,22 +2258,6 @@ fn insert_retained_fact_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool>
     Ok(fact_bytes_inserted || admission_inserted)
 }
 
-fn incoming_pending_fact_ids(store: &Db, limit: usize) -> Result<Vec<FactId>, String> {
-    let limit = i64::try_from(limit).map_err(|_| "incoming fact limit exceeds i64".to_string())?;
-    let sql = incoming_ready_sql("e.id", "ORDER BY e.received_at, e.id LIMIT ?1")?;
-    let mut stmt = store
-        .conn()
-        .prepare(&sql)
-        .map_err(|err| format!("load incoming facts: {err}"))?;
-    let rows = stmt
-        .query_map(params![limit], |row| {
-            fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")
-        })
-        .map_err(|err| format!("load incoming facts: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("load incoming facts: {err}"))
-}
-
 fn incoming_fact_by_id(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
     incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
 }
@@ -3365,31 +2323,6 @@ fn local_fact_admission_wire_error(
     projection_sql_error(format!("local fact admission {field}: {err}"))
 }
 
-fn incoming_ready_sql(select: &str, suffix: &str) -> Result<String, String> {
-    let incoming_facts = quoted_table_name(INCOMING_FACTS).map_err(|err| err.to_string())?;
-    let context_edges = quoted_table_name(CONTEXT_EDGES).map_err(|err| err.to_string())?;
-    let pending_matches =
-        quoted_table_name(PENDING_PROJECTION_MATCHES).map_err(|err| err.to_string())?;
-    Ok(format!(
-        r#"
-        SELECT {select}
-        FROM {incoming_facts} e
-        WHERE NOT EXISTS (
-                SELECT 1
-                FROM {context_edges} n
-                WHERE n.owner = e.id
-                  AND n.direction = 'need'
-            )
-           OR EXISTS (
-                SELECT 1
-                FROM {pending_matches} m
-                WHERE m.owner = e.id
-            )
-        {suffix}
-        "#
-    ))
-}
-
 fn incoming_fact_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option<Fact>> {
     store
         .conn()
@@ -3441,7 +2374,6 @@ fn delete_owner_rows_from_tables(
     Ok(deleted)
 }
 
-/// Count durable plus incoming facts currently queued for projection.
 pub(crate) fn pending_fact_count(store: &Db) -> usize {
     let durable = store
         .table_row_count(PENDING_PROJECTION)
@@ -3492,111 +2424,6 @@ pub(crate) fn submit_authored_facts_to_db<T>(
     effects.facts = facts;
     commit_runtime_effects_to_db(store, &effects, allowed_tables, fact_admission, label)?;
     Ok(receipt)
-}
-
-/// Drive one bounded projection drain pass.
-pub(crate) fn drain_projection(
-    store: &Db,
-    projector: &(impl Projector + ?Sized),
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    limit: usize,
-) -> Result<ProjectionProgress, String> {
-    let mut total = ProjectionProgress::default();
-    while total.projected < limit {
-        let remaining = limit - total.projected;
-        let mut progress = ProjectionProgress::default();
-
-        let durable_items = perf::measure_result("projection_pending_load", || {
-            pending_durable_projection_items(store, remaining)
-        })?;
-        drain_projection_items(
-            store,
-            projector,
-            ProjectionSource::Durable,
-            durable_items,
-            &mut progress,
-            allowed_tables,
-            fact_admission,
-            remaining,
-        )?;
-
-        if progress.projected < remaining {
-            let incoming_fact_ids = perf::measure_result("projection_incoming_load", || {
-                incoming_pending_fact_ids(store, remaining - progress.projected)
-            })?;
-            drain_projection_items(
-                store,
-                projector,
-                ProjectionSource::Incoming,
-                incoming_fact_ids
-                    .into_iter()
-                    .map(|fact_id| PendingProjectionItem {
-                        fact_id,
-                        mode: ProjectionMode::Normal,
-                    })
-                    .collect(),
-                &mut progress,
-                allowed_tables,
-                fact_admission,
-                remaining,
-            )?;
-        }
-
-        let projected = progress.projected > 0;
-        total.projected += progress.projected;
-        total.status.merge(progress.status);
-        if !projected {
-            break;
-        }
-    }
-    Ok(total)
-}
-
-fn drain_projection_items(
-    store: &Db,
-    projector: &(impl Projector + ?Sized),
-    source: ProjectionSource,
-    items: Vec<PendingProjectionItem>,
-    progress: &mut ProjectionProgress,
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    limit: usize,
-) -> Result<(), String> {
-    for item in items {
-        if progress.projected >= limit {
-            break;
-        }
-        let fact_id = item.fact_id;
-        let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
-            load_pending_fact(store, source, fact_id, item.mode)
-        })?
-        else {
-            match source {
-                ProjectionSource::Durable => store
-                    .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
-                    .map(|_| ())
-                    .map_err(|err| format!("purge stale durable pending fact: {err}"))?,
-                ProjectionSource::Incoming => store
-                    .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                    .map(|_| ())
-                    .map_err(|err| format!("purge stale incoming fact: {err}"))?,
-            }
-            continue;
-        };
-        let projected = process_projection_item(
-            store,
-            projector,
-            pending_fact,
-            allowed_tables,
-            fact_admission,
-        )?;
-        if projected {
-            progress.projected += 1;
-            progress.status.progressed = true;
-        }
-    }
-    Ok(())
 }
 
 /// Turn due time wakes into pending projection work.
@@ -3791,41 +2618,6 @@ fn due_time_wake_owners(
     rows.collect()
 }
 
-/// Read the next durable pending fact ids without mutating the queue.
-///
-/// The item commit removes the row only after projection succeeds. Missing
-/// facts are handled by the queue driver as stale pending rows.
-fn pending_durable_projection_items(
-    store: &Db,
-    limit: usize,
-) -> Result<Vec<PendingProjectionItem>, String> {
-    let limit =
-        i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
-    let mut stmt = store
-        .conn()
-        .prepare(
-            r#"
-            SELECT p.owner, p.mode
-            FROM pending_projection p
-            LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
-            ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
-            LIMIT ?1
-            "#,
-        )
-        .map_err(|err| format!("load pending projection: {err}"))?;
-    let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok(PendingProjectionItem {
-                fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-                mode: ProjectionMode::from_str(&row.get::<_, String>(1)?)
-                    .map_err(rusqlite::Error::InvalidParameterName)?,
-            })
-        })
-        .map_err(|err| format!("load pending projection: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("load pending projection: {err}"))
-}
-
 fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
     bytes.try_into().map_err(|_| {
         rusqlite::Error::InvalidParameterName(format!("{name} is not a 32-byte fact id"))
@@ -3837,7 +2629,1212 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
         .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
 }
 
-pub(crate) use commit_effects::commit_runtime_effects_to_db;
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
+    use crate::core::facts::{FactId, FactScope};
+    use crate::core::intents::{Intent, IntentKind};
+    use crate::core::project_fact::{submit_fact_to_db, submit_facts_to_db};
+    use rusqlite::OptionalExtension;
+
+    #[test]
+    fn projection_run_rejects_offer_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().offer(ContextOffer {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
+            }))
+        });
+
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign offer owner");
+
+        assert!(err.contains("projector emitted offer with owner"));
+    }
+
+    #[test]
+    fn projection_run_rejects_need_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().need(ContextNeed {
+                owner: [9; 32],
+                role: Role::new("exact").unwrap(),
+                scope: fact.scope.clone(),
+                start_key: ContextKey::from_bytes(fact.id),
+                end_key: ContextKey::from_bytes(fact.id),
+            }))
+        });
+
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign need owner");
+
+        assert!(err.contains("projector emitted need with owner"));
+    }
+
+    #[test]
+    fn projection_run_rejects_time_wake_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().time_wake(TimeWake {
+                owner: [9; 32],
+                timeline: Timeline::new("test").unwrap(),
+                at: 1,
+            }))
+        });
+
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign time-wake owner");
+
+        assert!(err.contains("projector emitted time wake"));
+    }
+
+    #[test]
+    fn projection_run_rejects_purge_owned_by_another_fact() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = test_projector(|_fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().purge_self([9; 32]))
+        });
+
+        let err = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect_err("projection should reject foreign purge owner");
+
+        assert!(err.contains("projector tried to purge fact"));
+    }
+
+    #[test]
+    fn projection_run_allows_self_purge() {
+        let fact = Fact::new(FactScope::Global, 1, b"owned".to_vec());
+        let projector = test_projector(|fact: &Fact, _context: &ProjectionContext| {
+            Ok(ProjectionOutput::new().purge_self(fact.id))
+        });
+
+        let run = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("projection should allow self purge");
+
+        assert_eq!(run.runtime_effects.purged_facts, vec![fact.id]);
+    }
+
+    #[test]
+    fn projection_run_diffs_standing_context_without_self_waking() {
+        let fact = Fact::new(FactScope::Global, 1, b"stable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([9; 32]);
+        let projector = need_until_offer(role, key, IntentKind::new("followup").unwrap());
+
+        let first = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("first run");
+        assert_eq!(first.context_delta.added_needs.len(), 1);
+        assert_eq!(first.context_delta.removed_needs.len(), 0);
+
+        let second = run_projection(
+            &projector,
+            &fact,
+            &first.context,
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("second run");
+        assert!(second.context_delta.is_empty());
+        assert_eq!(second.context, first.context);
+        assert!(second.runtime_effects.intents.is_empty());
+    }
+
+    #[test]
+    fn projection_run_replaces_need_with_intent_when_context_appears() {
+        let fact = Fact::new(FactScope::Global, 1, b"recoverable".to_vec());
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([9; 32]);
+        let projector = need_until_offer(
+            role.clone(),
+            key.clone(),
+            IntentKind::new("followup").unwrap(),
+        );
+        let previous = run_projection(
+            &projector,
+            &fact,
+            &ContextSet::new(),
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("previous projection")
+        .context;
+        let offer = ContextOffer {
+            owner: [2; 32],
+            role,
+            scope: FactScope::Global,
+            start_key: key.clone(),
+            end_key: key,
+        };
+
+        let next = run_projection(
+            &projector,
+            &fact,
+            &previous,
+            ProjectionContext::new(vec![offer]),
+        )
+        .expect("projection with context");
+
+        assert!(next.context.needs.is_empty());
+        assert_eq!(next.context_delta.removed_needs, previous.needs);
+        assert_eq!(next.context_delta.added_needs.len(), 0);
+        assert_eq!(next.runtime_effects.intents.len(), 1);
+        assert_eq!(next.runtime_effects.intents[0].kind.as_str(), "followup");
+    }
+
+    #[test]
+    fn projection_run_keeps_previous_offers_when_projector_stops_emitting_them() {
+        let fact = Fact::new(FactScope::Global, 1, b"offer-evidence".to_vec());
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([4; 32]);
+        let previous_offer = offer_for(&fact, &role, &key);
+        let previous = ContextSet {
+            needs: Vec::new(),
+            offers: vec![previous_offer.clone()],
+        }
+        .normalized();
+        let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
+
+        let next = run_projection(
+            &projector,
+            &fact,
+            &previous,
+            ProjectionContext::new(Vec::new()),
+        )
+        .expect("projection without re-emitting old offer");
+
+        assert_eq!(next.context.offers, vec![previous_offer]);
+        assert!(next.context_delta.removed_offers.is_empty());
+    }
+
+    #[test]
+    fn projection_commit_keeps_existing_offer_when_owner_reprojects_without_it() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let fact = Fact::new(FactScope::Global, 1, b"stored-offer-evidence".to_vec());
+        submit_fact_to_db(&store, fact.clone()).expect("persist fact");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([5; 32]);
+        let offer = offer_for(&fact, &role, &key);
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert old offer");
+
+        let projector = test_projector(|_fact, _context| Ok(ProjectionOutput::new()));
+        let progress = drain_projection(&projector, &store, &[], None, 1)
+            .expect("drain projection without re-emitting old offer");
+
+        assert_eq!(progress.projected, 1);
+        let context = stored_context_for_owner(&store, &fact.id).expect("stored context");
+        assert!(context.needs.is_empty());
+        assert_eq!(context.offers, vec![offer]);
+    }
+
+    #[test]
+    fn projection_drain_resolves_new_need_that_matches_existing_offer() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_db(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([7; 32]);
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let projector = need_until_payload(role, key, "ready", Some("premature"));
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
+
+        assert_eq!(progress.projected, 2);
+        assert_eq!(
+            intent_payload_for(&store, "ready", &target.id),
+            offered.id.to_vec()
+        );
+        let target_context = stored_context_for_owner(&store, &target.id).expect("target context");
+        assert!(target_context.needs.is_empty());
+        assert_eq!(pending_projection_count(&store, target.id), 0);
+    }
+
+    #[test]
+    fn projection_drain_resolves_new_range_need_that_matches_existing_offer() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"custom".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_db(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+
+        let role = Role::new("range").unwrap();
+        let key = ContextKey::from_bytes(b"m");
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            start_key: ContextKey::from_bytes(b"a"),
+            end_key: ContextKey::from_bytes(b"z"),
+        };
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let projector = need_until_payload(role, key, "ready", Some("premature"));
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
+
+        assert_eq!(progress.projected, 2);
+        assert_eq!(
+            intent_payload_for(&store, "ready", &target.id),
+            offered.id.to_vec()
+        );
+    }
+
+    #[test]
+    fn projection_drain_revisits_dependent_after_offer_commits() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let offered = Fact::new(FactScope::Global, 1, b"queue-offer".to_vec());
+        let dependent = Fact::new(FactScope::Global, 2, b"queue-dependent".to_vec());
+        submit_fact_to_db(&store, dependent.clone()).expect("submit dependent first");
+
+        let role = Role::new("queue_dep").unwrap();
+        let key = ContextKey::from_bytes(b"shared-key");
+        let projector = QueueDependencyProjector {
+            offered_id: offered.id,
+            dependent_id: dependent.id,
+            role: role.clone(),
+            key: key.clone(),
+        };
+        let first = drain_projection(&projector, &store, &[], None, 1)
+            .expect("dependent parks on missing offer");
+
+        assert_eq!(first.projected, 1);
+        assert_eq!(pending_projection_count(&store, dependent.id), 0);
+        let parked_context = stored_context_for_owner(&store, &dependent.id).expect("parked");
+        assert_eq!(parked_context.needs.len(), 1);
+
+        submit_fact_to_db(&store, offered.clone()).expect("submit offer");
+        let progress =
+            drain_projection(&projector, &store, &[], None, 3).expect("drain queued dependency");
+
+        assert_eq!(progress.projected, 2);
+        let payload = intent_payload_for(&store, "queue_ready", &dependent.id);
+        assert_eq!(payload, offered.id.to_vec());
+        let dependent_context =
+            stored_context_for_owner(&store, &dependent.id).expect("dependent context");
+        assert!(dependent_context.needs.is_empty());
+        assert_eq!(pending_projection_count(&store, offered.id), 0);
+        assert_eq!(pending_projection_count(&store, dependent.id), 0);
+    }
+
+    #[test]
+    fn projection_drain_uses_context_attached_to_pending_queue() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"queued-context-target".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"queued-context-payload".to_vec());
+        submit_facts_to_db(&store, vec![target.clone(), offered.clone()]).expect("persist facts");
+        for fact in [&target, &offered] {
+            store
+                .conn()
+                .execute(
+                    "DELETE FROM pending_projection WHERE owner = ?1",
+                    rusqlite::params![fact.id.as_slice()],
+                )
+                .expect("clear initial pending row");
+        }
+
+        let role = Role::new("queued_ctx").unwrap();
+        let key = ContextKey::from_bytes(b"queued-key");
+        let need = need_for(&target, &role, &key);
+        let offer = offer_for(&offered, &role, &key);
+        store
+            .write_transaction(|tx| {
+                insert_context_need_in_tx(tx, &need)?;
+                insert_context_offer_in_tx(tx, &offer)?;
+                wake_context_matches_in_tx(
+                    tx,
+                    &ContextSetDelta {
+                        added_offers: vec![offer.clone()],
+                        ..ContextSetDelta::default()
+                    },
+                    ProjectionMode::Normal,
+                )
+                .map_err(sqlite_string_error)?;
+                tx.conn().execute(
+                    "DELETE FROM context_edges WHERE owner = ?1 AND direction = 'offer'",
+                    rusqlite::params![offered.id.as_slice()],
+                )?;
+                Ok(())
+            })
+            .expect("queue match then remove standing offer");
+
+        assert_eq!(pending_projection_match_count(&store, target.id), 1);
+        let projector = need_until_payload(role, key, "queued_context_ready", None);
+        let progress =
+            drain_projection(&projector, &store, &[], None, 1).expect("drain projection");
+
+        assert_eq!(progress.projected, 1);
+        assert_eq!(
+            intent_payload_for(&store, "queued_context_ready", &target.id),
+            offered.id.to_vec()
+        );
+        assert_eq!(pending_projection_match_count(&store, target.id), 0);
+    }
+
+    #[test]
+    fn projection_drain_attaches_all_satisfied_context_when_later_need_wakes() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"multi-stage-target".to_vec());
+        let first_offer = Fact::new(FactScope::Global, 2, b"multi-stage-first".to_vec());
+        let second_offer = Fact::new(FactScope::Global, 3, b"multi-stage-second".to_vec());
+        submit_fact_to_db(&store, target.clone()).expect("submit target");
+
+        let projector = MultiStageDependencyProjector {
+            target_id: target.id,
+            first_offer_id: first_offer.id,
+            second_offer_id: second_offer.id,
+            first_role: Role::new("stage_first").unwrap(),
+            first_key: ContextKey::from_bytes(b"first"),
+            second_role: Role::new("stage_second").unwrap(),
+            second_key: ContextKey::from_bytes(b"second"),
+        };
+        let first =
+            drain_projection(&projector, &store, &[], None, 1).expect("target parks on first");
+
+        assert_eq!(first.projected, 1);
+        assert_eq!(pending_projection_count(&store, target.id), 0);
+
+        submit_fact_to_db(&store, first_offer.clone()).expect("submit first offer");
+        let second =
+            drain_projection(&projector, &store, &[], None, 2).expect("first offer wakes target");
+
+        assert_eq!(second.projected, 2);
+        assert!(intent_payload_for_maybe(&store, "multi_stage_ready", &target.id).is_none());
+        let staged_context = stored_context_for_owner(&store, &target.id).expect("target context");
+        assert_eq!(staged_context.needs.len(), 2);
+
+        submit_fact_to_db(&store, second_offer.clone()).expect("submit second offer");
+        let third = drain_projection(&projector, &store, &[], None, 3)
+            .expect("second offer wakes target with complete context");
+
+        assert_eq!(third.projected, 2);
+        let mut expected = first_offer.id.to_vec();
+        expected.extend_from_slice(&second_offer.id);
+        assert_eq!(
+            intent_payload_for(&store, "multi_stage_ready", &target.id),
+            expected
+        );
+        assert_eq!(pending_projection_count(&store, target.id), 0);
+        assert!(stored_context_for_owner(&store, &target.id)
+            .expect("target context")
+            .needs
+            .is_empty());
+    }
+
+    #[test]
+    fn projection_drain_isolates_a_failed_fact_without_rolling_back_previous_items() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let offered = Fact::new(FactScope::Global, 1, b"rollback-queue-offer".to_vec());
+        let failing = Fact::new(FactScope::Global, 2, b"rollback-queue-fail".to_vec());
+        assert_eq!(
+            submit_facts_to_db(&store, vec![offered.clone(), failing.clone()])
+                .expect("submit pending facts"),
+            2
+        );
+
+        let progress = drain_projection(
+            &ProjectionFailureProjector {
+                offered_id: offered.id,
+                failing_id: failing.id,
+                role: Role::new("rollback_dep").unwrap(),
+                key: ContextKey::from_bytes(b"rollback-key"),
+            },
+            &store,
+            &[],
+            None,
+            2,
+        )
+        .expect("a failed fact must not undo earlier projected items");
+
+        // The healthy fact committed — its neighbor's failure did not roll it back.
+        assert_eq!(progress.projected, 1);
+        assert_eq!(pending_projection_count(&store, offered.id), 0);
+        assert!(context_edge_count(&store, offered.id) > 0);
+
+        // Projector errors are not retried, but core keeps durable bytes. A
+        // projector-owned delete must be emitted as `purge_self`.
+        assert_eq!(pending_projection_count(&store, failing.id), 0);
+        assert!(retained_fact(&store, &failing.id)
+            .expect("load failing fact")
+            .is_some());
+    }
+
+    #[test]
+    fn projection_drain_keeps_a_context_inconsistent_fact_as_evidence() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let offered = Fact::new(FactScope::Global, 1, b"inconsistent-offer".to_vec());
+        let failing = Fact::new(FactScope::Global, 2, b"inconsistent-dependent".to_vec());
+        assert_eq!(
+            submit_facts_to_db(&store, vec![offered.clone(), failing.clone()])
+                .expect("submit pending facts"),
+            2
+        );
+
+        let progress = drain_projection(
+            &ContextInconsistentProjector {
+                offered_id: offered.id,
+                failing_id: failing.id,
+                role: Role::new("inconsistent_dep").unwrap(),
+                key: ContextKey::from_bytes(b"inconsistent-key"),
+            },
+            &store,
+            &[],
+            None,
+            3,
+        )
+        .expect("a context-inconsistent fact must not undo earlier projected items");
+
+        assert_eq!(progress.projected, 2);
+        assert_eq!(pending_projection_count(&store, offered.id), 0);
+
+        // Projector errors do not let core infer a purge decision. The durable
+        // bytes are retained and only the pending retry marker is cleared.
+        assert_eq!(pending_projection_count(&store, failing.id), 0);
+        assert!(retained_fact(&store, &failing.id)
+            .expect("load failing fact")
+            .is_some());
+    }
+
+    #[test]
+    fn projection_drain_can_keep_watch_need_after_it_matches() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let target = Fact::new(FactScope::Global, 1, b"watcher".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"watched".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
+        submit_fact_to_db(&store, target.clone()).expect("persist target");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([8; 32]);
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: target.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let projector = watch_need(role, key, "observed");
+        let progress =
+            drain_projection(&projector, &store, &[], None, 2).expect("drain projection");
+
+        assert_eq!(progress.projected, 2);
+        assert_eq!(
+            intent_payload_for(&store, "observed", &target.id),
+            b"watched".to_vec()
+        );
+        let target_context = stored_context_for_owner(&store, &target.id).expect("target context");
+        assert_eq!(target_context.needs.len(), 1);
+        assert_eq!(pending_projection_count(&store, target.id), 0);
+    }
+
+    #[test]
+    fn ephemeral_input_queues_child_fact_for_projection() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"child-offer".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let progress = drain_projection(
+            &ParentChildProjector {
+                parent_id: parent.id,
+                child: child.clone(),
+                child_mode: ChildMode::Offer,
+            },
+            &store,
+            &[],
+            None,
+            10,
+        )
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 2);
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load ephemeral")
+            .is_none());
+        assert_eq!(
+            retained_fact(&store, &child.id)
+                .expect("load child")
+                .as_ref(),
+            Some(&child)
+        );
+        let child_context = stored_context_for_owner(&store, &child.id).expect("child context");
+        assert_eq!(child_context.offers.len(), 1);
+        assert!(child_context.needs.is_empty());
+    }
+
+    #[test]
+    fn incoming_fact_missing_context_is_retained_and_parked() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-need".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([7; 32]);
+        let projector = need_only(role.clone(), key.clone());
+        let progress =
+            drain_projection(&projector, &store, &[], None, 10).expect("incoming parks on needs");
+
+        assert_eq!(progress.projected, 1);
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load incoming")
+            .is_none());
+        assert!(retained_fact(&store, &parent.id)
+            .expect("load retained incoming")
+            .is_some());
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert_eq!(context.needs.len(), 1);
+        assert!(context.offers.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_input_can_use_existing_durable_context() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-context".to_vec());
+        let offered = Fact::new(FactScope::Global, 2, b"available".to_vec());
+        submit_fact_to_db(&store, offered.clone()).expect("persist offer payload");
+        store
+            .conn()
+            .execute(
+                "DELETE FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![offered.id.as_slice()],
+            )
+            .expect("clear offered fact pending row");
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([8; 32]);
+        let offer = ContextOffer {
+            owner: offered.id,
+            role: role.clone(),
+            scope: parent.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        };
+        crate::core::project_fact::context_db::insert_context_offer_for_test(&store, &offer)
+            .expect("insert stored offer");
+
+        let projector = need_until_payload(role.clone(), key.clone(), "ephemeral_ready", None);
+        let progress =
+            drain_projection(&projector, &store, &[], None, 10).expect("drain projection");
+
+        assert_eq!(progress.projected, 2);
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load incoming")
+            .is_none());
+        assert!(retained_fact(&store, &parent.id)
+            .expect("load retained incoming")
+            .is_some());
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert!(context.needs.is_empty());
+        assert!(context.offers.is_empty());
+        assert_eq!(
+            intent_payload_for(&store, "ephemeral_ready", &parent.id),
+            offered.id.to_vec()
+        );
+    }
+
+    #[test]
+    fn ephemeral_input_cannot_emit_effects_while_transient_needs_remain() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-partial".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let role = Role::new("exact").unwrap();
+        let key = ContextKey::from_bytes([9; 32]);
+        let projector = test_projector(move |fact, _context| {
+            Ok(ProjectionOutput::new()
+                .drop_incoming()
+                .need(need_for(fact, &role, &key))
+                .intent(Intent::new(
+                    IntentKind::new("ephemeral_partial").unwrap(),
+                    fact.id,
+                    Vec::new(),
+                )))
+        });
+        let err = drain_projection(&projector, &store, &[], None, 10)
+            .expect_err("dropped incoming facts cannot partially succeed with unresolved probes");
+
+        assert!(err.contains("transient needs remain"), "{err}");
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load incoming")
+            .is_some());
+        let context = stored_context_for_owner(&store, &parent.id).expect("parent context");
+        assert!(context.needs.is_empty());
+        assert!(context.offers.is_empty());
+    }
+
+    #[test]
+    fn ephemeral_input_cannot_emit_durable_offers() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-offer".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let role = Role::new("ephemeral_offer").unwrap();
+        let projector = test_projector(move |fact, _context| {
+            let key = ContextKey::from_bytes(fact.id);
+            Ok(ProjectionOutput::new()
+                .drop_incoming()
+                .offer(offer_for(fact, &role, &key)))
+        });
+        let err = drain_projection(&projector, &store, &[], None, 10)
+            .expect_err("dropped incoming offers should fail");
+
+        assert!(err.contains("dropped incoming fact cannot emit durable offers"));
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load incoming")
+            .is_some());
+    }
+
+    #[test]
+    fn child_fact_parking_counts_as_successful_parent_projection() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"child-need".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let progress = drain_projection(
+            &ParentChildProjector {
+                parent_id: parent.id,
+                child: child.clone(),
+                child_mode: ChildMode::Need,
+            },
+            &store,
+            &[],
+            None,
+            10,
+        )
+        .expect("drain projection");
+
+        assert_eq!(progress.projected, 2);
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load ephemeral")
+            .is_none());
+        assert!(retained_fact(&store, &child.id)
+            .expect("load child")
+            .is_some());
+        let child_context = stored_context_for_owner(&store, &child.id).expect("child context");
+        assert_eq!(child_context.needs.len(), 1);
+        assert!(child_context.offers.is_empty());
+    }
+
+    #[test]
+    fn child_fact_projection_error_isolated_after_parent_commits() {
+        let store = Db::open_memory_with_schema_sources(&[crate::core::schema::CORE_SCHEMA_SOURCE])
+            .expect("open db");
+        let parent = Fact::new(FactScope::Local, 1, b"ephemeral-parent".to_vec());
+        let child = Fact::new(FactScope::Global, 2, b"child-error".to_vec());
+        store
+            .write_transaction(|tx| insert_incoming_fact_in_tx(tx, &parent))
+            .expect("insert incoming fact");
+
+        let progress = drain_projection(
+            &ParentChildProjector {
+                parent_id: parent.id,
+                child: child.clone(),
+                child_mode: ChildMode::Error,
+            },
+            &store,
+            &[],
+            None,
+            10,
+        )
+        .expect("child projection rejection is isolated");
+
+        assert_eq!(progress.projected, 1);
+        assert!(incoming_fact_by_id(&store, &parent.id)
+            .expect("load ephemeral")
+            .is_none());
+        assert_eq!(pending_projection_count(&store, child.id), 0);
+        assert!(retained_fact(&store, &child.id)
+            .expect("load child")
+            .is_some());
+    }
+
+    fn drain_projection(
+        projector: &impl Projector,
+        store: &Db,
+        allowed_tables: &[TableName],
+        fact_admission: Option<FactAdmissionFn>,
+        limit: usize,
+    ) -> Result<crate::core::project_fact::ProjectionProgress, String> {
+        crate::core::project_fact::drain_projection(
+            store,
+            projector,
+            allowed_tables,
+            fact_admission,
+            limit,
+        )
+    }
+
+    fn intent_payload_for(store: &Db, kind: &str, key: &FactId) -> Vec<u8> {
+        intent_payload_for_maybe(store, kind, key).expect("load intent payload")
+    }
+
+    fn intent_payload_for_maybe(store: &Db, kind: &str, key: &FactId) -> Option<Vec<u8>> {
+        store
+            .conn()
+            .query_row(
+                "SELECT payload FROM intents WHERE kind = ?1 AND idempotence_key = ?2",
+                rusqlite::params![kind, key.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("load optional intent payload")
+    }
+
+    fn pending_projection_count(store: &Db, owner: FactId) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pending_projection WHERE owner = ?1",
+                rusqlite::params![owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count pending projection")
+    }
+
+    fn pending_projection_match_count(store: &Db, owner: FactId) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pending_projection_matches WHERE owner = ?1",
+                rusqlite::params![owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count pending projection matches")
+    }
+
+    fn context_edge_count(store: &Db, owner: FactId) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM context_edges WHERE owner = ?1",
+                rusqlite::params![owner.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count context edges")
+    }
+
+    fn need_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextNeed {
+        ContextNeed {
+            owner: fact.id,
+            role: role.clone(),
+            scope: fact.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        }
+    }
+
+    fn offer_for(fact: &Fact, role: &Role, key: &ContextKey) -> ContextOffer {
+        ContextOffer {
+            owner: fact.id,
+            role: role.clone(),
+            scope: fact.scope.clone(),
+            start_key: key.clone(),
+            end_key: key.clone(),
+        }
+    }
+
+    struct TestProjector<F> {
+        project: F,
+    }
+
+    impl<F> Projector for TestProjector<F>
+    where
+        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
+    {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            (self.project)(fact, context)
+        }
+    }
+
+    fn test_projector<F>(project: F) -> TestProjector<F>
+    where
+        F: Fn(&Fact, &ProjectionContext) -> Result<ProjectionOutput, String>,
+    {
+        TestProjector { project }
+    }
+
+    fn need_until_offer(role: Role, key: ContextKey, intent_kind: IntentKind) -> impl Projector {
+        test_projector(move |fact, context| {
+            if context.offers().is_empty() {
+                Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
+            } else {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    intent_kind.clone(),
+                    fact.id,
+                    context
+                        .offers()
+                        .first()
+                        .map(|offer| offer.owner)
+                        .unwrap_or(fact.id),
+                )))
+            }
+        })
+    }
+
+    fn need_until_payload(
+        role: Role,
+        key: ContextKey,
+        ready_kind: &'static str,
+        premature_kind: Option<&'static str>,
+    ) -> impl Projector {
+        test_projector(move |fact, context| {
+            let need = need_for(fact, &role, &key);
+            if let Some(payload) = context.payload_for(&need) {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new(ready_kind).unwrap(),
+                    fact.id,
+                    payload.id,
+                )))
+            } else {
+                let mut output = ProjectionOutput::new().need(need);
+                if let Some(kind) = premature_kind {
+                    output = output.intent(Intent::new(
+                        IntentKind::new(kind).unwrap(),
+                        fact.id,
+                        b"missing".to_vec(),
+                    ));
+                }
+                Ok(output)
+            }
+        })
+    }
+
+    fn watch_need(role: Role, key: ContextKey, intent_kind: &'static str) -> impl Projector {
+        test_projector(move |fact, context| {
+            let need = need_for(fact, &role, &key);
+            let mut output = ProjectionOutput::new().need(need.clone());
+            if context.payload_for(&need).is_some() {
+                output = output.intent(Intent::new(
+                    IntentKind::new(intent_kind).unwrap(),
+                    fact.id,
+                    b"watched".to_vec(),
+                ));
+            }
+            Ok(output)
+        })
+    }
+
+    fn need_only(role: Role, key: ContextKey) -> impl Projector {
+        test_projector(move |fact, _context| {
+            Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
+        })
+    }
+
+    struct QueueDependencyProjector {
+        offered_id: FactId,
+        dependent_id: FactId,
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for QueueDependencyProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.offered_id {
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
+            }
+
+            if fact.id != self.dependent_id {
+                return Ok(ProjectionOutput::new());
+            }
+
+            let need = need_for(fact, &self.role, &self.key);
+            if let Some(payload) = context.payload_for(&need) {
+                Ok(ProjectionOutput::new().intent(Intent::new(
+                    IntentKind::new("queue_ready").unwrap(),
+                    fact.id,
+                    payload.id,
+                )))
+            } else {
+                Ok(ProjectionOutput::new().need(need))
+            }
+        }
+    }
+
+    struct MultiStageDependencyProjector {
+        target_id: FactId,
+        first_offer_id: FactId,
+        second_offer_id: FactId,
+        first_role: Role,
+        first_key: ContextKey,
+        second_role: Role,
+        second_key: ContextKey,
+    }
+
+    impl Projector for MultiStageDependencyProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.first_offer_id {
+                return Ok(ProjectionOutput::new().offer(offer_for(
+                    fact,
+                    &self.first_role,
+                    &self.first_key,
+                )));
+            }
+            if fact.id == self.second_offer_id {
+                return Ok(ProjectionOutput::new().offer(offer_for(
+                    fact,
+                    &self.second_role,
+                    &self.second_key,
+                )));
+            }
+            if fact.id != self.target_id {
+                return Ok(ProjectionOutput::new());
+            }
+
+            let first_need = need_for(fact, &self.first_role, &self.first_key);
+            let Some(first_payload) = context.payload_for(&first_need) else {
+                return Ok(ProjectionOutput::new().need(first_need));
+            };
+            let second_need = need_for(fact, &self.second_role, &self.second_key);
+            let Some(second_payload) = context.payload_for(&second_need) else {
+                return Ok(ProjectionOutput::new().need(first_need).need(second_need));
+            };
+
+            let mut payload = first_payload.id.to_vec();
+            payload.extend_from_slice(&second_payload.id);
+            Ok(ProjectionOutput::new().intent(Intent::new(
+                IntentKind::new("multi_stage_ready").unwrap(),
+                fact.id,
+                payload,
+            )))
+        }
+    }
+
+    struct ProjectionFailureProjector {
+        offered_id: FactId,
+        failing_id: FactId,
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for ProjectionFailureProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.offered_id {
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
+            }
+            if fact.id == self.failing_id {
+                return Err("projection failed".to_string());
+            }
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    /// `failing_id` authenticates fine (it parks when its context is absent) but
+    /// errors once its dependency context is present — an authentic fact with
+    /// inconsistent context.
+    struct ContextInconsistentProjector {
+        offered_id: FactId,
+        failing_id: FactId,
+        role: Role,
+        key: ContextKey,
+    }
+
+    impl Projector for ContextInconsistentProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.offered_id {
+                return Ok(ProjectionOutput::new().offer(offer_for(fact, &self.role, &self.key)));
+            }
+            if fact.id == self.failing_id {
+                let need = need_for(fact, &self.role, &self.key);
+                if context.payload_for(&need).is_some() {
+                    return Err("context inconsistent".to_string());
+                }
+                return Ok(ProjectionOutput::new().need(need));
+            }
+            Ok(ProjectionOutput::new())
+        }
+    }
+
+    enum ChildMode {
+        Offer,
+        Need,
+        Error,
+    }
+
+    struct ParentChildProjector {
+        parent_id: FactId,
+        child: Fact,
+        child_mode: ChildMode,
+    }
+
+    impl Projector for ParentChildProjector {
+        fn project(
+            &self,
+            fact: &Fact,
+            _context: &ProjectionContext,
+        ) -> Result<ProjectionOutput, String> {
+            if fact.id == self.parent_id {
+                return Ok(ProjectionOutput::new().fact(self.child.clone()));
+            }
+            if fact.id != self.child.id {
+                return Ok(ProjectionOutput::new());
+            }
+            match self.child_mode {
+                ChildMode::Offer => {
+                    let role = Role::new("child_ready").unwrap();
+                    let key = ContextKey::from_bytes(fact.id);
+                    Ok(ProjectionOutput::new().offer(offer_for(fact, &role, &key)))
+                }
+                ChildMode::Need => {
+                    let role = Role::new("missing_child_context").unwrap();
+                    let key = ContextKey::from_bytes(fact.id);
+                    Ok(ProjectionOutput::new().need(need_for(fact, &role, &key)))
+                }
+                ChildMode::Error => Err("child projection failed".to_string()),
+            }
+        }
+    }
+}
+
+// Core fact lifecycle and SQL-backed runtime projection.
+//
+// This module owns the reusable fact projection contract and queue worker.
+// Core routes raw facts to protocol projectors:
+//
+// ```text
+// route -> project -> effects/needs/offers -> commit
+// ```
+//
+// Core owns queueing, matched context loading, need/offer parking, and commit
+// boundaries. Protocol fact families own raw byte decoding, signature/context
+// validation, legacy adaptation, semantic projection, row construction, and
+// user-facing commands. Keeping the projector contract here lets core
+// projection stay protocol-neutral without teaching it what a workspace, message,
+// invite, key wrap, sync range, or connection fact means.
+//
+// The SQL-backed worker below owns one queued fact at a time: matched context
+// loading, projector execution, incoming retention, context wake fanout,
+// time-wake replacement, and projection effect commit.
+
+/// Check a fact's content id against its own bytes.
+///
+/// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally
+/// holds. Protocol-local validation helpers re-check it when they need a
+/// self-contained proof over raw bytes.
+pub fn verify_fact_id(fact: &crate::core::facts::Fact) -> Result<(), String> {
+    if fact.id == crate::core::facts::fact_id(&fact.bytes) {
+        Ok(())
+    } else {
+        Err("fact id does not match fact bytes".to_string())
+    }
+}
 
 #[cfg(test)]
 mod tests {
