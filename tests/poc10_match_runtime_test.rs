@@ -31,8 +31,12 @@ fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: us
     let mut progressed = false;
     for _ in 0..max_rounds {
         let status = runtime
-            .drain_projection_once(limit)
-            .expect("drain projection batch");
+            .drain_durable_projection(limit)
+            .expect("drain durable projection batch");
+        progressed |= status.progressed;
+        let status = runtime
+            .drain_incoming_projection(limit)
+            .expect("drain incoming projection batch");
         progressed |= status.progressed;
         if runtime.pending_fact_count() == 0 {
             return progressed;

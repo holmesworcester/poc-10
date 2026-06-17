@@ -29,10 +29,14 @@
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::facts::FactId;
-use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet, WorkStatus};
+use crate::core::handle_intent::{
+    dispatch_one_intent, next_intent_queue_key, HandlerRoute, HandlerSet, IntentQueue, WorkStatus,
+};
 use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
-use crate::core::project_fact::{self, FactAdmissionFn, Projector, RuntimeEffectMode};
+use crate::core::project_fact::{
+    self, FactAdmissionFn, ProjectionSource, Projector, RuntimeEffectMode,
+};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use rusqlite::params;
 use std::collections::BTreeSet;
@@ -204,12 +208,13 @@ struct ReplayCounters {
     replayed_intents: usize,
 }
 
-/// Drain replay work in the same visible order as the live runtime loop.
+/// Drain replay work in the same visible queue order as the live runtime loop.
 ///
-/// Each barrier step does bounded projection work, then bounded intent dispatch.
-/// Projection and dispatch keep their own SQLite transactions; replay's job is
-/// only to keep taking bounded queue steps until both are idle before live
-/// network/recurring work can resume.
+/// Each barrier step does bounded durable projection, incoming projection,
+/// durable intent dispatch, and local intent dispatch. Projection and dispatch
+/// keep their own SQLite transactions; replay's job is only to keep taking
+/// bounded queue steps until all queues are idle before live network/recurring
+/// work can resume.
 fn drain_replay_barrier(
     db: &Db,
     projector: &dyn Projector,
@@ -220,33 +225,116 @@ fn drain_replay_barrier(
 ) -> Result<(), String> {
     for _ in 0..REPLAY_MAX_DRAIN_STEPS {
         let mut status = WorkStatus::idle();
-        let progress = project_fact::drain_projection(
+        status.merge(drain_replay_projection_queue(
             db,
             projector,
+            ProjectionSource::Durable,
             allowed_tables,
             fact_admission,
-            REPLAY_WORK_LIMIT,
-        )?;
-        counters.projected_facts += progress.projected;
-        status.merge(progress.status);
+            counters,
+        )?);
+        status.merge(drain_replay_projection_queue(
+            db,
+            projector,
+            ProjectionSource::Incoming,
+            allowed_tables,
+            fact_admission,
+            counters,
+        )?);
 
-        let progress = dispatch_intents(
+        status.merge(drain_replay_intent_queue(
             db,
             handlers,
+            IntentQueue::Durable,
             allowed_tables,
             fact_admission,
-            REPLAY_WORK_LIMIT,
-            HandlerMode::Replay,
-            RuntimeEffectMode::Replay,
-        )?;
-        counters.replayed_intents += progress.dispatched;
-        status.merge(progress.status);
+            counters,
+        )?);
+        status.merge(drain_replay_intent_queue(
+            db,
+            handlers,
+            IntentQueue::Local,
+            allowed_tables,
+            fact_admission,
+            counters,
+        )?);
 
         if status.is_idle() {
             return Ok(());
         }
     }
     Err("replay drain exceeded the step limit".to_string())
+}
+
+fn drain_replay_projection_queue(
+    db: &Db,
+    projector: &dyn Projector,
+    source: ProjectionSource,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    counters: &mut ReplayCounters,
+) -> Result<WorkStatus, String> {
+    let mut status = WorkStatus::idle();
+    for _ in 0..REPLAY_WORK_LIMIT {
+        let step =
+            project_fact::project_one(db, projector, source, allowed_tables, fact_admission)?;
+        if step.status.is_idle() {
+            break;
+        }
+        counters.projected_facts += usize::from(step.projected);
+        status.merge(step.status);
+    }
+    Ok(status)
+}
+
+fn drain_replay_intent_queue(
+    db: &Db,
+    handlers: &HandlerSet,
+    queue: IntentQueue,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+    counters: &mut ReplayCounters,
+) -> Result<WorkStatus, String> {
+    let mut status = WorkStatus::idle();
+    let mut retried_local = BTreeSet::new();
+    let kinds = handlers.intent_kinds();
+    for _ in 0..REPLAY_WORK_LIMIT {
+        if queue == IntentQueue::Local {
+            let Some(next_key) = next_intent_queue_key(db, queue, &kinds)? else {
+                break;
+            };
+            if retried_local.contains(&next_key) {
+                break;
+            }
+        }
+
+        let report = dispatch_one_intent(
+            db,
+            handlers,
+            queue,
+            allowed_tables,
+            fact_admission,
+            HandlerMode::Replay,
+            RuntimeEffectMode::Replay,
+        )?;
+        if report.status.is_idle() {
+            break;
+        }
+        if report.dispatched {
+            counters.replayed_intents += 1;
+        }
+        status.merge(report.status);
+        if let Some(key) = report.retry_key {
+            if queue == IntentQueue::Local {
+                retried_local.insert(key);
+                continue;
+            }
+        }
+        if report.status.retried {
+            break;
+        }
+    }
+    Ok(status)
 }
 
 /// Mark every retained fact as replay pending in one SQL statement.
@@ -277,8 +365,8 @@ fn enqueue_retained_fact_for_replay(db: &Db, fact_id: FactId) -> Result<bool, St
 
 /// Compute the fact admission order for the requested replay order.
 fn ordered_fact_ids(db: &Db, order: ReplayOrder) -> Result<Vec<FactId>, String> {
-    // Canonical admission order: received_at then fact id, matching the pending
-    // projection batch ordering used in normal operation.
+    // Canonical admission order: received_at then fact id, matching durable
+    // pending projection selection.
     let sql = "SELECT f.id
                FROM facts f
                JOIN local_fact_admissions m ON m.fact_id = f.id

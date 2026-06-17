@@ -200,8 +200,11 @@ fn fact() -> Fact {
 fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
     for _ in 0..max_rounds {
         runtime
-            .drain_projection_once(limit)
-            .expect("drain projection batch");
+            .drain_durable_projection(limit)
+            .expect("drain durable projection batch");
+        runtime
+            .drain_incoming_projection(limit)
+            .expect("drain incoming projection batch");
         if runtime.pending_fact_count() == 0 {
             return;
         }

@@ -39,11 +39,17 @@ impl CommandClock for FixedClock {
 fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
     for _ in 0..max_rounds {
         runtime
-            .drain_projection_once(limit)
-            .expect("drain projection batch");
+            .drain_durable_projection(limit)
+            .expect("drain durable projection batch");
         runtime
-            .drain_intents_once(limit)
-            .expect("drain intent batch");
+            .drain_incoming_projection(limit)
+            .expect("drain incoming projection batch");
+        runtime
+            .drain_durable_intents(limit)
+            .expect("drain durable intent batch");
+        runtime
+            .drain_local_intents(limit)
+            .expect("drain local intent batch");
         if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
             return;
         }

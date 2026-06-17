@@ -54,10 +54,11 @@ effects.
 The daemon runs the same mechanics without a user command on the stack. Each
 tick fires due recurring intents, accepts network frames, lets the protocol
 intake hook convert recognized bytes into `RuntimeEffects`, admits due
-time-wake ranges as pending projection, drains one high-volume projection batch,
-drains one intent batch, and leaves any handler-emitted facts queued for later
-projection work. The runtime lock ensures this daemon work cannot race with a
-CLI command that is admitting new facts into the same database.
+time-wake ranges as pending projection, drains durable projection, drains
+incoming projection, drains durable intents, drains local intents, and leaves
+any handler-emitted facts queued for later projection work. The runtime lock
+ensures this daemon work cannot race with a CLI command that is admitting new
+facts into the same database.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
@@ -212,9 +213,10 @@ use core syntax and contracts, but core must not import their semantic rules.
   key lifetimes, authority checks, and semantic validation.
 - `daemon.rs`: long-running process lifecycle and tick ordering. It owns the
   database lock, listener setup, readiness/stop/reset handling, inbound frame
-  intake, due time-wake admission, and the bounded projection batch / intent
-  batch loop. The protocol declaration decides how inbound bytes become runtime
-  effects and which time-wake timelines are active.
+  intake, due time-wake admission, and the bounded durable projection, incoming
+  projection, durable intent, and local intent queue order. The protocol
+  declaration decides how inbound bytes become runtime effects and which
+  time-wake timelines are active.
 - `effects.rs`: shared effect language for projectors and handlers.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes

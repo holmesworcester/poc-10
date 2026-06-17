@@ -43,7 +43,6 @@ use crate::core::project_fact::commit_effects::{
 };
 use crate::core::project_fact::route::FactAdmissionFn;
 use rusqlite::{params, params_from_iter, OptionalExtension};
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
 /// Factory for one protocol intent handler.
@@ -176,14 +175,8 @@ impl HandlerSet {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct IntentDispatchProgress {
-    pub(crate) status: WorkStatus,
-    pub(crate) dispatched: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IntentQueue {
+pub(crate) enum IntentQueue {
     Durable,
     Local,
 }
@@ -202,6 +195,12 @@ impl IntentQueue {
             Self::Local => "rowid",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct IntentQueueKey {
+    kind: String,
+    idempotence_key: Vec<u8>,
 }
 
 fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
@@ -361,6 +360,7 @@ pub(crate) fn submit_intent_to_table(
 /// Durable queue rows are ordered by stable identity for deterministic tests
 /// and replay. Local rows use insertion order so inbound network frames and
 /// other ephemeral work preserve arrival order within one process.
+#[cfg(test)]
 pub(crate) fn next_queued_intent(
     store: &Db,
     allowed_kinds: &[&str],
@@ -399,13 +399,14 @@ fn handle_intent_with_policy(
         if status.retried && queued.queue == IntentQueue::Local {
             rotate_local_retry_to_tail(store, &queued.intent)?;
         }
+        let retry_key = status.retried.then(|| queued.queue_key());
         return Ok(IntentDispatchReport {
             status,
-            emitted_projectable_facts: false,
+            dispatched: false,
+            retry_key,
         });
     };
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
-    let emitted_projectable_facts = !output.facts.is_empty() || !output.incoming_facts.is_empty();
     status.progressed = commit_handler_output(
         store,
         &queued,
@@ -415,72 +416,47 @@ fn handle_intent_with_policy(
         effect_mode.pending_projection_mode(),
     )?;
     Ok(IntentDispatchReport {
-        emitted_projectable_facts: status.progressed && emitted_projectable_facts,
         status,
+        dispatched: status.progressed,
+        retry_key: None,
     })
 }
 
-/// Dispatch queued intents with the provided handler set.
-pub(crate) fn dispatch_intents(
+/// Dispatch one queued intent from the selected queue.
+///
+/// The caller owns queue order and batching. This function owns one intent row:
+/// load the selected handler's declared inputs, run the handler, and commit
+/// handler output atomically with queue deletion.
+pub(crate) fn dispatch_one_intent(
     store: &Db,
     handlers: &HandlerSet,
+    queue: IntentQueue,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    limit: usize,
     handler_mode: HandlerMode,
     effect_mode: RuntimeEffectMode,
-) -> Result<IntentDispatchProgress, String> {
-    let mut progress = IntentDispatchProgress::default();
+) -> Result<IntentDispatchReport, String> {
     let kinds = handlers.intent_kinds();
-    let mut retried_local = BTreeSet::<(String, Vec<u8>)>::new();
-    for _ in 0..limit {
-        let Some(work) = next_intent_work(store, handlers, &kinds)? else {
-            break;
-        };
-        let kind = work.queued.intent.kind.as_str();
-        let local_retry_key = if work.queued.queue == IntentQueue::Local {
-            Some((kind.to_owned(), work.queued.intent.key.clone()))
-        } else {
-            None
-        };
-        if local_retry_key
-            .as_ref()
-            .is_some_and(|key| retried_local.contains(key))
-        {
-            break;
-        }
-        let report = handle_intent_with_policy(
-            work,
-            store,
-            allowed_tables,
-            fact_admission,
-            handler_mode,
-            effect_mode,
-        )?;
-        progress.status.merge(report.status);
-        if report.status.progressed {
-            progress.dispatched += 1;
-        }
-        if report.status.retried {
-            if let Some(key) = local_retry_key {
-                retried_local.insert(key);
-                continue;
-            }
-            break;
-        }
-        if report.emitted_projectable_facts {
-            break;
-        }
-    }
-    Ok(progress)
+    let Some(work) = next_intent_work_in_queue(store, handlers, queue, &kinds)? else {
+        return Ok(IntentDispatchReport::idle());
+    };
+    handle_intent_with_policy(
+        work,
+        store,
+        allowed_tables,
+        fact_admission,
+        handler_mode,
+        effect_mode,
+    )
 }
 
-fn next_intent_work<'a>(
+fn next_intent_work_in_queue<'a>(
     store: &Db,
     handlers: &'a HandlerSet,
+    queue: IntentQueue,
     kinds: &[&str],
 ) -> Result<Option<IntentWork<'a>>, String> {
-    let Some(queued) = next_queued_intent(store, kinds)? else {
+    let Some(queued) = next_queued_intent_in_queue(store, queue, kinds)? else {
         return Ok(None);
     };
     let kind = queued.intent.kind.as_str();
@@ -488,6 +464,15 @@ fn next_intent_work<'a>(
         .handler_for_kind(kind)
         .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
     Ok(Some(IntentWork { queued, handler }))
+}
+
+/// Return the identity of the next queued row in one selected intent queue.
+pub(crate) fn next_intent_queue_key(
+    store: &Db,
+    queue: IntentQueue,
+    allowed_kinds: &[&str],
+) -> Result<Option<IntentQueueKey>, String> {
+    Ok(next_queued_intent_in_queue(store, queue, allowed_kinds)?.map(|queued| queued.queue_key()))
 }
 
 /// Return the first queued intent matching a declared handler route.
@@ -611,9 +596,29 @@ pub(crate) struct QueuedIntent {
     pub(crate) intent: Intent,
 }
 
+impl QueuedIntent {
+    fn queue_key(&self) -> IntentQueueKey {
+        IntentQueueKey {
+            kind: self.intent.kind.as_str().to_owned(),
+            idempotence_key: self.intent.key.clone(),
+        }
+    }
+}
+
 pub(crate) struct IntentDispatchReport {
     pub(crate) status: WorkStatus,
-    pub(crate) emitted_projectable_facts: bool,
+    pub(crate) dispatched: bool,
+    pub(crate) retry_key: Option<IntentQueueKey>,
+}
+
+impl IntentDispatchReport {
+    fn idle() -> Self {
+        Self {
+            status: WorkStatus::idle(),
+            dispatched: false,
+            retry_key: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -623,6 +628,7 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{retry_intent, HandlerResult, IntentKind};
     use crate::core::schema::{CORE_SCHEMA_SOURCE, INCOMING_FACTS, PENDING_PROJECTION};
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static RETRY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -636,9 +642,10 @@ mod tests {
         submit_intent_to_table(&store, LOCAL_INTENTS, intent.clone()).expect("submit local");
         submit_intent_to_table(&store, INTENTS, intent).expect("submit durable");
 
-        let progress = dispatch_intents(
+        let progress = dispatch_intents_for_test(
             &store,
             &HandlerSet::new(NOOP_ROUTES),
+            IntentQueue::Durable,
             &[],
             None,
             1,
@@ -666,9 +673,10 @@ mod tests {
         submit_intent_to_table(&store, LOCAL_INTENTS, first.clone()).expect("submit first local");
         submit_intent_to_table(&store, LOCAL_INTENTS, second).expect("submit second local");
 
-        let progress = dispatch_intents(
+        let progress = dispatch_intents_for_test(
             &store,
             &HandlerSet::new(RETRY_ROUTES),
+            IntentQueue::Local,
             &[],
             None,
             8,
@@ -696,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_fact_effects_are_retained_queued_and_yield_dispatch() {
+    fn handler_fact_effects_are_retained_queued_and_drain_continues() {
         AFTER_FACT_CALLS.store(0, Ordering::SeqCst);
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let emitted = emitted_fact();
@@ -705,9 +713,10 @@ mod tests {
         submit_intent_to_table(&store, INTENTS, test_intent("zz_after_fact", b"second"))
             .expect("submit following intent");
 
-        let progress = dispatch_intents(
+        let progress = dispatch_intents_for_test(
             &store,
             &HandlerSet::new(EMIT_FACT_ROUTES),
+            IntentQueue::Durable,
             &[],
             None,
             8,
@@ -716,11 +725,11 @@ mod tests {
         )
         .expect("dispatch emitting intent");
 
-        assert_eq!(progress.dispatched, 1);
+        assert_eq!(progress.dispatched, 2);
         assert_eq!(
             AFTER_FACT_CALLS.load(Ordering::SeqCst),
-            0,
-            "dispatcher should yield so projection can run before later handlers"
+            1,
+            "intent drains should keep draining the selected queue after queuing projection work"
         );
         assert_eq!(
             retained_fact(&store, &emitted.id).expect("load emitted fact"),
@@ -741,7 +750,7 @@ mod tests {
             0,
             "intent-created facts should not pass through incoming intake"
         );
-        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 1);
+        assert_eq!(store.table_row_count(INTENTS).expect("durable count"), 0);
     }
 
     #[test]
@@ -826,6 +835,64 @@ mod tests {
                 .idempotence_key,
             b"second"
         );
+    }
+
+    fn dispatch_intents_for_test(
+        store: &Db,
+        handlers: &HandlerSet,
+        queue: IntentQueue,
+        allowed_tables: &[TableName],
+        fact_admission: Option<FactAdmissionFn>,
+        limit: usize,
+        handler_mode: HandlerMode,
+        effect_mode: RuntimeEffectMode,
+    ) -> Result<TestIntentProgress, String> {
+        let mut progress = TestIntentProgress::default();
+        let mut retried_local = BTreeSet::new();
+        let kinds = handlers.intent_kinds();
+        for _ in 0..limit {
+            if queue == IntentQueue::Local {
+                let Some(next_key) = next_intent_queue_key(store, queue, &kinds)? else {
+                    break;
+                };
+                if retried_local.contains(&next_key) {
+                    break;
+                }
+            }
+
+            let report = dispatch_one_intent(
+                store,
+                handlers,
+                queue,
+                allowed_tables,
+                fact_admission,
+                handler_mode,
+                effect_mode,
+            )?;
+            if report.status.is_idle() {
+                break;
+            }
+            if report.dispatched {
+                progress.dispatched += 1;
+            }
+            progress.status.merge(report.status);
+            if let Some(key) = report.retry_key {
+                if queue == IntentQueue::Local {
+                    retried_local.insert(key);
+                    continue;
+                }
+            }
+            if report.status.retried {
+                break;
+            }
+        }
+        Ok(progress)
+    }
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    struct TestIntentProgress {
+        status: WorkStatus,
+        dispatched: usize,
     }
 
     struct NoopHandler;

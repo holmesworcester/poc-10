@@ -7,29 +7,32 @@
 //! sources, projector router, handler registry, and row mutation allowlist that
 //! make those mechanics meaningful.
 //!
-//! The runtime does not interpret protocol bytes. It schedules work and holds
-//! the transaction ordering rules: command-authored facts commit before command
-//! receipts are returned, daemon projection batches run before intent batches,
-//! and handler output commits only through the dispatch boundary. Those rules
-//! make facts, context, rows, and queued work visible in a predictable order
-//! regardless of whether work came from a CLI command, a daemon tick, sync, or a
-//! protocol handler.
+//! The runtime does not interpret protocol bytes. It wires protocol registries
+//! into bounded queue steps: durable projection, incoming projection, durable
+//! intents, and local intents. Command-authored facts commit before command
+//! receipts are returned, and handler output commits only through the dispatch
+//! boundary. Those rules make facts, context, rows, and queued work visible in a
+//! predictable order regardless of whether work came from a CLI command, a
+//! daemon tick, sync, or a protocol handler.
 //!
 //! This is the facade a protocol host should use when it wants the whole core
 //! engine. Runtime holds the concrete database, projector, and protocol
-//! description, and composes the bounded projection and intent workers into
-//! command, daemon, and replay ordering.
+//! description. Daemon and replay choose ordering by calling the named bounded
+//! queue steps.
 
 use crate::core::command::AuthoredFacts;
 use crate::core::db::{Db, SchemaSource, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
-use crate::core::handle_intent::{dispatch_intents, HandlerSet};
+use crate::core::handle_intent::{
+    dispatch_one_intent, next_intent_queue_key, HandlerSet, IntentQueue,
+};
 use crate::core::intents::{HandlerMode, Intent};
 use crate::core::project_fact::{
-    self, FactAdmissionFn, FactRoute, Projector, RuntimeEffectMode, Timeline,
+    self, FactAdmissionFn, FactRoute, ProjectionSource, Projector, RuntimeEffectMode, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub use crate::core::handle_intent::{
@@ -198,38 +201,106 @@ impl Runtime {
         .map(|_| ())
     }
 
-    /// Drain at most `limit` queued projection items once.
+    /// Drain at most `limit` durable projection items.
     ///
-    /// This is the daemon-facing projection step. It advances one bounded batch
-    /// and leaves any remaining projection work queued for a later runtime turn.
-    pub fn drain_projection_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
-        project_fact::drain_projection(
-            &self.db,
-            self.projector.as_ref(),
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            limit,
-        )
-        .map(|progress| progress.status)
+    /// Runtime owns the bounded loop; `project_fact` owns the one-item
+    /// projection transaction. This keeps daemon scheduling visible without
+    /// spreading projection commit details outside the projection worker.
+    pub fn drain_durable_projection(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        self.drain_projection_source(ProjectionSource::Durable, limit)
     }
 
-    /// Drain queued intents once using the live handler set.
+    /// Drain at most `limit` incoming projection items.
     ///
-    /// Handler-emitted facts are retained and queued durably by dispatch. A
-    /// caller that wants those facts projected should run projection in a later
-    /// runtime step. This advances at most `limit` intent rows and leaves
-    /// remaining work queued.
-    pub fn drain_intents_once(&mut self, limit: usize) -> Result<WorkStatus, String> {
-        dispatch_intents(
-            &self.db,
-            &self.handlers,
-            self.description.row_mutation_tables,
-            self.description.fact_admission,
-            limit,
-            HandlerMode::Live,
-            RuntimeEffectMode::Live,
-        )
-        .map(|progress| progress.status)
+    /// Incoming facts are process-local intake. The daemon schedules this queue
+    /// explicitly after durable projection so readers do not have to inspect
+    /// `project_fact` to learn the live projection order.
+    pub fn drain_incoming_projection(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        self.drain_projection_source(ProjectionSource::Incoming, limit)
+    }
+
+    fn drain_projection_source(
+        &mut self,
+        source: ProjectionSource,
+        limit: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut status = WorkStatus::idle();
+        for _ in 0..limit {
+            let step = project_fact::project_one(
+                &self.db,
+                self.projector.as_ref(),
+                source,
+                self.description.row_mutation_tables,
+                self.description.fact_admission,
+            )?;
+            if step.status.is_idle() {
+                break;
+            }
+            status.merge(step.status);
+        }
+        Ok(status)
+    }
+
+    /// Drain at most `limit` durable intents using the live handler set.
+    ///
+    /// Runtime owns the bounded loop and yield policy. `handle_intent` owns the
+    /// one-row handler transaction.
+    pub fn drain_durable_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        self.drain_intent_queue(IntentQueue::Durable, limit)
+    }
+
+    /// Drain at most `limit` local intents using the live handler set.
+    ///
+    /// Local retries are rotated to the tail by `handle_intent`; this loop tracks
+    /// which local keys already retried so one bounded pass cannot spin forever
+    /// on retry-only local work.
+    pub fn drain_local_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
+        self.drain_intent_queue(IntentQueue::Local, limit)
+    }
+
+    fn drain_intent_queue(
+        &mut self,
+        queue: IntentQueue,
+        limit: usize,
+    ) -> Result<WorkStatus, String> {
+        let mut status = WorkStatus::idle();
+        let mut retried_local = BTreeSet::new();
+        let kinds = self.handlers.intent_kinds();
+        for _ in 0..limit {
+            if queue == IntentQueue::Local {
+                let Some(next_key) = next_intent_queue_key(&self.db, queue, &kinds)? else {
+                    break;
+                };
+                if retried_local.contains(&next_key) {
+                    break;
+                }
+            }
+
+            let report = dispatch_one_intent(
+                &self.db,
+                &self.handlers,
+                queue,
+                self.description.row_mutation_tables,
+                self.description.fact_admission,
+                HandlerMode::Live,
+                RuntimeEffectMode::Live,
+            )?;
+            if report.status.is_idle() {
+                break;
+            }
+
+            status.merge(report.status);
+            if let Some(key) = report.retry_key {
+                if queue == IntentQueue::Local {
+                    retried_local.insert(key);
+                    continue;
+                }
+            }
+            if report.status.retried {
+                break;
+            }
+        }
+        Ok(status)
     }
 
     pub fn process_due_time_range(
@@ -509,7 +580,7 @@ mod tests {
             .expect("submit facts");
 
         projection_runtime
-            .drain_projection_once(1)
+            .drain_durable_projection(1)
             .expect("drain one projection");
         assert_eq!(
             projection_runtime.pending_fact_count(),
@@ -529,7 +600,7 @@ mod tests {
         }
 
         intent_runtime
-            .drain_intents_once(1)
+            .drain_durable_intents(1)
             .expect("drain one intent");
         assert_eq!(
             HANDLER_CALLS.load(Ordering::SeqCst),
@@ -550,7 +621,9 @@ mod tests {
             ))
             .expect("submit intent");
 
-        let first = runtime.drain_intents_once(8).expect("drain intent batch");
+        let first = runtime
+            .drain_durable_intents(8)
+            .expect("drain durable intent batch");
 
         assert!(first.progressed);
         assert_eq!(
@@ -565,8 +638,8 @@ mod tests {
         );
 
         let second = runtime
-            .drain_projection_once(8)
-            .expect("drain later projection batch");
+            .drain_durable_projection(8)
+            .expect("drain later durable projection batch");
 
         assert!(second.progressed);
         assert_eq!(

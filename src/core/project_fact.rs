@@ -59,13 +59,13 @@ use rusqlite::{params, OptionalExtension};
 
 pub(crate) use commit_effects::{commit_runtime_effects_to_db, RuntimeEffectMode};
 
-/// Projection progress from one bounded drain pass.
+/// Result from one selected projection queue step.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ProjectionProgress {
-    /// Number of facts that completed projection.
-    pub(crate) projected: usize,
-    /// Whether the pass made progress or hit a retry.
+pub(crate) struct ProjectionStep {
+    /// Whether this step changed queue or projected state.
     pub(crate) status: WorkStatus,
+    /// Whether this step completed a projector run and commit.
+    pub(crate) projected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,185 +113,130 @@ struct ProjectedOutput {
     runtime_effects: RuntimeEffects,
 }
 
-/// Drive one bounded projection drain pass.
-pub(crate) fn drain_projection(
-    store: &Db,
-    projector: &(impl Projector + ?Sized),
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    limit: usize,
-) -> Result<ProjectionProgress, String> {
-    let mut total = ProjectionProgress::default();
-    while total.projected < limit {
-        let remaining = limit - total.projected;
-        let mut progress = ProjectionProgress::default();
-
-        let durable_items = perf::measure_result("projection_pending_load", || {
-            pending_durable_projection_items(store, remaining)
-        })?;
-        drain_projection_items(
-            store,
-            projector,
-            ProjectionSource::Durable,
-            durable_items,
-            &mut progress,
-            allowed_tables,
-            fact_admission,
-            remaining,
-        )?;
-
-        if progress.projected < remaining {
-            let incoming_fact_ids = perf::measure_result("projection_incoming_load", || {
-                incoming_pending_fact_ids(store, remaining - progress.projected)
-            })?;
-            drain_projection_items(
-                store,
-                projector,
-                ProjectionSource::Incoming,
-                incoming_fact_ids
-                    .into_iter()
-                    .map(|fact_id| PendingProjectionItem {
-                        fact_id,
-                        mode: ProjectionMode::Normal,
-                    })
-                    .collect(),
-                &mut progress,
-                allowed_tables,
-                fact_admission,
-                remaining,
-            )?;
-        }
-
-        let projected = progress.projected > 0;
-        total.projected += progress.projected;
-        total.status.merge(progress.status);
-        if !projected {
-            break;
-        }
-    }
-    Ok(total)
-}
-
-fn drain_projection_items(
+/// Project one queued item from the selected projection source.
+///
+/// The caller owns queue order and batching. This function owns the mechanics
+/// for one selected queue item: load the queued fact and context, run its
+/// projector, and commit the result as one SQL transaction. Missing stale work
+/// and rejected projection both count as progress because the queued item is
+/// consumed or cleaned up.
+pub(crate) fn project_one(
     store: &Db,
     projector: &(impl Projector + ?Sized),
     source: ProjectionSource,
-    items: Vec<PendingProjectionItem>,
-    progress: &mut ProjectionProgress,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    limit: usize,
-) -> Result<(), String> {
-    for item in items {
-        if progress.projected >= limit {
-            break;
+) -> Result<ProjectionStep, String> {
+    let Some(item) = perf::measure_result("projection_queue_load", || {
+        next_projection_item(store, source)
+    })?
+    else {
+        return Ok(ProjectionStep::default());
+    };
+
+    let fact_id = item.fact_id;
+    let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
+        load_pending_fact(store, source, fact_id, item.mode)
+    })?
+    else {
+        match source {
+            ProjectionSource::Durable => store
+                .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
+                .map(|_| ())
+                .map_err(|err| format!("purge stale durable pending fact: {err}"))?,
+            ProjectionSource::Incoming => store
+                .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
+                .map(|_| ())
+                .map_err(|err| format!("purge stale incoming fact: {err}"))?,
         }
-        let fact_id = item.fact_id;
-        let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
-            load_pending_fact(store, source, fact_id, item.mode)
-        })?
-        else {
-            match source {
-                ProjectionSource::Durable => store
-                    .write_transaction(|tx| purge_fact_in_tx(tx, fact_id))
-                    .map(|_| ())
-                    .map_err(|err| format!("purge stale durable pending fact: {err}"))?,
-                ProjectionSource::Incoming => store
-                    .write_transaction(|tx| delete_incoming_fact_in_tx(tx, fact_id))
-                    .map(|_| ())
-                    .map_err(|err| format!("purge stale incoming fact: {err}"))?,
-            }
-            continue;
-        };
-        let projected = process_projection_item(
-            store,
-            projector,
-            pending_fact,
-            allowed_tables,
-            fact_admission,
-        )?;
-        if projected {
-            progress.projected += 1;
-            progress.status.progressed = true;
-        }
-    }
-    Ok(())
+        return Ok(ProjectionStep {
+            status: WorkStatus::progressed(true),
+            projected: false,
+        });
+    };
+
+    let projected = process_projection_item(
+        store,
+        projector,
+        pending_fact,
+        allowed_tables,
+        fact_admission,
+    )?;
+    Ok(ProjectionStep {
+        status: WorkStatus::progressed(true),
+        projected,
+    })
 }
 
-/// Read the next durable pending fact ids without mutating the queue.
+fn next_projection_item(
+    store: &Db,
+    source: ProjectionSource,
+) -> Result<Option<PendingProjectionItem>, String> {
+    match source {
+        ProjectionSource::Durable => next_durable_projection_item(store),
+        ProjectionSource::Incoming => next_incoming_projection_item(store),
+    }
+}
+
+/// Read the next durable pending fact id without mutating the queue.
 ///
 /// The item commit removes the row only after projection succeeds. Missing
 /// facts are handled by the queue driver as stale pending rows.
-fn pending_durable_projection_items(
-    store: &Db,
-    limit: usize,
-) -> Result<Vec<PendingProjectionItem>, String> {
-    let limit =
-        i64::try_from(limit).map_err(|_| "pending projection limit exceeds i64".to_string())?;
-    let mut stmt = store
+fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
+    store
         .conn()
-        .prepare(
+        .query_row(
             r#"
             SELECT p.owner, p.mode
             FROM pending_projection p
             LEFT JOIN local_fact_admissions m ON m.fact_id = p.owner
             ORDER BY COALESCE(m.received_at, 9223372036854775807), p.owner
-            LIMIT ?1
+            LIMIT 1
             "#,
+            [],
+            |row| {
+                Ok(PendingProjectionItem {
+                    fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
+                    mode: ProjectionMode::from_str(&row.get::<_, String>(1)?)
+                        .map_err(rusqlite::Error::InvalidParameterName)?,
+                })
+            },
         )
-        .map_err(|err| format!("load pending projection: {err}"))?;
-    let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok(PendingProjectionItem {
-                fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-                mode: ProjectionMode::from_str(&row.get::<_, String>(1)?)
-                    .map_err(rusqlite::Error::InvalidParameterName)?,
-            })
-        })
-        .map_err(|err| format!("load pending projection: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .optional()
         .map_err(|err| format!("load pending projection: {err}"))
 }
 
-fn incoming_pending_fact_ids(store: &Db, limit: usize) -> Result<Vec<FactId>, String> {
-    let limit = i64::try_from(limit).map_err(|_| "incoming fact limit exceeds i64".to_string())?;
-    let sql = incoming_ready_sql("e.id", "ORDER BY e.received_at, e.id LIMIT ?1")?;
-    let mut stmt = store
+fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
+    store
         .conn()
-        .prepare(&sql)
-        .map_err(|err| format!("load incoming facts: {err}"))?;
-    let rows = stmt
-        .query_map(params![limit], |row| {
-            fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")
-        })
-        .map_err(|err| format!("load incoming facts: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .query_row(
+            r#"
+            SELECT e.id
+            FROM incoming_facts e
+            WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM context_edges n
+                    WHERE n.owner = e.id
+                      AND n.direction = 'need'
+                )
+               OR EXISTS (
+                    SELECT 1
+                    FROM pending_projection_matches m
+                    WHERE m.owner = e.id
+                )
+            ORDER BY e.received_at, e.id
+            LIMIT 1
+            "#,
+            [],
+            |row| {
+                Ok(PendingProjectionItem {
+                    fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")?,
+                    mode: ProjectionMode::Normal,
+                })
+            },
+        )
+        .optional()
         .map_err(|err| format!("load incoming facts: {err}"))
-}
-
-fn incoming_ready_sql(select: &str, suffix: &str) -> Result<String, String> {
-    let incoming_facts = quoted_table_name(INCOMING_FACTS).map_err(|err| err.to_string())?;
-    let context_edges = quoted_table_name(CONTEXT_EDGES).map_err(|err| err.to_string())?;
-    let pending_matches =
-        quoted_table_name(PENDING_PROJECTION_MATCHES).map_err(|err| err.to_string())?;
-    Ok(format!(
-        r#"
-        SELECT {select}
-        FROM {incoming_facts} e
-        WHERE NOT EXISTS (
-                SELECT 1
-                FROM {context_edges} n
-                WHERE n.owner = e.id
-                  AND n.direction = 'need'
-            )
-           OR EXISTS (
-                SELECT 1
-                FROM {pending_matches} m
-                WHERE m.owner = e.id
-            )
-        {suffix}
-        "#
-    ))
 }
 
 /// Load everything projection needs for one fact.
@@ -3452,14 +3397,38 @@ mod contract_tests {
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
-    ) -> Result<crate::core::project_fact::ProjectionProgress, String> {
-        crate::core::project_fact::drain_projection(
-            store,
-            projector,
-            allowed_tables,
-            fact_admission,
-            limit,
-        )
+    ) -> Result<TestProjectionProgress, String> {
+        let mut progress = TestProjectionProgress::default();
+        for _ in 0..limit {
+            let mut step = crate::core::project_fact::project_one(
+                store,
+                projector,
+                ProjectionSource::Durable,
+                allowed_tables,
+                fact_admission,
+            )?;
+            if step.status.is_idle() {
+                step = crate::core::project_fact::project_one(
+                    store,
+                    projector,
+                    ProjectionSource::Incoming,
+                    allowed_tables,
+                    fact_admission,
+                )?;
+            }
+            if step.status.is_idle() {
+                break;
+            }
+            progress.status.merge(step.status);
+            progress.projected += usize::from(step.projected);
+        }
+        Ok(progress)
+    }
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    struct TestProjectionProgress {
+        projected: usize,
+        status: WorkStatus,
     }
 
     fn intent_payload_for(store: &Db, kind: &str, key: &FactId) -> Vec<u8> {
@@ -3966,10 +3935,10 @@ mod tests {
     }
 
     #[test]
-    fn incoming_pending_ids_treat_pending_matches_as_ready() {
+    fn next_incoming_projection_item_treats_pending_matches_as_ready() {
         let db = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let ready = Fact::new(FactScope::Local, 1, b"ready incoming".to_vec());
-        let blocked = Fact::new(FactScope::Local, 2, b"blocked incoming".to_vec());
+        let blocked = Fact::new(FactScope::Local, 0, b"blocked incoming".to_vec());
 
         db.write_transaction(|tx| {
             insert_incoming_fact_in_tx(tx, &ready)?;
@@ -3990,8 +3959,10 @@ mod tests {
         .expect("seed incoming facts");
 
         assert_eq!(
-            incoming_pending_fact_ids(&db, 10).expect("pending incoming ids"),
-            vec![ready.id]
+            next_incoming_projection_item(&db)
+                .expect("next incoming")
+                .map(|item| item.fact_id),
+            Some(ready.id)
         );
 
         db.conn()
@@ -4011,8 +3982,10 @@ mod tests {
             .expect("record pending match");
 
         assert_eq!(
-            incoming_pending_fact_ids(&db, 10).expect("matched incoming ids"),
-            vec![ready.id, blocked.id]
+            next_incoming_projection_item(&db)
+                .expect("matched incoming")
+                .map(|item| item.fact_id),
+            Some(blocked.id)
         );
     }
 

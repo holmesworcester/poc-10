@@ -639,7 +639,7 @@ fn poc10_core_workers_expose_protocol_neutral_vocabulary() {
             "intent output",
             &[
                 "handler output",
-                "IntentDispatchProgress",
+                "IntentDispatchReport",
                 "commit_handler_output",
             ][..],
         ),

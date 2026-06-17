@@ -5,9 +5,9 @@
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
 //! daemon description. The tick is protocol-agnostic: fire recurring intents,
 //! accept network bytes, commit protocol-classified incoming effects, process
-//! declared time wakes with a high local budget, drain one high-volume
-//! projection batch and one intent batch, then pump queued outgoing network
-//! bytes.
+//! declared time wakes with a high local budget, drain durable projection, drain
+//! incoming projection, drain durable intents, drain local intents, then pump
+//! queued outgoing network bytes.
 //!
 //! The daemon is the host for work that should keep happening without a user
 //! command on the stack. It does not decode connection frames or choose protocol
@@ -16,13 +16,14 @@
 //! the runtime handlers that consume queued work.
 //!
 //! The order inside `tick` is part of the runtime contract. Network input is
-//! admitted after recurring intents are fired, due time ranges wake facts, one
-//! runtime projection batch drains, one runtime intent batch drains, and then
-//! queued outgoing TCP bytes are pumped by target address. Handler-emitted facts
-//! remain queued for later projection work. Change that order here only if the
-//! whole daemon scheduling policy changes; protocol handlers should adapt by
-//! emitting facts, time wakes, or intents rather than calling daemon steps
-//! directly.
+//! admitted after recurring intents are fired, due time ranges wake facts,
+//! durable projection drains, incoming projection drains, durable intents drain,
+//! local intents drain, and then queued outgoing TCP bytes are pumped by target
+//! address.
+//! Handler-emitted facts remain queued for later projection work. Change that
+//! order here only if the whole daemon scheduling policy changes; protocol
+//! handlers should adapt by emitting facts, time wakes, or intents rather than
+//! calling daemon steps directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::db::Db;
@@ -102,9 +103,9 @@ pub struct DaemonTimeWake {
 /// Run one bounded daemon tick.
 ///
 /// The order is fixed: fire recurring intents, accept TCP, commit inbound intake
-/// effects, admit time wakes with the high local-derivation budget, drain one
-/// high-volume projection batch and one base-limit intent batch, then pump
-/// outgoing TCP rows.
+/// effects, admit time wakes with the high local-derivation budget, drain
+/// durable projection, drain incoming projection, drain durable intents, drain
+/// local intents, then pump outgoing TCP rows.
 /// Protocols should change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
@@ -127,8 +128,10 @@ pub fn tick(
         runtime,
         local_derivation_limit,
     )?);
-    status.merge(runtime.drain_projection_once(local_derivation_limit)?);
-    status.merge(runtime.drain_intents_once(work_limit)?);
+    status.merge(runtime.drain_durable_projection(local_derivation_limit)?);
+    status.merge(runtime.drain_incoming_projection(local_derivation_limit)?);
+    status.merge(runtime.drain_durable_intents(work_limit)?);
+    status.merge(runtime.drain_local_intents(work_limit)?);
     status.merge(drain_outgoing_network(runtime, work_limit)?);
     Ok(status)
 }
