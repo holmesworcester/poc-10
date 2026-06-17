@@ -91,6 +91,7 @@ pub(crate) struct PendingFact {
 }
 
 /// A projector result plus the pending-fact metadata needed to commit it.
+#[derive(Debug)]
 struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
@@ -100,16 +101,6 @@ struct PreparedProjection {
     context: ContextSet,
     time_wakes: Vec<TimeWake>,
     context_delta: ContextSetDelta,
-    runtime_effects: RuntimeEffects,
-}
-
-/// The pure result of running one projector before any SQL writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectedOutput {
-    retain_self: bool,
-    context: ContextSet,
-    context_delta: ContextSetDelta,
-    time_wakes: Vec<TimeWake>,
     runtime_effects: RuntimeEffects,
 }
 
@@ -296,37 +287,10 @@ pub(crate) fn process_projection_item(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<bool, String> {
-    let PendingFact {
-        source,
-        fact_id,
-        mode,
-        fact,
-        previous_context,
-        projection_context,
-    } = pending_fact;
-
+    let source = pending_fact.source;
+    let fact_id = pending_fact.fact_id;
     let projection = match perf::measure_result("projection_prepare_effects", || {
-        let run = perf::measure_result("projection_projector_cpu", || {
-            run_projection(projector, &fact, &previous_context, projection_context)
-        })?;
-        perf::measure_result("projection_validate_effects", || {
-            validate_runtime_effects_for_admission(
-                &run.runtime_effects,
-                allowed_tables,
-                fact_admission,
-            )
-        })?;
-        Ok::<PreparedProjection, String>(PreparedProjection {
-            source,
-            fact,
-            fact_id,
-            mode,
-            retain_self: run.retain_self,
-            context: run.context,
-            time_wakes: run.time_wakes,
-            context_delta: run.context_delta,
-            runtime_effects: run.runtime_effects,
-        })
+        prepare_projection(projector, pending_fact, allowed_tables, fact_admission)
     }) {
         Ok(projection) => projection,
         Err(_rejection) => {
@@ -360,14 +324,24 @@ pub(crate) fn process_projection_item(
 /// fact. This helper enforces that projectors only own their own context/time
 /// rows and may purge only their own fact, then computes the context delta that
 /// will wake dependent facts after commit.
-fn run_projection(
+fn prepare_projection(
     projector: &(impl Projector + ?Sized),
-    fact: &Fact,
-    previous_context: &ContextSet,
-    context: ProjectionContext,
-) -> Result<ProjectedOutput, String> {
-    let output = projector.project(fact, &context)?;
-    enforce_owner_is_self(fact, &output)?;
+    pending_fact: PendingFact,
+    allowed_tables: &[TableName],
+    fact_admission: Option<FactAdmissionFn>,
+) -> Result<PreparedProjection, String> {
+    let PendingFact {
+        source,
+        fact_id,
+        mode,
+        fact,
+        previous_context,
+        projection_context,
+    } = pending_fact;
+    let output = perf::measure_result("projection_projector_cpu", || {
+        projector.project(&fact, &projection_context)
+    })?;
+    enforce_owner_is_self(&fact, &output)?;
     let output_context = output.context_set();
     let context = ContextSet {
         needs: output_context.needs,
@@ -379,13 +353,21 @@ fn run_projection(
             .collect(),
     }
     .normalized();
-    let context_delta = diff_context_sets(previous_context, &context);
-    Ok(ProjectedOutput {
+    let context_delta = diff_context_sets(&previous_context, &context);
+    let runtime_effects = output.effects;
+    perf::measure_result("projection_validate_effects", || {
+        validate_runtime_effects_for_admission(&runtime_effects, allowed_tables, fact_admission)
+    })?;
+    Ok(PreparedProjection {
+        source,
+        fact,
+        fact_id,
+        mode,
         retain_self: output.retain_self,
         context,
         context_delta,
         time_wakes: output.time_wakes,
-        runtime_effects: output.effects,
+        runtime_effects,
     })
 }
 
@@ -2574,6 +2556,19 @@ fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
         .map_err(|_| rusqlite::Error::InvalidParameterName(format!("{name} is negative")))
 }
 
+/// Check a fact's content id against its own bytes.
+///
+/// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally
+/// holds. Protocol-local validation helpers re-check it when they need a
+/// self-contained proof over raw bytes.
+pub fn verify_fact_id(fact: &crate::core::facts::Fact) -> Result<(), String> {
+    if fact.id == crate::core::facts::fact_id(&fact.bytes) {
+        Ok(())
+    } else {
+        Err("fact id does not match fact bytes".to_string())
+    }
+}
+
 #[cfg(test)]
 mod contract_tests {
     use super::*;
@@ -2582,6 +2577,28 @@ mod contract_tests {
     use crate::core::intents::{Intent, IntentKind};
     use crate::core::project_fact::{submit_fact_to_db, submit_facts_to_db};
     use rusqlite::OptionalExtension;
+
+    fn run_projection(
+        projector: &(impl Projector + ?Sized),
+        fact: &Fact,
+        previous_context: &ContextSet,
+        projection_context: ProjectionContext,
+    ) -> Result<PreparedProjection, String> {
+        let mode = projection_context.mode();
+        prepare_projection(
+            projector,
+            PendingFact {
+                source: ProjectionSource::Durable,
+                fact_id: fact.id,
+                mode,
+                fact: fact.clone(),
+                previous_context: previous_context.clone(),
+                projection_context,
+            },
+            &[],
+            None,
+        )
+    }
 
     #[test]
     fn projection_run_rejects_offer_owned_by_another_fact() {
@@ -3397,8 +3414,8 @@ mod contract_tests {
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
-    ) -> Result<TestProjectionProgress, String> {
-        let mut progress = TestProjectionProgress::default();
+    ) -> Result<TestProjectionDrain, String> {
+        let mut progress = TestProjectionDrain::default();
         for _ in 0..limit {
             let mut step = crate::core::project_fact::project_one(
                 store,
@@ -3426,7 +3443,7 @@ mod contract_tests {
     }
 
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    struct TestProjectionProgress {
+    struct TestProjectionDrain {
         projected: usize,
         status: WorkStatus,
     }
@@ -3791,19 +3808,6 @@ mod contract_tests {
 // The SQL-backed worker below owns one queued fact at a time: matched context
 // loading, projector execution, incoming retention, context wake fanout,
 // time-wake replacement, and projection effect commit.
-
-/// Check a fact's content id against its own bytes.
-///
-/// Core constructs every `Fact` with `id = fact_id(bytes)`, so this normally
-/// holds. Protocol-local validation helpers re-check it when they need a
-/// self-contained proof over raw bytes.
-pub fn verify_fact_id(fact: &crate::core::facts::Fact) -> Result<(), String> {
-    if fact.id == crate::core::facts::fact_id(&fact.bytes) {
-        Ok(())
-    } else {
-        Err("fact id does not match fact bytes".to_string())
-    }
-}
 
 #[cfg(test)]
 mod tests {
