@@ -1,18 +1,30 @@
-//! One queued fact projection item.
+//! Projection queue storage and one-item projection commits.
 //!
-//! One item loads one fact, any matched payload facts, and due time ranges.
-//! It then runs the routed protocol projector. The projector may decode raw
-//! bytes, validate context, park on needs, and emit effects or offers. Core
-//! resolves newly declared needs that already match stored offers and commits
-//! the complete output once.
+//! Projection is the only path from stored fact bytes to standing context,
+//! materialized protocol rows, time wakes, purges, and follow-up work. The SQL
+//! shape is intentionally small:
 //!
-//! Projection commits are the only path from fact bytes to standing context,
-//! read-model rows, time wakes, purges, and follow-up work. For a durable fact,
-//! the commit consumes the pending row, clears queued matches and due ranges for
-//! the owner, replaces owned needs/time wakes, appends offers, records wake
-//! matches for dependents, and applies `RuntimeEffects` atomically. Incoming
-//! facts use the same boundary after either being retained into `facts` or
-//! dropped from `incoming_facts`.
+//! - `facts` stores durable content-addressed fact bytes by id.
+//! - `local_fact_admissions` stores the local metadata needed to interpret
+//!   those bytes: scope, scope kind/id, and admission time. Loading a durable
+//!   `Fact` always joins these two tables.
+//! - `incoming_facts` is temp, process-local intake. Incoming rows project once;
+//!   projection either moves them into durable `facts` plus
+//!   `local_fact_admissions`, or drops them.
+//! - `pending_projection` is the work queue keyed by fact id (`owner`) plus
+//!   projection mode.
+//! - `pending_projection_matches` and `pending_time_ranges` carry the context
+//!   that woke a queued owner. They are consumed with the owner row.
+//! - `context_edges` stores standing needs/offers, and `time_wakes` stores
+//!   standing future wake requests emitted by durable projection.
+//!
+//! SQL atomicity is the safety mechanism. Submitting a fact inserts bytes,
+//! admission metadata, the pending row, and any already matched context in one
+//! transaction. Projecting a queued fact then consumes that pending work,
+//! replaces owned needs/time wakes, appends offers, records newly woken owners,
+//! applies row mutations, records intents, and moves/drops incoming rows in one
+//! transaction. If SQLite rolls back, the old queue state remains. If it
+//! commits, the projector output is visible as a complete unit.
 //!
 //! Projectors do not query the database for missing context during a run. Matched
 //! payload facts arrive through `ProjectionContext` because the pending row
@@ -3133,32 +3145,6 @@ const OWNER_KEYED_FACT_CLEANUP_TABLES: &[TableName] = &[
     PENDING_PROJECTION,
 ];
 
-#[derive(Debug, Clone, Copy)]
-enum FactReadSource {
-    Retained,
-    Incoming,
-}
-
-impl FactReadSource {
-    fn select_by_id_sql(self) -> &'static str {
-        match self {
-            Self::Retained => {
-                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-                 FROM facts f
-                 JOIN local_fact_admissions m ON m.fact_id = f.id
-                 WHERE f.id = ?1
-                 LIMIT 1"
-            }
-            Self::Incoming => {
-                "SELECT id, scope, scope_kind, scope_id, received_at, bytes
-                 FROM incoming_facts
-                 WHERE id = ?1
-                 LIMIT 1"
-            }
-        }
-    }
-}
-
 fn projection_sql_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
@@ -3179,7 +3165,19 @@ fn verify_idempotent_insert<T>(
 }
 
 fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
-    fact_by_id_in_tx(store, id).map_err(|err| format!("load fact row: {err}"))
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load retained fact: {err}"))
 }
 
 /// Insert a fact and mark it pending in the caller's transaction.
@@ -3392,23 +3390,14 @@ fn incoming_ready_sql(select: &str, suffix: &str) -> Result<String, String> {
     ))
 }
 
-fn fact_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option<Fact>> {
-    fact_by_id_from(store, FactReadSource::Retained, id)
-}
-
 fn incoming_fact_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option<Fact>> {
-    fact_by_id_from(store, FactReadSource::Incoming, id)
-}
-
-fn fact_by_id_from(
-    store: &Db,
-    source: FactReadSource,
-    id: &FactId,
-) -> rusqlite::Result<Option<Fact>> {
     store
         .conn()
         .query_row(
-            source.select_by_id_sql(),
+            "SELECT id, scope, scope_kind, scope_id, received_at, bytes
+             FROM incoming_facts
+             WHERE id = ?1
+             LIMIT 1",
             params![id.as_slice()],
             fact_from_storage_row,
         )
@@ -3663,33 +3652,6 @@ pub(crate) fn submit_facts_to_db(
         })
         .map_err(|err| format!("submit facts: {err}"))?;
     Ok(inserted)
-}
-
-/// Seed replay by queueing all retained facts as replay work.
-pub(crate) fn enqueue_retained_facts_for_replay(store: &Db) -> Result<usize, String> {
-    store
-        .conn()
-        .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner, mode)
-             SELECT id, 'replay' FROM facts",
-            [],
-        )
-        .map_err(|err| format!("enqueue retained facts for replay: {err}"))
-}
-
-/// Seed replay by queueing one retained fact as replay work.
-pub(crate) fn enqueue_retained_fact_for_replay(
-    store: &Db,
-    fact_id: FactId,
-) -> Result<bool, String> {
-    store
-        .conn()
-        .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner, mode) VALUES (?1, 'replay')",
-            params![fact_id.as_slice()],
-        )
-        .map(|inserted| inserted > 0)
-        .map_err(|err| format!("enqueue retained fact for replay: {err}"))
 }
 
 /// Turn due time wakes into pending projection work plus time context.

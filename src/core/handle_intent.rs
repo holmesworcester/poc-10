@@ -8,23 +8,27 @@
 //! keeps commands, projection, network IO, and background maintenance on the
 //! same idempotent queue model.
 //!
-//! Dispatch owns the lifecycle of one queued intent row. It chooses the next
-//! row for a registered kind, loads only the facts requested by the handler,
-//! and calls the handler. On success it opens the transaction that deletes the
-//! handled row, then delegates the handler's `RuntimeEffects` to
-//! `commit_effects` inside that same transaction. Retry errors deliberately
-//! leave the row queued.
+//! Dispatch owns the lifecycle of one queued intent row. The SQL shape is two
+//! queues with the same columns: durable `intents` rows and process-local
+//! `local_intents` rows. Queue identity is `(kind, idempotence_key)`, so
+//! inserts are idempotent only when the payload also matches. Durable rows are
+//! selected in stable identity order for replay and tests; local rows are
+//! selected by SQLite insertion order so live IO preserves arrival order.
+//!
+//! A handler declares exact fact inputs. Dispatch loads those inputs by joining
+//! durable `facts` bytes with `local_fact_admissions` metadata and places them
+//! in `HandlerContext`; handlers that require an input call
+//! `HandlerContext::require_fact`.
 //!
 //! This transaction boundary is why dispatch matters. A handler output is
 //! visible exactly when its input queue row is consumed: no output without
 //! deleting the work item, and no deletion without committing the output. That
-//! is the rule that makes handler retries safe after process crashes, missing
-//! dependencies, and temporary network failures.
-//!
-//! Durable and ephemeral queues share the same row shape. Durable work wins
-//! when both queues contain the same kind, and handling a durable row removes a
-//! duplicate local row with the same identity so ephemeral retries do not
-//! repeat work already accepted durably.
+//! delete and every `RuntimeEffects` write happen inside one SQLite transaction.
+//! If the transaction rolls back, the queued row is still there; if it commits,
+//! the row is gone and the output is durable. Durable work wins when both queues
+//! contain the same kind, and handling a durable row removes a duplicate local
+//! row with the same identity so ephemeral retries do not repeat work already
+//! accepted durably.
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
@@ -192,21 +196,12 @@ impl IntentQueue {
         }
     }
 
-    fn order(self) -> IntentWorkRowOrder {
+    fn order_by_sql(self) -> &'static str {
         match self {
-            Self::Durable => IntentWorkRowOrder::StableIdentity,
-            Self::Local => IntentWorkRowOrder::Insertion,
+            Self::Durable => "kind, idempotence_key",
+            Self::Local => "rowid",
         }
     }
-}
-
-/// Ordering policy for selecting the next raw intent work row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IntentWorkRowOrder {
-    /// Stable identity order for durable, replayable work.
-    StableIdentity,
-    /// SQLite insertion order for process-local ephemeral work.
-    Insertion,
 }
 
 fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
@@ -309,16 +304,12 @@ fn next_intent_work_row(
     db: &Db,
     table: TableName,
     allowed_kinds: &[&str],
-    order: IntentWorkRowOrder,
+    order_by_sql: &str,
 ) -> rusqlite::Result<Option<IntentWorkRow>> {
     if allowed_kinds.is_empty() {
         return Ok(None);
     }
     let table_name = quoted_intent_work_table_name(table)?;
-    let order = match order {
-        IntentWorkRowOrder::StableIdentity => "kind, idempotence_key",
-        IntentWorkRowOrder::Insertion => "rowid",
-    };
     let placeholders = (1..=allowed_kinds.len())
         .map(|idx| format!("?{idx}"))
         .collect::<Vec<_>>()
@@ -329,7 +320,7 @@ fn next_intent_work_row(
                 "SELECT kind, idempotence_key, payload
                  FROM {table_name}
                  WHERE kind IN ({placeholders})
-                 ORDER BY {order}
+                 ORDER BY {order_by_sql}
                  LIMIT 1"
             ),
             params_from_iter(allowed_kinds.iter().copied()),
@@ -505,7 +496,7 @@ fn next_queued_intent_in_queue(
     queue: IntentQueue,
     allowed_kinds: &[&str],
 ) -> Result<Option<QueuedIntent>, String> {
-    next_intent_work_row(store, queue.table(), allowed_kinds, queue.order())
+    next_intent_work_row(store, queue.table(), allowed_kinds, queue.order_by_sql())
         .map_err(|err| format!("load queued intent: {err}"))?
         .map(|row| Intent::from_work_row(row).map(|intent| QueuedIntent { queue, intent }))
         .transpose()
@@ -795,7 +786,7 @@ mod tests {
             &store,
             INTENTS,
             &["z_kind", "a_kind"],
-            IntentWorkRowOrder::StableIdentity,
+            "kind, idempotence_key",
         )
         .expect("select durable row")
         .expect("durable row");
@@ -817,15 +808,10 @@ mod tests {
         }
 
         assert_eq!(
-            next_intent_work_row(
-                &store,
-                LOCAL_INTENTS,
-                &["work"],
-                IntentWorkRowOrder::Insertion,
-            )
-            .expect("select first local")
-            .expect("first local")
-            .idempotence_key,
+            next_intent_work_row(&store, LOCAL_INTENTS, &["work"], "rowid",)
+                .expect("select first local")
+                .expect("first local")
+                .idempotence_key,
             b"first"
         );
 
@@ -834,15 +820,10 @@ mod tests {
             .expect("rotate first row");
 
         assert_eq!(
-            next_intent_work_row(
-                &store,
-                LOCAL_INTENTS,
-                &["work"],
-                IntentWorkRowOrder::Insertion,
-            )
-            .expect("select second local")
-            .expect("second local")
-            .idempotence_key,
+            next_intent_work_row(&store, LOCAL_INTENTS, &["work"], "rowid",)
+                .expect("select second local")
+                .expect("second local")
+                .idempotence_key,
             b"second"
         );
     }

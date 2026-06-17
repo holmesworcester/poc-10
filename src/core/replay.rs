@@ -10,10 +10,11 @@
 //! and independent of fact projection order.
 //!
 //! Ownership boundary. Replay reuses the ordinary projection and dispatch
-//! workers; it adds three things on top: a db-owned reset of schema-declared
-//! replay tables, projection-order control used by the reverse and scrambled
-//! diagnostics, and replay-mode projection context. Projectors decide how their
-//! facts behave in replay through `ProjectionContext::is_replay()`.
+//! workers; it adds four things on top: a db-owned reset of schema-declared
+//! replay tables, SQL inserts that mark retained facts pending in replay mode,
+//! projection-order control used by the reverse and scrambled diagnostics, and
+//! replay-mode projection/handler context. Projectors decide how their facts
+//! behave in replay through `ProjectionContext::is_replay()`.
 //!
 //! Invariants. Replay must not perform network IO or run operational wall-clock
 //! decisions. It re-materializes standing time wakes but does not decide that
@@ -33,6 +34,7 @@ use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
 use crate::core::project_fact::{self, FactAdmissionFn, Projector, RuntimeEffectMode};
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
+use rusqlite::params;
 use std::collections::BTreeSet;
 
 const REPLAY_WORK_LIMIT: usize = 4096;
@@ -111,22 +113,43 @@ pub fn run_replay(
     };
     let facts_before = fact_id_set(db)?;
 
-    report.wiped_tables = wipe_derived_state(db)?;
+    report.wiped_tables = clear_replay_reset_tables(db)?;
     report.retained_facts = table_count(db, FACTS)?;
 
-    let drive = ReplayDrive::new(db, projector, allowed_tables, fact_admission, routes);
+    let handlers = HandlerSet::new(routes);
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
-            project_fact::enqueue_retained_facts_for_replay(db)?;
-            drive.drain_until_barrier(&mut counters)?;
+            enqueue_all_retained_facts_for_replay(db)?;
+            drain_replay_barrier(
+                db,
+                projector,
+                &handlers,
+                allowed_tables,
+                fact_admission,
+                &mut counters,
+            )?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(db, order)? {
-                project_fact::enqueue_retained_fact_for_replay(db, fact_id)?;
-                drive.drain_until_barrier(&mut counters)?;
+                enqueue_retained_fact_for_replay(db, fact_id)?;
+                drain_replay_barrier(
+                    db,
+                    projector,
+                    &handlers,
+                    allowed_tables,
+                    fact_admission,
+                    &mut counters,
+                )?;
             }
-            drive.drain_until_barrier(&mut counters)?;
+            drain_replay_barrier(
+                db,
+                projector,
+                &handlers,
+                allowed_tables,
+                fact_admission,
+                &mut counters,
+            )?;
         }
     }
 
@@ -181,83 +204,75 @@ struct ReplayCounters {
     replayed_intents: usize,
 }
 
-/// Replay-mode work driver over the ordinary projection and dispatch workers.
+/// Drain replay work in the same visible order as the live runtime loop.
 ///
-/// It instantiates the ordinary handler routes and passes replay mode through
-/// handler context. Each step drains one projection batch and one intent batch;
-/// the barrier repeats that visible queue order until a step is idle.
-struct ReplayDrive<'a> {
-    db: &'a Db,
-    projector: &'a dyn Projector,
-    allowed_tables: &'a [TableName],
+/// Each barrier step does bounded projection work, then bounded intent dispatch.
+/// Projection and dispatch keep their own SQLite transactions; replay's job is
+/// only to keep taking bounded queue steps until both are idle before live
+/// network/recurring work can resume.
+fn drain_replay_barrier(
+    db: &Db,
+    projector: &dyn Projector,
+    handlers: &HandlerSet,
+    allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    handlers: HandlerSet,
-}
-
-impl<'a> ReplayDrive<'a> {
-    fn new(
-        db: &'a Db,
-        projector: &'a dyn Projector,
-        allowed_tables: &'a [TableName],
-        fact_admission: Option<FactAdmissionFn>,
-        routes: &'static [HandlerRoute],
-    ) -> Self {
-        let handlers = HandlerSet::new(routes);
-        Self {
+    counters: &mut ReplayCounters,
+) -> Result<(), String> {
+    for _ in 0..REPLAY_MAX_DRAIN_STEPS {
+        let mut status = WorkStatus::idle();
+        let progress = project_fact::drain_projection(
             db,
             projector,
             allowed_tables,
             fact_admission,
-            handlers,
-        }
-    }
-
-    fn drain_until_barrier(&self, counters: &mut ReplayCounters) -> Result<(), String> {
-        for _ in 0..REPLAY_MAX_DRAIN_STEPS {
-            if self.drain_one_step(counters)?.is_idle() {
-                return Ok(());
-            }
-        }
-        Err("replay drain exceeded the step limit".to_string())
-    }
-
-    fn drain_one_step(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
-        let mut status = WorkStatus::idle();
-        status.merge(self.drain_projection(counters)?);
-        status.merge(self.dispatch_replay(counters)?);
-        Ok(status)
-    }
-
-    fn drain_projection(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
-        let progress = project_fact::drain_projection(
-            self.db,
-            self.projector,
-            self.allowed_tables,
-            self.fact_admission,
             REPLAY_WORK_LIMIT,
         )?;
         counters.projected_facts += progress.projected;
-        Ok(progress.status)
-    }
+        status.merge(progress.status);
 
-    fn dispatch_replay(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
         let progress = dispatch_intents(
-            self.db,
-            &self.handlers,
-            self.allowed_tables,
-            self.fact_admission,
+            db,
+            handlers,
+            allowed_tables,
+            fact_admission,
             REPLAY_WORK_LIMIT,
             HandlerMode::Replay,
             RuntimeEffectMode::Replay,
         )?;
         counters.replayed_intents += progress.dispatched;
-        Ok(progress.status)
+        status.merge(progress.status);
+
+        if status.is_idle() {
+            return Ok(());
+        }
     }
+    Err("replay drain exceeded the step limit".to_string())
 }
 
-/// Wipe every schema-declared replay-resettable table.
-fn wipe_derived_state(db: &Db) -> Result<usize, String> {
-    clear_replay_reset_tables(db)
+/// Mark every retained fact as replay pending in one SQL statement.
+///
+/// `facts` is replay-protected durable storage; `pending_projection` is
+/// resettable runtime work. This insert is safe to repeat because the queue is
+/// keyed by owner.
+fn enqueue_all_retained_facts_for_replay(db: &Db) -> Result<usize, String> {
+    db.conn()
+        .execute(
+            "INSERT OR IGNORE INTO pending_projection (owner, mode)
+             SELECT id, 'replay' FROM facts",
+            [],
+        )
+        .map_err(|err| format!("enqueue retained facts for replay: {err}"))
+}
+
+/// Mark one retained fact as replay pending for order-variation diagnostics.
+fn enqueue_retained_fact_for_replay(db: &Db, fact_id: FactId) -> Result<bool, String> {
+    db.conn()
+        .execute(
+            "INSERT OR IGNORE INTO pending_projection (owner, mode) VALUES (?1, 'replay')",
+            params![fact_id.as_slice()],
+        )
+        .map(|inserted| inserted > 0)
+        .map_err(|err| format!("enqueue retained fact for replay: {err}"))
 }
 
 /// Compute the fact admission order for the requested replay order.
