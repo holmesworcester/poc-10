@@ -34,7 +34,7 @@ use self::context_db::{
 use crate::core::context::{diff_context_sets, ContextSet, ContextSetDelta};
 use crate::core::db::{quoted_identifier, quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
-use crate::core::facts::{fact_id, Fact, FactId};
+use crate::core::facts::{fact_from_storage_row, fact_id, Fact, FactId};
 use crate::core::perf_profile as perf;
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
@@ -3410,7 +3410,7 @@ fn fact_by_id_from(
         .query_row(
             source.select_by_id_sql(),
             params![id.as_slice()],
-            fact_from_sql_row,
+            fact_from_storage_row,
         )
         .optional()
 }
@@ -3424,17 +3424,6 @@ fn fact_bytes_by_id_in_tx(store: &Db, id: &FactId) -> rusqlite::Result<Option<Ve
             |row| row.get(0),
         )
         .optional()
-}
-
-fn fact_from_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Fact> {
-    let id = fact_id_column(row.get::<_, Vec<u8>>(0)?, "id")?;
-    let scope_tag = row.get::<_, String>(1)?;
-    let scope_kind = row.get::<_, String>(2)?;
-    let scope_id = fact_id_column(row.get::<_, Vec<u8>>(3)?, "scope_id")?;
-    let timestamp = u64_column(row.get::<_, i64>(4)?, "received_at")?;
-    let bytes = row.get::<_, Vec<u8>>(5)?;
-    Fact::from_storage_columns(id, &scope_tag, &scope_kind, scope_id, timestamp, bytes)
-        .map_err(projection_sql_error)
 }
 
 fn delete_rows_by_blob_column_in_tx(

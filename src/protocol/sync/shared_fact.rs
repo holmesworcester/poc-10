@@ -27,3 +27,4 @@ pub use index::{
     NegentropyNodeRow, ShareableFactRow, NEGENTROPY_CONTEXT_HAVE_ROWS, NEGENTROPY_LEAF_ROWS,
     NEGENTROPY_NODE_ROWS, SHAREABLE_FACT_ROWS,
 };
+pub(crate) use index::{retained_fact, retained_fact_exists};

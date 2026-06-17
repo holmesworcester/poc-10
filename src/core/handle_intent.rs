@@ -28,6 +28,7 @@
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
+use crate::core::facts::{fact_from_storage_row, Fact, FactId};
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerMode, Intent, IntentHandler, IntentWorkRow,
 };
@@ -519,12 +520,28 @@ fn load_handler_context<'a>(
 ) -> Result<HandlerContext<'a>, String> {
     let mut facts = Vec::new();
     for id in handler.input_fact_ids(intent)? {
-        if let Some(fact) = store.fact(&id)? {
+        if let Some(fact) = retained_fact(store, &id)? {
             facts.push(fact);
         }
     }
     let context = HandlerContext::with_facts(facts).with_mode(mode);
     Ok(context.with_db(store))
+}
+
+fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load handler fact: {err}"))
 }
 
 /// Run a handler and convert retry markers into report state.
@@ -715,7 +732,7 @@ mod tests {
             "dispatcher should yield so projection can run before later handlers"
         );
         assert_eq!(
-            store.fact(&emitted.id).expect("load emitted fact"),
+            retained_fact(&store, &emitted.id).expect("load emitted fact"),
             Some(emitted),
             "intent-created fact should be retained immediately"
         );

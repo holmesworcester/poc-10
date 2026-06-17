@@ -155,6 +155,33 @@ pub fn fact_id(bytes: &[u8]) -> FactId {
     *blake3::hash(bytes).as_bytes()
 }
 
+/// Decode a fact row after a SQL owner selects the standard fact storage columns.
+pub(crate) fn fact_from_storage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Fact> {
+    let id = fact_id_column(row.get::<_, Vec<u8>>(0)?, "id")?;
+    let scope = row.get::<_, String>(1)?;
+    let scope_kind = row.get::<_, String>(2)?;
+    let scope_id = fact_id_column(row.get::<_, Vec<u8>>(3)?, "scope_id")?;
+    let timestamp = u64_column(row.get::<_, i64>(4)?, "received_at")?;
+    let bytes = row.get::<_, Vec<u8>>(5)?;
+    Fact::from_storage_columns(id, &scope, &scope_kind, scope_id, timestamp, bytes)
+        .map_err(fact_storage_error)
+}
+
+fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
+    bytes
+        .try_into()
+        .map_err(|_| fact_storage_error(format!("fact SQL column {name} is not a fact id")))
+}
+
+fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| fact_storage_error(format!("fact SQL column {name} is negative")))
+}
+
+fn fact_storage_error(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(message.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

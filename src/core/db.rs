@@ -11,9 +11,8 @@
 //! supplies `BEGIN IMMEDIATE`, rollback, and `COMMIT`; owning modules decide
 //! which facts, rows, queue entries, or diagnostics belong in that boundary.
 
-use crate::core::facts::{Fact, FactId};
 use rusqlite::{
-    params, params_from_iter, types::Value as SqliteValue, Connection as SqliteConnection,
+    params_from_iter, types::Value as SqliteValue, Connection as SqliteConnection,
     OptionalExtension,
 };
 use std::path::Path;
@@ -375,39 +374,6 @@ impl Db {
             .map_err(|err| format!("snapshot database: {err}"))
     }
 
-    /// Count retained fact byte rows.
-    pub fn fact_count(&self) -> rusqlite::Result<usize> {
-        self.table_row_count(crate::core::schema::FACTS)
-    }
-
-    /// Load one retained fact by id.
-    pub fn fact(&self, id: &FactId) -> Result<Option<Fact>, String> {
-        self.conn
-            .query_row(
-                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-                 FROM facts f
-                 JOIN local_fact_admissions m ON m.fact_id = f.id
-                 WHERE f.id = ?1
-                 LIMIT 1",
-                params![id.as_slice()],
-                retained_fact_from_row,
-            )
-            .optional()
-            .map_err(|err| format!("load fact row: {err}"))
-    }
-
-    /// Return whether a retained fact row exists.
-    pub fn fact_exists(&self, id: &FactId) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT 1 FROM facts WHERE id = ?1 LIMIT 1",
-                params![id.as_slice()],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
     // Critical path: callers put every atomic row mutation
     // through this closure, then use the transaction-local row helpers below.
     /// Run a write transaction.
@@ -526,27 +492,6 @@ impl Db {
             .optional()
             .map(|row| row.is_some())
     }
-}
-
-fn retained_fact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Fact> {
-    let id = fact_id_column(row.get::<_, Vec<u8>>(0)?, "id")?;
-    let scope_tag = row.get::<_, String>(1)?;
-    let scope_kind = row.get::<_, String>(2)?;
-    let scope_id = fact_id_column(row.get::<_, Vec<u8>>(3)?, "scope_id")?;
-    let timestamp = u64_column(row.get::<_, i64>(4)?, "received_at")?;
-    let bytes = row.get::<_, Vec<u8>>(5)?;
-    Fact::from_storage_columns(id, &scope_tag, &scope_kind, scope_id, timestamp, bytes)
-        .map_err(db_error)
-}
-
-fn fact_id_column(bytes: Vec<u8>, name: &str) -> rusqlite::Result<FactId> {
-    bytes
-        .try_into()
-        .map_err(|_| db_error(format!("fact SQL column {name} is not a fact id")))
-}
-
-fn u64_column(value: i64, name: &str) -> rusqlite::Result<u64> {
-    u64::try_from(value).map_err(|_| db_error(format!("fact SQL column {name} is negative")))
 }
 
 fn validate_columns_and_values(

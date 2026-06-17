@@ -8,6 +8,7 @@ use crate::core::crypto::Ed25519PublicKey;
 use crate::core::db::{Db, DEFAULT_QUERY_LIMIT};
 use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
+use crate::core::schema::FACTS;
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::connection;
@@ -181,7 +182,10 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
         .db()
         .table_row_count(super::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))?;
-    let facts = runtime.fact_count();
+    let facts = runtime
+        .db()
+        .table_row_count(FACTS)
+        .map_err(|err| format!("count retained facts: {err}"))?;
     let sync_facts = shared_fact::sync_status(runtime.db())?.indexed_facts;
     let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
     let pending_intents = runtime.pending_intent_count();

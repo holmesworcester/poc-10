@@ -11,7 +11,7 @@
 //! file to ask what a peer is allowed to learn.
 
 use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value, DEFAULT_QUERY_LIMIT};
-use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::facts::{fact_from_storage_row, Fact, FactId, FactScope};
 use crate::protocol::{
     auth, connection,
     sync::{
@@ -1220,7 +1220,7 @@ fn connection_workspaces(
     let Some(invite_secret_id) = connection_invite_secret_id(store, connection)? else {
         return Ok(workspace_ids);
     };
-    if let Some(invite_secret) = store.fact(&invite_secret_id)? {
+    if let Some(invite_secret) = retained_fact(store, &invite_secret_id)? {
         let invite = auth::invite_secret::project::decode::decode_fact(&invite_secret.bytes)
             .map_err(|_| "connection invite context is not an invite secret".to_string())?;
         if let Some(workspace_id) = invite.workspace_id {
@@ -1247,7 +1247,7 @@ fn open_unified_connection_request_for_sync(
     connection: &connection::connection::queries::ConnectionRow,
 ) -> Result<Option<connection::request::fact::ConnectionRequestFact>, String> {
     let mut request_bytes = Vec::new();
-    if let Some(request_fact) = store.fact(&connection.request_id)? {
+    if let Some(request_fact) = retained_fact(store, &connection.request_id)? {
         request_bytes.push(request_fact.bytes);
     }
     if let Some(row) = connection::request::queries::request_by_id(store, &connection.request_id)? {
@@ -1436,7 +1436,7 @@ pub fn negentropy_context_have_for_leaf(
 }
 
 fn fact_for_shareable_row(store: &Db, row: &ShareableFactRow) -> Result<Option<Fact>, String> {
-    let Some(fact) = store.fact(&row.fact_id)? else {
+    let Some(fact) = retained_fact(store, &row.fact_id)? else {
         return Ok(None);
     };
     if fact.timestamp != row.timestamp_ms {
@@ -1451,6 +1451,35 @@ fn fact_for_shareable_row(store: &Db, row: &ShareableFactRow) -> Result<Option<F
         }
         _ => Err("shareable fact row does not match a global or workspace-scoped fact".to_string()),
     }
+}
+
+pub(crate) fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load retained fact: {err}"))
+}
+
+pub(crate) fn retained_fact_exists(store: &Db, id: &FactId) -> Result<bool, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT 1 FROM facts WHERE id = ?1 LIMIT 1",
+            params![id.as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|err| format!("load retained fact presence: {err}"))
 }
 
 fn remote_endpoint_for_connection(

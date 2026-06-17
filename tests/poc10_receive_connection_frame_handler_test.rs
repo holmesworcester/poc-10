@@ -2,8 +2,10 @@
 
 use std::io::Write;
 use std::net::{Shutdown, TcpStream};
+use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::{params, Connection, OptionalExtension};
 use topo::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use topo::core::crypto;
 use topo::core::daemon;
@@ -310,7 +312,9 @@ fn receive_handler_emits_ephemeral_connection_frame_small() {
 #[test]
 fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     let (frame, _, _, _, _) = encrypted_small_frame();
-    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("runtime.db");
+    let mut runtime = Runtime::open_disk(&MATCH_RUNTIME, &db_path).expect("runtime");
     let listener = network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
     let addr = listener.local_addr();
     let sent_frame = frame.clone();
@@ -339,12 +343,10 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     assert!(status.progressed);
     let expected_frame =
         frame_small_author::fact_from_wire(&frame, RECEIVED_AT).expect("expected frame fact");
-    let received_frame = runtime
-        .db()
-        .fact(&expected_frame.id)
+    let received_frame_bytes = retained_fact_bytes(&db_path, &expected_frame.id)
         .expect("load received frame fact")
         .expect("wire frame should reach projection through direct incoming intake");
-    frame_small_layout_decode::decode_fact(received_frame.body())
+    frame_small_layout_decode::decode_fact(&received_frame_bytes)
         .expect("stored received frame should decode as frame_small");
     assert_eq!(
         runtime
@@ -361,6 +363,18 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
             .is_err(),
         "core should not create an inbound network row table"
     );
+}
+
+fn retained_fact_bytes(db: &Path, id: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
+    Connection::open(db)
+        .map_err(|err| format!("open sqlite: {err}"))?
+        .query_row(
+            "SELECT bytes FROM facts WHERE id = ?1 LIMIT 1",
+            params![id.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| format!("load retained fact bytes: {err}"))
 }
 
 #[test]

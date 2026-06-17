@@ -1,7 +1,9 @@
 //! Black-box connection close cleanup tests.
 
 use std::cell::Cell;
+use std::path::Path;
 
+use rusqlite::{params, Connection, OptionalExtension};
 use topo::core::command::CommandClock;
 use topo::core::crypto;
 use topo::core::facts::{Fact, FactScope};
@@ -64,7 +66,9 @@ fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: 
 
 #[test]
 fn closing_connection_purges_connection_fact_and_row() {
-    let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("runtime.db");
+    let mut runtime = Runtime::open_disk(&MATCH_RUNTIME, &db_path).expect("runtime");
     let alice = endpoint([11; 32], [12; 32]);
     let bob = endpoint([21; 32], [22; 32]);
     let alice_endpoint_fact = Fact::new(
@@ -143,18 +147,9 @@ fn closing_connection_purges_connection_fact_and_row() {
         .expect("submit connection");
     drain_projection_for_test(&mut runtime, 8, 64);
 
-    assert!(runtime
-        .db()
-        .fact_exists(&initiator_ephemeral_id)
-        .expect("initiator fact exists"));
-    assert!(!runtime
-        .db()
-        .fact_exists(&responder_ephemeral_id)
-        .expect("responder fact exists"));
-    assert!(runtime
-        .db()
-        .fact_exists(&connection_id)
-        .expect("connection fact exists"));
+    assert!(retained_fact_exists(&db_path, &initiator_ephemeral_id));
+    assert!(!retained_fact_exists(&db_path, &responder_ephemeral_id));
+    assert!(retained_fact_exists(&db_path, &connection_id));
     assert_eq!(
         runtime
             .db()
@@ -177,18 +172,9 @@ fn closing_connection_purges_connection_fact_and_row() {
         .expect("submit close");
     drain_runtime_work_for_test(&mut runtime, 16, 64);
 
-    assert!(runtime
-        .db()
-        .fact_exists(&initiator_ephemeral_id)
-        .expect("initiator fact exists after close"));
-    assert!(!runtime
-        .db()
-        .fact_exists(&responder_ephemeral_id)
-        .expect("responder fact exists after close"));
-    assert!(!runtime
-        .db()
-        .fact_exists(&connection_id)
-        .expect("connection fact exists after close"));
+    assert!(retained_fact_exists(&db_path, &initiator_ephemeral_id));
+    assert!(!retained_fact_exists(&db_path, &responder_ephemeral_id));
+    assert!(!retained_fact_exists(&db_path, &connection_id));
     assert_eq!(
         runtime
             .db()
@@ -207,13 +193,23 @@ fn closing_connection_purges_connection_fact_and_row() {
     assert_eq!(runtime.pending_intent_count(), 0);
 
     assert!(
-        runtime
-            .db()
-            .fact_exists(&request_fact.id)
-            .expect("request fact exists"),
+        retained_fact_exists(&db_path, &request_fact.id),
         "closing the connection must not purge the request history"
     );
     assert_eq!(initiator_ephemeral_fact.id, initiator_ephemeral_id);
+}
+
+fn retained_fact_exists(db: &Path, id: &[u8; 32]) -> bool {
+    Connection::open(db)
+        .expect("open sqlite")
+        .query_row(
+            "SELECT 1 FROM facts WHERE id = ?1 LIMIT 1",
+            params![id.as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .expect("load retained fact presence")
+        .is_some()
 }
 
 fn endpoint(secret: [u8; 32], signing_secret: [u8; 32]) -> EndpointFact {

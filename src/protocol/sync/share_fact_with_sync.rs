@@ -8,6 +8,8 @@
 //! dependency closure from fact bodies.
 
 use crate::core::{
+    db::Db,
+    facts::{fact_from_storage_row, Fact},
     intents::{
         HandlerContext, HandlerError, HandlerFactId, HandlerFactId as FactId, HandlerResult,
         Intent, IntentHandler, IntentKind,
@@ -15,6 +17,7 @@ use crate::core::{
     wire::{Reader as PayloadReader, WireError as PayloadError, Writer as PayloadWriter},
 };
 use crate::protocol::sync::{seed_connection, shared_fact};
+use rusqlite::{params, OptionalExtension};
 
 pub const SHARE_FACT_WITH_SYNC: &str = "share_fact_with_sync";
 
@@ -187,7 +190,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                             // Context links came from projector-validated offers. A context fact may
                             // already be purged by the time this queued handler runs.
                             for fact_id in &input.context_have {
-                                let Some(fact) = context.db()?.fact(fact_id)? else {
+                                let Some(fact) = retained_fact(context.db()?, fact_id)? else {
                                     continue;
                                 };
                                 HandlerContext::with_facts([fact])
@@ -240,6 +243,22 @@ impl IntentHandler for ShareFactWithSyncHandler {
             }
         })
     }
+}
+
+fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load context fact: {err}"))
 }
 
 #[cfg(test)]

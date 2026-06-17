@@ -114,13 +114,6 @@ impl Runtime {
         &self.db
     }
 
-    /// Count retained facts without loading their bytes.
-    pub fn fact_count(&self) -> usize {
-        self.db
-            .fact_count()
-            .expect("runtime fact count should load from database")
-    }
-
     /// Count facts currently queued for projection.
     pub fn pending_fact_count(&self) -> usize {
         project_fact::pending_fact_count(&self.db)
@@ -453,7 +446,7 @@ mod tests {
     };
 
     #[test]
-    fn runtime_reads_store_backed_facts_from_sqlite() {
+    fn runtime_counts_store_backed_facts_from_sqlite() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("runtime.db");
         let runtime = Runtime::open_disk(&TEST_RUNTIME, &path).expect("runtime");
@@ -462,12 +455,13 @@ mod tests {
         let mut writer = Runtime::open_disk(&TEST_RUNTIME, &path).expect("writer runtime");
         assert!(writer.submit_fact(external_fact.clone()));
 
-        assert!(
+        assert_eq!(
             runtime
                 .db()
-                .fact_exists(&external_fact.id)
-                .expect("fact exists"),
-            "fact lookup should read externally committed facts from SQLite"
+                .table_row_count(crate::core::schema::FACTS)
+                .expect("fact count"),
+            1,
+            "fact counts should read externally committed facts from SQLite"
         );
     }
 
@@ -481,8 +475,11 @@ mod tests {
             .expect("submit authored facts");
 
         assert_eq!(
-            runtime.db().fact(&fact.id).expect("load fact"),
-            Some(fact.clone()),
+            runtime
+                .db()
+                .table_row_count(crate::core::schema::FACTS)
+                .expect("fact count"),
+            1,
             "command-authored fact should be retained immediately"
         );
         assert_eq!(
@@ -590,7 +587,11 @@ mod tests {
 
         assert!(err.contains("bad test fact rejected by admission"), "{err}");
         assert!(
-            !runtime.db().fact_exists(&rejected.id).expect("fact exists"),
+            runtime
+                .db()
+                .table_row_count(crate::core::schema::FACTS)
+                .expect("fact count")
+                == 0,
             "rejected fact must not be persisted"
         );
     }

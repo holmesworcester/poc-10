@@ -12,7 +12,7 @@ use crate::core::intents::{Intent, IntentKind};
 use crate::protocol::connection::send_facts_on_connection::{
     send_facts_on_connection_intent, SendFactsOnConnection,
 };
-use crate::protocol::sync::{have_id, need_id};
+use crate::protocol::sync::{have_id, need_id, shared_fact};
 
 pub const SEND_NEEDED_FACT_ID: &str = "send_needed_fact_id";
 
@@ -78,7 +78,7 @@ impl IntentHandler for SendNeededFactIdHandler {
         }
         let have_fact = context.require_fact(&input.have_fact_id)?;
         let have = have_id::project::decode::decode_fact(&have_fact.bytes)?;
-        if context.db()?.fact(&have.fact_id)?.is_some() {
+        if shared_fact::retained_fact_exists(context.db()?, &have.fact_id)? {
             return Ok(RuntimeEffects::new());
         }
         let need = need_id::fact::SyncNeedIdFact {

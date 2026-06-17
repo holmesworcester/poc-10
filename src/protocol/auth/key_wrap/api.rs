@@ -7,7 +7,7 @@
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
 use crate::core::db::Db;
-use crate::core::facts::{Fact, FactId};
+use crate::core::facts::{fact_from_storage_row, Fact, FactId};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
 use rusqlite::{params, OptionalExtension};
@@ -169,14 +169,12 @@ pub fn create_history_node(
     if history_source_is_tombstoned(store, input.source_secret_id)? {
         return Err("history node source fact is missing".to_string());
     }
-    let source = store
-        .fact(&input.source_secret_id)?
+    let source = retained_fact(store, &input.source_secret_id)?
         .ok_or_else(|| "history node source fact is missing".to_string())?;
     let (owner_endpoint_id, source_secret) =
         history_source_material(&source, input.workspace_id, input.removal_frontier_id)?;
     if input.tombstone_node_id != [0; 32] {
-        let tombstone = store
-            .fact(&input.tombstone_node_id)?
+        let tombstone = retained_fact(store, &input.tombstone_node_id)?
             .ok_or_else(|| "history node tombstone fact is missing".to_string())?;
         local_history_layout_decode::decode_local_history_node_secret(&tombstone.bytes)
             .map_err(|_| "history node tombstone fact is not a history node".to_string())?;
@@ -212,6 +210,22 @@ pub fn create_history_node(
         tombstone_node_id: input.tombstone_node_id,
     })
     .with_facts(vec![fact]))
+}
+
+fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id
+             WHERE f.id = ?1
+             LIMIT 1",
+            params![id.as_slice()],
+            fact_from_storage_row,
+        )
+        .optional()
+        .map_err(|err| format!("load retained fact: {err}"))
 }
 
 fn history_source_material(
