@@ -39,7 +39,7 @@ use crate::core::intents::{
 use crate::core::schema::{INTENTS, LOCAL_INTENTS};
 
 use crate::core::project_fact::commit_effects::{
-    commit_runtime_effects_in_tx, validate_runtime_effects_for_admission, RuntimeEffectMode,
+    commit_runtime_effects_in_tx, validate_runtime_effects_for_admission,
 };
 use crate::core::project_fact::route::FactAdmissionFn;
 use rusqlite::{params, params_from_iter, OptionalExtension};
@@ -384,7 +384,6 @@ fn handle_intent_with_policy(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     handler_mode: HandlerMode,
-    effect_mode: RuntimeEffectMode,
 ) -> Result<WorkStatus, String> {
     let IntentWork { queued, handler } = work;
     let mut status = WorkStatus::idle();
@@ -396,14 +395,8 @@ fn handle_intent_with_policy(
         return Ok(status);
     };
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
-    status.progressed = commit_handler_output(
-        store,
-        &queued,
-        &output,
-        allowed_tables,
-        fact_admission,
-        effect_mode.pending_projection_mode(),
-    )?;
+    status.progressed =
+        commit_handler_output(store, &queued, &output, allowed_tables, fact_admission)?;
     Ok(status)
 }
 
@@ -419,20 +412,12 @@ pub(crate) fn dispatch_one_intent(
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     handler_mode: HandlerMode,
-    effect_mode: RuntimeEffectMode,
 ) -> Result<WorkStatus, String> {
     let kinds = handlers.intent_kinds();
     let Some(work) = next_intent_work_in_queue(store, handlers, queue, &kinds)? else {
         return Ok(WorkStatus::idle());
     };
-    handle_intent_with_policy(
-        work,
-        store,
-        allowed_tables,
-        fact_admission,
-        handler_mode,
-        effect_mode,
-    )
+    handle_intent_with_policy(work, store, allowed_tables, fact_admission, handler_mode)
 }
 
 fn next_intent_work_in_queue<'a>(
@@ -533,7 +518,6 @@ fn commit_handler_output(
     effects: &RuntimeEffects,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    pending_mode: crate::core::project_fact::ProjectionMode,
 ) -> Result<bool, String> {
     store
         .write_transaction(|tx| {
@@ -546,13 +530,7 @@ fn commit_handler_output(
                 delete_intent_work_row_in_tx(tx, LOCAL_INTENTS, kind, idempotence_key)?;
             }
 
-            commit_runtime_effects_in_tx(
-                tx,
-                effects,
-                allowed_tables,
-                fact_admission,
-                pending_mode,
-            )?;
+            commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)?;
             Ok(true)
         })
         .map_err(|err| format!("commit handler output: {err}"))
@@ -600,7 +578,6 @@ mod tests {
             None,
             1,
             HandlerMode::Live,
-            RuntimeEffectMode::Live,
         )
         .expect("dispatch durable intent");
 
@@ -631,7 +608,6 @@ mod tests {
             None,
             8,
             HandlerMode::Live,
-            RuntimeEffectMode::Live,
         )
         .expect("dispatch retrying local intents");
 
@@ -671,7 +647,6 @@ mod tests {
             None,
             8,
             HandlerMode::Live,
-            RuntimeEffectMode::Live,
         )
         .expect("dispatch emitting intent");
 
@@ -795,7 +770,6 @@ mod tests {
         fact_admission: Option<FactAdmissionFn>,
         limit: usize,
         handler_mode: HandlerMode,
-        effect_mode: RuntimeEffectMode,
     ) -> Result<TestIntentProgress, String> {
         let mut progress = TestIntentProgress::default();
         for _ in 0..limit {
@@ -806,7 +780,6 @@ mod tests {
                 allowed_tables,
                 fact_admission,
                 handler_mode,
-                effect_mode,
             )?;
             if step_status.is_idle() {
                 break;

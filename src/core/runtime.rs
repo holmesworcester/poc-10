@@ -27,7 +27,7 @@ use crate::core::facts::Fact;
 use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::{HandlerMode, Intent};
 use crate::core::project_fact::{
-    self, FactAdmissionFn, FactRoute, ProjectionSource, Projector, RuntimeEffectMode, Timeline,
+    self, FactAdmissionFn, FactRoute, ProjectionMode, ProjectionSource, Projector, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
 use std::path::Path;
@@ -227,6 +227,7 @@ impl Runtime {
                 &self.db,
                 self.projector.as_ref(),
                 source,
+                ProjectionMode::Normal,
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
             )?;
@@ -269,7 +270,6 @@ impl Runtime {
                 self.description.row_mutation_tables,
                 self.description.fact_admission,
                 HandlerMode::Live,
-                RuntimeEffectMode::Live,
             )?;
             if step_status.is_idle() {
                 break;

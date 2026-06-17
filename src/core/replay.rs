@@ -35,7 +35,7 @@ use crate::core::handle_intent::{
 use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
 use crate::core::project_fact::{
-    self, FactAdmissionFn, ProjectionSource, Projector, RuntimeEffectMode,
+    self, FactAdmissionFn, ProjectionMode, ProjectionSource, Projector,
 };
 use crate::core::schema::{CONTEXT_EDGES, FACTS, INTENTS, LOCAL_INTENTS, TIME_WAKES};
 use rusqlite::params;
@@ -236,8 +236,14 @@ fn drain_replay_projection_queue(
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
     for _ in 0..REPLAY_WORK_LIMIT {
-        let step_status =
-            project_fact::project_one(db, projector, source, allowed_tables, fact_admission)?;
+        let step_status = project_fact::project_one(
+            db,
+            projector,
+            source,
+            ProjectionMode::Replay,
+            allowed_tables,
+            fact_admission,
+        )?;
         if step_status.is_idle() {
             break;
         }
@@ -262,7 +268,6 @@ fn drain_replay_intent_queue(
             allowed_tables,
             fact_admission,
             HandlerMode::Replay,
-            RuntimeEffectMode::Replay,
         )?;
         if step_status.is_idle() {
             break;
@@ -283,8 +288,10 @@ fn drain_replay_intent_queue(
 fn enqueue_all_retained_facts_for_replay(db: &Db) -> Result<usize, String> {
     db.conn()
         .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner, mode)
-             SELECT id, 'replay' FROM facts",
+            "INSERT OR IGNORE INTO pending_projection (owner, queued_at)
+             SELECT f.id, m.received_at
+             FROM facts f
+             JOIN local_fact_admissions m ON m.fact_id = f.id",
             [],
         )
         .map_err(|err| format!("enqueue retained facts for replay: {err}"))
@@ -294,7 +301,7 @@ fn enqueue_all_retained_facts_for_replay(db: &Db) -> Result<usize, String> {
 fn enqueue_retained_fact_for_replay(db: &Db, fact_id: FactId) -> Result<bool, String> {
     db.conn()
         .execute(
-            "INSERT OR IGNORE INTO pending_projection (owner, mode) VALUES (?1, 'replay')",
+            "INSERT OR IGNORE INTO pending_projection (owner, queued_at) VALUES (?1, 0)",
             params![fact_id.as_slice()],
         )
         .map(|inserted| inserted > 0)

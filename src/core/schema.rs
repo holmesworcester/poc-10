@@ -116,8 +116,10 @@ CREATE INDEX IF NOT EXISTS time_wakes_by_owner
 
 CREATE TABLE IF NOT EXISTS pending_projection (
     owner BLOB PRIMARY KEY NOT NULL,
-    mode TEXT NOT NULL DEFAULT 'normal'
+    queued_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS pending_projection_by_queue
+    ON pending_projection (queued_at, owner);
 
 CREATE TABLE IF NOT EXISTS pending_projection_matches (
     owner BLOB NOT NULL,

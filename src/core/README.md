@@ -413,11 +413,11 @@ exposes that range without allowing projectors to read the clock.
 Replay uses the same projection and handler paths with a different runtime
 mode. It preserves only the retained fact storage (`facts` plus
 `local_fact_admissions`), clears schema-declared resettable runtime state,
-queues retained facts and replayable scheduled wake-ups into
-`pending_projection` with mode `replay`, exposes that mode through
-`ProjectionContext::is_replay()`, and keeps facts emitted during replay in
-replay projection mode. Projectors use replay mode to avoid live-only
-projection intents. During replay dispatch, handlers receive
+queues retained facts into `pending_projection`, and calls projection with
+`ProjectionContext::is_replay()`. Facts emitted during replay enter the same
+queue and are projected by the replay drain before live work resumes.
+Projectors use replay mode to avoid live-only projection intents. During replay
+dispatch, handlers receive
 `HandlerContext::is_replay()` and return empty effects at live-only edges.
 Recurring work is represented as recurring intents; the live daemon's in-memory
 cadence is only the scheduling mechanism that enqueues due work.

@@ -11,8 +11,8 @@
 //! - `incoming_facts` is temp, process-local intake. Incoming rows project once;
 //!   projection either moves them into durable `facts` plus
 //!   `local_fact_admissions`, or drops them.
-//! - `pending_projection` is the work queue keyed by fact id (`owner`) plus
-//!   projection mode.
+//! - `pending_projection` is the work queue keyed by fact id (`owner`) plus the
+//!   time the owner entered the queue.
 //! - `pending_projection_matches` and `pending_time_ranges` carry the context
 //!   that woke a queued owner. They are consumed with the owner row.
 //! - `context_edges` stores standing needs/offers, and `time_wakes` stores
@@ -59,12 +59,11 @@ use crate::core::schema::{
 use crate::core::wire::Writer;
 use rusqlite::{params, OptionalExtension};
 
-pub(crate) use commit_effects::{commit_runtime_effects_to_db, RuntimeEffectMode};
+pub(crate) use commit_effects::commit_runtime_effects_to_db;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingProjectionItem {
     fact_id: FactId,
-    mode: ProjectionMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +76,6 @@ pub(crate) enum ProjectionSource {
 pub(crate) struct PendingFact {
     source: ProjectionSource,
     fact_id: FactId,
-    mode: ProjectionMode,
     fact: Fact,
     previous_context: ContextSet,
     projection_context: ProjectionContext,
@@ -89,7 +87,6 @@ struct PreparedProjection {
     source: ProjectionSource,
     fact: Fact,
     fact_id: FactId,
-    mode: ProjectionMode,
     retain_self: bool,
     context: ContextSet,
     time_wakes: Vec<TimeWake>,
@@ -108,6 +105,7 @@ pub(crate) fn project_one(
     store: &Db,
     projector: &(impl Projector + ?Sized),
     source: ProjectionSource,
+    mode: ProjectionMode,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
 ) -> Result<WorkStatus, String> {
@@ -120,7 +118,7 @@ pub(crate) fn project_one(
 
     let fact_id = item.fact_id;
     let Some(pending_fact) = perf::measure_result("projection_load_pending_fact", || {
-        load_pending_fact(store, source, fact_id, item.mode)
+        load_pending_fact(store, source, fact_id, mode)
     })?
     else {
         match source {
@@ -156,28 +154,24 @@ fn next_projection_item(
     }
 }
 
-/// Read the next durable pending fact id without mutating the queue.
+/// Read the oldest durable pending fact id without mutating the queue.
 ///
 /// The item commit removes the row only after projection succeeds. Missing
-/// facts are handled by the queue driver as stale pending rows. The admission
-/// join is left-sided so stale owners stay visible and can be purged.
+/// facts are handled by the queue driver as stale pending rows.
 fn next_durable_projection_item(store: &Db) -> Result<Option<PendingProjectionItem>, String> {
     store
         .conn()
         .query_row(
             r#"
-            SELECT p.owner, p.mode
-            FROM pending_projection p
-            LEFT JOIN local_fact_admissions admission ON admission.fact_id = p.owner
-            ORDER BY admission.received_at IS NULL, admission.received_at, p.owner
+            SELECT owner
+            FROM pending_projection
+            ORDER BY queued_at, owner
             LIMIT 1
             "#,
             [],
             |row| {
                 Ok(PendingProjectionItem {
                     fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "owner")?,
-                    mode: ProjectionMode::from_str(&row.get::<_, String>(1)?)
-                        .map_err(rusqlite::Error::InvalidParameterName)?,
                 })
             },
         )
@@ -214,7 +208,6 @@ fn next_incoming_projection_item(store: &Db) -> Result<Option<PendingProjectionI
             |row| {
                 Ok(PendingProjectionItem {
                     fact_id: fact_id_column(row.get::<_, Vec<u8>>(0)?, "incoming id")?,
-                    mode: ProjectionMode::Normal,
                 })
             },
         )
@@ -282,7 +275,6 @@ pub(crate) fn load_pending_fact(
     Ok(Some(PendingFact {
         source,
         fact_id,
-        mode,
         fact,
         previous_context,
         projection_context,
@@ -348,7 +340,6 @@ fn prepare_projection(
     let PendingFact {
         source,
         fact_id,
-        mode,
         fact,
         previous_context,
         projection_context,
@@ -377,7 +368,6 @@ fn prepare_projection(
         source,
         fact,
         fact_id,
-        mode,
         retain_self: output.retain_self,
         context,
         context_delta,
@@ -491,8 +481,7 @@ fn commit_projection_effects_in_tx(
             replace_stored_time_wake_owner_rows(tx, projection.fact_id, &projection.time_wakes)
         })?;
         perf::measure_result("projection_wake_context_matches", || {
-            wake_context_matches_in_tx(tx, &projection.context_delta, projection.mode)
-                .map_err(sqlite_string_error)
+            wake_context_matches_in_tx(tx, &projection.context_delta).map_err(sqlite_string_error)
         })?;
     }
 
@@ -502,7 +491,6 @@ fn commit_projection_effects_in_tx(
             &projection.runtime_effects,
             allowed_tables,
             fact_admission,
-            projection.mode,
         )
     })?;
     Ok(())
@@ -663,28 +651,7 @@ pub(crate) mod commit_effects {
 
     use super::context_db::record_pending_matches_for_stored_needs_in_tx;
     use super::route::FactAdmissionFn;
-    use super::{
-        insert_fact_and_pending_with_mode_in_tx, insert_incoming_fact_in_tx, purge_fact_in_tx,
-        ProjectionMode,
-    };
-
-    /// Runtime mode for committing shared effects.
-    #[derive(Debug, Clone, Copy)]
-    pub(crate) enum RuntimeEffectMode {
-        /// Normal runtime behavior.
-        Live,
-        /// Replay behavior: emitted facts stay in replay projection mode.
-        Replay,
-    }
-
-    impl RuntimeEffectMode {
-        pub(crate) fn pending_projection_mode(self) -> ProjectionMode {
-            match self {
-                Self::Live => ProjectionMode::Normal,
-                Self::Replay => ProjectionMode::Replay,
-            }
-        }
-    }
+    use super::{insert_fact_and_pending_in_tx, insert_incoming_fact_in_tx, purge_fact_in_tx};
 
     /// Counts of newly inserted follow-up work after an effect commit.
     ///
@@ -824,13 +791,7 @@ pub(crate) mod commit_effects {
         validate_runtime_effects_for_admission(effects, allowed_tables, fact_admission)?;
         store
             .write_transaction(|tx| {
-                commit_runtime_effects_in_tx(
-                    tx,
-                    effects,
-                    allowed_tables,
-                    fact_admission,
-                    ProjectionMode::Normal,
-                )
+                commit_runtime_effects_in_tx(tx, effects, allowed_tables, fact_admission)
             })
             .map_err(|err| format!("{label}: {err}"))
     }
@@ -850,7 +811,6 @@ pub(crate) mod commit_effects {
         effects: &RuntimeEffects,
         allowed_tables: &[TableName],
         fact_admission: Option<FactAdmissionFn>,
-        pending_mode: ProjectionMode,
     ) -> rusqlite::Result<RuntimeEffectCounts> {
         validate_fact_admissions(effects, fact_admission).map_err(sqlite_string_error)?;
         for purged in &effects.purged_facts {
@@ -859,7 +819,7 @@ pub(crate) mod commit_effects {
 
         let mut facts = 0usize;
         for fact in &effects.facts {
-            if insert_fact_and_pending_with_mode_in_tx(tx, fact, pending_mode)? {
+            if insert_fact_and_pending_in_tx(tx, fact)? {
                 record_pending_matches_for_stored_needs_in_tx(tx, fact.id)
                     .map_err(sqlite_string_error)?;
                 facts += 1;
@@ -925,21 +885,6 @@ pub mod context {
     }
 
     impl ProjectionMode {
-        pub(crate) const fn as_str(self) -> &'static str {
-            match self {
-                Self::Normal => "normal",
-                Self::Replay => "replay",
-            }
-        }
-
-        pub(crate) fn from_str(value: &str) -> Result<Self, String> {
-            match value {
-                "normal" => Ok(Self::Normal),
-                "replay" => Ok(Self::Replay),
-                other => Err(format!("unknown projection mode {other}")),
-            }
-        }
-
         pub fn is_replay(self) -> bool {
             matches!(self, Self::Replay)
         }
@@ -1140,10 +1085,7 @@ pub(crate) mod context_db {
     use rusqlite::params;
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{
-        insert_pending_owner_with_mode_in_tx, retained_fact, MatchedContext, ProjectionContext,
-        ProjectionMode,
-    };
+    use super::{insert_pending_owner_in_tx, retained_fact, MatchedContext, ProjectionContext};
 
     const CONTEXT_NEED_DIRECTION: &str = "need";
     const CONTEXT_OFFER_DIRECTION: &str = "offer";
@@ -1537,7 +1479,6 @@ pub(crate) mod context_db {
     pub(crate) fn wake_context_matches_in_tx(
         store: &Db,
         delta: &ContextSetDelta,
-        mode: ProjectionMode,
     ) -> Result<usize, String> {
         let mut owners = BTreeSet::new();
         for need in &delta.added_needs {
@@ -1553,7 +1494,7 @@ pub(crate) mod context_db {
 
         let mut changed = 0usize;
         for owner in owners {
-            let queued = insert_pending_owner_with_mode_in_tx(store, owner, mode)
+            let queued = insert_pending_owner_in_tx(store, owner)
                 .map_err(|err| format!("queue pending projection match: {err}"))?;
             let recorded = record_pending_matches_for_stored_needs_in_tx(store, owner)?;
             changed += usize::from(queued > 0 || recorded > 0);
@@ -2098,34 +2039,17 @@ fn retained_fact(store: &Db, id: &FactId) -> Result<Option<Fact>, String> {
 
 /// Insert a fact and mark it pending in the caller's transaction.
 pub(crate) fn insert_fact_and_pending_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
-    insert_fact_and_pending_with_mode_in_tx(store, fact, ProjectionMode::Normal)
-}
-
-fn insert_fact_and_pending_with_mode_in_tx(
-    store: &Db,
-    fact: &Fact,
-    mode: ProjectionMode,
-) -> rusqlite::Result<bool> {
     let inserted = insert_retained_fact_in_tx(store, fact)?;
     if inserted {
-        insert_pending_owner_with_mode_in_tx(store, fact.id, mode)?;
+        insert_pending_owner_in_tx(store, fact.id)?;
     }
     Ok(inserted)
 }
 
-fn insert_pending_owner_with_mode_in_tx(
-    store: &Db,
-    owner: FactId,
-    mode: ProjectionMode,
-) -> rusqlite::Result<usize> {
+fn insert_pending_owner_in_tx(store: &Db, owner: FactId) -> rusqlite::Result<usize> {
     store.conn().execute(
-        "INSERT INTO pending_projection (owner, mode) VALUES (?1, ?2)
-         ON CONFLICT(owner) DO UPDATE SET mode =
-             CASE
-                 WHEN excluded.mode = 'replay' OR pending_projection.mode = 'replay' THEN 'replay'
-                 ELSE 'normal'
-             END",
-        params![owner.as_slice(), mode.as_str()],
+        "INSERT OR IGNORE INTO pending_projection (owner, queued_at) VALUES (?1, ?2)",
+        params![owner.as_slice(), queue_now_ms()?],
     )
 }
 
@@ -2209,6 +2133,14 @@ fn sqlite_u64(value: u64, name: &str) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| {
         projection_sql_error(format!("{name}: SQL value exceeds SQLite integer range"))
     })
+}
+
+fn queue_now_ms() -> rusqlite::Result<i64> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| projection_sql_error(format!("queue clock before Unix epoch: {err}")))?;
+    let millis = duration.as_millis();
+    i64::try_from(millis).map_err(|_| projection_sql_error("queue timestamp exceeds SQLite range"))
 }
 
 fn insert_fact_bytes_in_tx(store: &Db, fact: &Fact) -> rusqlite::Result<bool> {
@@ -2377,14 +2309,18 @@ pub(crate) fn process_due_time_range(
     end_inclusive: u64,
     limit: usize,
 ) -> Result<usize, String> {
-    process_due_time_range_with_mode(
-        store,
+    if limit == 0 {
+        return Ok(0);
+    }
+    let range = TimeRange {
         timeline,
         start_exclusive,
         end_inclusive,
-        limit,
-        ProjectionMode::Normal,
-    )
+    };
+
+    store
+        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit))
+        .map_err(|err| format!("process due time range: {err}"))
 }
 
 /// Insert a fact and mark it pending in the same transaction.
@@ -2424,38 +2360,10 @@ pub(crate) fn submit_facts_to_db(
     Ok(inserted)
 }
 
-/// Turn due time wakes into pending projection work plus time context.
-///
-/// Time wakes are upstream of one-item projection. When a caller supplies a due
-/// time window, matching owners are marked pending and receive that `TimeRange`
-/// as projection context when `project_fact` later loads the item.
-fn process_due_time_range_with_mode(
-    store: &Db,
-    timeline: Timeline,
-    start_exclusive: Option<u64>,
-    end_inclusive: u64,
-    limit: usize,
-    mode: ProjectionMode,
-) -> Result<usize, String> {
-    if limit == 0 {
-        return Ok(0);
-    }
-    let range = TimeRange {
-        timeline,
-        start_exclusive,
-        end_inclusive,
-    };
-
-    store
-        .write_transaction(|tx| enqueue_due_time_wakes_in_tx(tx, &range, limit, mode))
-        .map_err(|err| format!("process due time range: {err}"))
-}
-
 fn enqueue_due_time_wakes_in_tx(
     store: &Db,
     range: &TimeRange,
     limit: usize,
-    mode: ProjectionMode,
 ) -> rusqlite::Result<usize> {
     let owners = due_time_wake_owners(store, range, limit)?;
     let has_start = range.start_exclusive.is_some();
@@ -2465,7 +2373,7 @@ fn enqueue_due_time_wakes_in_tx(
 
     let mut inserted = 0;
     for owner in owners {
-        inserted += insert_pending_owner_with_mode_in_tx(store, owner, mode)?;
+        inserted += insert_pending_owner_in_tx(store, owner)?;
         context_db::record_pending_matches_for_stored_needs_in_tx(store, owner).map_err(|err| {
             rusqlite::Error::InvalidParameterName(format!("queue time wake matches: {err}"))
         })?;
@@ -2600,13 +2508,11 @@ mod contract_tests {
         previous_context: &ContextSet,
         projection_context: ProjectionContext,
     ) -> Result<PreparedProjection, String> {
-        let mode = projection_context.mode();
         prepare_projection(
             projector,
             PendingFact {
                 source: ProjectionSource::Durable,
                 fact_id: fact.id,
-                mode,
                 fact: fact.clone(),
                 previous_context: previous_context.clone(),
                 projection_context,
@@ -2990,7 +2896,6 @@ mod contract_tests {
                         added_offers: vec![offer.clone()],
                         ..ContextSetDelta::default()
                     },
-                    ProjectionMode::Normal,
                 )
                 .map_err(sqlite_string_error)?;
                 tx.conn().execute(
@@ -3437,6 +3342,7 @@ mod contract_tests {
                 store,
                 projector,
                 ProjectionSource::Durable,
+                ProjectionMode::Normal,
                 allowed_tables,
                 fact_admission,
             )?;
@@ -3445,6 +3351,7 @@ mod contract_tests {
                     store,
                     projector,
                     ProjectionSource::Incoming,
+                    ProjectionMode::Normal,
                     allowed_tables,
                     fact_admission,
                 )?;
@@ -4118,8 +4025,8 @@ mod tests {
             params![owner.as_slice()],
         )?;
         store.conn().execute(
-            "INSERT INTO pending_projection (owner, mode)
-             VALUES (?1, 'normal')",
+            "INSERT INTO pending_projection (owner, queued_at)
+             VALUES (?1, 0)",
             params![owner.as_slice()],
         )?;
         seed_pending_match(store, owner, offer_owner)
