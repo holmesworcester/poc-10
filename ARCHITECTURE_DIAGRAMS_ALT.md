@@ -40,18 +40,22 @@ flowchart TD
 
 ## Daemon Queue Steps
 
-After network IO and time wakes have been handled, the daemon runs two explicit
-runtime queue steps: one bounded projection batch and one bounded intent batch.
-The full `project one fact` path above is represented here as a single node.
+Inside one daemon tick, recurring intents fire first, then inbound network and
+time wakes feed the runtime queues. The daemon then runs two explicit runtime
+queue steps: one high-volume projection batch and one bounded intent batch. The
+full `project one fact` path above is represented here as a single node.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
-    START["daemon tick queue phase"] --> PRE_PROJECT["Runtime::drain_projection_once(limit)"]
+    START["daemon::tick"] --> RECUR["fire due recurring intents -> local_intents"]
+    RECUR --> INBOUND["accept frames -> inbound intake"]
+    INBOUND --> TIME["admit due time_wakes"]
+    TIME --> PRE_PROJECT["Runtime::drain_projection_once(high local limit)"]
     PRE_PROJECT --> PROJECT_ONE["project one pending fact"]
     PROJECT_ONE --> MORE_PROJECTION{"pending projection remains and batch budget remains?"}
     MORE_PROJECTION -- yes --> PROJECT_ONE
-    MORE_PROJECTION -- no --> DISPATCH["Runtime::drain_intents_once(limit)"]
+    MORE_PROJECTION -- no --> DISPATCH["Runtime::drain_intents_once(base limit)"]
 
     DISPATCH --> NEXT_INTENT{"registered durable or local intent exists?"}
     NEXT_INTENT -- yes --> HANDLER["run one intent handler"]
@@ -123,11 +127,10 @@ sequenceDiagram
     C->>R: open runtime
     C->>R: run registered protocol CLI command
     alt query style command
-        C->>R: optionally settle command-safe work
         C->>R: read projected state
     else write style command
-        C->>R: submit CommandOutput
-        C->>R: optionally settle command-safe work
+        C->>R: read projected state
+        C->>R: submit AuthoredFacts
     end
     C->>L: release
     D->>L: acquire for next daemon tick

@@ -7,7 +7,7 @@
 //! a user into the workspace.
 
 use super::author;
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth;
@@ -36,9 +36,9 @@ pub struct CreateUserInviteReceipt {
     pub public_key: Ed25519PublicKey,
 }
 
-pub fn create(input: CreateUserInvite) -> Result<CommandOutput<CreateUserInviteReceipt>, String> {
+pub fn create(input: CreateUserInvite) -> Result<AuthoredFacts<CreateUserInviteReceipt>, String> {
     let fact = user_invite_fact(input)?;
-    Ok(CommandOutput::new(CreateUserInviteReceipt {
+    Ok(AuthoredFacts::new(CreateUserInviteReceipt {
         user_invite_id: fact.id,
         public_key: input.public_key,
     })
@@ -47,7 +47,7 @@ pub fn create(input: CreateUserInvite) -> Result<CommandOutput<CreateUserInviteR
 
 pub fn create_with_secret(
     input: CreateUserInviteWithSecret,
-) -> Result<CommandOutput<CreateUserInviteReceipt>, String> {
+) -> Result<AuthoredFacts<CreateUserInviteReceipt>, String> {
     let create = CreateUserInvite {
         created_at_ms: input.created_at_ms,
         public_key: crypto::ed25519_public_key(&input.invite_private_key),
@@ -61,7 +61,7 @@ pub fn create_with_secret(
         &input.signer_private_key,
         input.created_at_ms,
     )?;
-    Ok(CommandOutput::new(CreateUserInviteReceipt {
+    Ok(AuthoredFacts::new(CreateUserInviteReceipt {
         user_invite_id: fact.id,
         public_key: create.public_key,
     })

@@ -1,7 +1,7 @@
 //! Deterministic constructors for content-message deletion facts.
 //!
 //! This layer takes already-resolved parameters and returns canonical fact
-//! bytes. User-facing timestamping and receipts live in `commands.rs`.
+//! bytes. User-facing timestamping and receipts live in `api.rs`.
 
 use crate::core::command::LocalSigningCapability;
 use crate::core::crypto;

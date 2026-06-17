@@ -2,9 +2,10 @@
 //!
 //! Core can launch any protocol that exports a `ProtocolDescription`: the
 //! description names its runtime declaration, daemon declarations, and command
-//! table. Core owns the fixed daemon cycle through `core::daemon`: accept
-//! network bytes, commit protocol intake effects, process declared time wakes,
-//! then drain one projection batch and one intent batch.
+//! table. Core owns the fixed daemon cycle through `core::daemon`: fire
+//! recurring intents, accept network bytes, commit protocol intake effects,
+//! process declared time wakes, then drain one projection batch and one intent
+//! batch.
 //!
 //! Core still does not know command semantics. For non-daemon commands it opens
 //! the declared runtime, constructs the protocol-owned context, calls the
@@ -126,17 +127,21 @@ fn run_start<C: 'static>(
         .db
         .ok_or_else(|| usage(description, "start requires --db PATH"))?;
     let mut runtime = Runtime::open_disk(&description.runtime, &db)?;
-    // Recurring operational loops are not durable state: install in-memory
-    // schedules from the handler registry and fire the due ones before each
-    // tick, after the daemon is running normally.
+    // Recurring operational loops are not durable state. The daemon tick fires
+    // due schedules from this in-memory scheduler after startup.
     let mut scheduler =
         daemon::RecurringScheduler::install(description.runtime.handlers, daemon::now_ms());
     daemon::start(
         &db,
         CliArgs::new(&parsed.command[1..]),
         |listener, limit| {
-            scheduler.fire_due(&mut runtime, daemon::now_ms(), Some(listener.local_addr()))?;
-            daemon::tick(description.daemon, &mut runtime, listener, limit)
+            daemon::tick(
+                description.daemon,
+                &mut runtime,
+                listener,
+                &mut scheduler,
+                limit,
+            )
         },
     )
 }

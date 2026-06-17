@@ -9,7 +9,11 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
+use crate::core::store::TableName;
+
 pub const TYPE_LOCAL_KEY_SECRET: u8 = encode::TYPE_LOCAL_KEY_SECRET;
+
+pub const LOCAL_KEY_SECRET_ROWS: TableName = TableName::new("local_key_secret_rows");
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalKeySecretFact, String> {
     project::decode::decode_local_key_secret(bytes)

@@ -1,301 +1,264 @@
 # Architecture Diagrams
 
-These are GitHub-renderable Mermaid flowcharts for the current Context
-architecture. They are a visual companion to `README.md`, `docs/RULES.md`, and
-the scope READMEs; the Rust modules remain the source of truth.
+GitHub-renderable Mermaid flowcharts for the Context runtime. They are a visual
+companion to `README.md`, `src/core/README.md`, `docs/RULES.md`, and the scope
+READMEs; the Rust modules remain the source of truth.
 
-## 0) Runtime Boundaries
+## The One Idea
 
-Context has one protocol-neutral runtime organized around serialized turns.
-Core owns turn locking, queue draining, context matching, transaction
-boundaries, time-wake admission, recurring schedule firing, and opaque network
-bytes. Protocol code participates when runtime turns call command authors,
-inbound intake, projectors, registered handlers, and recurring intent builders.
-Network ingress here is tick-scoped, not a background async receive path. A
-tick asks the nonblocking listener for ready streams; the work limit bounds
-accepted streams, and each accepted stream is read as length-prefixed opaque
-bytes. Each frame byte payload is passed directly to inbound intake; recognized
-handshake or established-frame bytes commit `RuntimeEffects` directly into
-runtime queues, including `incoming_facts`. Projectors later open connection
-frames and validate recovered child facts.
+The whole runtime is a small set of **queues** plus a little protocol-supplied
+logic that core pumps between them. Two functions do the steady-state work of
+the loop:
+
+- a **fact projector** turns one fact into standing context, rows, time wakes,
+  intents, and follow-up facts, and
+- an **intent handler** performs one bounded retryable action (IO, sealing,
+  responding) and returns more facts.
+
+Protocol code also has thinner hooks at the edges — it authors facts for a
+command, converts inbound network bytes into incoming facts, and validates a
+fact on admission — but those only feed the queues; the projector and handler
+are where queued work is transformed.
+
+Core never interprets a fact. It only admits facts, matches context ranges,
+schedules wakes, and pumps these queues through the protocol functions. Most
+queues are durable SQLite tables that survive restart; `incoming_facts` and
+`local_intents` are `CREATE TEMP TABLE`, so they last as long as the SQLite
+connection — the whole daemon session, or one CLI command — and a restart
+rebuilds them empty. The daemon drains them each tick on its own long-lived
+connection. A CLI command or query turn does not drain runtime queues. It reads
+currently projected rows or commits authored facts to durable pending
+projection. Because temp tables are connection-local and a CLI command runs on a
+separate connection from the daemon, any temp rows such a turn stages are
+dropped when its connection closes — they are not handed to the daemon (see
+diagram 2):
+
+```text
+facts (+ local_fact_admissions)   immutable fact store
+incoming_facts                    outside-origin facts staged for projection (temp)
+pending_projection                facts waiting to be projected
+context_edges                     standing needs and offers
+pending_projection_matches        offers that matched a parked need
+time_wakes                        facts scheduled to reproject at a time
+intents (+ local_intents)         bounded work waiting for a handler (local is temp)
+network_outgoing                  sealed bytes waiting for the TCP pump
+<scope>_rows                      materialized state — read by queries and handlers, never by projectors
+```
+
+Each diagram below is one zoom level on that loop.
+
+## 1) The Runtime Loop
+
+A fact lands in `pending_projection` and the projector runs. Its output fans
+into the other queues; core matches new offers against parked needs, re-queues
+the woken owners, and dispatches intents to handlers, whose facts re-enter the
+loop. Materialized rows are read-model and planning state, not part of the
+projection→match cycle: projectors and context matching never read them.
+Queries read rows, and handlers may read them when planning work (for example,
+sync computing range summaries).
 
 ```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 320}} }%%
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
 flowchart TD
-    CLI["CLI command or query"] --> TURN["acquire serialized runtime turn"]
-    DAEMON["daemon loop"] --> TURN
-    TURN <--> STORE[("runtime store and queues: facts, incoming_facts, context, time_wakes, intents, local_intents, rows")]
+    FACTS[("facts: immutable store")]
+    PENDING[("pending_projection")]
+    NETIN["inbound bytes (from peers)"]
+    INCOMING[("incoming_facts (temp)")]
+    PROJECTOR{{"fact projector (protocol)"}}
+    CONTEXT[("context_edges: needs + offers")]
+    MATCHES[("pending_projection_matches")]
+    WAKES[("time_wakes")]
+    INTENTS[("intents + local_intents")]
+    HANDLER{{"intent handler (protocol)"}}
+    OUT[("network_outgoing")]
+    NETOUT["outbound bytes (to peers)"]
+    ROWS[("scope rows: materialized")]
+    QUERY["query reads rows"]
 
-    TURN --> COMMAND_PATH["run command or query"]
-    COMMAND_PATH --> COMMANDS["call protocol command author"]
-    COMMANDS --> COMMAND_FACTS["authored facts"]
-    COMMAND_FACTS --> COMMIT["atomic fact/effect commit"]
-    COMMAND_PATH --> PREQUERY_QUEUE["query path: drain retained projection queue"]
-    STORE --> PREQUERY_QUEUE
-    PREQUERY_QUEUE --> PROJECTOR
+    NETIN -->|intake| INCOMING
+    FACTS -->|admit| PENDING
+    INCOMING --> PROJECTOR
+    PENDING --> PROJECTOR
+    MATCHES -.matched offer payload.-> PROJECTOR
 
-    TURN --> DAEMON_PATH["run daemon tick"]
-    DAEMON_PATH --> FIRE["fire recurring intent builders"]
-    FIRE --> LOCAL_QUEUE["queue local_intents"]
-    LOCAL_QUEUE --> STORE
-    FIRE --> NET_IN["drain ready TCP streams"]
-    NET_IN --> FRAME["read length-prefixed opaque bytes"]
-    FRAME --> INTAKE["call inbound intake hook"]
-    INTAKE --> RECOGNIZE["recognize frame family and stage effects"]
-    RECOGNIZE --> COMMIT
-    DAEMON_PATH --> TIME["admit due time wakes"]
-    TIME --> STORE
+    PROJECTOR -->|needs + offers| CONTEXT
+    PROJECTOR -->|time wakes| WAKES
+    PROJECTOR -->|intents| INTENTS
+    PROJECTOR -->|follow-up facts| FACTS
+    PROJECTOR -->|rows| ROWS
 
-    subgraph DRAIN["runtime queue drain order"]
-      TIME --> PROJECTION_A["drain projection work"]
-      STORE --> PROJECTION_A
-      PROJECTION_A --> PROJECTOR["run owning projector"]
-      PROJECTOR --> COMMIT
-      PROJECTION_A --> DISPATCH["dispatch intent queues"]
-      STORE --> DISPATCH
-      DISPATCH --> HANDLERS["run registered handler"]
-      HANDLERS --> COMMIT
+    CONTEXT -->|core matches range overlap| MATCHES
+    MATCHES -->|wake parked owner| PENDING
+    WAKES -->|due time admits owner| PENDING
+
+    INTENTS --> HANDLER
+    HANDLER -->|facts| FACTS
+    HANDLER -->|rows| ROWS
+    HANDLER -->|sealed bytes| OUT
+
+    OUT -->|TCP pump| NETOUT
+    ROWS --> QUERY
+    ROWS -.read for planning.-> HANDLER
+```
+
+Core owns every arrow and the atomic commit behind it; the two rounded boxes are
+the only protocol code on the diagram. The projector is pure derivation (it may
+park on missing context but never does IO); the handler is the only place
+*protocol* code does bounded, retryable work. Core still does mechanical IO of
+its own — the TCP listener reads frames and the pump writes `network_outgoing`,
+deferring targets whose sockets are not ready — but it moves opaque bytes and
+never interprets a fact.
+
+## 2) One Serialized Turn
+
+Commands, queries, and the daemon turn all acquire `<db>.runtime.lock`, but they
+do not all drive the runtime loop. A command reads currently projected state,
+authors facts, commits them to durable pending projection, and returns a
+receipt. A query reads currently projected rows. The daemon turn (the recurring
+scheduler plus `daemon::tick`) is the live loop that advances queues.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart TD
+    LOCK["acquire <db>.runtime.lock"]
+
+    LOCK --> CMD["command turn"]
+    CMD --> READ_INPUTS["read current projected rows"]
+    READ_INPUTS --> AUTHOR["author facts"]
+    AUTHOR --> COMMIT_FACTS["commit authored facts -> pending_projection"]
+    COMMIT_FACTS --> RECEIPT["return receipt"]
+
+    LOCK --> Q["query turn"]
+    Q --> READ["read materialized rows"]
+
+    LOCK --> TICK["daemon turn"]
+    TICK --> T0["daemon::tick step 1. fire recurring intents (maintain_connections, maintain_sync)"]
+    T0 --> T1["2. accept frames -> inbound intake -> incoming_facts"]
+    T1 --> T2["3. admit due time_wakes -> pending_projection"]
+    T2 --> T3["4. drain one projection batch"]
+    T3 --> T4["5. dispatch one intent batch -> handlers"]
+    T4 --> T5["6. pump network_outgoing"]
+
+    T0 -.enqueued intents drained at.-> T4
+    CMD_SETTLE -.same projector loop.-> T3
+    Q_SETTLE -.same projector loop.-> T3
+```
+
+The only difference between turns is which queues they drain. Queries and
+commands deliberately stop after projection: incoming facts, due time, recurring
+work, and handler-derived state are daemon progress, observed eventually, not
+produced inside a user command. Handler-emitted facts are committed atomically
+with intent dispatch and remain queued for a later projection batch.
+
+The recurring step is daemon-only and is the source of all periodic work.
+Recurring intents are not durable state: an in-memory `RecurringScheduler`,
+installed once from the handler registry at daemon start, fires due operational
+loops at the top of `daemon::tick` and enqueues ordinary intents that the same
+tick's intent batch dispatches like any other. The live daemon's cadence is only
+the scheduling mechanism; the work itself is plain facts and handlers.
+
+## 3) Needs And Offers
+
+Context matching is the one mechanism that lets facts wake each other without
+core understanding them. A projector that lacks proof emits a **need** and
+parks; any fact may publish an **offer**. The match is not a background scan: it
+runs inside the projection commit in `project_fact.rs`. When a projector's
+output commits, core takes the needs and offers that output just added (the
+context delta) and matches them against the already-stored set on `(role, scope,
+range)` overlap — symmetrically, a newly committed offer wakes the owners of
+overlapping stored needs, and a newly committed need is checked against stored
+offers. Core records each hit in `pending_projection_matches` and re-queues the
+matched owner with the offer payload attached; the woken projector then decides
+whether that payload actually proves what it needed.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}} }%%
+flowchart TD
+    A["fact A projector: missing proof"] -->|emit need role/scope/range| NEED[("context_edges: need (A)")]
+    NEED --> PARK["A parked in pending_projection"]
+
+    B["fact B projector: accepted"] -->|emit offer role/scope/range| OFFER[("context_edges: offer (B)")]
+
+    NEED --> MATCH{{"core: range overlap match<br/>(runs at projection commit)"}}
+    OFFER --> MATCH
+    MATCH -->|record| MATCHED[("pending_projection_matches: B for A")]
+    MATCHED -->|re-queue A| PENDING[("pending_projection")]
+    PENDING --> REPROJECT["A projector reruns with B's payload"]
+    REPROJECT -->|payload proves it| OUT["replace needs, emit rows + offers + intents"]
+    REPROJECT -.payload insufficient.-> NEED
+```
+
+Three properties make this more than a dependency block: an offer may be
+published before the need that consumes it exists; one offer can satisfy many
+needs; and needs are a *replacement* subscription (a reprojection's needs fully
+replace the prior set) while offers are append-only evidence until the owner
+fact is purged. The concrete role/range catalog lives beside each scope's
+projector docs, not here.
+
+## 4) Sync: The Convergence Loop
+
+The previous three diagrams are the loop running on one node. Sync is what makes
+two nodes' loops converge, and it is best read as a back-and-forth over time
+rather than a flowchart. The crucial point is that the network adds no new
+machinery: every message on the wire is an ordinary fact, so each step is the
+same `admit -> project (writes a row) -> emit intent -> handler emits the next
+message` cycle from diagrams 1-3, just alternating between peers. The summaries
+exchanged are negentropy range summaries (a `count` and a `fingerprint`) over
+each peer's durable share/leaf/node index.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Node A
+    participant B as Node B
+
+    Note over A,B: Each arrow is a sealed connection frame. The sender's handler queues<br/>send_facts_on_connection. The receiver's intake stages incoming_facts and a<br/>connection projector opens it into the named sync fact, which is then projected.
+
+    Note over A: owner (auth/content) projector admits a shared fact and emits<br/>share_fact_with_sync. Its handler upserts shareable + negentropy<br/>leaf/node rows — the durable range index (count + fingerprint).
+    Note over A: seed_connection_sync / maintain_sync handler reads that index,<br/>builds a range summary, and emits the first compare.
+
+    A->>B: compare(range, summary{count, fingerprint})
+
+    loop until the two range summaries are equal
+        Note over B: admit compare -> project (sync_compare_rows) -> emit send_sync_compare_response.<br/>Handler reads B's shareable + negentropy rows and diffs the summaries.
+        alt summaries differ broadly
+            B->>A: compare(child range, summary)
+            Note over A: same admit -> project -> handler step on a narrower range
+        else difference localized to specific facts
+            B->>A: fact bytes: in-range owners + context_have dependency closure
+            Note over A: opened bytes admit as ordinary facts. Owning projectors validate,<br/>materialize rows, emit share_fact_with_sync -> A's index now matches B
+        end
     end
 
-    COMMIT --> STORE
-    DISPATCH --> NET_OUT["pump network_outgoing"]
-    STORE --> NET_OUT
-    NET_OUT --> PEER["remote peer"]
-    PEER --> NET_IN
-```
-
-## 1) Fact Admission And Context Matching
-
-Facts enter through the shared effect commit path, then projection drains the
-queues that commit created. Command output is normalized to
-`RuntimeEffects::facts`; handlers, inbound intake, and projector follow-up work
-already return `RuntimeEffects`. `commit_runtime_effects_in_tx` retains
-`RuntimeEffects::facts` and queues retained projection work, but only stages
-`RuntimeEffects::incoming_facts` in the temporary incoming queue. `drain_projection`
-selects retained work first, then ready incoming work. The owning projector is
-the decision point: `commit_projection_effects_in_tx` either clears retained
-work, retains an incoming fact, or deletes the incoming row, then writes the
-projector's declared context, time wakes, rows, intents, and follow-up effects.
-In code, durable effect facts use `insert_fact_and_pending_with_mode_in_tx`,
-incoming effect facts use `insert_incoming_fact_in_tx`, retained projection uses
-`pending_durable_projection_items`, incoming projection uses
-`incoming_pending_fact_ids`, and the incoming decision commits through
-`move_incoming_to_retained_in_tx` or `delete_incoming_fact_in_tx`.
-Context is a range relationship: an offer can satisfy many needs, and an offer
-may exist before a later fact creates the matching need.
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 320}} }%%
-flowchart TD
-    CMD["command-authored facts"] --> EFFECT_COMMIT["effect commit transaction"]
-    INTAKE["inbound intake effects"] --> EFFECT_COMMIT
-    HANDLER_OUT["handler effects"] --> EFFECT_COMMIT
-    PROJECTOR_EFFECTS["projector follow-up effects"] --> EFFECT_COMMIT
-    OPENED["opened frame child facts"] --> EFFECT_COMMIT
-
-    EFFECT_COMMIT --> RETAINED[("retained facts: facts + local_fact_admissions")]
-    EFFECT_COMMIT --> PENDING[("retained work queue: pending_projection")]
-    EFFECT_COMMIT --> INCOMING[("incoming work queue: incoming_facts")]
-    EFFECT_COMMIT --> ROWS[("scope-owned rows")]
-    EFFECT_COMMIT --> INTENTS[("intent queues: intents + local_intents")]
-
-    subgraph DRAIN["projection drain"]
-      RETAINED --> RETAINED_ITEM["retained projection item"]
-      PENDING --> RETAINED_ITEM
-      MATCHES[("queued context matches")] --> RETAINED_ITEM
-      DUE_RANGES[("queued due time ranges")] --> RETAINED_ITEM
-      INCOMING --> INCOMING_ITEM["incoming projection item"]
-      RETAINED_ITEM --> PROJECTOR["owning projector"]
-      INCOMING_ITEM --> PROJECTOR
+    Note over A,B: Exact-id request path (have_id / need_id): used when a peer advertises<br/>one specific id instead of bulk-comparing. Same project -> intent -> handler shape.
+    opt advertise, then request a single id
+        B->>A: have_id(fact_id)
+        Note over A: project have_id (sync_have_id_rows) -> send_needed_fact_id.<br/>If A lacks the id, the handler authors need_id
+        A->>B: need_id(fact_id)
+        Note over B: project need_id (sync_need_id_rows) -> send_requested_fact.<br/>Handler loads that one fact, checks it is shareable here, sends it (no closure)
+        B->>A: fact bytes: the single requested fact
     end
 
-    PROJECTOR --> OUTPUT["projection output: context, time, rows, intents, effects, incoming decision"]
-    OUTPUT --> PROJECTION_COMMIT["projection commit transaction"]
-
-    PROJECTION_COMMIT -->|durable source| CONSUMED["clear consumed retained work"]
-    PROJECTION_COMMIT -->|retain incoming| RETAINED
-    PROJECTION_COMMIT -->|drop incoming| DROP_INCOMING["delete dropped incoming row"]
-    PROJECTION_COMMIT --> CONTEXT[("standing context: replacement needs + append-only offers")]
-    PROJECTION_COMMIT --> TIME_ROWS[("time_wakes")]
-    PROJECTION_COMMIT --> ROWS
-    PROJECTION_COMMIT --> INTENTS
-    PROJECTION_COMMIT --> PROJECTOR_EFFECTS
-
-    CONTEXT --> MATCHER["range matcher"]
-    MATCHER --> MATCHES
-    MATCHES --> PENDING
-
-    TIME_ROWS --> DUE["daemon due-time admission"]
-    DUE --> DUE_RANGES
-    DUE --> PENDING
-
-    INTENTS --> HANDLER["intent dispatch"]
-    HANDLER --> HANDLER_OUT
+    Note over A,B: Summaries equal -> converged. New local facts live-tail immediately:<br/>a share_fact_with_sync upsert queues send_facts_on_connection to live peers<br/>without waiting for the next compare round.
 ```
 
-The lifecycle diagram above is the context diagram: it shows projectors
-declaring needs and offers, core matching ranges, and matches waking later
-projection work. The concrete role catalog belongs beside the projector docs
-that own those roles, not in a second architecture graph.
+The same exchange runs in both directions over one connection, so each peer both
+sends and receives. A productive response narrows the compared range, transfers
+selected facts plus their closure, or just returns a same-range summary; for a
+stable, authorized range whose transferred facts are admitted, these responses
+drive the summaries together. But a round can make no progress — a same-range
+summary with nothing to send, or a no-op because the peer already has the fact,
+or it is missing, unshareable, or rejected on projection — so convergence is
+eventual, not guaranteed per round.
 
-## 2) Connection Bootstrap And Established Frames
-
-Connection owns sealed transport. Request and connection facts are their own
-sealed wire bytes. The daemon converts accepted TCP bytes through
-`receive_network_frame` intake effects, which stage typed incoming facts plus
-`frame_observation`. Request sends are live operational work from
-`maintain_connections`; response sends are emitted by the connection projector
-after the connection fact commits. Established frames carry ordinary fact bytes;
-once opened, child facts return to core admission and their owning scope
-validates meaning.
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 340}} }%%
-flowchart TD
-    REQUEST_CMD["request command or accepted invite row"] --> LOCAL_REQ["ephemeral_secret plus sealed request fact"]
-    LOCAL_REQ --> REQUEST_PROJECTOR["request projector"]
-    REQUEST_PROJECTOR --> REQUEST_ROW["retryable request row"]
-    REQUEST_ROW --> MAINTAIN["maintain_connections recurring intent"]
-    MAINTAIN --> SEND_REQ["network_outgoing sealed request"]
-    SEND_REQ --> PEER["remote node"]
-
-    PEER --> REMOTE_REQ["remote sealed request bytes"]
-    REMOTE_REQ --> RECEIVE["receive_network_frame intake effects"]
-    RECEIVE --> REQ["incoming request fact"]
-    RECEIVE --> OBS1["frame_observation for request"]
-    REQ --> REQ_PROJECTOR["request projector"]
-    OBS1 --> REQ_PROJECTOR
-    REQ_PROJECTOR --> REQ_RECEIPT["connection_fact_receipt for request"]
-    REQ_PROJECTOR --> CREATE_RESP["create_connection"]
-    CREATE_RESP --> RESP_SECRET["responder ephemeral_secret"]
-    CREATE_RESP --> RESP_OUT["sealed connection fact"]
-    RESP_OUT --> RESP_PROJECT_A["connection projector"]
-    RESP_PROJECT_A --> CONNECTION_A["connection row and context"]
-    RESP_PROJECT_A --> QUEUE_RESP["queue_outgoing_frame"]
-    RESP_PROJECT_A --> SEED_A["seed_connection_sync"]
-    QUEUE_RESP --> RESP_BYTES["network_outgoing sealed connection"]
-    RESP_BYTES --> PEER
-
-    PEER --> REMOTE_RESP["remote sealed response bytes"]
-    REMOTE_RESP --> RECEIVE
-    RECEIVE --> RESP_LOCAL["incoming connection fact"]
-    RECEIVE --> OBS2["frame_observation for response"]
-    RESP_LOCAL --> RESP_PROJECT_B["connection projector"]
-    OBS2 --> RESP_PROJECT_B
-    RESP_PROJECT_B --> CONNECTION_B["connection row and context"]
-    RESP_PROJECT_B --> RESP_RECEIPT["connection_fact_receipt for response"]
-    RESP_PROJECT_B --> SEED_B["seed_connection_sync"]
-
-    subgraph ESTABLISHED["Established connection"]
-      SYNC_IDS["sync-selected fact ids"] --> SEND_IDS["send_facts_on_connection"]
-      CONNECTION_B --> SEND_IDS
-      FACT_STORE[("fact store payload bytes")] --> SEND_IDS
-      SEND_IDS --> FRAME_OUT["frame_small, frame_file_slice, or frame_bundle"]
-      FRAME_OUT --> NETWORK["network_outgoing"]
-      NETWORK --> PEER
-      PEER --> FRAME_IN_BYTES["sealed established frame bytes"]
-      FRAME_IN_BYTES --> RECEIVE
-      RECEIVE --> OBS["frame_observation"]
-      RECEIVE --> FRAME_IN["incoming frame fact"]
-      OBS --> FRAME_PROJECTOR["frame projector"]
-      CONNECTION_B --> FRAME_PROJECTOR
-      FRAME_IN --> FRAME_PROJECTOR
-      FRAME_PROJECTOR --> PARK["retain with needs until context appears"]
-      FRAME_PROJECTOR --> CHILD["child facts"]
-      FRAME_PROJECTOR --> REC_CHILD["connection_fact_receipt per child"]
-    end
-
-    CHILD --> CORE["ordinary core admission"]
-    REC_CHILD --> CORE
-```
-
-## 3) Sync Seed, Live Tail, And Catch-Up
-
-Sync plans replication over connection rows. A connection becomes live only
-after its projector validates request, authority, observation, and
-ephemeral-secret context. That projection writes the live connection row and
-emits `seed_connection_sync`. The seed and live-only recurring `maintain_sync`
-path create compares over the active local sync-setting range. Later share
-contributions live-tail to established authorized connections. Periodic daemon
-ticks drain recurring intents, queued compare, have, need, fact-send, and
-replayable time-wake work when catch-up remains.
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 340}} }%%
-flowchart TD
-    BOOT_RESP["connection opens sealed bytes"] --> RESP_FACT["connection fact"]
-    RESPONDER["create_connection handler"] --> RESP_FACT
-    RESPONDER --> RESP_SECRET["responder ephemeral_secret"]
-    REQUEST_CTX["connection_request context"] --> RESP_PROJECTOR["connection projector"]
-    INVITE_CTX["connection_invite_secret context"] --> RESP_PROJECTOR
-    OBS_CTX["frame_observation context"] --> RESP_PROJECTOR
-    EPHEMERAL_CTX["connection_ephemeral_secret context"] --> RESP_PROJECTOR
-    RESP_FACT --> RESP_PROJECTOR
-    RESP_PROJECTOR --> CONNECTION_ROWS["connection rows"]
-    RESP_PROJECTOR --> SEED["seed_connection_sync"]
-    CONNECTION_ROWS --> MAINTAIN_SYNC["maintain_sync recurring intent"]
-    SETTING["active sync-setting range"] --> RANGE_COMPARE["compare fact"]
-    SEED --> RANGE_COMPARE
-    MAINTAIN_SYNC --> RANGE_COMPARE
-    RANGE_COMPARE --> SEND_COMPARE["send_facts_on_connection"]
-    SEND_COMPARE --> PEER["remote node"]
-
-    PEER --> PEER_COMPARE["received compare"]
-    PEER_COMPARE --> COMPARE_HANDLER["send_sync_compare_response"]
-    COMPARE_HANDLER --> CHILD_COMPARE["child compare facts"]
-    COMPARE_HANDLER --> HAVE["have_id facts"]
-    COMPARE_HANDLER --> SELECT["selected fact ids"]
-    CHILD_COMPARE --> SEND_COMPARE
-    HAVE --> SEND_HAVE["send_facts_on_connection have_id"]
-    SEND_HAVE --> PEER
-    SELECT --> EXPAND["expand context_have recursively"]
-    EXPAND --> SEND_BYTES["send owner bytes plus authorized dependencies"]
-    SEND_BYTES --> PEER
-
-    PEER --> PEER_HAVE["received have_id"]
-    PEER_HAVE --> NEED_HANDLER["send_needed_fact_id"]
-    NEED_HANDLER --> NEED_FACT["need_id fact if missing"]
-    NEED_FACT --> SEND_NEED["send_facts_on_connection"]
-    SEND_NEED --> PEER
-    PEER --> PEER_NEED["received need_id"]
-    PEER_NEED --> SEND_REQUESTED["send_requested_fact"]
-    SEND_REQUESTED --> EXPAND
-
-    OWNER_PROJECTOR["auth/content/sync projector"] --> SHARE["share_fact_with_sync"]
-    SHARE --> INDEX["shareable rows, leaves, context_have, summaries"]
-    SHARE --> LIVE["live-tail advertisement"]
-    LIVE --> ORIGIN_FILTER["skip origin connection receipts"]
-    ORIGIN_FILTER --> EXPAND
-
-    TICK["daemon tick catch-up"] --> QUEUED["recurring intents, queued intents, and due time wakes"]
-    QUEUED --> COMPARE_HANDLER
-    QUEUED --> SEND_REQUESTED
-    QUEUED --> SEND_COMPARE
-```
-
-## 4) Responsibility Summary
-
-```mermaid
-flowchart TD
-    FACTS["facts are immutable protocol statements"] --> PROJECTORS["projectors validate meaning"]
-    PROJECTORS --> CONTEXT["context offers and needs express relationships"]
-    CONTEXT --> CORE_MATCH["core matches ranges and wakes owners"]
-    PROJECTORS --> ROWS["scope-owned rows materialize local state"]
-    PROJECTORS --> INTENTS["intents name bounded stateful work"]
-    INTENTS --> HANDLERS["handlers perform retryable effects"]
-    HANDLERS --> EFFECTS["RuntimeEffects"]
-    EFFECTS --> FACTS
-    EFFECTS --> INCOMING
-
-    COMMANDS["commands author facts only"] --> FACTS
-    INTAKE["network intake stages incoming typed facts"] --> INCOMING["incoming_facts temp queue"]
-    INCOMING --> PROJECTORS
-    PROJECTORS --> RETAIN_INCOMING["incoming retention decision"]
-    RETAIN_INCOMING --> FACTS
-    REPLAY["replay drains retained facts and replayable time wakes"] --> PROJECTORS
-    RECURRING["live recurring intents run operational loops"] --> HANDLERS
-    CONNECTION["connection carries bytes"] --> INTAKE
-    SYNC["sync chooses ids and dependency closure"] --> CONNECTION
-    AUTH["auth proves authority and key access"] --> PROJECTORS
-    CONTENT["content proves user-visible data and purge"] --> PROJECTORS
-```
+Two divisions of labor keep this small. **Sync vs connection:** sync only
+chooses fact ids and their dependency closure; connection decides how to batch,
+seal, address, and write the bytes, and records a `connection_fact_receipt` so
+live-tail can skip the origin peer. **Core vs protocol:** core pumps opaque
+length-prefixed bytes and never parses a frame — the recurring drivers
+(`maintain_connections`, `maintain_sync`) are just handlers emitting ordinary
+facts. The handshake that brings a connection live (request, connection,
+ephemeral-secret context), the established frame types (`frame_small`,
+`frame_file_slice`, `frame_bundle`), and the exact compare/have/need fact
+layouts are detailed in `src/protocol/connection/README.md` and
+`src/protocol/sync/README.md`.

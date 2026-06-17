@@ -8,10 +8,10 @@
 
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactScope};
-use crate::core::store::{persisted_facts, Store};
+use crate::core::store::Store;
 
+use super::encode;
 use super::fact::EndpointFact;
-use super::{encode, project::decode};
 
 pub fn create_local_endpoint() -> EndpointFact {
     let secret = crypto::random_x25519_private_key();
@@ -57,7 +57,7 @@ pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
         .map_err(|err| format!("load local endpoint signing secret: {err}"))?;
 
     match (endpoint, secret, signing_public_key, signing_secret) {
-        (None, None, None, None) => unprojected_local_endpoint(store),
+        (None, None, None, None) => Ok(None),
         (Some(endpoint), Some(secret), Some(signing_public_key), Some(signing_secret)) => {
             let endpoint = id32(&endpoint, "local endpoint")?;
             let secret = id32(&secret, "local endpoint secret")?;
@@ -84,23 +84,6 @@ pub fn local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
         (_, _, None, _) => Err("local endpoint signing public key is missing".to_string()),
         (_, _, _, None) => Err("local endpoint signing secret is missing".to_string()),
     }
-}
-
-fn unprojected_local_endpoint(store: &Store) -> Result<Option<EndpointFact>, String> {
-    let mut endpoints = persisted_facts(store)?
-        .into_iter()
-        .filter(|fact| fact.scope == FactScope::Local)
-        .filter_map(|fact| {
-            decode::decode_fact(fact.body())
-                .ok()
-                .map(|endpoint| (fact.timestamp, fact.id, endpoint))
-        })
-        .collect::<Vec<_>>();
-    endpoints.sort_by_key(|(timestamp, id, _)| (*timestamp, *id));
-    Ok(endpoints
-        .into_iter()
-        .map(|(_, _, endpoint)| endpoint)
-        .next())
 }
 
 fn id32(value: &[u8], label: &str) -> Result<[u8; 32], String> {

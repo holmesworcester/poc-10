@@ -4,7 +4,7 @@
 //! It then runs the routed protocol projector. The projector may decode raw
 //! bytes, validate context, park on needs, and emit effects or offers. Core
 //! resolves newly declared needs that already match stored offers and commits
-//! the settled output once.
+//! the complete output once.
 //!
 //! Projection commits are the only path from fact bytes to standing context,
 //! read-model rows, time wakes, purges, and follow-up work. For a durable fact,
@@ -37,7 +37,7 @@ use crate::core::facts::{Fact, FactId};
 use crate::core::perf_profile as perf;
 use crate::core::store::{
     delete_incoming_fact_in_tx, incoming_fact_by_id, move_incoming_to_retained_in_tx,
-    persisted_fact, purge_fact_in_tx,
+    purge_fact_in_tx,
 };
 use crate::core::store::{Store, TableName};
 use rusqlite::params;
@@ -130,15 +130,6 @@ struct PreparedProjection {
 pub(crate) enum ProjectionSource {
     Durable,
     Incoming,
-}
-
-/// Which pending fact sources a projection drain may consume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectionDrainScope {
-    /// Runtime/daemon work drains retained pending facts and ephemeral incoming facts.
-    Runtime,
-    /// Query pre-settle drains only retained pending facts created by local work.
-    PreQuery,
 }
 
 /// Commit one pending fact's complete projection result.
@@ -326,7 +317,7 @@ pub(crate) fn load_pending_fact(
     mode: ProjectionMode,
 ) -> Result<Option<PendingFact>, String> {
     let fact = perf::measure_result("projection_load_fact", || match source {
-        ProjectionSource::Durable => persisted_fact(store, &fact_id),
+        ProjectionSource::Durable => store.fact(&fact_id),
         ProjectionSource::Incoming => incoming_fact_by_id(store, &fact_id),
     })?;
     let Some(fact) = fact else {
@@ -1287,7 +1278,6 @@ mod contract_tests {
             projector,
             allowed_tables,
             fact_admission,
-            ProjectionDrainScope::Runtime,
             limit,
         )
     }
@@ -1676,7 +1666,7 @@ pub(crate) mod commit_effects {
     //! moment those pending effects are validated, written to SQLite, and made
     //! visible together.
     //!
-    //! Commit requests come from three places. `Runtime::submit_command_output`
+    //! Commit requests come from three places. `Runtime::submit_authored_facts`
     //! commits effects produced by a user-facing command. Fact projection owns a
     //! larger transaction that replaces that fact's needs and time wakes, appends
     //! offers, then calls the shared commit helper to write the projector's
@@ -1728,17 +1718,12 @@ pub(crate) mod commit_effects {
     //! modules.
 
     use crate::core::effects::RuntimeEffects;
-    use crate::core::intents::{
-        Intent, RowMutation, TableDelete, TableDeleteWhere, TableInsert, Value as SqlValue,
-    };
+    use crate::core::intents::{Intent, RowMutation};
     use crate::core::schema::{INTENTS, LOCAL_INTENTS};
     use crate::core::store::{
         insert_fact_and_pending_with_mode_in_tx, insert_incoming_fact_in_tx, purge_fact_in_tx,
     };
-    use crate::core::store::{
-        quoted_identifier, quoted_identifier_list, quoted_table_name, Store, TableName, TableRow,
-    };
-    use rusqlite::{params_from_iter, OptionalExtension};
+    use crate::core::store::{Store, TableName};
     use std::collections::BTreeMap;
 
     use super::context_store::record_pending_matches_for_stored_needs_in_tx;
@@ -1861,34 +1846,6 @@ pub(crate) mod commit_effects {
         Ok(())
     }
 
-    /// Split opaque row-table mutations into inserts and deletes for the store.
-    ///
-    /// Typed-table mutations stay in `row_mutations` because they need declared
-    /// columns and predicates rather than the generic `row_key/row_value` shape.
-    /// The split keeps the store's opaque-row API narrow while letting this file
-    /// apply all row effects in one ordered commit pass.
-    ///
-    /// This also means opaque `PutRow` is not an update primitive. Inserts run
-    /// before deletes, so a same-batch delete and put for the same key is not a
-    /// replacement operation. Use typed-table mutations when projection needs
-    /// explicit delete-then-insert state changes.
-    fn row_mutation_rows(
-        mutations: &[RowMutation],
-        allowed_tables: &[TableName],
-    ) -> Result<(Vec<TableRow>, Vec<TableDelete>), String> {
-        let mut rows = Vec::new();
-        let mut deletes = Vec::<TableDelete>::new();
-        for mutation in mutations {
-            validate_row_mutation_table(mutation, allowed_tables)?;
-            match mutation {
-                RowMutation::PutRow(row) => rows.push(row.clone()),
-                RowMutation::DeleteRow(delete) => deletes.push(delete.clone()),
-                RowMutation::InsertValues(_) | RowMutation::DeleteWhere(_) => {}
-            }
-        }
-        Ok((rows, deletes))
-    }
-
     fn validate_row_mutation_table(
         mutation: &RowMutation,
         allowed_tables: &[TableName],
@@ -1977,23 +1934,9 @@ pub(crate) mod commit_effects {
             insert_incoming_fact_in_tx(tx, fact)?;
         }
 
-        let (rows, deletes) = row_mutation_rows(&effects.row_mutations, allowed_tables)
+        validate_row_mutations(&effects.row_mutations, allowed_tables)
             .map_err(sqlite_string_error)?;
-        tx.insert_table_rows_in_tx(rows)?;
-        for delete in deletes {
-            tx.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
-        }
-        for mutation in &effects.row_mutations {
-            match mutation {
-                RowMutation::InsertValues(insert) => {
-                    insert_values_in_tx(tx, insert)?;
-                }
-                RowMutation::DeleteWhere(delete) => {
-                    delete_where_in_tx(tx, delete)?;
-                }
-                RowMutation::PutRow(_) | RowMutation::DeleteRow(_) => {}
-            }
-        }
+        tx.apply_row_mutations_in_tx(&effects.row_mutations)?;
 
         let mut intents = 0usize;
         for intent in &effects.intents {
@@ -2014,115 +1957,6 @@ pub(crate) mod commit_effects {
             intents,
             local_intents,
         })
-    }
-
-    /// Insert a typed-table row idempotently.
-    ///
-    /// Unlike row tables, typed tables do not have a generic key/value shape. The
-    /// complete supplied column set is therefore both the insert data and the
-    /// idempotence check. If SQLite ignores the insert because a primary key or
-    /// unique index already exists, the existing row must match every supplied
-    /// column or the effect is rejected as a conflict.
-    ///
-    /// A typed table can still express changing projection state: emit a
-    /// `DeleteWhere` for the old logical row before an `InsertValues` for the new
-    /// row. The typed mutation loop preserves the order chosen by the protocol
-    /// module.
-    fn insert_values_in_tx(store: &Store, insert: &TableInsert) -> rusqlite::Result<usize> {
-        validate_columns_and_values(insert.columns, &insert.values, "insert")?;
-        let table = quoted_table_name(insert.table)?;
-        let columns = quoted_identifier_list(insert.columns)?;
-        let placeholders = placeholders(insert.values.len());
-        let values = sqlite_values(&insert.values)?;
-        let changed = store.conn().execute(
-            &format!("INSERT OR IGNORE INTO {table} ({columns}) VALUES ({placeholders})"),
-            params_from_iter(values.iter()),
-        )?;
-        if changed == 0 && !insert_values_match(store, insert, &values)? {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "conflicting row for {}",
-                insert.table.as_str()
-            )));
-        }
-        Ok(changed)
-    }
-
-    /// Check whether an ignored typed insert was an exact duplicate.
-    ///
-    /// This is intentionally stricter than "the key already exists": callers that
-    /// emit typed rows must be able to retry the exact same effect without changing
-    /// meaning, and must fail if the same database identity already names different
-    /// column values.
-    fn insert_values_match(
-        store: &Store,
-        insert: &TableInsert,
-        values: &[rusqlite::types::Value],
-    ) -> rusqlite::Result<bool> {
-        let table = quoted_table_name(insert.table)?;
-        let predicate = where_clause(insert.columns)?;
-        store
-            .conn()
-            .query_row(
-                &format!("SELECT 1 FROM {table} WHERE {predicate} LIMIT 1"),
-                params_from_iter(values.iter()),
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
-    }
-
-    /// Delete typed-table rows by an exact column predicate.
-    ///
-    /// Deletes are idempotent absence requests. Deleting zero rows is successful
-    /// because callers are asking the commit boundary to make matching rows absent,
-    /// not asserting that a row must already exist.
-    fn delete_where_in_tx(store: &Store, delete: &TableDeleteWhere) -> rusqlite::Result<usize> {
-        validate_columns_and_values(delete.columns, &delete.values, "delete")?;
-        let table = quoted_table_name(delete.table)?;
-        let predicate = where_clause(delete.columns)?;
-        let values = sqlite_values(&delete.values)?;
-        store.conn().execute(
-            &format!("DELETE FROM {table} WHERE {predicate}"),
-            params_from_iter(values.iter()),
-        )
-    }
-
-    fn validate_columns_and_values(
-        columns: &[&str],
-        values: &[SqlValue],
-        label: &str,
-    ) -> rusqlite::Result<()> {
-        if columns.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "{label} mutation requires at least one column"
-            )));
-        }
-        if columns.len() != values.len() {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "{label} mutation column/value count mismatch"
-            )));
-        }
-        Ok(())
-    }
-
-    fn sqlite_values(values: &[SqlValue]) -> rusqlite::Result<Vec<rusqlite::types::Value>> {
-        values.iter().map(SqlValue::as_sqlite_value).collect()
-    }
-
-    fn where_clause(columns: &[&str]) -> rusqlite::Result<String> {
-        columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| Ok(format!("{} = ?{}", quoted_identifier(column)?, index + 1)))
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map(|columns| columns.join(" AND "))
-    }
-
-    fn placeholders(count: usize) -> String {
-        (1..=count)
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }
 pub mod context {
@@ -3273,7 +3107,7 @@ pub use route::{
     ProjectorFn, RouterProjector,
 };
 
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::handle_intent::WorkStatus;
 use crate::core::schema::{
     CONTEXT_EDGES, INCOMING_FACTS, PENDING_PROJECTION, PENDING_PROJECTION_MATCHES,
@@ -3303,17 +3137,9 @@ struct PendingProjectionItem {
 
 /// Count durable plus incoming facts currently queued for projection.
 pub(crate) fn pending_fact_count(store: &Store) -> usize {
-    pending_fact_count_for_scope(store, ProjectionDrainScope::Runtime)
-}
-
-/// Count queued projection work visible to the requested drain scope.
-pub(crate) fn pending_fact_count_for_scope(store: &Store, scope: ProjectionDrainScope) -> usize {
     let durable = store
         .table_row_count(PENDING_PROJECTION)
         .expect("pending projection count should load from store");
-    if scope == ProjectionDrainScope::PreQuery {
-        return durable;
-    }
     durable
         + store
             .table_row_count(INCOMING_FACTS)
@@ -3348,9 +3174,9 @@ pub(crate) fn submit_facts_with_admission(
 }
 
 /// Commit command-authored facts and return the command receipt.
-pub(crate) fn submit_command_output_to_store<T>(
+pub(crate) fn submit_authored_facts_to_store<T>(
     store: &Store,
-    output: CommandOutput<T>,
+    output: AuthoredFacts<T>,
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
     label: &str,
@@ -3368,7 +3194,6 @@ pub(crate) fn drain_projection(
     projector: &(impl Projector + ?Sized),
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    scope: ProjectionDrainScope,
     limit: usize,
 ) -> Result<ProjectionProgress, String> {
     let mut total = ProjectionProgress::default();
@@ -3390,7 +3215,7 @@ pub(crate) fn drain_projection(
             remaining,
         )?;
 
-        if scope == ProjectionDrainScope::Runtime && progress.projected < remaining {
+        if progress.projected < remaining {
             let incoming_fact_ids = perf::measure_result("projection_incoming_load", || {
                 incoming_pending_fact_ids(store, remaining - progress.projected)
             })?;
@@ -3466,34 +3291,6 @@ fn drain_projection_items(
         }
     }
     Ok(())
-}
-
-/// Drain pending projection until no projection work remains or rounds expire.
-pub(crate) fn process_projection_until_idle(
-    store: &Store,
-    projector: &(impl Projector + ?Sized),
-    allowed_tables: &[TableName],
-    fact_admission: Option<FactAdmissionFn>,
-    scope: ProjectionDrainScope,
-    max_rounds: usize,
-    limit_per_round: usize,
-) -> Result<WorkStatus, String> {
-    let mut total = WorkStatus::idle();
-    for _ in 0..max_rounds {
-        let progress = drain_projection(
-            store,
-            projector,
-            allowed_tables,
-            fact_admission,
-            scope,
-            limit_per_round,
-        )?;
-        total.merge(progress.status);
-        if progress.projected == 0 && pending_fact_count_for_scope(store, scope) == 0 {
-            return Ok(total);
-        }
-    }
-    Err("projection work did not become idle within the round limit".to_string())
 }
 
 /// Turn due time wakes into pending projection work.
@@ -3594,17 +3391,6 @@ pub(crate) fn enqueue_retained_fact_for_replay(
         )
         .map(|inserted| inserted > 0)
         .map_err(|err| format!("enqueue retained fact for replay: {err}"))
-}
-
-/// Remove a fact and all core-owned durable rows keyed by its id.
-///
-/// Protocol-owned read-model rows are removed by projector row mutations or
-/// protocol handlers, not by this generic core purge.
-pub(crate) fn purge_fact_from_store(store: &Store, owner: FactId) -> Result<bool, String> {
-    let changed = store
-        .write_transaction(|tx| purge_fact_in_tx(tx, owner))
-        .map_err(|err| format!("purge fact: {err}"))?;
-    Ok(changed)
 }
 
 /// Turn due time wakes into pending projection work plus time context.

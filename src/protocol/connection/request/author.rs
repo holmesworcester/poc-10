@@ -42,8 +42,10 @@ pub fn create_bootstrap_attempt(
     validate_id("remote_endpoint", &input.remote_endpoint)?;
     validate_id("invite_fact_id", &input.invite_fact_id)?;
     let invite_secret = input.invite_secret.validate()?;
-    let invite_secret_fact =
-        crate::protocol::auth::invite_secret::author::secret_fact(invite_secret, input.created_at_ms)?;
+    let invite_secret_fact = crate::protocol::auth::invite_secret::author::secret_fact(
+        invite_secret,
+        input.created_at_ms,
+    )?;
     let (ephemeral, ephemeral_fact) = ephemeral_author::random_secret_fact(
         input.local_endpoint.endpoint,
         input.created_at_ms.saturating_add(1),

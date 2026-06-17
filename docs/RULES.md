@@ -18,12 +18,14 @@ in `src/core` or `src/protocol`.
   digests therefore cover durable truth, not resurrected transport.
 - Projectors are pure functions over one fact plus provided context. They return
   context needs, context offers, and intents.
-- Context is explicit. Needs and offers describe relationships that should wake
-  projection when matched by a context matcher. Core stores and matches them;
-  projectors decide what they mean.
-- Core runtime workers own admission, pending projection, context matching,
-  projection drain, row mutations, deferred intent queueing, handler dispatch,
-  and persistence.
+- Context is explicit. Needs and offers describe relationships that wake
+  projection when their `(role, scope, range)` overlap. Matching is not a
+  separate stage or background scan: core matches the needs and offers each
+  projection just added during that same projection commit, re-queues the woken
+  owners, and lets projectors decide what the matched payload means.
+- Core runtime workers own admission, pending projection, projection drain
+  (including the context matching done as part of each projection commit), row
+  mutations, deferred intent queueing, handler dispatch, and persistence.
 - Intent handlers own bounded stateful work. They consume intents and exact
   declared fact inputs, then return facts, purged fact ids, and follow-up
   intents. They must not own protocol fact layouts or read-model projection
@@ -55,7 +57,7 @@ in `src/core` or `src/protocol`.
   crypto, network queues, TCP, clock, and schema declarations.
 - `src/protocol/<scope>/<fact_family>/` owns one fact family's role files:
   fact shape (`fact.rs`), canonical byte encoding (`encode.rs`), local authoring
-  (`author.rs`), commands (`commands.rs`), projection, schema-backed row
+  (`author.rs`), typed operations (`api.rs`), projection, schema-backed row
   materialization, queries, CLI adapters, and context helpers as applicable.
   Primary byte parsing, primary-fact authentication, and semantic adaptation
   live as local `decode`, `authenticate`, and `adapt` modules inside
@@ -63,16 +65,16 @@ in `src/core` or `src/protocol`.
 - Routed fact families use the settled role-file split. Byte construction rules
   live in `encode.rs`; byte parsing rules live in the projector-local `decode`
   module; pure fact construction, signing, encryption, and assembly live in
-  `author.rs`; runtime gathering remains in `commands.rs`; row shape is
+  `author.rs`; API gathering and receipt construction remain in `api.rs`; row shape is
   declared through schema metadata or clearly named non-family modules such as
   sync `index.rs` / `staging.rs`.
 - `src/protocol/<scope>/<verb_object>.rs` owns one deferred effect boundary.
   Handler subdirectories, `driver.rs`, and handler-local `intent.rs` files are
   forbidden.
-- Shared command output and clock primitives live in `src/core/command.rs`.
-  Concrete command constructors live in the fact module that owns the emitted
-  fact, receive `Store` and `CommandClock` directly, and use protocol-owned
-  query helpers for pre-command state.
+- Shared authored-fact and clock primitives live in `src/core/command.rs`.
+  Concrete authoring functions live in the fact module that owns the emitted
+  fact, receive `Store` and `CommandClock` directly when they need current
+  projected state, and return `AuthoredFacts` instead of driving runtime work.
 - There is no `mod.rs`. Root manifest files such as `src/core.rs`,
   `src/protocol.rs`, and `src/protocol/<scope>.rs` are declaration-only.
 - Schema declarations live beside their owners in `src/core/schema.rs`,
@@ -222,8 +224,9 @@ proves relationships, but never re-verifies the signature.
 
 Missing context parks. Mismatched context rejects.
 
-Parking returns the current standing needs so the context matcher can wake the
-fact later. A projector should return an error only when supplied data violates
+Parking returns the current standing needs so that a later projection whose
+committed offer overlaps one of those needs re-queues and wakes the parked fact.
+A projector should return an error only when supplied data violates
 the fact's structural, signature, authority, or cross-field policy.
 
 ### Schema And Rows

@@ -8,7 +8,7 @@
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::core::wire::FixedText;
 
 use super::fact::{
@@ -55,7 +55,7 @@ pub fn decode_endpoint_shared_row(key: &[u8], value: &[u8]) -> Result<EndpointSh
 /// need to reason about cross-workspace membership without touching
 /// `endpoint_shared` row internals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EndpointMembership {
+pub(crate) struct EndpointMembership {
     pub workspace_id: FactId,
     pub endpoint_id: FactId,
     pub endpoint_shared_id: FactId,
@@ -64,9 +64,9 @@ pub struct EndpointMembership {
 /// Every projected endpoint membership across all workspaces, in deterministic
 /// order. Other scopes use this to decide mutual membership without importing
 /// `endpoint_shared` rows.
-pub fn all_memberships(store: &Store) -> Result<Vec<EndpointMembership>, String> {
+pub(crate) fn all_memberships(store: &Store) -> Result<Vec<EndpointMembership>, String> {
     let mut memberships = store
-        .table_rows(ENDPOINT_SHARED_ROWS)
+        .table_rows_page(ENDPOINT_SHARED_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load endpoint memberships: {err}"))?
         .into_iter()
         .map(|(key, value)| {
@@ -90,7 +90,7 @@ pub fn peers_in_workspace(
     workspace_id: FactId,
 ) -> Result<Vec<EndpointSharedRow>, String> {
     let mut rows = store
-        .table_rows_with_key_prefix(ENDPOINT_SHARED_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(ENDPOINT_SHARED_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load endpoint peers: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_endpoint_shared_row(&key, &value))

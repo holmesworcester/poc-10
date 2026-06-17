@@ -9,7 +9,11 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
+use crate::core::store::TableName;
+
 pub const TYPE_REMOVAL_FRONTIER: u8 = encode::TYPE_REMOVAL_FRONTIER;
+
+pub const REMOVAL_FRONTIER_ROWS: TableName = TableName::new("removal_frontier_rows");
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::RemovalFrontierFact, String> {
     project::decode::decode_removal_frontier(bytes)

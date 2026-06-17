@@ -179,6 +179,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
+use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
@@ -187,7 +188,7 @@ use crate::protocol::auth::key_wrap::project::require_fact_scope;
 use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::fact::RemovalFrontierFact;
+use super::{fact::RemovalFrontierFact, REMOVAL_FRONTIER_ROWS};
 
 /// Projector route metadata for the removal_frontier fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -290,7 +291,24 @@ impl RemovalFrontierProjector {
             frontier.workspace_id,
             fact,
             context_have,
-        ))
+        )
+        .row_mutation(RowMutation::InsertValues(TableInsert {
+            table: REMOVAL_FRONTIER_ROWS,
+            columns: &[
+                "workspace_id",
+                "frontier_id",
+                "owner_endpoint_id",
+                "created_at_ms",
+                "signer_public_key",
+            ],
+            values: vec![
+                Value::Bytes(frontier.workspace_id.to_vec()),
+                Value::Bytes(fact.id.to_vec()),
+                Value::Bytes(frontier.owner_endpoint_id.to_vec()),
+                Value::U64(frontier.created_at_ms),
+                Value::Bytes(frontier.signer_public_key.to_vec()),
+            ],
+        })))
     }
 }
 

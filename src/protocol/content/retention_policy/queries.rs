@@ -8,7 +8,7 @@
 
 use crate::core::clock;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
 use std::collections::BTreeSet;
 
@@ -105,7 +105,7 @@ pub fn policies_for_scope(
     prefix.push(scope_kind);
     prefix.extend_from_slice(&scope_id);
     store
-        .table_rows_with_key_prefix(RETENTION_POLICY_ROWS, &prefix, usize::MAX)
+        .table_rows_with_key_prefix(RETENTION_POLICY_ROWS, &prefix, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read retention policy rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_policy_row(&key, &value))

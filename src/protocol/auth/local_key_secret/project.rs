@@ -190,6 +190,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::{Fact, FactScope};
+use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
@@ -200,7 +201,7 @@ use crate::protocol::auth::local_history_node_secret::project::secret_offer;
 use crate::protocol::auth::local_secret_retirement;
 use crate::protocol::auth::removal_frontier;
 
-use super::fact::LocalKeySecretFact;
+use super::{fact::LocalKeySecretFact, LOCAL_KEY_SECRET_ROWS};
 
 /// Projector route metadata for the local_key_secret fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -251,7 +252,17 @@ fn project_local_key_secret(
     let retirement_need = local_secret_retirement::secret_retired_need(fact.id, fact.id);
     if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
         validate_local_key_retirement(retirement_fact, fact.id, &secret)?;
-        return Ok(ProjectionOutput::new().purge_self(fact.id));
+        return Ok(ProjectionOutput::new()
+            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+                table: LOCAL_KEY_SECRET_ROWS,
+                columns: &["workspace_id", "frontier_id", "secret_id"],
+                values: vec![
+                    Value::Bytes(secret.workspace_id.to_vec()),
+                    Value::Bytes(secret.frontier_id.to_vec()),
+                    Value::Bytes(fact.id.to_vec()),
+                ],
+            }))
+            .purge_self(fact.id));
     }
 
     let frontier_need = ContextNeed::range(
@@ -283,6 +294,25 @@ fn project_local_key_secret(
         output = output.offer(offer);
     }
     Ok(output
+        .row_mutation(RowMutation::InsertValues(TableInsert {
+            table: LOCAL_KEY_SECRET_ROWS,
+            columns: &[
+                "workspace_id",
+                "frontier_id",
+                "secret_id",
+                "owner_endpoint_id",
+                "created_at_ms",
+                "key_secret",
+            ],
+            values: vec![
+                Value::Bytes(secret.workspace_id.to_vec()),
+                Value::Bytes(secret.frontier_id.to_vec()),
+                Value::Bytes(fact.id.to_vec()),
+                Value::Bytes(secret.owner_endpoint_id.to_vec()),
+                Value::U64(secret.created_at_ms),
+                Value::Bytes(secret.key_secret.to_vec()),
+            ],
+        }))
         .offer(ContextOffer::range(
             fact.id,
             "local_secret_source",

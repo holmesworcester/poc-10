@@ -12,13 +12,13 @@ use std::path::Path;
 use crate::core::cli::{
     decode_hex_32, encode_hex_32, read_file_bytes, write_file_bytes, CliArgs, CliOutput,
 };
-use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::crypto::{self, XChaCha20Poly1305Key, XChaCha20Poly1305Nonce};
 use crate::core::facts::FactId;
-use crate::core::store::persisted_facts;
 use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::content::{file, file_slice, message, message_deletion, reaction};
+use rusqlite::{params, OptionalExtension};
 
 use super::queries;
 
@@ -68,14 +68,14 @@ pub fn send(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<message::commands::SendReceipt>, String> {
+) -> Result<AuthoredFacts<message::api::SendReceipt>, String> {
     args.require_len(2, SEND_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let text = args.get(1).expect("length checked");
-    message::commands::send_message(store, clock, workspace_id, text)
+    message::api::send_message(store, clock, workspace_id, text)
 }
 
-pub fn send_output(receipt: &message::commands::SendReceipt, text: &str) -> CliOutput {
+pub fn send_output(receipt: &message::api::SendReceipt, text: &str) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex_32(&receipt.workspace_id)),
         format!("fact_id: {}", encode_hex_32(&receipt.message_fact_id)),
@@ -89,16 +89,16 @@ pub fn generate(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<message::commands::GenerateReceipt>, String> {
+) -> Result<AuthoredFacts<message::api::GenerateReceipt>, String> {
     args.require_len(3, GENERATE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let count = args.parse_positive_usize(1, GENERATE_USAGE)?;
     let message_text_bytes = args.parse_positive_usize(2, GENERATE_USAGE)?;
-    message::commands::generate_messages(store, clock, workspace_id, count, message_text_bytes)
+    message::api::generate_messages(store, clock, workspace_id, count, message_text_bytes)
 }
 
 pub fn generated_output(
-    receipt: &message::commands::GenerateReceipt,
+    receipt: &message::api::GenerateReceipt,
     applied_facts: usize,
 ) -> CliOutput {
     CliOutput::lines(vec![
@@ -115,7 +115,7 @@ pub fn react(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<ReactReceipt>, String> {
+) -> Result<AuthoredFacts<ReactReceipt>, String> {
     args.require_len(3, REACT_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let target = resolve_message_selector(store, workspace_id, args.get(1).unwrap())?;
@@ -130,7 +130,7 @@ pub fn react(
     }
 
     let author_user_id = local_author_user_id(store, workspace_id)?;
-    let encryption = message::commands::local_encryption_capability(store, workspace_id)?;
+    let encryption = message::api::local_encryption_capability(store, workspace_id)?;
     let created_at_ms = clock.next_timestamp();
     let nonce = deterministic_nonce(b"topo:reaction-nonce:v1", workspace_id, created_at_ms);
     let ciphertext = seal_bytes(
@@ -154,7 +154,7 @@ pub fn react(
             .map_err(|err| format!("reaction ciphertext: {err}"))?,
     };
     let authored = authored_reaction_fact(store, workspace_id, created_at_ms, reaction)?;
-    Ok(CommandOutput::new(ReactReceipt {
+    Ok(AuthoredFacts::new(ReactReceipt {
         workspace_id,
         reaction_fact_id: authored.fact.id,
         target_message_id: target.message_id,
@@ -181,7 +181,7 @@ pub fn send_file(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<SendFileReceipt>, String> {
+) -> Result<AuthoredFacts<SendFileReceipt>, String> {
     let parsed = parse_send_file_args(args)?;
     let payload = read_file_bytes(&parsed.path)?;
     let filename = parsed
@@ -191,11 +191,11 @@ pub fn send_file(
         .ok_or_else(|| "file path must have a utf-8 filename".to_string())?
         .to_string();
     let message_output =
-        message::commands::send_message(store, clock, parsed.workspace_id, &parsed.text)?;
+        message::api::send_message(store, clock, parsed.workspace_id, &parsed.text)?;
     let message_receipt = message_output.receipt.clone();
     let author_user_id = local_author_user_id(store, parsed.workspace_id)?;
     let created_at_ms = message_receipt.created_at_ms.saturating_add(1);
-    let encryption = message::commands::local_encryption_capability(store, parsed.workspace_id)?;
+    let encryption = message::api::local_encryption_capability(store, parsed.workspace_id)?;
     let total_slices = if payload.is_empty() {
         0
     } else {
@@ -263,7 +263,7 @@ pub fn send_file(
         );
     }
 
-    Ok(CommandOutput::new(SendFileReceipt {
+    Ok(AuthoredFacts::new(SendFileReceipt {
         workspace_id: parsed.workspace_id,
         message_fact_id: message_receipt.message_fact_id,
         file_fact_id: descriptor_fact_id,
@@ -295,11 +295,11 @@ pub fn delete_message(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<DeleteMessageReceipt>, String> {
+) -> Result<AuthoredFacts<DeleteMessageReceipt>, String> {
     args.require_len(2, DELETE_MESSAGE_USAGE)?;
     let workspace_id = decode_id(args.get(0).expect("length checked"))?;
     let target = resolve_message_selector(store, workspace_id, args.get(1).unwrap())?;
-    let output = message_deletion::commands::delete_message(
+    let output = message_deletion::api::delete_message(
         store,
         clock,
         workspace_id,
@@ -309,7 +309,7 @@ pub fn delete_message(
         target.author_user_id,
     )?;
     let receipt = output.receipt.clone();
-    Ok(CommandOutput::new(DeleteMessageReceipt {
+    Ok(AuthoredFacts::new(DeleteMessageReceipt {
         workspace_id,
         deletion_fact_id: receipt.deletion_fact_id,
         target_message_id: target.message_id,
@@ -918,7 +918,7 @@ fn signing_fields(
     store: &Store,
     workspace_id: FactId,
 ) -> Result<(FactId, crypto::Ed25519PublicKey, crypto::Ed25519PrivateKey), String> {
-    let signing = auth::endpoint::commands::local_signing_capability(store, workspace_id)?;
+    let signing = auth::endpoint::api::local_signing_capability(store, workspace_id)?;
     if signing.workspace_id != workspace_id {
         return Err("signing capability is not bound to this workspace".to_string());
     }
@@ -1068,35 +1068,41 @@ fn local_content_key(
     frontier_id: FactId,
     minute: u64,
 ) -> Result<XChaCha20Poly1305Key, String> {
-    let facts = persisted_facts(store)?;
-    for fact in &facts {
-        if let Ok(secret) =
-            auth::local_key_secret::project::decode::decode_local_key_secret(fact.body())
-        {
-            if secret.workspace_id == workspace_id && secret.frontier_id == frontier_id {
-                return Ok(secret.key_secret);
-            }
-        }
+    if let Some(key) = store
+        .conn()
+        .query_row(
+            "SELECT key_secret
+             FROM local_key_secret_rows
+             WHERE workspace_id = ?1 AND frontier_id = ?2
+             ORDER BY created_at_ms DESC, secret_id DESC
+             LIMIT 1",
+            params![workspace_id, frontier_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| format!("load local root key row: {err}"))?
+    {
+        return Ok(key);
     }
-    for fact in facts {
-        if let Ok(secret) =
-            auth::local_history_node_secret::project::decode::decode_local_history_node_secret(
-                fact.body(),
-            )
-        {
-            let end_minute = secret
-                .range_start
-                .saturating_add(secret.range_width.saturating_sub(1));
-            if secret.workspace_id == workspace_id
-                && secret.frontier_id == frontier_id
-                && minute >= secret.range_start
-                && minute <= end_minute
-            {
-                return Ok(secret.node_secret);
-            }
-        }
-    }
-    Err("no local content key covers encrypted content".to_string())
+    let minute = i64::try_from(minute)
+        .map_err(|_| "content minute exceeds SQLite integer range".to_string())?;
+    store
+        .conn()
+        .query_row(
+            "SELECT node_secret
+             FROM local_history_node_secret_rows
+             WHERE workspace_id = ?1
+               AND frontier_id = ?2
+               AND range_start <= ?3
+               AND ?3 < range_start + range_width
+             ORDER BY range_width ASC, range_start DESC, secret_id DESC
+             LIMIT 1",
+            params![workspace_id, frontier_id, minute],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| format!("load local history key row: {err}"))?
+        .ok_or_else(|| "no local content key covers encrypted content".to_string())
 }
 
 fn file_id_for(

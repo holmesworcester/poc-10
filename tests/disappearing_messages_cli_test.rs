@@ -29,7 +29,8 @@ fn cli_disappearing_messages_expire_and_resist_daemon_recovery() {
 
     let workspace_id =
         create_workspace_with_ttl(&alice, "Disappearing", "alice", "alice-laptop", 1);
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let alice_daemon = spawn_daemon(&alice, alice_port);
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     // Pin clock to unix_minute 100 (ms = 6_000_000). TTL=1 ⇒ expires at
@@ -41,8 +42,6 @@ fn cli_disappearing_messages_expire_and_resist_daemon_recovery() {
     wait_for_message_text(&alice, &workspace_id, "alice: secret");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
     assert_key_access(&alice, &workspace_id, &removal_frontier_id, "yes");
-
-    let alice_daemon = spawn_daemon(&alice, alice_port);
 
     assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
     wait_for_no_messages(&alice, &workspace_id);
@@ -84,7 +83,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -155,7 +154,7 @@ fn cli_disappearing_messages_two_peer_convergence() {
 // ---------------------------------------------------------------------------
 // Test 3: later admin-signed `content::retention_policy` facts
 // supersede earlier ones; messages stamped under an earlier policy
-// retain their stamped TTL. `workspace::commands::create` emits the
+// retain their stamped TTL. `workspace::api::create` emits the
 // workspace's initial retention policy alongside the workspace fact, so the
 // first policy and any later admin `disappearing-set` form a chain
 // of policies — there is no separate "workspace TTL fallback" anymore.
@@ -172,13 +171,15 @@ fn cli_retention_policy_supersedes_workspace_ttl_without_rewriting_old_messages(
 
     // Workspace TTL = 1 minute at creation.
     let workspace_id = create_workspace_with_ttl(&alice, "Policy", "alice", "alice-laptop", 1);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin the clock and author the first message at minute 100. This is
     // stamped under the workspace fact's TTL of 1, so its
     // expires_at_minute is 101.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "early"]));
+    wait_for_message_text(&alice, &workspace_id, "alice: early");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
 
     // Admin authors a retention policy fact raising TTL to 5. After the policy
@@ -191,12 +192,14 @@ fn cli_retention_policy_supersedes_workspace_ttl_without_rewriting_old_messages(
         &workspace_id,
         "5",
     ]));
+    wait_for_disappearing_value(&alice, &workspace_id, "current_ttl_minutes", "5");
 
     // Author the second message at the same minute 100 but after the new
     // policy. It should be stamped with expires_at_minute = 100 + 5 = 105.
     // (No clock advance — the policy takes effect immediately for the
     // next authoring.)
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "late"]));
+    wait_for_message_text(&alice, &workspace_id, "alice: late");
     assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
 
     // Spawn the daemon and advance the clock past minute 101 but before
@@ -204,7 +207,6 @@ fn cli_retention_policy_supersedes_workspace_ttl_without_rewriting_old_messages(
     // must remain visible. This is the key claim — the policy did not
     // retroactively rewrite "early"'s expiry to 105, and the new message
     // really did pick up the new TTL.
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
     assert_success(topo(&["--db", &alice, "clock", "set", "6180000"])); // minute 103
 
     // Wait for "early" to disappear; "late" should remain.
@@ -255,12 +257,15 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
     let alice_port = free_port();
 
     let workspace_id = create_workspace_with_ttl(&alice, "Cascade", "alice", "alice-laptop", 1);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
 
     // Author a message and then react to it, both in unix_minute 100.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "secret"]));
+    wait_for_message_text(&alice, &workspace_id, "alice: secret");
     assert_success(topo(&["--db", &alice, "react", &workspace_id, "#1", "🌶️"]));
+    wait_for_view_contains(&alice, &workspace_id, "🌶️ alice");
 
     // Pre-expiry: one message and its reaction are visible through the CLI.
     assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
@@ -270,7 +275,6 @@ fn cli_disappearing_messages_cascade_reactions_when_parent_message_expires() {
         "view must show the message and reaction before expiry:\n{pre_view}"
     );
 
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
     // Advance past minute 101 (TTL=1 ⇒ expires_at_minute=101).
     assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
 
@@ -328,7 +332,7 @@ fn cli_disappearing_messages_authoring_continues_after_retirement_without_rotati
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-    let frontier_before = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier_before = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id_before = line_value(&frontier_before, "removal_frontier_id");
     let _ = key_wrap_with_retry(
         &alice,
@@ -437,7 +441,7 @@ fn cli_disappearing_messages_cover_horizon_seals_old_subtrees() {
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -562,7 +566,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -594,6 +598,7 @@ fn cli_disappearing_messages_mixed_ttls_in_same_minute_retire_independently() {
         &workspace_id,
         "1",
     ]));
+    wait_for_disappearing_value(&alice, &workspace_id, "current_ttl_minutes", "1");
 
     // Author Y under the new TTL=1. With the clock still pinned to minute
     // 100, Y is stamped to expire at minute 101.
@@ -721,7 +726,7 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -741,13 +746,12 @@ fn cli_disappearing_messages_late_delivery_after_cover_horizon_is_staged_for_pub
 
     // Pin both clocks to minute 100. Alice authors X; with TTL=0 the
     // message has `expires_at_minute = u64::MAX` and the per-message
-    // TTL expiry will not remove it. X is in alice's local store
-    // immediately (the `send` command admits + applies before returning).
+    // TTL expiry will not remove it. The command receipt proves X was
+    // durably authored while alice's daemon is stopped.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
     let send_out = assert_success(topo(&["--db", &alice, "send", &workspace_id, "ancient-x"]));
     let message_fact_id = line_value(&send_out, "fact_id");
-    wait_for_message_text(&alice, &workspace_id, "alice: ancient-x");
 
     // Advance bob's clock past the horizon. With T_AUTHOR=100 and
     // COVER_HORIZON_MINUTES=43_200, choose now_minute = 43_301 so
@@ -877,7 +881,7 @@ fn cli_disappearing_messages_message_resyncs_after_proactive_key_arrival() {
     // Alice creates a frontier. This creates alice's local_key_secret F and
     // enqueues proactive wrapping for already-known recipient keys. We do not
     // call the manual `key-wrap` command for bob in this test.
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     // Alice wraps for ALICE only (her own F). Authoring will use alice's
     // F to derive X's leaf. Bob's F must arrive through the proactive path.
@@ -952,7 +956,7 @@ fn cli_disappearing_messages_cover_horizon_chop_gcs_old_per_message_tombstones()
 
     let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     let _ = key_wrap_with_retry(
         &alice,
@@ -1037,7 +1041,26 @@ fn create_workspace_with_ttl(
         "--ttl-minutes",
         &ttl,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    if ttl_minutes > 0 {
+        wait_for_disappearing_value(
+            db,
+            &workspace_id,
+            "current_ttl_minutes",
+            &ttl_minutes.to_string(),
+        );
+    }
+    workspace_id
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
 }
 
 fn messages_text(db: &str, workspace_id: &str) -> String {
@@ -1046,6 +1069,24 @@ fn messages_text(db: &str, workspace_id: &str) -> String {
 
 fn view_text(db: &str, workspace_id: &str) -> String {
     assert_success(topo(&["--db", db, "view", workspace_id]))
+}
+
+fn wait_for_view_contains(db: &str, workspace_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "view", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if out.contains(expected) {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("view never contained {expected:?}:\n{last}");
 }
 
 fn disappearing_status(db: &str, workspace_id: &str) -> String {
@@ -1116,6 +1157,24 @@ fn wait_for_key_access(db: &str, workspace_id: &str, removal_frontier_id: &str, 
         thread::sleep(Duration::from_millis(100));
     }
     panic!("key access did not reach {expected}:\n{last}");
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}:\n{last}");
 }
 
 fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
@@ -1314,6 +1373,24 @@ fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("user {username} never appeared in {db}: {last}");
+}
+
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let identity = topo(&["--db", db, "identity"]);
+        if identity.status.success() {
+            let identity = stdout(&identity);
+            if identity.contains(expected) {
+                return;
+            }
+            last = identity;
+        } else {
+            last = stderr(&identity);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
 }
 
 fn try_accept_with_identity_retry(

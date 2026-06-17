@@ -14,11 +14,9 @@ use topo::core::crypto;
 use topo::core::runtime::Runtime;
 use topo::core::store::Store;
 use topo::protocol::app::MATCH_RUNTIME;
-use topo::protocol::auth::key_wrap::commands::{create_key_frontier, CreateKeyFrontier};
-use topo::protocol::auth::workspace::commands::{
-    create_workspace_with_identity, BootstrapIdentity,
-};
-use topo::protocol::content::message::commands::{local_encryption_capability, send_message};
+use topo::protocol::auth::key_wrap::api::{create_key_frontier, CreateKeyFrontier};
+use topo::protocol::auth::workspace::api::{create_workspace_with_identity, BootstrapIdentity};
+use topo::protocol::content::message::api::{local_encryption_capability, send_message};
 use topo::protocol::content::message::encode::associated_data;
 use topo::protocol::content::message::project::decode::{decode_fact, recover_text};
 
@@ -36,6 +34,21 @@ impl CommandClock for FixedClock {
         self.0.set(next + 1);
         next
     }
+}
+
+fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
+    for _ in 0..max_rounds {
+        runtime
+            .drain_projection_once(limit)
+            .expect("drain projection batch");
+        runtime
+            .drain_intents_once(limit)
+            .expect("drain intent batch");
+        if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
+            return;
+        }
+    }
+    panic!("runtime work did not become idle within {max_rounds} rounds");
 }
 
 fn open_store() -> Store {
@@ -58,11 +71,9 @@ fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
     .expect("workspace command");
     let workspace_id = workspace.receipt.workspace_fact_id;
     runtime
-        .submit_command_output(workspace)
+        .submit_authored_facts(workspace)
         .expect("submit workspace");
-    runtime
-        .process_all_work_until_idle(8, 512)
-        .expect("project workspace");
+    drain_runtime_work_for_test(&mut runtime, 8, 512);
     let frontier = create_key_frontier(
         runtime.store(),
         CreateKeyFrontier {
@@ -72,11 +83,9 @@ fn runtime_with_workspace_and_key() -> (Runtime, WorkspaceId) {
     )
     .expect("frontier command");
     runtime
-        .submit_command_output(frontier)
+        .submit_authored_facts(frontier)
         .expect("submit frontier");
-    runtime
-        .process_all_work_until_idle(8, 512)
-        .expect("project frontier");
+    drain_runtime_work_for_test(&mut runtime, 8, 512);
     (runtime, workspace_id)
 }
 

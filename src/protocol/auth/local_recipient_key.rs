@@ -9,7 +9,11 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
+use crate::core::store::TableName;
+
 pub const TYPE_LOCAL_RECIPIENT_KEY: u8 = encode::TYPE_LOCAL_RECIPIENT_KEY;
+
+pub const LOCAL_RECIPIENT_KEY_ROWS: TableName = TableName::new("local_recipient_key_rows");
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalRecipientKeyFact, String> {
     project::decode::decode_local_recipient_key(bytes)

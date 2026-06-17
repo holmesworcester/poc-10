@@ -30,7 +30,7 @@
 
 use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
-use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet};
+use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet, WorkStatus};
 use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
 use crate::core::project_fact::{self, FactAdmissionFn, Projector, RuntimeEffectMode};
@@ -39,7 +39,7 @@ use crate::core::store::{Store, TableName};
 use std::collections::BTreeSet;
 
 const REPLAY_WORK_LIMIT: usize = 4096;
-const REPLAY_FIXPOINT_ROUNDS: usize = 256;
+const REPLAY_MAX_DRAIN_STEPS: usize = 256;
 
 /// Core runtime index tables that are protocol-derived but are not read-model
 /// row mutations; counted separately from materialized rows.
@@ -83,7 +83,7 @@ pub struct ReplayReport {
     pub purged_facts: usize,
     /// Due time-wake rows admitted from replayable semantic timelines.
     pub semantic_time_wakes: usize,
-    /// Standing time-wake rows remaining after replay settles.
+    /// Standing time-wake rows remaining after replay drains.
     pub standing_time_wakes: usize,
     /// Intents dispatched before the replay barrier.
     pub replayed_intents: usize,
@@ -199,9 +199,9 @@ fn area_diffs(left: &StateSummary, right: &StateSummary) -> Vec<String> {
 /// Run the replay entry point against an opened store.
 ///
 /// Steps: count and drop queued intents, wipe derived state, mark retained facts
-/// pending in the requested order, then drain replay-mode projection, time
-/// wakes, and intent dispatch to a fixpoint. Returns counters, or an error if
-/// replay produced network rows before the barrier.
+/// pending in the requested order, then run replay-mode queue steps until the
+/// replay barrier is idle. Returns counters, or an error if replay produced
+/// network rows before the barrier.
 pub fn run_replay(
     store: &Store,
     projector: &dyn Projector,
@@ -233,15 +233,14 @@ pub fn run_replay(
     match order {
         ReplayOrder::Canonical => {
             project_fact::enqueue_retained_facts_for_replay(store)?;
-            drive.fixpoint(&mut counters)?;
+            drive.drain_until_barrier(&mut counters)?;
         }
         ReplayOrder::Reverse | ReplayOrder::Scramble { .. } => {
             for fact_id in ordered_fact_ids(store, order)? {
                 project_fact::enqueue_retained_fact_for_replay(store, fact_id)?;
-                drive.fixpoint(&mut counters)?;
+                drive.drain_until_barrier(&mut counters)?;
             }
-            // A final fixpoint settles any work left after the last admission.
-            drive.fixpoint(&mut counters)?;
+            drive.drain_until_barrier(&mut counters)?;
         }
     }
 
@@ -259,7 +258,7 @@ pub fn run_replay(
 
     if remaining_queued_work > 0 {
         return Err(format!(
-            "replay left {remaining_queued_work} queued intent rows after the barrier; replay work did not reach a fixpoint"
+            "replay left {remaining_queued_work} queued intent rows after the drain barrier"
         ));
     }
 
@@ -309,8 +308,9 @@ struct ReplayCounters {
 /// Replay-mode work driver over the ordinary projection and dispatch workers.
 ///
 /// It instantiates the ordinary handler routes and passes replay mode through
-/// handler context. Projection, time-wake admission, and replay dispatch run to
-/// a fixpoint together because each can produce inputs for the others.
+/// handler context. Each step admits due replay time wakes, drains one
+/// projection batch, and drains one intent batch; the barrier repeats that
+/// visible queue order until a step is idle.
 struct ReplayDrive<'a> {
     store: &'a Store,
     projector: &'a dyn Projector,
@@ -340,41 +340,36 @@ impl<'a> ReplayDrive<'a> {
         }
     }
 
-    fn fixpoint(&self, counters: &mut ReplayCounters) -> Result<(), String> {
-        for _ in 0..REPLAY_FIXPOINT_ROUNDS {
-            let mut progressed = false;
-            progressed |= self.project_to_idle(counters)?;
-            progressed |= self.admit_time_wakes(counters)?;
-            progressed |= self.project_to_idle(counters)?;
-            progressed |= self.dispatch_replay(counters)?;
-            if !progressed {
+    fn drain_until_barrier(&self, counters: &mut ReplayCounters) -> Result<(), String> {
+        for _ in 0..REPLAY_MAX_DRAIN_STEPS {
+            if self.drain_one_step(counters)?.is_idle() {
                 return Ok(());
             }
         }
-        Err("replay did not reach a fixpoint within the round limit".to_string())
+        Err("replay drain exceeded the step limit".to_string())
     }
 
-    fn project_to_idle(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
-        let mut progressed = false;
-        loop {
-            let progress = project_fact::drain_projection(
-                self.store,
-                self.projector,
-                self.allowed_tables,
-                self.fact_admission,
-                project_fact::ProjectionDrainScope::Runtime,
-                REPLAY_WORK_LIMIT,
-            )?;
-            counters.projected_facts += progress.projected;
-            if progress.projected == 0 {
-                break;
-            }
-            progressed = true;
-        }
-        Ok(progressed)
+    fn drain_one_step(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
+        let mut status = WorkStatus::idle();
+        status.merge(self.admit_time_wakes(counters)?);
+        status.merge(self.drain_projection(counters)?);
+        status.merge(self.dispatch_replay(counters)?);
+        Ok(status)
     }
 
-    fn admit_time_wakes(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
+    fn drain_projection(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
+        let progress = project_fact::drain_projection(
+            self.store,
+            self.projector,
+            self.allowed_tables,
+            self.fact_admission,
+            REPLAY_WORK_LIMIT,
+        )?;
+        counters.projected_facts += progress.projected;
+        Ok(progress.status)
+    }
+
+    fn admit_time_wakes(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
         let mut admitted = 0;
         for wake in self.replay_time_wakes {
             let Some(end_inclusive) = (wake.end_inclusive)(self.store)? else {
@@ -389,10 +384,10 @@ impl<'a> ReplayDrive<'a> {
             )?;
         }
         counters.time_wake_admissions += admitted;
-        Ok(admitted > 0)
+        Ok(WorkStatus::progressed(admitted > 0))
     }
 
-    fn dispatch_replay(&self, counters: &mut ReplayCounters) -> Result<bool, String> {
+    fn dispatch_replay(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
         let progress = dispatch_intents(
             self.store,
             &self.handlers,
@@ -403,7 +398,7 @@ impl<'a> ReplayDrive<'a> {
             RuntimeEffectMode::Replay,
         )?;
         counters.replayed_intents += progress.dispatched;
-        Ok(progress.status.progressed)
+        Ok(progress.status)
     }
 }
 

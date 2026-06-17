@@ -4,7 +4,7 @@
 //! fact when no complete local keypair exists yet, reusing the constructors and
 //! capability access in `author.rs`.
 
-use crate::core::command::{CommandOutput, LocalSigningCapability, WorkspaceId};
+use crate::core::command::{AuthoredFacts, LocalSigningCapability, WorkspaceId};
 use crate::core::store::Store;
 use crate::protocol::auth;
 
@@ -20,16 +20,16 @@ pub struct LocalEndpointOutput {
 pub fn local_or_create(
     store: &Store,
     created_at_ms: u64,
-) -> Result<CommandOutput<LocalEndpointOutput>, String> {
+) -> Result<AuthoredFacts<LocalEndpointOutput>, String> {
     match local_endpoint(store)? {
-        Some(endpoint) => Ok(CommandOutput::new(LocalEndpointOutput {
+        Some(endpoint) => Ok(AuthoredFacts::new(LocalEndpointOutput {
             endpoint,
             created: false,
         })),
         None => {
             let endpoint = create_local_endpoint();
             let fact = endpoint_fact(created_at_ms, endpoint)?;
-            Ok(CommandOutput::new(LocalEndpointOutput {
+            Ok(AuthoredFacts::new(LocalEndpointOutput {
                 endpoint,
                 created: true,
             })
@@ -90,13 +90,14 @@ mod tests {
     }
 
     #[test]
-    fn local_or_create_reuses_unprojected_local_endpoint_fact() {
+    fn local_or_create_reuses_projected_local_endpoint_rows() {
         let store =
             Store::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE, FACTS_SCHEMA_SOURCE])
                 .expect("open store");
         let endpoint = create_local_endpoint();
-        let fact = super::super::author::endpoint_fact(10, endpoint).expect("endpoint fact");
-        crate::core::project_fact::submit_fact_to_store(&store, fact).expect("submit fact");
+        store
+            .insert_table_rows(super::super::endpoint_rows(&endpoint))
+            .expect("insert endpoint rows");
 
         let output = local_or_create(&store, 20).expect("reuse endpoint");
 

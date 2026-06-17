@@ -5,8 +5,8 @@
 //! projection context. These facts are local authority, not shared identity
 //! proofs. Shared endpoint visibility lives in `endpoint_shared`.
 
+pub mod api;
 pub mod author;
-pub mod commands;
 pub mod encode;
 pub mod fact;
 pub mod project;

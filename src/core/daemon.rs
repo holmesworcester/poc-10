@@ -3,9 +3,10 @@
 //! Core owns only the reusable mechanics: parse daemon flags, hold the
 //! per-store lock, bind the TCP listener, publish the readiness line, react to
 //! stop/reset, and run a bounded tick from the selected protocol's declarative
-//! daemon description. The tick is protocol-agnostic: accept network bytes,
-//! commit protocol-classified incoming facts, process declared time wakes, drain
-//! one projection batch and one intent batch, then pump queued outgoing network
+//! daemon description. The tick is protocol-agnostic: fire recurring intents,
+//! accept network bytes, commit protocol-classified incoming effects, process
+//! declared time wakes with a high local budget, drain one high-volume
+//! projection batch and one intent batch, then pump queued outgoing network
 //! bytes.
 //!
 //! The daemon is the host for work that should keep happening without a user
@@ -15,12 +16,13 @@
 //! the runtime handlers that consume queued work.
 //!
 //! The order inside `tick` is part of the runtime contract. Network input is
-//! admitted first, due time ranges wake facts, one runtime projection batch
-//! drains, one runtime intent batch drains, and then queued outgoing TCP bytes
-//! are pumped by target address. Handler-emitted facts remain queued for later
-//! projection work. Change that order here only if the whole daemon scheduling
-//! policy changes; protocol handlers should adapt by emitting facts, time
-//! wakes, or intents rather than calling daemon steps directly.
+//! admitted after recurring intents are fired, due time ranges wake facts, one
+//! runtime projection batch drains, one runtime intent batch drains, and then
+//! queued outgoing TCP bytes are pumped by target address. Handler-emitted facts
+//! remain queued for later projection work. Change that order here only if the
+//! whole daemon scheduling policy changes; protocol handlers should adapt by
+//! emitting facts, time wakes, or intents rather than calling daemon steps
+//! directly.
 
 use crate::core::cli::{CliArgs, CliOutput};
 use crate::core::effects::RuntimeEffects;
@@ -44,6 +46,7 @@ const STOP_USAGE: &str = "stop";
 const RESET_USAGE: &str = "reset";
 const DEFAULT_TICK_MS: u64 = 250;
 const DEFAULT_WORK_LIMIT: usize = 4096;
+const LOCAL_DERIVATION_WORK_MULTIPLIER: usize = 16;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -59,7 +62,8 @@ pub struct StartOptions {
     pub listen: SocketAddr,
     /// Sleep duration after an idle tick.
     pub quiet_ms: u64,
-    /// Maximum queued items one tick should process per stage.
+    /// Base maximum queued items one tick should process per side-effecting stage.
+    /// Local derivation queues use a larger derived budget.
     pub work_limit: usize,
 }
 
@@ -97,28 +101,51 @@ pub struct DaemonTimeWake {
 
 /// Run one bounded daemon tick.
 ///
-/// The order is fixed: accept TCP, commit inbound intake effects, admit time
-/// wakes, drain one projection batch and one intent batch, then pump outgoing TCP
-/// rows.
+/// The order is fixed: fire recurring intents, accept TCP, commit inbound intake
+/// effects, admit time wakes with the high local-derivation budget, drain one
+/// high-volume projection batch and one base-limit intent batch, then pump
+/// outgoing TCP rows.
 /// Protocols should change their declarations rather than reordering this loop.
 pub fn tick(
     description: DaemonDescription,
     runtime: &mut Runtime,
     listener: &network::Listener,
+    scheduler: &mut RecurringScheduler,
     work_limit: usize,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
+    let local_derivation_limit = local_derivation_work_limit(work_limit);
+    status.merge(fire_recurring_intents(runtime, scheduler, listener)?);
     status.merge(drain_inbound_listener(
         description,
         runtime,
         listener,
         work_limit,
     )?);
-    status.merge(drain_time_wakes(description, runtime, work_limit)?);
-    status.merge(runtime.drain_projection_once(work_limit)?);
+    status.merge(drain_time_wakes(
+        description,
+        runtime,
+        local_derivation_limit,
+    )?);
+    status.merge(runtime.drain_projection_once(local_derivation_limit)?);
     status.merge(runtime.drain_intents_once(work_limit)?);
     status.merge(drain_outgoing_network(runtime, work_limit)?);
     Ok(status)
+}
+
+fn local_derivation_work_limit(work_limit: usize) -> usize {
+    work_limit
+        .saturating_mul(LOCAL_DERIVATION_WORK_MULTIPLIER)
+        .max(work_limit)
+}
+
+fn fire_recurring_intents(
+    runtime: &mut Runtime,
+    scheduler: &mut RecurringScheduler,
+    listener: &network::Listener,
+) -> Result<WorkStatus, String> {
+    let fired = scheduler.fire_due(runtime, now_ms(), Some(listener.local_addr()))?;
+    Ok(WorkStatus::progressed(fired > 0))
 }
 
 fn drain_inbound_listener(
@@ -151,15 +178,21 @@ fn drain_inbound_listener(
 fn drain_time_wakes(
     description: DaemonDescription,
     runtime: &mut Runtime,
-    work_limit: usize,
+    limit: usize,
 ) -> Result<WorkStatus, String> {
     let mut due = 0;
+    let mut remaining = limit;
     for wake in description.time_wakes {
+        if remaining == 0 {
+            break;
+        }
         let Some(end_inclusive) = (wake.end_inclusive)(runtime.store())? else {
             continue;
         };
-        due +=
-            runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, work_limit)?;
+        let admitted =
+            runtime.process_due_time_range((wake.timeline)(), None, end_inclusive, remaining)?;
+        due += admitted;
+        remaining = remaining.saturating_sub(admitted);
     }
     Ok(WorkStatus::progressed(due > 0))
 }
@@ -691,11 +724,14 @@ fn print_line_now(line: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::core::facts::Fact;
+    use crate::core::handle_intent::RecurringIntentSpec;
+    use crate::core::intents::{HandlerContext, HandlerResult, Intent, IntentHandler, IntentKind};
     use crate::core::network::{NetworkTarget, OutgoingFrame};
     use crate::core::project_fact::{ProjectionContext, ProjectionOutput, Projector};
     use crate::core::runtime::RuntimeDescription;
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     struct NoopProjector;
@@ -714,6 +750,38 @@ mod tests {
         Box::new(NoopProjector)
     }
 
+    struct RecurringHandler;
+
+    impl IntentHandler for RecurringHandler {
+        fn handle(&self, intent: &Intent, _context: &HandlerContext<'_>) -> HandlerResult {
+            assert_eq!(intent.kind.as_str(), "recurring_tick");
+            assert_eq!(intent.key, b"cycle".to_vec());
+            RECURRING_HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(RuntimeEffects::new())
+        }
+    }
+
+    fn recurring_handler() -> Box<dyn IntentHandler> {
+        Box::new(RecurringHandler)
+    }
+
+    fn recurring_builder(
+        _store: &Store,
+        context: RecurringIntentContext,
+    ) -> Result<Option<Intent>, String> {
+        assert!(
+            context.local_addr.is_some(),
+            "daemon tick should pass its listen address to recurring builders"
+        );
+        Ok(Some(Intent::new(
+            IntentKind::new("recurring_tick").expect("intent kind"),
+            b"cycle".to_vec(),
+            Vec::new(),
+        )))
+    }
+
+    static RECURRING_HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
     const TEST_RUNTIME: RuntimeDescription = RuntimeDescription {
         schema_sources: &[network::SCHEMA_SOURCE],
         row_mutation_tables: &[],
@@ -721,6 +789,25 @@ mod tests {
         fact_routes: &[],
         fact_admission: None,
         handlers: &[],
+    };
+
+    const RECURRING_HANDLERS: &[HandlerRoute] = &[HandlerRoute {
+        intent_kind: "recurring_tick",
+        factory: recurring_handler,
+        recurrence: Some(RecurringIntentSpec {
+            interval_ms: 60_000,
+            initial_delay_ms: 0,
+            build_intent: recurring_builder,
+        }),
+    }];
+
+    const RECURRING_RUNTIME: RuntimeDescription = RuntimeDescription {
+        schema_sources: &[network::SCHEMA_SOURCE],
+        row_mutation_tables: &[],
+        projector: noop_projector,
+        fact_routes: &[],
+        fact_admission: None,
+        handlers: RECURRING_HANDLERS,
     };
 
     #[test]
@@ -821,6 +908,7 @@ mod tests {
             },
         )
         .expect("queue outgoing frame");
+        let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers, now_ms());
 
         let status = tick(
             DaemonDescription {
@@ -829,6 +917,7 @@ mod tests {
             },
             &mut runtime,
             &listener,
+            &mut scheduler,
             16,
         )
         .expect("daemon tick");
@@ -842,6 +931,71 @@ mod tests {
         )
         .expect("claim after tick")
         .is_empty());
+    }
+
+    #[test]
+    fn tick_uses_high_local_derivation_budget_for_projection() {
+        let listener =
+            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
+        let mut runtime = Runtime::open_memory(&TEST_RUNTIME).expect("runtime");
+        let mut scheduler = RecurringScheduler::install(TEST_RUNTIME.handlers, now_ms());
+        runtime.submit_fact(Fact::new(
+            crate::core::facts::FactScope::Global,
+            7,
+            b"one".to_vec(),
+        ));
+        runtime.submit_fact(Fact::new(
+            crate::core::facts::FactScope::Global,
+            7,
+            b"two".to_vec(),
+        ));
+
+        tick(
+            DaemonDescription {
+                inbound_network_intake: None,
+                time_wakes: &[],
+            },
+            &mut runtime,
+            &listener,
+            &mut scheduler,
+            1,
+        )
+        .expect("daemon tick");
+
+        assert_eq!(
+            runtime.pending_fact_count(),
+            0,
+            "projection should use the high local-derivation budget, not the base side-effect limit"
+        );
+    }
+
+    #[test]
+    fn tick_fires_recurring_intents_before_drain_steps() {
+        RECURRING_HANDLER_CALLS.store(0, Ordering::SeqCst);
+        let listener =
+            network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("daemon listener");
+        let mut runtime = Runtime::open_memory(&RECURRING_RUNTIME).expect("runtime");
+        let mut scheduler = RecurringScheduler::install(RECURRING_RUNTIME.handlers, 0);
+
+        let status = tick(
+            DaemonDescription {
+                inbound_network_intake: None,
+                time_wakes: &[],
+            },
+            &mut runtime,
+            &listener,
+            &mut scheduler,
+            16,
+        )
+        .expect("daemon tick");
+
+        assert!(status.progressed);
+        assert_eq!(RECURRING_HANDLER_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.pending_intent_count(),
+            0,
+            "the same daemon tick should dispatch the recurring intent it fired"
+        );
     }
 
     fn read_length_prefixed_frame(stream: &mut TcpStream) -> Vec<u8> {

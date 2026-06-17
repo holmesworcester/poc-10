@@ -6,7 +6,7 @@
 //! the user is connected to a valid invite or authority chain before rows become
 //! visible.
 
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto::{Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth;
@@ -37,9 +37,9 @@ pub struct CreateUserReceipt {
     pub username: String,
 }
 
-pub fn create(input: CreateUser) -> Result<CommandOutput<CreateUserReceipt>, String> {
+pub fn create(input: CreateUser) -> Result<AuthoredFacts<CreateUserReceipt>, String> {
     let fact = user_fact(&input)?;
-    Ok(CommandOutput::new(CreateUserReceipt {
+    Ok(AuthoredFacts::new(CreateUserReceipt {
         user_id: fact.id,
         public_key: input.public_key,
         username: input.username,
@@ -49,7 +49,7 @@ pub fn create(input: CreateUser) -> Result<CommandOutput<CreateUserReceipt>, Str
 
 pub fn create_with_authority(
     input: CreateUserWithAuthority,
-) -> Result<CommandOutput<CreateUserReceipt>, String> {
+) -> Result<AuthoredFacts<CreateUserReceipt>, String> {
     let public_key = crate::core::crypto::ed25519_public_key(&input.signer_private_key);
     let fact = authored_user_fact(&input, public_key)?;
     let signature = auth::signature::author::sign_fact(
@@ -58,7 +58,7 @@ pub fn create_with_authority(
         &input.signer_private_key,
         input.created_at_ms,
     )?;
-    Ok(CommandOutput::new(CreateUserReceipt {
+    Ok(AuthoredFacts::new(CreateUserReceipt {
         user_id: fact.id,
         public_key,
         username: input.username,

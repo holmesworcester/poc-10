@@ -9,7 +9,7 @@ use topo::protocol::auth::{
     admin, endpoint, invite_accepted,
     signature::project::{authenticate as signature_authenticate, decode as signature_decode},
     user, user_invite,
-    workspace::commands::{create_workspace_with_identity, BootstrapIdentity},
+    workspace::api::{create_workspace_with_identity, BootstrapIdentity},
     workspace::project::decode as workspace_decode,
 };
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
@@ -124,7 +124,9 @@ fn create_workspace_authors_first_user_through_bootstrap_invite_and_admin_grant(
     assert_eq!(accepted.bootstrap_endpoint_id, local_endpoint.endpoint);
     assert_eq!(
         accepted.bootstrap_hash,
-        topo::protocol::auth::invite_secret::fact::bootstrap_secret_hash(&accepted.bootstrap_secret)
+        topo::protocol::auth::invite_secret::fact::bootstrap_secret_hash(
+            &accepted.bootstrap_secret
+        )
     );
 
     let user_fact = output

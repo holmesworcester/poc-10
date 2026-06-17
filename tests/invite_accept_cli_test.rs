@@ -7,7 +7,7 @@
 
 mod cli_harness;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Output};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -79,16 +79,7 @@ fn workspace_invite_accept_builds_identity_graph_over_two_cli_processes() {
     let host_port = free_port();
     let joiner_port = free_port();
 
-    let created = assert_success(topo(&[
-        "--db",
-        &host,
-        "create-workspace",
-        "Alpha",
-        "--username",
-        "alice",
-        "--devicename",
-        "alice-laptop",
-    ]));
+    let created = create_workspace(&host, "Alpha", "alice", "alice-laptop");
     let workspace_id = line_value(&created, "workspace_id");
 
     let _host_daemon = spawn_daemon(&host, host_port);
@@ -179,16 +170,7 @@ fn workspace_invite_is_multi_use_for_two_accepting_users() {
     let carol = temp_db(&tmp, "carol.db");
     let port = free_port();
 
-    let created = assert_success(topo(&[
-        "--db",
-        &host,
-        "create-workspace",
-        "Alpha",
-        "--username",
-        "alice",
-        "--devicename",
-        "alice-laptop",
-    ]));
+    let created = create_workspace(&host, "Alpha", "alice", "alice-laptop");
     let workspace_id = line_value(&created, "workspace_id");
 
     let _host_daemon = spawn_daemon(&host, port);
@@ -297,16 +279,7 @@ fn device_link_accept_links_second_device_over_two_cli_processes() {
     let phone = temp_db(&tmp, "phone.db");
     let port = free_port();
 
-    let created = assert_success(topo(&[
-        "--db",
-        &host,
-        "create-workspace",
-        "Alpha",
-        "--username",
-        "alice",
-        "--devicename",
-        "alice-laptop",
-    ]));
+    let created = create_workspace(&host, "Alpha", "alice", "alice-laptop");
     let workspace_id = line_value(&created, "workspace_id");
     let user_id = line_value(&created, "user_id");
 
@@ -549,12 +522,7 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_messages() {
 
     let victim_created = create_workspace(&victim, "Victim", "victim", "victim-laptop");
     let victim_workspace_id = line_value(&victim_created, "workspace_id");
-    assert_success(topo(&[
-        "--db",
-        &victim,
-        "key-frontier",
-        &victim_workspace_id,
-    ]));
+    create_local_content_key(&victim, &victim_workspace_id);
     let generated = assert_success(topo(&[
         "--db",
         &victim,
@@ -598,7 +566,9 @@ fn forged_workspace_invite_does_not_authorize_or_exfiltrate_messages() {
 
 fn invite_accept_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn accept_with_retry(db: &str, invite: &str) -> String {
@@ -653,6 +623,38 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
     RunningDaemon { child }
 }
 
+fn spawn_projection_daemon_if_needed(db: &str) -> Option<RunningDaemon> {
+    let port = free_port().to_string();
+    let mut child = spawn_topo(&[
+        "--db",
+        db,
+        "start",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--tick-ms",
+        "50",
+        "--quiet-ms",
+        "50",
+    ]);
+    let stdout = child.stdout.take().expect("daemon stdout");
+    let stderr = child.stderr.take().expect("daemon stderr");
+    let mut reader = BufReader::new(stdout);
+    let mut first = String::new();
+    reader.read_line(&mut first).expect("daemon first line");
+    if first.starts_with("listening: ") {
+        return Some(RunningDaemon { child });
+    }
+    let mut stderr_reader = BufReader::new(stderr);
+    let mut stderr_text = String::new();
+    let _ = stderr_reader.read_to_string(&mut stderr_text);
+    let _ = child.wait();
+    if stderr_text.contains("daemon already running") {
+        return None;
+    }
+    panic!("daemon did not report listening: {first}\nstderr:\n{stderr_text}");
+}
+
 fn wait_until_invite_can_be_created(db: &str, workspace_id: &str, port: u16) {
     let addr = format!("127.0.0.1:{port}");
     let mut last = String::new();
@@ -677,7 +679,7 @@ fn wait_until_invite_can_be_created(db: &str, workspace_id: &str, port: u16) {
 }
 
 fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> String {
-    assert_success(topo(&[
+    let out = assert_success(topo(&[
         "--db",
         db,
         "create-workspace",
@@ -686,7 +688,20 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         username,
         "--devicename",
         device_name,
-    ]))
+    ]));
+    let workspace_id = line_value(&out, "workspace_id");
+    let _projection_daemon = spawn_projection_daemon_if_needed(db);
+    wait_for_users_containing(db, &workspace_id, &[username]);
+    wait_for_identity_containing(db, &["endpoint_role=device"]);
+    out
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    let _projection_daemon = spawn_projection_daemon_if_needed(db);
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
 }
 
 fn workspace_invite_link(db: &str, workspace_id: &str, port: u16) -> String {
@@ -937,6 +952,24 @@ fn wait_for_peers_containing(db: &str, workspace_id: &str, values: &[&str]) {
         thread::sleep(Duration::from_millis(50));
     }
     panic!("peers never contained {values:?}:\n{last}");
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}: {last}");
 }
 
 fn connection_count(db: &str) -> usize {

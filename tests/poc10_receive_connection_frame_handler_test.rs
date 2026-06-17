@@ -313,28 +313,39 @@ fn daemon_tick_admits_wire_frame_without_inbound_rows_or_receive_intents() {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let listener = network::listen("127.0.0.1:0".parse().expect("listen addr")).expect("listen");
     let addr = listener.local_addr();
+    let sent_frame = frame.clone();
     let writer = std::thread::spawn(move || {
         let mut stream = TcpStream::connect(addr).expect("connect");
-        let len = u32::try_from(frame.len())
+        let len = u32::try_from(sent_frame.len())
             .expect("frame length")
             .to_be_bytes();
         stream.write_all(&len).expect("write frame length");
-        stream.write_all(&frame).expect("write frame body");
+        stream.write_all(&sent_frame).expect("write frame body");
         stream.shutdown(Shutdown::Write).expect("shutdown write");
     });
     std::thread::sleep(Duration::from_millis(50));
 
-    let status =
-        daemon::tick(MATCH_PROTOCOL.daemon, &mut runtime, &listener, 16).expect("daemon tick");
+    let mut scheduler = daemon::RecurringScheduler::install(MATCH_RUNTIME.handlers, u64::MAX);
+    let status = daemon::tick(
+        MATCH_PROTOCOL.daemon,
+        &mut runtime,
+        &listener,
+        &mut scheduler,
+        16,
+    )
+    .expect("daemon tick");
     writer.join().expect("writer thread");
 
     assert!(status.progressed);
-    assert!(
-        runtime
-            .facts()
-            .any(|fact| frame_small_layout_decode::decode_fact(fact.body()).is_ok()),
-        "wire frame should reach projection through direct incoming intake"
-    );
+    let expected_frame =
+        frame_small_author::fact_from_wire(&frame, RECEIVED_AT).expect("expected frame fact");
+    let received_frame = runtime
+        .store()
+        .fact(&expected_frame.id)
+        .expect("load received frame fact")
+        .expect("wire frame should reach projection through direct incoming intake");
+    frame_small_layout_decode::decode_fact(received_frame.body())
+        .expect("stored received frame should decode as frame_small");
     assert_eq!(
         runtime
             .store()

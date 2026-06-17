@@ -7,7 +7,7 @@
 //! project, or dispatch intents.
 
 use crate::core::facts::FactId;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 
 use super::{CONNECTION_FACT_RECEIPT_ROWS, CONNECTION_FACT_RECEIPT_ROW_SCHEMA};
 
@@ -50,7 +50,11 @@ pub fn origin_connection_ids_for_fact(
     received_fact_id: FactId,
 ) -> Result<Vec<FactId>, String> {
     let mut ids = store
-        .table_rows_with_key_prefix(CONNECTION_FACT_RECEIPT_ROWS, &received_fact_id, usize::MAX)
+        .table_rows_with_key_prefix(
+            CONNECTION_FACT_RECEIPT_ROWS,
+            &received_fact_id,
+            DEFAULT_QUERY_LIMIT,
+        )
         .map_err(|err| format!("load connection fact receipt rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_connection_fact_receipt_row(&key, &value))

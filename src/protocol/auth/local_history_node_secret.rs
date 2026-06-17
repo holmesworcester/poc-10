@@ -10,7 +10,14 @@ pub mod encode;
 pub mod fact;
 pub mod project;
 
+use crate::core::store::TableName;
+
 pub const TYPE_LOCAL_HISTORY_NODE_SECRET: u8 = encode::TYPE_LOCAL_HISTORY_NODE_SECRET;
+
+pub const LOCAL_HISTORY_NODE_SECRET_ROWS: TableName =
+    TableName::new("local_history_node_secret_rows");
+pub const LOCAL_HISTORY_NODE_TOMBSTONE_ROWS: TableName =
+    TableName::new("local_history_node_tombstone_rows");
 
 pub fn decode_fact_payload(bytes: &[u8]) -> Result<fact::LocalHistoryNodeSecretFact, String> {
     project::decode::decode_local_history_node_secret(bytes)

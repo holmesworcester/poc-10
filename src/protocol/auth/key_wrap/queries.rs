@@ -8,13 +8,9 @@
 use crate::core::clock;
 use crate::core::facts::FactId;
 use crate::core::runtime::Runtime;
-use crate::core::store::Store;
-use crate::protocol::auth::local_key_secret::project::decode as local_key_secret_layout_decode;
-use crate::protocol::auth::local_recipient_key::project::decode as local_recipient_layout_decode;
-use crate::protocol::auth::recipient_key::project::decode as recipient_key_layout;
-use crate::protocol::auth::removal_frontier::project::decode as removal_frontier_decode;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::BTreeSet;
 
 use super::encode;
@@ -107,24 +103,20 @@ fn latest_local_recipient_key(
     runtime: &Runtime,
     workspace_id: FactId,
 ) -> Result<Option<FactId>, String> {
-    let mut latest = None;
-    for fact in runtime.facts() {
-        let Ok(local) = local_recipient_layout_decode::decode_local_recipient_key(fact.body())
-        else {
-            continue;
-        };
-        if local.workspace_id != workspace_id {
-            continue;
-        }
-        match latest {
-            None => latest = Some((fact.timestamp, local.recipient_key_id)),
-            Some((timestamp, id)) if (fact.timestamp, local.recipient_key_id) > (timestamp, id) => {
-                latest = Some((fact.timestamp, local.recipient_key_id));
-            }
-            _ => {}
-        }
-    }
-    Ok(latest.map(|(_, id)| id))
+    runtime
+        .store()
+        .conn()
+        .query_row(
+            "SELECT recipient_key_id
+             FROM local_recipient_key_rows
+             WHERE workspace_id = ?1
+             ORDER BY fact_timestamp DESC, recipient_key_id DESC
+             LIMIT 1",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| format!("load latest local recipient key: {err}"))
 }
 
 pub fn recipient_key_for_rotation(
@@ -158,14 +150,11 @@ pub fn lookup_key_wrap(runtime: &Runtime, query: KeyWrapQuery) -> Result<KeyWrap
 }
 
 pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessStatus, String> {
-    let access = runtime.facts().any(|fact| {
-        local_key_secret_layout_decode::decode_local_key_secret(fact.body())
-            .map(|secret| {
-                secret.workspace_id == query.workspace_id
-                    && secret.frontier_id == query.removal_frontier_id
-            })
-            .unwrap_or(false)
-    }) && !workspace_retired_from_access(runtime, query.workspace_id)?;
+    let access = local_key_secret_frontier_exists(
+        runtime.store(),
+        query.workspace_id,
+        query.removal_frontier_id,
+    )? && !workspace_retired_from_access(runtime, query.workspace_id)?;
     Ok(KeyAccessStatus {
         workspace_id: query.workspace_id,
         removal_frontier_id: query.removal_frontier_id,
@@ -175,39 +164,67 @@ pub fn key_access(runtime: &Runtime, query: KeyAccessQuery) -> Result<KeyAccessS
 
 pub fn local_key_secret_count(runtime: &Runtime) -> usize {
     runtime
-        .facts()
-        .filter(|fact| local_key_secret_layout_decode::decode_local_key_secret(fact.body()).is_ok())
-        .count()
+        .store()
+        .conn()
+        .query_row("SELECT COUNT(*) FROM local_key_secret_rows", [], |row| {
+            row.get::<_, i64>(0).map(|count| count as usize)
+        })
+        .expect("local key secret count should load rows")
 }
 
-fn local_key_secret_frontiers(runtime: &Runtime, workspace_id: FactId) -> Vec<FactId> {
-    runtime
-        .facts()
-        .filter_map(|fact| {
-            local_key_secret_layout_decode::decode_local_key_secret(fact.body()).ok()
+fn local_key_secret_frontier_exists(
+    store: &Store,
+    workspace_id: FactId,
+    frontier_id: FactId,
+) -> Result<bool, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT 1
+             FROM local_key_secret_rows
+             WHERE workspace_id = ?1 AND frontier_id = ?2
+             LIMIT 1",
+            params![workspace_id, frontier_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|err| format!("load local key secret access row: {err}"))
+}
+
+fn local_key_secret_frontiers(store: &Store, workspace_id: FactId) -> Result<Vec<FactId>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT frontier_id
+             FROM local_key_secret_rows
+             WHERE workspace_id = ?1
+             ORDER BY created_at_ms, frontier_id
+             LIMIT ?2",
+        )
+        .map_err(|err| format!("load local key secret frontiers: {err}"))?;
+    let rows = stmt
+        .query_map(params![workspace_id, DEFAULT_QUERY_LIMIT as i64], |row| {
+            row.get::<_, FactId>(0)
         })
-        .filter(|secret| secret.workspace_id == workspace_id)
-        .map(|secret| secret.frontier_id)
-        .collect()
+        .map_err(|err| format!("load local key secret frontiers: {err}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("decode local key secret frontiers: {err}"))
 }
 
 pub fn key_wrap_count(runtime: &Runtime) -> Result<usize, String> {
     runtime
         .store()
-        .table_rows(super::KEY_WRAP_ROWS)
-        .map(|rows| rows.len())
-        .map_err(|err| format!("load key wraps: {err}"))
+        .table_row_count(super::KEY_WRAP_ROWS)
+        .map_err(|err| format!("count key wraps: {err}"))
 }
 
 fn workspace_key_wrap_count(runtime: &Runtime, workspace_id: FactId) -> Result<usize, String> {
-    Ok(runtime
+    runtime
         .store()
-        .table_rows(super::KEY_WRAP_ROWS)
-        .map_err(|err| format!("load key wraps: {err}"))?
-        .into_iter()
-        .filter_map(|(key, value)| decode_key_wrap_row(&key, &value).ok())
-        .filter(|row| row.wrap.workspace_id == workspace_id)
-        .count())
+        .table_rows_with_key_prefix(super::KEY_WRAP_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
+        .map(|rows| rows.len())
+        .map_err(|err| format!("load workspace key wraps: {err}"))
 }
 
 pub fn key_status_report(
@@ -226,28 +243,14 @@ pub fn key_status_report(
             |row| row.get::<_, i64>(0).map(|value| value as usize),
         )
         .map_err(|err| format!("load file deletion rows: {err}"))?;
-    let local_key_secret_frontiers = local_key_secret_frontiers(runtime, workspace_id);
-    let recipient_keys = runtime
-        .facts()
-        .filter_map(|fact| recipient_key_layout::decode_recipient_key(&fact.bytes).ok())
-        .filter(|key| key.workspace_id == workspace_id)
-        .count();
-    let local_recipient_keys = runtime
-        .facts()
-        .filter_map(|fact| {
-            local_recipient_layout_decode::decode_local_recipient_key(&fact.bytes).ok()
-        })
-        .filter(|key| key.workspace_id == workspace_id)
-        .count();
-    let removal_frontiers = runtime
-        .facts()
-        .filter_map(|fact| {
-            removal_frontier_decode::decode_removal_frontier(&fact.bytes)
-                .ok()
-                .map(|frontier| (fact.id, frontier))
-        })
-        .filter(|(_, frontier)| frontier.workspace_id == workspace_id)
-        .map(|(frontier_id, _)| RemovalFrontierAccess {
+    let local_key_secret_frontiers = local_key_secret_frontiers(store, workspace_id)?;
+    let recipient_keys = recipient_key_count(store, workspace_id)?;
+    let local_recipient_keys = local_recipient_key_count(store, workspace_id)?;
+    let local_history_node_secrets = local_history_node_secret_count(store, workspace_id)?;
+    let local_history_node_tombstones = local_history_node_tombstone_count(store, workspace_id)?;
+    let removal_frontiers = removal_frontier_ids(store, workspace_id)?
+        .into_iter()
+        .map(|frontier_id| RemovalFrontierAccess {
             frontier_id,
             access: local_key_secret_frontiers.contains(&frontier_id),
         })
@@ -261,13 +264,91 @@ pub fn key_status_report(
         removal_frontiers,
         key_wraps,
         local_key_secrets: local_key_secret_frontiers.len(),
-        local_history_node_secrets: leaves.len(),
+        local_history_node_secrets: local_history_node_secrets + leaves.len(),
         local_history_leaves: leaves.len(),
-        local_history_node_tombstones: message_tombstones + file_tombstones,
+        local_history_node_tombstones: local_history_node_tombstones
+            + message_tombstones
+            + file_tombstones,
         message_tombstones,
         cover_summary,
         history_leaves: leaves,
     })
+}
+
+fn recipient_key_count(store: &Store, workspace_id: FactId) -> Result<usize, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM recipient_key_rows
+             WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, i64>(0).map(|count| count as usize),
+        )
+        .map_err(|err| format!("count recipient keys: {err}"))
+}
+
+fn local_recipient_key_count(store: &Store, workspace_id: FactId) -> Result<usize, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM local_recipient_key_rows
+             WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, i64>(0).map(|count| count as usize),
+        )
+        .map_err(|err| format!("count local recipient keys: {err}"))
+}
+
+fn local_history_node_secret_count(store: &Store, workspace_id: FactId) -> Result<usize, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM local_history_node_secret_rows
+             WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, i64>(0).map(|count| count as usize),
+        )
+        .map_err(|err| format!("count local history node secrets: {err}"))
+}
+
+fn local_history_node_tombstone_count(
+    store: &Store,
+    workspace_id: FactId,
+) -> Result<usize, String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*)
+             FROM local_history_node_tombstone_rows t
+             JOIN local_history_node_secret_rows n ON n.secret_id = t.secret_id
+             WHERE n.workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, i64>(0).map(|count| count as usize),
+        )
+        .map_err(|err| format!("count local history node tombstones: {err}"))
+}
+
+fn removal_frontier_ids(store: &Store, workspace_id: FactId) -> Result<Vec<FactId>, String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT frontier_id
+             FROM removal_frontier_rows
+             WHERE workspace_id = ?1
+             ORDER BY created_at_ms, frontier_id
+             LIMIT ?2",
+        )
+        .map_err(|err| format!("load removal frontier rows: {err}"))?;
+    let rows = stmt
+        .query_map(params![workspace_id, DEFAULT_QUERY_LIMIT as i64], |row| {
+            row.get::<_, FactId>(0)
+        })
+        .map_err(|err| format!("load removal frontier rows: {err}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("decode removal frontier rows: {err}"))
 }
 
 fn workspace_retired_from_access(runtime: &Runtime, workspace_id: FactId) -> Result<bool, String> {
@@ -337,31 +418,40 @@ fn recipient_key_is_superseded(
     workspace_id: FactId,
     recipient_key_id: FactId,
 ) -> Result<bool, String> {
-    let mut target_endpoint = None;
-    for fact in runtime.facts() {
-        if fact.id != recipient_key_id {
-            continue;
-        }
-        let recipient = recipient_key_layout::decode_recipient_key(fact.body())?;
-        if recipient.workspace_id == workspace_id {
-            target_endpoint = Some(recipient.endpoint_id);
-        }
-    }
+    let target = runtime
+        .store()
+        .conn()
+        .query_row(
+            "SELECT endpoint_id
+             FROM recipient_key_rows
+            WHERE workspace_id = ?1 AND recipient_key_id = ?2
+             LIMIT 1",
+            params![workspace_id, recipient_key_id],
+            |row| row.get::<_, FactId>(0),
+        )
+        .optional()
+        .map_err(|err| format!("load recipient key row: {err}"))?;
+    let target_endpoint = target;
     let Some(endpoint_id) = target_endpoint else {
         return Ok(false);
     };
-    for fact in runtime.facts() {
-        let Ok(recipient) = recipient_key_layout::decode_recipient_key(fact.body()) else {
-            continue;
-        };
-        if recipient.workspace_id == workspace_id
-            && recipient.endpoint_id == endpoint_id
-            && recipient.previous_recipient_key_id == recipient_key_id
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    runtime
+        .store()
+        .conn()
+        .query_row(
+            "SELECT 1
+             FROM recipient_key_rows
+             WHERE workspace_id = ?1
+               AND endpoint_id = ?2
+               AND previous_recipient_key_id = ?3
+               AND recipient_key_id != ?3
+             LIMIT 1",
+            params![workspace_id, endpoint_id, recipient_key_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|err| format!("load recipient key supersession row: {err}"))
 }
 
 #[cfg(test)]

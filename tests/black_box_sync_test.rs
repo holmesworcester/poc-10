@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use cli_harness::*;
 use topo::core::cli::decode_hex_32;
 use topo::core::schema::CORE_SCHEMA_SOURCE;
-use topo::core::store::Store;
+use topo::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use topo::protocol::auth::{admin, workspace as auth_workspace};
 use topo::protocol::registry::FACTS_SCHEMA_SOURCE;
 
@@ -741,9 +741,65 @@ fn poll_for_workspace_member(db: &str, workspace_id: &str, username: &str, timeo
     );
 }
 
+fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let users = topo(&["--db", db, "users", workspace_id]);
+        if users.status.success() {
+            let users = stdout(&users);
+            if users.contains(username) {
+                return;
+            }
+            last = users;
+        } else {
+            last = stderr(&users);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("user {username} never appeared in {db}: {last}");
+}
+
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let identity = topo(&["--db", db, "identity"]);
+        if identity.status.success() {
+            let identity = stdout(&identity);
+            if identity.contains(expected) {
+                return;
+            }
+            last = identity;
+        } else {
+            last = stderr(&identity);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
+}
+
 fn create_local_content_key(db: &str, workspace_id: &str) -> String {
     let frontier = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
     line_value(&frontier, "removal_frontier_id")
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} never reached {expected}: {last}");
 }
 
 fn poll_for_wrap_eligibility(
@@ -823,7 +879,7 @@ fn local_admin_visible(db: &str, workspace_id: [u8; 32]) -> Result<bool, String>
     let membership = auth_workspace::queries::local_membership(&store, workspace_id)?
         .ok_or_else(|| "local endpoint has not joined workspace".to_string())?;
     let rows = store
-        .table_rows_with_key_prefix(admin::ADMIN_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(admin::ADMIN_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load admin rows: {err}"))?;
     for (key, value) in rows {
         let row = admin::queries::decode_admin_row(&key, &value)?;
@@ -1027,7 +1083,11 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         "--devicename",
         device_name,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    workspace_id
 }
 
 fn accept_workspace_invite(
@@ -1044,6 +1104,7 @@ fn accept_workspace_invite(
         Err(err) => panic!("workspace invite accept failed: {err}"),
     };
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
+    poll_for_workspace_member(joiner_db, workspace_id, username, 10_000);
 }
 
 struct RunningDaemon {

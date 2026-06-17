@@ -12,7 +12,7 @@ use topo::protocol::auth::local_key_secret::fact::LocalKeySecretFact;
 use topo::protocol::auth::removal_frontier::encode as removal_frontier_layout;
 use topo::protocol::auth::removal_frontier::fact::RemovalFrontierFact;
 use topo::protocol::auth::workspace::{
-    commands::{create_workspace_with_identity, BootstrapIdentity},
+    api::{create_workspace_with_identity, BootstrapIdentity},
     queries as workspace_queries,
 };
 use topo::protocol::content::message as content_message;
@@ -27,8 +27,22 @@ impl CommandClock for FixedClock {
     }
 }
 
+fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) -> bool {
+    let mut progressed = false;
+    for _ in 0..max_rounds {
+        let status = runtime
+            .drain_projection_once(limit)
+            .expect("drain projection batch");
+        progressed |= status.progressed;
+        if runtime.pending_fact_count() == 0 {
+            return progressed;
+        }
+    }
+    panic!("projection work did not become idle within {max_rounds} rounds");
+}
+
 #[test]
-fn runtime_submits_command_output_and_projects_workspace_rows() {
+fn runtime_submits_authored_facts_and_projects_workspace_rows() {
     let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
     let clock = FixedClock(Cell::new(123_000));
     let output = create_workspace_with_identity(
@@ -44,14 +58,12 @@ fn runtime_submits_command_output_and_projects_workspace_rows() {
     .expect("create workspace");
 
     let receipt = runtime
-        .submit_command_output(output)
-        .expect("submit command output");
-    let status = runtime
-        .process_projection_until_idle(4, 32)
-        .expect("drain projection");
+        .submit_authored_facts(output)
+        .expect("submit authored facts");
+    let projected = drain_projection_for_test(&mut runtime, 4, 32);
 
     assert_eq!(receipt.created_at_ms, 123_000);
-    assert!(status.progressed);
+    assert!(projected);
     assert!(
         runtime.pending_intent_count() >= 1,
         "workspace projection should enqueue sync maintenance work"
@@ -94,11 +106,9 @@ fn runtime_routes_signature_evidenced_content_message_to_projector() {
         key_secret,
     ));
     runtime.submit_fact(message);
-    let status = runtime
-        .process_projection_until_idle(8, 64)
-        .expect("drain signature-evidenced message projection");
+    let projected = drain_projection_for_test(&mut runtime, 8, 64);
 
-    assert!(status.progressed);
+    assert!(projected);
     assert!(
         content_message::queries::content_message_rows(runtime.store(), workspace_id)
             .expect("content message rows")

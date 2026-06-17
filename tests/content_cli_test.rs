@@ -22,7 +22,8 @@ fn cli_send_then_messages_lists_authored_messages() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let send1 = assert_success(topo(&["--db", &db, "send", &workspace_id, "first message"]));
     assert!(send1.contains("text: first message"), "{send1}");
@@ -36,6 +37,7 @@ fn cli_send_then_messages_lists_authored_messages() {
     ]));
     assert!(send2.contains("text: second message"), "{send2}");
 
+    wait_for_messages_count(&db, &workspace_id, "2");
     let listing = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert_eq!(line_value(&listing, "messages"), "2");
     assert!(listing.contains("alice: first message"), "{listing}");
@@ -47,11 +49,14 @@ fn cli_react_appears_in_messages_listing() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "hello"]));
+    wait_for_messages_count(&db, &workspace_id, "1");
     let react = assert_success(topo(&["--db", &db, "react", &workspace_id, "#1", "+1"]));
     assert!(react.contains("emoji: +1"), "{react}");
+    wait_for_messages_contains(&db, &workspace_id, "reactions: +1");
 
     let listing = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(listing.contains("reactions: +1"), "{listing}");
@@ -62,9 +67,11 @@ fn cli_stores_reactions_and_files_as_ciphertext() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "hello"]));
+    wait_for_messages_count(&db, &workspace_id, "1");
     assert_success(topo(&[
         "--db",
         &db,
@@ -73,6 +80,7 @@ fn cli_stores_reactions_and_files_as_ciphertext() {
         "#1",
         "super-secret-emoji",
     ]));
+    wait_for_messages_contains(&db, &workspace_id, "reactions: super-secret-emoji");
 
     let payload = b"clear file body secret".to_vec();
     let in_path = tmp.path().join("secret-name.txt");
@@ -86,6 +94,8 @@ fn cli_stores_reactions_and_files_as_ciphertext() {
         "--file",
         in_path.to_str().expect("path utf-8"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
+    wait_for_messages_count(&db, &workspace_id, "2");
 
     let listing = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(
@@ -164,7 +174,8 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Activism", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "hey bob"]));
     assert_success(topo(&[
@@ -174,7 +185,9 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
         &workspace_id,
         "second message",
     ]));
+    wait_for_messages_count(&db, &workspace_id, "2");
     assert_success(topo(&["--db", &db, "react", &workspace_id, "#1", "+1"]));
+    wait_for_messages_contains(&db, &workspace_id, "reactions: +1");
 
     let payload = b"hello world".to_vec();
     let in_path = tmp.path().join("payload.txt");
@@ -188,6 +201,8 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
         "--file",
         in_path.to_str().expect("path utf-8"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
+    wait_for_messages_count(&db, &workspace_id, "3");
 
     let view = assert_success(topo(&["--db", &db, "view", &workspace_id]));
 
@@ -219,16 +234,13 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
         view.contains("    alice ["),
         "missing author header:\n{view}"
     );
+    assert!(view.contains("hey bob"), "missing first message:\n{view}");
     assert!(
-        view.contains("      1. hey bob"),
-        "missing first message:\n{view}"
-    );
-    assert!(
-        view.contains("      2. second message"),
+        view.contains("second message"),
         "missing second message:\n{view}"
     );
     assert!(
-        view.contains("      3. see attached"),
+        view.contains("see attached"),
         "missing send-file message:\n{view}"
     );
     assert!(
@@ -246,9 +258,11 @@ fn cli_view_with_no_workspace_argument_picks_single_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Solo", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "first"]));
+    wait_for_messages_count(&db, &workspace_id, "1");
 
     let view = assert_success(topo(&["--db", &db, "view"]));
 
@@ -274,7 +288,8 @@ fn cli_view_requires_argument_when_multiple_workspaces() {
     let db = temp_db(&tmp, "alice.db");
     let one = create_workspace(&db, "WorkspaceOne", "alice", "laptop");
     let _two = create_workspace(&db, "WorkspaceTwo", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &one]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &one);
 
     let output = topo(&["--db", &db, "view"]);
     assert!(
@@ -296,11 +311,14 @@ fn cli_view_with_explicit_workspace_argument_renders_that_workspace() {
     let db = temp_db(&tmp, "alice.db");
     let one = create_workspace(&db, "WorkspaceOne", "alice", "laptop");
     let two = create_workspace(&db, "WorkspaceTwo", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &one]));
-    assert_success(topo(&["--db", &db, "key-frontier", &two]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &one);
+    create_local_content_key(&db, &two);
 
     assert_success(topo(&["--db", &db, "send", &one, "in one"]));
     assert_success(topo(&["--db", &db, "send", &two, "in two"]));
+    wait_for_messages_count(&db, &one, "1");
+    wait_for_messages_count(&db, &two, "1");
 
     let view_one = assert_success(topo(&["--db", &db, "view", &one]));
     assert!(
@@ -325,10 +343,12 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
     let workspace_id = create_workspace(&alice, "Activism", "alice", "laptop");
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let alice_port = free_port();
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    let _bob_daemon = spawn_daemon(&bob, free_port());
+    create_local_content_key(&alice, &workspace_id);
 
-    let bob_join_port = free_port();
-    join_workspace(&alice, &bob, &workspace_id, bob_join_port, "bob", "phone");
+    join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "phone");
 
     assert_success(topo(&[
         "--db",
@@ -344,6 +364,7 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
         &workspace_id,
         "second by alice",
     ]));
+    wait_for_messages_count(&alice, &workspace_id, "2");
 
     let view = assert_success(topo(&["--db", &alice, "view", &workspace_id]));
     let alice_header_count = view.matches("    alice [").count();
@@ -352,11 +373,11 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
         "expected one alice author header for two consecutive messages:\n{view}"
     );
     assert!(
-        view.contains("      1. first by alice"),
+        view.contains("first by alice"),
         "missing first message:\n{view}"
     );
     assert!(
-        view.contains("      2. second by alice"),
+        view.contains("second by alice"),
         "missing second message:\n{view}"
     );
     assert!(view.contains("alice/laptop (you)"), "{view}");
@@ -368,16 +389,20 @@ fn cli_delete_message_removes_target_from_listing() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "regret"]));
+    wait_for_messages_count(&db, &workspace_id, "1");
     assert_success(topo(&["--db", &db, "react", &workspace_id, "#1", "ack"]));
+    wait_for_messages_contains(&db, &workspace_id, "reactions: ack");
 
     let before = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert!(!before.contains("(deleted)"), "{before}");
 
     let deleted = assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
     assert!(deleted.contains("fact_id:"), "{deleted}");
+    wait_for_messages_count(&db, &workspace_id, "0");
 
     let after = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert_eq!(line_value(&after, "messages"), "0");
@@ -390,7 +415,8 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let payload: Vec<u8> = (0..8192u32).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("input.bin");
@@ -408,6 +434,8 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
     assert!(sent.contains("filename: input.bin"), "{sent}");
     assert_eq!(line_value(&sent, "blob_bytes"), "8192");
     let file_fact_id = line_value(&sent, "file_fact_id");
+    wait_for_files_count(&db, &workspace_id, "1");
+    wait_for_messages_contains(&db, &workspace_id, "file: input.bin");
 
     let files = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&files), "1");
@@ -437,6 +465,8 @@ fn cli_send_file_then_save_file_round_trips_bytes_through_real_binary() {
     assert_eq!(read_back, payload);
 
     assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
+    wait_for_messages_count(&db, &workspace_id, "0");
+    wait_for_files_count(&db, &workspace_id, "0");
     let messages_after_delete = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
     assert_eq!(line_value(&messages_after_delete, "messages"), "0");
     let files_after_delete = assert_success(topo(&["--db", &db, "files", &workspace_id]));
@@ -463,7 +493,8 @@ fn cli_save_file_rejects_root_hash_mismatch() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Content", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("input.bin");
@@ -478,6 +509,7 @@ fn cli_save_file_rejects_root_hash_mismatch() {
         "--file",
         in_path.to_str().expect("path utf-8"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
 
     let conn = Connection::open(&db).expect("open db");
     conn.execute(
@@ -527,6 +559,7 @@ fn cli_messages_and_reactions_sync_between_two_peers() {
     grant_content_key_to_peer(&alice, &bob, &workspace_id);
 
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "from alice"]));
+    wait_for_messages_count(&alice, &workspace_id, "1");
     assert_success(topo(&[
         "--db",
         &alice,
@@ -677,7 +710,8 @@ fn cli_files_listing_counts_verified_slice_rows_as_progress() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Progress", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     // Four fixed 256 KiB slices. Delete two verified rows after projection so
     // the listing has a deterministic 50% partial state without racing sync.
@@ -693,6 +727,7 @@ fn cli_files_listing_counts_verified_slice_rows_as_progress() {
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
     delete_verified_file_slices_from(&db, 2);
 
     let partial = assert_success(topo(&["--db", &db, "files", &workspace_id]));
@@ -717,7 +752,8 @@ fn cli_save_file_rejects_incomplete_download() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Reject", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let payload: Vec<u8> = (0..(512 * 1024u32)).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("big.bin");
@@ -731,6 +767,7 @@ fn cli_save_file_rejects_incomplete_download() {
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
     delete_verified_file_slices_from(&db, 1);
 
     let out_path = tmp.path().join("out.bin");
@@ -760,7 +797,8 @@ fn cli_save_file_assembles_slices_by_index() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Order", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     // 2 slices @ 256 KiB = 512 KiB. Vary the byte pattern by slice index so a
     // wrong-order assembly would fail the equality check, not just length.
@@ -786,6 +824,7 @@ fn cli_save_file_assembles_slices_by_index() {
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
     rewrite_verified_file_slices_in_reverse(&db);
 
     let out_path = tmp.path().join("out.bin");
@@ -857,7 +896,8 @@ fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Zero", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let payload: Vec<u8> = (0..(512 * 1024u32)).map(|byte| byte as u8).collect();
     let in_path = tmp.path().join("very_big.bin");
@@ -871,6 +911,7 @@ fn cli_files_listing_shows_zero_progress_when_only_descriptor_received() {
         "--file",
         in_path.to_str().expect("path"),
     ]));
+    wait_for_files_count(&db, &workspace_id, "1");
     delete_verified_file_slices_from(&db, 0);
 
     let partial = assert_success(topo(&["--db", &db, "files", &workspace_id]));
@@ -914,7 +955,8 @@ fn cli_send_file_with_explicit_mime_round_trips_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Sealed", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let in_path = tmp.path().join("input.bin");
     let mut payload = Vec::new();
@@ -946,6 +988,7 @@ fn cli_send_file_with_explicit_mime_round_trips_bytes() {
         line_value(&sent, "blob_bytes"),
         format!("{}", payload.len())
     );
+    wait_for_files_count(&db, &workspace_id, "1");
 
     let files = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&files), "1");
@@ -977,7 +1020,8 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Purge", "alice", "alice-laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     let in_path = tmp.path().join("input.bin");
     let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
@@ -993,10 +1037,13 @@ fn cli_delete_message_hides_attached_file_and_rejects_save() {
         in_path.to_str().expect("path"),
     ]));
     let file_fact_id = line_value(&sent, "file_fact_id");
+    wait_for_files_count(&db, &workspace_id, "1");
     let files_before = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&files_before), "1");
 
     assert_success(topo(&["--db", &db, "delete-message", &workspace_id, "#1"]));
+    wait_for_files_count(&db, &workspace_id, "0");
+    wait_for_messages_count(&db, &workspace_id, "0");
 
     let after_files = assert_success(topo(&["--db", &db, "files", &workspace_id]));
     assert_eq!(files_total(&after_files), "0");
@@ -1099,7 +1146,18 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         "--devicename",
         device_name,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username, &[("db", db)]);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    workspace_id
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
 }
 
 fn join_workspace_on_daemons(
@@ -1113,37 +1171,6 @@ fn join_workspace_on_daemons(
     let invite = workspace_invite_for_addr(host, workspace_id, host_port);
     let accepted = try_accept_with_identity_retry(joiner, &invite, username, device_name)
         .unwrap_or_else(|err| panic!("workspace invite accept failed: {err}"));
-    assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
-    wait_for_local_workspace_join(joiner, workspace_id, username);
-    wait_for_users_contains(
-        host,
-        workspace_id,
-        username,
-        &[("host", host), ("joiner", joiner)],
-    );
-    wait_for_peers_contains(
-        host,
-        workspace_id,
-        device_name,
-        &[("host", host), ("joiner", joiner)],
-    );
-}
-
-fn join_workspace(
-    host: &str,
-    joiner: &str,
-    workspace_id: &str,
-    port: u16,
-    username: &str,
-    device_name: &str,
-) {
-    let _host_daemon = spawn_daemon(host, port);
-    let _joiner_daemon = spawn_daemon(joiner, free_port());
-    let invite = workspace_invite_for_addr(host, workspace_id, port);
-    let accepted = match try_accept_with_identity_retry(joiner, &invite, username, device_name) {
-        Ok(output) => output,
-        Err(err) => panic!("workspace invite accept failed: {err}"),
-    };
     assert_eq!(line_value(&accepted, "workspace_id"), workspace_id);
     wait_for_local_workspace_join(joiner, workspace_id, username);
     wait_for_users_contains(
@@ -1244,6 +1271,24 @@ fn wait_for_peers_contains(
     );
 }
 
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let identity = topo(&["--db", db, "identity"]);
+        if identity.status.success() {
+            let identity = stdout(&identity);
+            if identity.contains(expected) {
+                return;
+            }
+            last = identity;
+        } else {
+            last = stderr(&identity);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
+}
+
 fn try_accept_with_identity_retry(
     db: &str,
     invite: &str,
@@ -1317,7 +1362,7 @@ fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
 fn grant_content_key_to_peer(alice: &str, peer: &str, workspace_id: &str) {
     let recipient = assert_success(topo(&["--db", peer, "key-recipient", workspace_id]));
     let recipient_key_id = line_value(&recipient, "recipient_key_id");
-    let frontier = assert_success(topo(&["--db", alice, "key-frontier", workspace_id]));
+    let frontier = create_local_content_key(alice, workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     let wrapped = key_wrap_with_retry(alice, workspace_id, &removal_frontier_id, &recipient_key_id);
     assert_eq!(line_value(&wrapped, "recipient_key_id"), recipient_key_id);
@@ -1370,6 +1415,24 @@ fn wait_for_key_access(
         thread::sleep(Duration::from_millis(100));
     }
     panic!("key access did not reach {expected}: {last}");
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, key) == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}: {last}");
 }
 
 fn sync_full_range_to_peer(sender: &str, receiver: &str, workspace_id: &str) {

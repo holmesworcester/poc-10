@@ -7,7 +7,12 @@
 
 mod cli_harness;
 
-use cli_harness::{assert_success, con_cli, line_value, temp_db};
+use std::io::{BufRead, BufReader};
+use std::process::Child;
+use std::thread;
+use std::time::Duration;
+
+use cli_harness::*;
 
 #[test]
 fn con_help_is_served_by_the_product_boundary() {
@@ -119,6 +124,7 @@ fn con_cascade_fixture_commands_are_not_registered() {
 fn con_create_workspace_accepts_positional_identity_shape() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = temp_db(&temp, "con.db");
+    let _daemon = spawn_daemon(&db, free_port());
 
     let stdout = assert_success(con_cli(&[
         "--db",
@@ -134,6 +140,7 @@ fn con_create_workspace_accepts_positional_identity_shape() {
     let workspace_id = line_value(&stdout, "workspace_id");
     assert_eq!(workspace_id.len(), 64);
     assert!(stdout.contains("name: Runtime Team"));
+    wait_for_workspaces_contains(&db, "1", &workspace_id);
 
     let workspaces = assert_success(con_cli(&["--db", &db, "workspaces"]));
     assert!(
@@ -146,6 +153,7 @@ fn con_create_workspace_accepts_positional_identity_shape() {
 fn con_create_workspace_uses_target_runtime() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = temp_db(&temp, "con.db");
+    let _daemon = spawn_daemon(&db, free_port());
 
     let stdout = assert_success(con_cli(&[
         "--db",
@@ -161,6 +169,7 @@ fn con_create_workspace_uses_target_runtime() {
     let workspace_id = line_value(&stdout, "workspace_id");
     assert_eq!(workspace_id.len(), 64);
     assert!(stdout.contains("name: Runtime CLI"));
+    wait_for_workspaces_contains(&db, "1", &workspace_id);
 
     let workspaces = assert_success(con_cli(&["--db", &db, "workspaces"]));
     assert!(
@@ -175,6 +184,7 @@ fn con_create_workspace_uses_target_runtime() {
 fn con_workspace_reads_use_target_rows() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = temp_db(&temp, "con.db");
+    let _daemon = spawn_daemon(&db, free_port());
 
     assert_success(con_cli(&[
         "--db",
@@ -186,6 +196,7 @@ fn con_workspace_reads_use_target_rows() {
         "--devicename",
         "alice-alpha-laptop",
     ]));
+    wait_for_workspaces_contains(&db, "1", " name=Alpha");
     assert_success(con_cli(&[
         "--db",
         &db,
@@ -196,6 +207,7 @@ fn con_workspace_reads_use_target_rows() {
         "--devicename",
         "alice-beta-laptop",
     ]));
+    wait_for_workspaces_contains(&db, "2", " name=Beta");
 
     let workspaces = assert_success(con_cli(&["--db", &db, "workspaces"]));
     assert!(
@@ -207,4 +219,62 @@ fn con_workspace_reads_use_target_rows() {
 
     let count = assert_success(con_cli(&["--db", &db, "count"]));
     assert_eq!(line_value(&count, "workspace_rows"), "2");
+}
+
+struct RunningDaemon {
+    child: Child,
+}
+
+impl Drop for RunningDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_daemon(db: &str, port: u16) -> RunningDaemon {
+    let port = port.to_string();
+    let mut child = spawn_con(&[
+        "--db",
+        db,
+        "start",
+        "--listen",
+        "127.0.0.1",
+        &port,
+        "--tick-ms",
+        "50",
+        "--quiet-ms",
+        "50",
+    ]);
+    let stdout = child.stdout.take().expect("daemon stdout");
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
+    }
+    let mut first = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first)
+        .expect("daemon first line");
+    assert!(
+        first.starts_with("listening: "),
+        "daemon did not report listening: {first}"
+    );
+    RunningDaemon { child }
+}
+
+fn wait_for_workspaces_contains(db: &str, expected_count: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = con_cli(&["--db", db, "workspaces"]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, "workspaces") == expected_count && out.contains(expected) {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("workspaces did not reach {expected_count} with {expected}: {last}");
 }

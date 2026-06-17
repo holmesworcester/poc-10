@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
 use crate::protocol::connection::request::{
     encode::ADDR_BLOCK_BYTES, project::decode::decode_optional_addr,
@@ -66,7 +66,7 @@ pub fn decode_invite_accepted_row(key: &[u8], value: &[u8]) -> Result<InviteAcce
 
 pub fn accepted_bootstrap_peers(store: &Store) -> Result<Vec<InviteAcceptedRow>, String> {
     store
-        .table_rows(INVITE_ACCEPTED_ROWS)
+        .table_rows_page(INVITE_ACCEPTED_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read invite accepted rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_invite_accepted_row(&key, &value))
@@ -77,8 +77,8 @@ pub fn accepted_bootstrap_peers(store: &Store) -> Result<Vec<InviteAcceptedRow>,
 mod tests {
     use super::*;
     use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-    use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
     use crate::protocol::auth::invite_accepted::fact::InviteAcceptedFact;
+    use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
 
     #[test]
     fn invite_accepted_row_roundtrips_through_schema() {

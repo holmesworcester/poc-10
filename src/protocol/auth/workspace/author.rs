@@ -2,7 +2,7 @@
 //!
 //! This layer takes explicit inputs and signing material, builds the typed
 //! source value, and returns canonical workspace fact bytes. Runtime gathering
-//! and command orchestration belong in `commands.rs`.
+//! and command orchestration belong in `api.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::core::facts::{Fact, FactScope};

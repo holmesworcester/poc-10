@@ -162,9 +162,9 @@ pub mod authenticate {
         use crate::core::facts::{Fact, FactScope};
         use crate::core::project_fact::ProjectionContext;
         use crate::protocol::auth::endpoint_shared::fact::EndpointRole;
-        use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
         use crate::protocol::auth::invite_accepted::encode;
         use crate::protocol::auth::invite_accepted::fact::InviteAcceptedFact;
+        use crate::protocol::auth::invite_secret::fact::bootstrap_secret_hash;
 
         fn canonical_fact() -> Fact {
             let accepted = InviteAcceptedFact {

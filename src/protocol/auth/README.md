@@ -40,7 +40,7 @@ Auth owns rows that describe workspace authority, membership, invites,
 endpoint membership, recipient keys, removal frontiers, key wraps, and local
 private material. Shared rows such as workspace, user, admin, user-invite,
 endpoint-shared, recipient-key, removal-frontier, and key-wrap rows support
-auth queries and command output. Local rows such as endpoint secret, local
+auth queries and CLI output. Local rows such as endpoint secret, local
 signer, local recipient key, local key secret, local history node, invite
 secret, and secret-retirement rows are private store state.
 

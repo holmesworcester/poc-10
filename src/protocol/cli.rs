@@ -3,24 +3,20 @@
 //! Fact-scope `cli.rs` modules own argv parsing, text formatting, and command
 //! output construction. Core owns runtime opening and final printing. These
 //! host functions add the protocol-specific runtime context between those two:
-//! they pass the store and command clock to command/query modules, submit
-//! authored facts when a command authors work, and run every query through the
-//! runtime's retained-projection pre-settle boundary.
+//! they pass the current store and command clock to command/query modules and
+//! submit authored facts when a command authors work.
 //!
 //! This file is a command router, not a domain model. Each function should stay
 //! thin: parse through the owning fact module, pass `Store`/`CommandClock` to
-//! the owning command or query helper, submit `CommandOutput` when the command
-//! authors work, and format with the owning module's CLI helpers. If the code starts proving
-//! authority, constructing payload bytes, or interpreting projected rows, move
-//! that logic back to the fact, intent, or query module that owns it.
-//!
-//! Query pre-settle is intentionally narrower than worker progress: it projects
-//! retained local facts so reads observe local writes, but it does not dispatch
-//! handlers, consume incoming network facts, or admit due time wakes.
+//! the owning command or query helper, submit `AuthoredFacts` when the command
+//! authors work, and format with the owning module's CLI helpers. If the code
+//! starts proving authority, constructing payload bytes, or interpreting
+//! projected rows, move that logic back to the fact, intent, or query module
+//! that owns it.
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliArgs, CliOutput};
 use crate::core::clock;
-use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::daemon;
 use crate::core::replay::{ReplayOrder, ReplayReport, StateSummary};
 use crate::core::runtime::Runtime;
@@ -59,35 +55,25 @@ impl MatchCliContext {
         run: impl FnOnce(&Store, &dyn CommandClock) -> Result<T, String>,
     ) -> Result<T, String> {
         let clock = SystemClock;
-        self.runtime.query(|store| run(store, &clock))
-    }
-
-    fn settle_query_projection(&mut self) -> Result<(), String> {
-        self.runtime.query(|_| Ok(()))
+        run(self.runtime.store(), &clock)
     }
 
     fn query_store<T>(
         &mut self,
         run: impl FnOnce(&Store) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.runtime.query(run)
+        run(self.runtime.store())
     }
 
     fn query_runtime<T>(
         &mut self,
         run: impl FnOnce(&Runtime) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.settle_query_projection()?;
         run(&self.runtime)
     }
 
-    // Commands that author facts often format immediately projected output.
-    // This projects retained facts only; handlers and incoming facts remain
-    // daemon/runtime work.
-    fn submit_and_project<T>(&mut self, output: CommandOutput<T>) -> Result<T, String> {
-        let receipt = self.runtime.submit_command_output(output)?;
-        self.settle_query_projection()?;
-        Ok(receipt)
+    fn submit_authored_facts<T>(&mut self, output: AuthoredFacts<T>) -> Result<T, String> {
+        self.runtime.submit_authored_facts(output)
     }
 }
 
@@ -96,7 +82,7 @@ pub(crate) fn accept(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cli
     let output = ctx.with_command_inputs(|store, clock| {
         auth::invite_secret::cli::accept(store, clock, args, from_listen_addr)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
@@ -108,7 +94,7 @@ pub(crate) fn accept_invite_server(
     let output = ctx.with_command_inputs(|store, clock| {
         auth::invite_secret::cli::accept_invite_server(store, clock, args, from_listen_addr)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
@@ -120,27 +106,26 @@ pub(crate) fn accept_link(
     let output = ctx.with_command_inputs(|store, clock| {
         auth::invite_secret::cli::accept_link(store, clock, args, from_listen_addr)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::invite_secret::cli::accept_output(&receipt))
 }
 
 pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    args.require_len(2, connection::request::commands::CONNECT_USAGE)?;
+    args.require_len(2, connection::request::api::CONNECT_USAGE)?;
     let target_endpoint = decode_hex_32(
-        args.get(0)
-            .ok_or(connection::request::commands::CONNECT_USAGE)?,
+        args.get(0).ok_or(connection::request::api::CONNECT_USAGE)?,
         "endpoint id",
     )?;
     let dialed_addr = args
         .get(1)
-        .ok_or(connection::request::commands::CONNECT_USAGE)?
+        .ok_or(connection::request::api::CONNECT_USAGE)?
         .parse()
         .map_err(|_| "connect address must be HOST:PORT".to_string())?;
     let from_listen_addr = daemon::current_listen_addr(ctx.db_path("connect")?)?;
     let output = ctx.with_command_inputs(|store, clock| {
-        connection::request::commands::connect(
+        connection::request::api::connect(
             store,
-            connection::request::commands::Connect {
+            connection::request::api::Connect {
                 created_at_ms: clock.next_timestamp(),
                 target_endpoint,
                 dialed_addr,
@@ -148,7 +133,7 @@ pub(crate) fn connect(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<Cl
             },
         )
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(CliOutput::line(format!(
         "connecting: request_id={}",
         encode_hex_32(&receipt.request_id)
@@ -164,9 +149,9 @@ pub(crate) fn peers(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
 }
 
 pub(crate) fn invite(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let output =
-        ctx.with_command_inputs(|store, clock| auth::invite_secret::cli::invite(store, clock, args))?;
-    let receipt = ctx.submit_and_project(output)?;
+    let output = ctx
+        .with_command_inputs(|store, clock| auth::invite_secret::cli::invite(store, clock, args))?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
@@ -174,16 +159,17 @@ pub(crate) fn invite_server(
     ctx: &mut MatchCliContext,
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
-    let output = ctx
-        .with_command_inputs(|store, clock| auth::invite_secret::cli::invite_server(store, clock, args))?;
-    let receipt = ctx.submit_and_project(output)?;
+    let output = ctx.with_command_inputs(|store, clock| {
+        auth::invite_secret::cli::invite_server(store, clock, args)
+    })?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
 pub(crate) fn link(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let output =
         ctx.with_command_inputs(|store, clock| auth::invite_secret::cli::link(store, clock, args))?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::invite_secret::cli::invite_output(&receipt))
 }
 
@@ -194,19 +180,8 @@ pub(crate) fn create_workspace(
     let output = ctx.with_command_inputs(|store, clock| {
         auth::workspace::cli::create_workspace(store, clock, args)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
-    let workspace = auth::workspace::queries::workspace_by_id(
-        ctx.runtime().store(),
-        receipt.workspace_fact_id,
-    )?;
-    let bootstrap_user_id =
-        auth::user::queries::users_in_workspace(ctx.runtime().store(), receipt.workspace_fact_id)?
-            .first()
-            .map(|user| user.user_id);
-    Ok(auth::workspace::cli::created_workspace_output(
-        &workspace,
-        bootstrap_user_id,
-    ))
+    let receipt = ctx.submit_authored_facts(output)?;
+    Ok(auth::workspace::cli::created_workspace_output(&receipt))
 }
 
 pub(crate) fn workspaces(
@@ -235,7 +210,7 @@ pub(crate) fn key_recipient(
     let output = ctx.with_command_inputs(|store, clock| {
         auth::key_wrap::cli::key_recipient(store, clock, args)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::key_wrap::cli::key_recipient_output(&receipt))
 }
 
@@ -255,7 +230,7 @@ pub(crate) fn key_recipient_rotation(
     let output = ctx.with_command_inputs(|store, clock| {
         auth::key_wrap::cli::key_recipient_rotation(store, clock, args, previous)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::key_wrap::cli::key_recipient_rotation_output(
         &receipt, 1,
     ))
@@ -268,7 +243,7 @@ pub(crate) fn key_frontier(
     let output = ctx.with_command_inputs(|store, clock| {
         auth::key_wrap::cli::key_frontier(store, clock, args)
     })?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::key_wrap::cli::key_frontier_output(&receipt))
 }
 
@@ -304,10 +279,9 @@ pub(crate) fn key_derive(
 
 pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let args = auth::key_wrap::cli::key_node_args(args)?;
-    ctx.settle_query_projection()?;
-    let output = auth::key_wrap::commands::create_history_node(
+    let output = auth::key_wrap::api::create_history_node(
         ctx.runtime().store(),
-        auth::key_wrap::commands::CreateHistoryNode {
+        auth::key_wrap::api::CreateHistoryNode {
             created_at_ms: SystemClock.next_timestamp(),
             workspace_id: args.workspace_id,
             removal_frontier_id: args.removal_frontier_id,
@@ -317,7 +291,7 @@ pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
             tombstone_node_id: args.tombstone_node_id,
         },
     )?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::key_wrap::cli::history_node_output(&receipt))
 }
 
@@ -335,16 +309,16 @@ pub(crate) fn disappearing_set(
 ) -> Result<CliOutput, String> {
     let args = content::retention_policy::cli::parse_disappearing_set_args(cli_args.values())?;
     let now_ms = ctx.query_runtime(next_cli_timestamp)?;
-    let output = content::retention_policy::commands::author_set_with_auto_floor(
+    let output = content::retention_policy::api::author_set_with_auto_floor(
         ctx.runtime().store(),
-        content::retention_policy::commands::AuthorPolicy {
+        content::retention_policy::api::AuthorPolicy {
             workspace_id: args.workspace_id,
             now_ms,
             ttl_minutes: args.ttl_minutes,
             explicit_floor: args.explicit_floor,
         },
     )?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     let delta = receipt
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
@@ -377,14 +351,14 @@ pub(crate) fn disappearing_tighten(
         return Err("disappearing-tighten requires --yes in the target CLI".to_string());
     }
     let now_ms = ctx.query_runtime(next_cli_timestamp)?;
-    let input = content::retention_policy::commands::AuthorTighten {
+    let input = content::retention_policy::api::AuthorTighten {
         workspace_id: args.workspace_id,
         now_ms,
         ttl_minutes: args.ttl_minutes,
     };
-    let plan = content::retention_policy::commands::plan_tighten(ctx.runtime().store(), input)?;
-    let output = content::retention_policy::commands::author_tighten(ctx.runtime().store(), input)?;
-    let receipt = ctx.submit_and_project(output)?;
+    let plan = content::retention_policy::api::plan_tighten(ctx.runtime().store(), input)?;
+    let output = content::retention_policy::api::author_tighten(ctx.runtime().store(), input)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(CliOutput::lines(vec![
         format!("policy_fact_id: {}", encode_hex_32(&receipt.policy_fact_id)),
         format!("ttl_minutes: {}", args.ttl_minutes),
@@ -400,14 +374,14 @@ pub(crate) fn disappearing_compact(
 ) -> Result<CliOutput, String> {
     let workspace_id = content::retention_policy::cli::compact_workspace_id(args)?;
     let now_ms = ctx.query_runtime(next_cli_timestamp)?;
-    let output = content::retention_policy::commands::author_compact(
+    let output = content::retention_policy::api::author_compact(
         ctx.runtime().store(),
-        content::retention_policy::commands::AuthorCompact {
+        content::retention_policy::api::AuthorCompact {
             workspace_id,
             now_ms,
         },
     )?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     let delta = receipt
         .new_floor_minute
         .saturating_sub(receipt.previous_floor_minute);
@@ -432,7 +406,7 @@ pub(crate) fn send(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
     let timestamp = ctx.query_runtime(next_cli_timestamp)?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::send(ctx.runtime().store(), &clock, args)?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::send_output(&receipt, &text))
 }
 
@@ -444,7 +418,7 @@ pub(crate) fn react(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
     let timestamp = ctx.query_runtime(next_cli_timestamp)?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::react(ctx.runtime().store(), &clock, args)?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::react_output(&receipt))
 }
 
@@ -456,7 +430,7 @@ pub(crate) fn send_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<
     let timestamp = ctx.query_runtime(next_cli_timestamp)?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::send_file(ctx.runtime().store(), &clock, args)?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::send_file_output(&receipt))
 }
 
@@ -485,14 +459,14 @@ pub(crate) fn delete_file(
     })?;
     let timestamp = ctx.query_runtime(next_cli_timestamp)?;
     let clock = FixedClock(timestamp);
-    let output = content::file_deletion::commands::delete_file(
+    let output = content::file_deletion::api::delete_file(
         ctx.runtime().store(),
         &clock,
         workspace_id,
         file.file_fact_id,
         file.author_user_id,
     )?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::file_deletion::cli::delete_file_output(&receipt))
 }
 
@@ -507,7 +481,7 @@ pub(crate) fn delete_message(
     let timestamp = ctx.query_runtime(next_cli_timestamp)?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::delete_message(ctx.runtime().store(), &clock, args)?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(content::message::cli::delete_message_output(&receipt))
 }
 
@@ -525,7 +499,7 @@ pub(crate) fn grant_admin(
 ) -> Result<CliOutput, String> {
     let output =
         ctx.with_command_inputs(|store, clock| auth::admin::cli::grant_admin(store, clock, args))?;
-    let receipt = ctx.submit_and_project(output)?;
+    let receipt = ctx.submit_authored_facts(output)?;
     Ok(auth::admin::cli::grant_admin_output(&receipt))
 }
 
@@ -555,9 +529,8 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
         content::message::cli::generate(ctx.runtime().store(), &clock, args)
     })?;
     let receipt = crate::core::perf_profile::measure_result("commit", || {
-        ctx.runtime_mut().submit_command_output(output)
+        ctx.runtime_mut().submit_authored_facts(output)
     })?;
-    crate::core::perf_profile::measure_result("settle", || ctx.settle_query_projection())?;
     profile.finish_success(receipt.generated_facts, receipt.message_text_bytes);
     Ok(content::message::cli::generated_output(
         &receipt,
@@ -584,7 +557,7 @@ pub(crate) fn sync(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
             let output = ctx.with_command_inputs(|_store, clock| {
                 sync::local_setting::author_setting(clock, mode)
             })?;
-            let receipt = ctx.submit_and_project(output)?;
+            let receipt = ctx.submit_authored_facts(output)?;
             Ok(sync::local_setting::sync_setting_receipt_output(&receipt))
         }
     }
@@ -599,7 +572,6 @@ pub(crate) fn content_count(
 }
 
 pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    ctx.settle_query_projection()?;
     let observed_max = max_cli_timestamp(ctx.runtime().store())?;
     clock::run_cli(ctx.runtime().store(), args, observed_max)
 }
@@ -630,7 +602,6 @@ pub(crate) fn state_summary(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     args.require_len(0, STATE_SUMMARY_USAGE)?;
-    ctx.settle_query_projection()?;
     let summary = ctx.runtime().state_summary()?;
     Ok(state_summary_output(&summary))
 }

@@ -9,12 +9,10 @@ use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::signature::project::{
     authenticate as signature_authenticate, decode as signature_decode,
 };
-use topo::protocol::auth::workspace::commands::{
-    create_workspace_with_identity, BootstrapIdentity,
-};
-use topo::protocol::content::file_deletion::commands::delete_file;
+use topo::protocol::auth::workspace::api::{create_workspace_with_identity, BootstrapIdentity};
+use topo::protocol::content::file_deletion::api::delete_file;
 use topo::protocol::content::file_deletion::project::decode as file_deletion_layout_decode;
-use topo::protocol::content::message_deletion::commands::delete_message;
+use topo::protocol::content::message_deletion::api::delete_message;
 use topo::protocol::content::message_deletion::project::decode as message_deletion_layout_decode;
 
 struct FixedClock(Cell<u64>);
@@ -25,6 +23,21 @@ impl CommandClock for FixedClock {
         self.0.set(next + 1);
         next
     }
+}
+
+fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
+    for _ in 0..max_rounds {
+        runtime
+            .drain_projection_once(limit)
+            .expect("drain projection batch");
+        runtime
+            .drain_intents_once(limit)
+            .expect("drain intent batch");
+        if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
+            return;
+        }
+    }
+    panic!("runtime work did not become idle within {max_rounds} rounds");
 }
 
 fn runtime_with_workspace() -> (Runtime, WorkspaceId) {
@@ -43,11 +56,9 @@ fn runtime_with_workspace() -> (Runtime, WorkspaceId) {
     .expect("workspace command");
     let workspace_id = workspace.receipt.workspace_fact_id;
     runtime
-        .submit_command_output(workspace)
+        .submit_authored_facts(workspace)
         .expect("submit workspace");
-    runtime
-        .process_all_work_until_idle(8, 512)
-        .expect("project workspace");
+    drain_runtime_work_for_test(&mut runtime, 8, 512);
     (runtime, workspace_id)
 }
 

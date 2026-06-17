@@ -1,13 +1,13 @@
 //! CLI adapter for workspace commands.
 //!
 //! This file owns only frontend concerns: argv parsing and text formatting.
-//! It calls `commands.rs` for the actual workspace workflow and never opens a
+//! It calls `api.rs` for the actual workspace workflow and never opens a
 //! store, drains projection, or dispatches handlers.
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex, CliArgs, CliOutput};
-use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::store::Store;
-use crate::protocol::auth::workspace::{commands, queries};
+use crate::protocol::auth::workspace::{api, queries};
 
 pub const CREATE_WORKSPACE_USAGE: &str =
     "create-workspace (--public-key HEX64 --name NAME | NAME --username USER --devicename DEVICE)";
@@ -18,13 +18,11 @@ pub fn create_workspace(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<commands::CreateWorkspaceReceipt>, String> {
+) -> Result<AuthoredFacts<api::CreateWorkspaceReceipt>, String> {
     let parsed = CreateWorkspaceArgs::parse(args)?;
     match parsed.identity {
-        Some(identity) => {
-            commands::create_workspace_with_identity(store, clock, &parsed.name, identity)
-        }
-        None => commands::create_workspace(
+        Some(identity) => api::create_workspace_with_identity(store, clock, &parsed.name, identity),
+        None => api::create_workspace(
             clock,
             parsed
                 .public_key
@@ -38,7 +36,7 @@ pub fn create_workspace(
 struct CreateWorkspaceArgs<'a> {
     name: String,
     public_key: Option<[u8; 32]>,
-    identity: Option<commands::BootstrapIdentity<'a>>,
+    identity: Option<api::BootstrapIdentity<'a>>,
 }
 
 impl<'a> CreateWorkspaceArgs<'a> {
@@ -92,7 +90,7 @@ impl<'a> CreateWorkspaceArgs<'a> {
             .to_string();
 
         let identity = match (username, device_name) {
-            (Some(username), Some(device_name)) => Some(commands::BootstrapIdentity {
+            (Some(username), Some(device_name)) => Some(api::BootstrapIdentity {
                 username,
                 device_name,
                 ttl_minutes: _ttl_minutes,
@@ -118,16 +116,13 @@ impl<'a> CreateWorkspaceArgs<'a> {
     }
 }
 
-pub fn created_workspace_output(
-    workspace: &queries::WorkspaceSummary,
-    bootstrap_user_id: Option<[u8; 32]>,
-) -> CliOutput {
+pub fn created_workspace_output(receipt: &api::CreateWorkspaceReceipt) -> CliOutput {
     let mut lines = vec![
-        format!("workspace_id: {}", encode_hex(&workspace.workspace_id)),
-        format!("created_at_ms: {}", workspace.created_at_ms),
-        format!("name: {}", workspace.name),
+        format!("workspace_id: {}", encode_hex(&receipt.workspace_fact_id)),
+        format!("created_at_ms: {}", receipt.created_at_ms),
+        format!("name: {}", receipt.name),
     ];
-    if let Some(user_id) = bootstrap_user_id {
+    if let Some(user_id) = receipt.user_id {
         lines.push(format!("user_id: {}", encode_hex(&user_id)));
     }
     CliOutput::lines(lines)

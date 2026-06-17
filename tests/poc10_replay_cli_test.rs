@@ -28,15 +28,21 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         "--devicename",
         device_name,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    wait_for_users_contains(db, &workspace_id, username);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    workspace_id
 }
 
 fn seed_workspace_with_content(db: &str) -> String {
+    let _daemon = spawn_worker_daemon(db);
     let workspace_id = create_workspace(db, "Replay", "alice", "laptop");
-    assert_success(topo(&["--db", db, "key-frontier", &workspace_id]));
+    create_local_content_key(db, &workspace_id);
     assert_success(topo(&["--db", db, "send", &workspace_id, "first message"]));
+    wait_for_message_text(db, &workspace_id, "alice: first message");
     assert_success(topo(&["--db", db, "send", &workspace_id, "second message"]));
-    settle_runtime_with_daemon(db);
+    wait_for_message_text(db, &workspace_id, "alice: second message");
+    wait_for_runtime_idle(db);
     workspace_id
 }
 
@@ -81,11 +87,6 @@ fn spawn_worker_daemon(db: &str) -> StartedDaemon {
     }
 }
 
-fn settle_runtime_with_daemon(db: &str) {
-    let _daemon = spawn_worker_daemon(db);
-    wait_for_runtime_idle(db);
-}
-
 fn wait_for_runtime_idle(db: &str) {
     let started = Instant::now();
     let timeout = Duration::from_secs(10);
@@ -103,10 +104,92 @@ fn wait_for_runtime_idle(db: &str) {
         }
         assert!(
             started.elapsed() < timeout,
-            "daemon did not settle runtime queues:\n{last}"
+            "daemon did not drain runtime queues:\n{last}"
         );
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}:\n{last}");
+}
+
+fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "messages", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if out
+                .lines()
+                .any(|line| line.trim_end().ends_with(expected_suffix))
+            {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("message text {expected_suffix:?} never appeared in {db}:\n{last}");
+}
+
+fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let users = topo(&["--db", db, "users", workspace_id]);
+        if users.status.success() {
+            let users = stdout(&users);
+            if users.contains(username) {
+                return;
+            }
+            last = users;
+        } else {
+            last = stderr(&users);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("user {username} never appeared in {db}: {last}");
+}
+
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let identity = topo(&["--db", db, "identity"]);
+        if identity.status.success() {
+            let identity = stdout(&identity);
+            if identity.contains(expected) {
+                return;
+            }
+            last = identity;
+        } else {
+            last = stderr(&identity);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
 }
 
 fn state_hash(db: &str) -> String {
@@ -312,7 +395,7 @@ fn replay_recreates_key_material_idempotently() {
     let daemon_port = free_port();
     let _daemon = spawn_daemon(&db, daemon_port);
     let workspace_id = create_workspace(&db, "Keys", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    create_local_content_key(&db, &workspace_id);
     assert_success(topo(&["--db", &db, "key-recipient", &workspace_id]));
     assert_success(topo(&[
         "--db",

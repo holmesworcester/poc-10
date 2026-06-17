@@ -1,14 +1,14 @@
 //! CLI adapter for auth key-material commands.
 //!
 //! This file owns only argv parsing and text formatting. Key construction and
-//! read-model decisions live in `commands.rs`; runtime draining, handler
+//! read-model decisions live in `api.rs`; runtime draining, handler
 //! dispatch, and persistence stay at the root app/runtime boundary.
 
 use crate::core::cli::{decode_hex_32_named as core_decode_hex_32, encode_hex, CliArgs, CliOutput};
-use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::store::Store;
 
-use super::{commands, queries};
+use super::{api, queries};
 
 pub const KEY_RECIPIENT_USAGE: &str = "key-recipient WORKSPACE_ID_HEX";
 pub const KEY_ROTATE_RECIPIENT_USAGE: &str = "key-rotate-recipient WORKSPACE_ID_HEX";
@@ -24,11 +24,11 @@ pub fn key_recipient(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
+) -> Result<AuthoredFacts<api::CreateRecipientKeyReceipt>, String> {
     let workspace = args.get(0).ok_or_else(|| KEY_RECIPIENT_USAGE.to_string())?;
-    commands::create_recipient_key(
+    api::create_recipient_key(
         store,
-        commands::CreateRecipientKey {
+        api::CreateRecipientKey {
             created_at_ms: clock.next_timestamp(),
             workspace_id: decode_hex_32(workspace)?,
             previous_recipient_key_id:
@@ -42,12 +42,12 @@ pub fn rotate_recipient(
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     previous_recipient_key_id: [u8; 32],
-) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
+) -> Result<AuthoredFacts<api::CreateRecipientKeyReceipt>, String> {
     args.require_len(1, KEY_ROTATE_RECIPIENT_USAGE)?;
     let workspace = args.get(0).expect("length checked");
-    commands::create_recipient_key(
+    api::create_recipient_key(
         store,
-        commands::CreateRecipientKey {
+        api::CreateRecipientKey {
             created_at_ms: clock.next_timestamp(),
             workspace_id: decode_hex_32(workspace)?,
             previous_recipient_key_id,
@@ -60,11 +60,11 @@ pub fn key_recipient_rotation(
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
     previous_recipient_key_id: [u8; 32],
-) -> Result<CommandOutput<commands::CreateRecipientKeyReceipt>, String> {
+) -> Result<AuthoredFacts<api::CreateRecipientKeyReceipt>, String> {
     rotate_recipient(store, clock, args, previous_recipient_key_id)
 }
 
-pub fn key_recipient_output(receipt: &commands::CreateRecipientKeyReceipt) -> CliOutput {
+pub fn key_recipient_output(receipt: &api::CreateRecipientKeyReceipt) -> CliOutput {
     CliOutput::lines(vec![
         format!(
             "local_recipient_key_id: {}",
@@ -79,7 +79,7 @@ pub fn key_recipient_output(receipt: &commands::CreateRecipientKeyReceipt) -> Cl
 }
 
 pub fn key_recipient_rotation_output(
-    receipt: &commands::CreateRecipientKeyReceipt,
+    receipt: &api::CreateRecipientKeyReceipt,
     superseded_recipient_keys: usize,
 ) -> CliOutput {
     let mut output = key_recipient_output(receipt);
@@ -93,18 +93,18 @@ pub fn key_frontier(
     store: &Store,
     clock: &dyn CommandClock,
     args: CliArgs<'_>,
-) -> Result<CommandOutput<commands::CreateKeyFrontierReceipt>, String> {
+) -> Result<AuthoredFacts<api::CreateKeyFrontierReceipt>, String> {
     args.require_len(1, KEY_FRONTIER_USAGE)?;
-    commands::create_key_frontier(
+    api::create_key_frontier(
         store,
-        commands::CreateKeyFrontier {
+        api::CreateKeyFrontier {
             created_at_ms: clock.next_timestamp(),
             workspace_id: decode_hex_32(args.get(0).expect("length checked"))?,
         },
     )
 }
 
-pub fn key_frontier_output(receipt: &commands::CreateKeyFrontierReceipt) -> CliOutput {
+pub fn key_frontier_output(receipt: &api::CreateKeyFrontierReceipt) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
         format!(
@@ -234,7 +234,7 @@ pub fn keys_workspace_id(args: CliArgs<'_>) -> Result<[u8; 32], String> {
     core_decode_hex_32(args.get(0).expect("length checked"), "workspace id")
 }
 
-pub fn history_node_output(receipt: &commands::CreateHistoryNodeReceipt) -> CliOutput {
+pub fn history_node_output(receipt: &api::CreateHistoryNodeReceipt) -> CliOutput {
     CliOutput::lines(vec![
         format!("workspace_id: {}", encode_hex(&receipt.workspace_id)),
         format!(

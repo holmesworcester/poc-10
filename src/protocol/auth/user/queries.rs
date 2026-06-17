@@ -7,7 +7,7 @@
 
 use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::core::wire::FixedText;
 
 use super::fact::{UserId, Username, WorkspaceId, USERNAME_BYTES};
@@ -47,7 +47,7 @@ fn read_username(bytes: &[u8]) -> Result<String, String> {
 
 pub fn users_in_workspace(store: &Store, workspace_id: FactId) -> Result<Vec<UserRow>, String> {
     let mut rows = store
-        .table_rows_with_key_prefix(USER_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(USER_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load users: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_user_row(&key, &value))

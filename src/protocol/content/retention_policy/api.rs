@@ -4,10 +4,10 @@
 //! a proposed retention policy fact. Projection and purge execution stay in the
 //! target runtime.
 
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::FactId;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth::signature::author::AuthoredFactEvidence;
 use crate::protocol::{auth, content};
 
@@ -67,7 +67,7 @@ pub struct AuthorCompactReport {
 pub fn author_set_with_auto_floor(
     store: &Store,
     input: AuthorPolicy,
-) -> Result<CommandOutput<AuthorSetReport>, String> {
+) -> Result<AuthoredFacts<AuthorSetReport>, String> {
     if input.ttl_minutes == 0 {
         return Err("retention policy ttl_minutes must be non-zero".to_string());
     }
@@ -94,7 +94,7 @@ pub fn author_set_with_auto_floor(
         author_user_id,
         input.now_ms,
     )?;
-    Ok(CommandOutput::new(AuthorSetReport {
+    Ok(AuthoredFacts::new(AuthorSetReport {
         policy_fact_id: authored.fact.id,
         previous_floor_minute: previous_floor,
         new_floor_minute: new_floor,
@@ -132,7 +132,7 @@ pub fn plan_tighten(store: &Store, input: AuthorTighten) -> Result<TightenPlan, 
 pub fn author_tighten(
     store: &Store,
     input: AuthorTighten,
-) -> Result<CommandOutput<AuthorTightenReport>, String> {
+) -> Result<AuthoredFacts<AuthorTightenReport>, String> {
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
     let previous = queries::active_for_workspace(store, input.workspace_id)?;
     let previous_policy_id = previous.as_ref().map(|row| row.policy_id);
@@ -155,7 +155,7 @@ pub fn author_tighten(
         author_user_id,
         input.now_ms,
     )?;
-    Ok(CommandOutput::new(AuthorTightenReport {
+    Ok(AuthoredFacts::new(AuthorTightenReport {
         policy_fact_id: authored.fact.id,
         previous_floor_minute: previous_floor,
         target_floor_minute: target_floor,
@@ -166,7 +166,7 @@ pub fn author_tighten(
 pub fn author_compact(
     store: &Store,
     input: AuthorCompact,
-) -> Result<CommandOutput<AuthorCompactReport>, String> {
+) -> Result<AuthoredFacts<AuthorCompactReport>, String> {
     let active = queries::active_for_workspace(store, input.workspace_id)?
         .ok_or_else(|| "no active retention policy; use disappearing-set first".to_string())?;
     let author_user_id = local_admin_user_id(store, input.workspace_id)?;
@@ -183,7 +183,7 @@ pub fn author_compact(
         author_user_id,
         input.now_ms,
     )?;
-    Ok(CommandOutput::new(AuthorCompactReport {
+    Ok(AuthoredFacts::new(AuthorCompactReport {
         policy_fact_id: authored.fact.id,
         ttl_minutes: active.ttl_minutes,
         previous_floor_minute: active.retire_minute,
@@ -270,7 +270,7 @@ fn local_admin_user_id(store: &Store, workspace_id: FactId) -> Result<FactId, St
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let user_id = membership.user_authority_fact_id;
     let admin_rows = store
-        .table_rows_with_key_prefix(auth::admin::ADMIN_ROWS, &workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(auth::admin::ADMIN_ROWS, &workspace_id, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load admin rows: {err}"))?;
     let is_admin = admin_rows.into_iter().any(|(key, value)| {
         auth::admin::queries::decode_admin_row(&key, &value)

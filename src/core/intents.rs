@@ -29,43 +29,13 @@
 
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::{IntentWorkRow, Store, TableName, TableRow};
-use rusqlite::types::Value as SqliteValue;
+use crate::core::store::{IntentWorkRow, Store};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// SQLite value carried by typed-table row mutations and internal SQL helpers.
-///
-/// Protocol row builders choose these values from their fact layout and table
-/// schema. Core also uses the same representation for checked runtime
-/// insert-select parameters. Conversion into SQLite bind parameters is
-/// mechanical; core does not interpret what a column or parameter means.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Value {
-    Bytes(Vec<u8>),
-    Text(String),
-    U64(u64),
-    I64(i64),
-    Bool(bool),
-}
-
-impl Value {
-    pub(crate) fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
-        match self {
-            Self::Bytes(value) => Ok(SqliteValue::Blob(value.clone())),
-            Self::Text(value) => Ok(SqliteValue::Text(value.clone())),
-            Self::U64(value) => i64::try_from(*value)
-                .map(SqliteValue::Integer)
-                .map_err(|_| {
-                    rusqlite::Error::InvalidParameterName(
-                        "SQL value exceeds SQLite integer range".to_string(),
-                    )
-                }),
-            Self::I64(value) => Ok(SqliteValue::Integer(*value)),
-            Self::Bool(value) => Ok(SqliteValue::Integer(i64::from(*value))),
-        }
-    }
-}
+pub use crate::core::store::{
+    RowMutation, TableDelete, TableDeleteWhere, TableInsert, TypedTableSchema, Value,
+};
 
 /// Stable queue routing key for an intent handler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -132,109 +102,6 @@ impl Intent {
             .map_err(|err| format!("invalid queued intent kind: {err}"))?;
         Ok(Self::new(kind, row.idempotence_key, row.payload))
     }
-}
-
-/// Delete one opaque row by key from a row table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableDelete {
-    /// Table to delete from.
-    pub table: TableName,
-    /// Opaque row key to delete.
-    pub key: Vec<u8>,
-}
-
-/// Insert a typed-table row by column values.
-///
-/// This is for schema-declared tables whose key is not the generic
-/// `row_key/row_value` shape. The insert is idempotent only when an existing
-/// row has exactly the same column values. To change typed projection state,
-/// emit a matching `DeleteWhere` before the replacement insert.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableInsert {
-    /// Typed table to insert into.
-    pub table: TableName,
-    /// Columns supplied by this insert.
-    pub columns: &'static [&'static str],
-    /// Values corresponding to `columns`.
-    pub values: Vec<Value>,
-}
-
-/// Delete typed-table rows matching all supplied columns.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableDeleteWhere {
-    /// Typed table to delete from.
-    pub table: TableName,
-    /// Predicate columns.
-    pub columns: &'static [&'static str],
-    /// Predicate values corresponding to `columns`.
-    pub values: Vec<Value>,
-}
-
-/// Protocol-owned typed table declaration.
-///
-/// This is the narrow schema surface shared by projection code and the runtime
-/// commit path. Protocol registry code owns the SQL DDL; row builders use this
-/// value to avoid re-declaring table names and column order beside every
-/// materialized read model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TypedTableSchema {
-    /// Typed table name.
-    pub table: TableName,
-    /// Full insert column order for this table's materialized row.
-    pub columns: &'static [&'static str],
-    /// Logical key columns used for delete/replacement mutations.
-    pub key_columns: &'static [&'static str],
-}
-
-impl TypedTableSchema {
-    /// Build an insert mutation using this schema's declared column order.
-    pub fn insert(self, values: Vec<Value>) -> TableInsert {
-        TableInsert {
-            table: self.table,
-            columns: self.columns,
-            values,
-        }
-    }
-
-    /// Build a delete mutation against this schema's logical key columns.
-    pub fn delete_by_key(self, values: Vec<Value>) -> TableDeleteWhere {
-        TableDeleteWhere {
-            table: self.table,
-            columns: self.key_columns,
-            values,
-        }
-    }
-
-    /// Build a delete mutation against an explicit predicate.
-    pub fn delete_where(
-        self,
-        columns: &'static [&'static str],
-        values: Vec<Value>,
-    ) -> TableDeleteWhere {
-        TableDeleteWhere {
-            table: self.table,
-            columns,
-            values,
-        }
-    }
-}
-
-/// Row-level mutations a command, projector, or handler can request.
-///
-/// Core validates the target table against the runtime description before any
-/// mutation commits. The module that constructs the mutation owns the row
-/// layout and semantic meaning.
-///
-/// `PutRow` is an idempotent insert into an opaque key/value row table, not an
-/// upsert. Re-emitting the same key with different bytes is a conflict. Use
-/// typed-table mutations when projection needs explicit delete-then-insert
-/// state changes for the same logical row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RowMutation {
-    PutRow(TableRow),
-    DeleteRow(TableDelete),
-    InsertValues(TableInsert),
-    DeleteWhere(TableDeleteWhere),
 }
 
 // === Intent handler contract ===
@@ -443,6 +310,8 @@ pub trait IntentHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::store::{TableName, TableRow};
+    use rusqlite::types::Value as SqliteValue;
 
     const TEST_TABLE: TableName = TableName::new("test.rows");
 
@@ -498,16 +367,8 @@ mod tests {
             SqliteValue::Blob(b"bytes".to_vec())
         );
         assert_eq!(
-            Value::Text("text".to_string()).as_sqlite_value().unwrap(),
-            SqliteValue::Text("text".to_string())
-        );
-        assert_eq!(
             Value::U64(42).as_sqlite_value().unwrap(),
             SqliteValue::Integer(42)
-        );
-        assert_eq!(
-            Value::I64(-7).as_sqlite_value().unwrap(),
-            SqliteValue::Integer(-7)
         );
         assert_eq!(
             Value::Bool(true).as_sqlite_value().unwrap(),

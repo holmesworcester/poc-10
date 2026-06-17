@@ -39,6 +39,13 @@ range. Core only matches role/scope/range overlap and loads the offer owner as
 payload; the woken projector decides whether that payload actually proves what
 it needs.
 
+Matching is not a separate stage or a background scan. It runs inside each
+projection commit: when a projector's output commits, core matches the needs
+and offers that output just added against the already-stored set, records the
+overlaps, and re-queues the owners they wake. A later fact's commit is therefore
+what wakes an earlier parked fact, and an earlier offer is already stored to be
+matched the moment a later need commits.
+
 Readable examples look like this; real keys are canonical protocol bytes:
 
 ```text
@@ -186,26 +193,24 @@ stages those rows; runtime loads them into the owning projector, and projector
 output either deletes the incoming row or retains it as a normal fact when it
 must park on context or become protocol evidence.
 
-Commands do not dispatch handlers. Before any protocol query reads projected
-state, runtime pre-settles retained `pending_projection` work so the query sees
-local command-authored facts. That pre-query settle does not consume
-`incoming_facts`, dispatch intents, or admit time wakes; the daemon and worker
-turns own incoming facts, due time wakes, and handler-derived state. Tests that
-observe handler output should run a daemon/worker and assert eventually.
+Commands do not dispatch handlers or privately project their own writes. A
+command reads the current projected state, authors all facts from that snapshot,
+commits those facts atomically, and returns its receipt. Later visibility is
+normal runtime work: the daemon admits incoming facts and due time wakes, drains
+bounded projection and intent batches, and pumps network output. Tests and CLI
+flows that observe projected state should run daemon work and assert eventually.
 
-User query-facing commands should not require intent dispatch to finish their
-visible writes. If a command needs additional facts before its rows can be read
-back, prefer authoring those facts in the command chain itself so projection
-settlement is sufficient. If a future command truly needs a deterministic
-fact-creating intent before its query-visible state is complete, the
-pre-query settle boundary must expand to drain those bounded intents and the
-pending projections they create to a fixpoint. The current runtime does not
-need that: query settling drains retained `pending_projection` only.
+User query-facing commands read the projected state already visible to the user.
+If an authoring command needs additional facts before its rows can eventually
+materialize, it authors those facts in the same in-memory command chain instead
+of querying its own writes. Handler-created facts remain daemon/replay work, not
+part of a command-local settle loop.
 
 Local operational settings follow the same rule. For example, `sync range`
-authors a local sync-setting fact and projects it before returning; recurring
-daemon sync reads the projected setting and performs compare/have/need/fact-send
-work later. A setting command changes state, not the handler queue.
+authors a local sync-setting fact and commits it; a daemon tick later projects
+the setting, and recurring daemon sync reads that projected row to perform
+compare/have/need/fact-send work. A setting command changes durable facts, not
+the handler queue.
 
 Network input is accepted by core's TCP listener and handed directly to the
 protocol-declared inbound intake. The intake commits recognized wire frames as

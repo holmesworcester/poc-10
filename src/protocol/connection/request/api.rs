@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use crate::core::cli::encode_hex;
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::Store;
@@ -54,7 +54,7 @@ pub struct CreateConnectionRequestReceipt {
 
 pub fn create_bootstrap(
     input: CreateBootstrapConnectionRequest,
-) -> Result<CommandOutput<CreateConnectionRequestReceipt>, String> {
+) -> Result<AuthoredFacts<CreateConnectionRequestReceipt>, String> {
     validate_id("remote_endpoint", &input.remote_endpoint)?;
     validate_id("invite_fact_id", &input.invite_fact_id)?;
     if input.bootstrap_secret == [0; 32] {
@@ -71,9 +71,10 @@ pub fn create_bootstrap(
                 input.created_at_ms,
             )?
         }
-        None => {
-            auth::invite_secret::author::unscoped_secret_fact(input.bootstrap_secret, input.created_at_ms)?
-        }
+        None => auth::invite_secret::author::unscoped_secret_fact(
+            input.bootstrap_secret,
+            input.created_at_ms,
+        )?,
     };
     let (ephemeral, ephemeral_fact) = ephemeral_fact(
         input.local_endpoint.endpoint,
@@ -103,7 +104,7 @@ pub fn create_bootstrap(
         input.created_at_ms.saturating_add(2),
     )?;
 
-    Ok(CommandOutput::new(CreateConnectionRequestReceipt {
+    Ok(AuthoredFacts::new(CreateConnectionRequestReceipt {
         request_id: request_fact.id,
         invite_secret_id: Some(invite_secret_fact.id),
         initiator_ephemeral_secret_id: ephemeral_fact.id,
@@ -113,7 +114,7 @@ pub fn create_bootstrap(
 
 pub fn create_membership(
     input: CreateMembershipConnectionRequest,
-) -> Result<CommandOutput<CreateConnectionRequestReceipt>, String> {
+) -> Result<AuthoredFacts<CreateConnectionRequestReceipt>, String> {
     validate_id("remote_endpoint", &input.remote_endpoint)?;
     validate_id(
         "initiator_endpoint_shared_id",
@@ -147,7 +148,7 @@ pub fn create_membership(
         input.created_at_ms.saturating_add(2),
     )?;
 
-    Ok(CommandOutput::new(CreateConnectionRequestReceipt {
+    Ok(AuthoredFacts::new(CreateConnectionRequestReceipt {
         request_id: request_fact.id,
         invite_secret_id: None,
         initiator_ephemeral_secret_id: ephemeral_fact.id,
@@ -167,7 +168,7 @@ pub struct Connect {
 pub fn connect(
     store: &Store,
     input: Connect,
-) -> Result<CommandOutput<CreateConnectionRequestReceipt>, String> {
+) -> Result<AuthoredFacts<CreateConnectionRequestReceipt>, String> {
     if input.from_listen_addr.is_none() {
         return Err("connect requires a running local daemon".to_string());
     }
@@ -215,12 +216,12 @@ fn validate_id(name: &str, id: &FactId) -> Result<(), String> {
 }
 
 // Compatibility for older call sites that imported the membership constructor
-// as `request::commands::create`.
+// as `request::api::create`.
 pub type CreateConnectionRequest = CreateMembershipConnectionRequest;
 
 pub fn create(
     input: CreateConnectionRequest,
-) -> Result<CommandOutput<CreateConnectionRequestReceipt>, String> {
+) -> Result<AuthoredFacts<CreateConnectionRequestReceipt>, String> {
     create_membership(input)
 }
 

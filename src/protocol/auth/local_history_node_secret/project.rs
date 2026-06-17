@@ -221,6 +221,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextKey, ContextNeed, ContextOffer, Role};
 use crate::core::facts::{Fact, FactId, FactScope};
+use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
@@ -231,8 +232,11 @@ use crate::protocol::auth::local_key_secret;
 use crate::protocol::auth::local_secret_retirement;
 use crate::protocol::auth::removal_frontier;
 
-use super::fact::{
-    mask_prefix_to_depth, LocalHistoryNodeSecretFact, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
+use super::{
+    fact::{
+        mask_prefix_to_depth, LocalHistoryNodeSecretFact, TIME_TREE_BIT_DEPTH, TRIE_LEAF_BIT_DEPTH,
+    },
+    LOCAL_HISTORY_NODE_SECRET_ROWS, LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
 };
 
 // ---------------------------------------------------------------------------
@@ -503,7 +507,25 @@ fn project_local_history_node_secret(
     }
     if let Some(retirement_fact) = projection_context.payload_for(&retirement_need) {
         validate_history_retirement(retirement_fact, fact.id, &node)?;
-        return Ok(ProjectionOutput::new().purge_self(fact.id));
+        return Ok(ProjectionOutput::new()
+            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+                table: LOCAL_HISTORY_NODE_SECRET_ROWS,
+                columns: &["workspace_id", "frontier_id", "secret_id"],
+                values: vec![
+                    Value::Bytes(node.workspace_id.to_vec()),
+                    Value::Bytes(node.frontier_id.to_vec()),
+                    Value::Bytes(fact.id.to_vec()),
+                ],
+            }))
+            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+                table: LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
+                columns: &["tombstone_node_id", "secret_id"],
+                values: vec![
+                    Value::Bytes(node.tombstone_node_id.to_vec()),
+                    Value::Bytes(fact.id.to_vec()),
+                ],
+            }))
+            .purge_self(fact.id));
     }
 
     let Some(frontier_fact) = projection_context.payload_for(&frontier_need) else {
@@ -577,6 +599,45 @@ fn project_local_history_node_secret(
             fact.id,
             node.tombstone_node_id,
         ));
+    }
+    output = output.row_mutation(RowMutation::InsertValues(TableInsert {
+        table: LOCAL_HISTORY_NODE_SECRET_ROWS,
+        columns: &[
+            "workspace_id",
+            "frontier_id",
+            "secret_id",
+            "owner_endpoint_id",
+            "source_secret_id",
+            "range_start",
+            "range_width",
+            "bit_depth",
+            "fact_id_prefix",
+            "tombstone_node_id",
+            "node_secret",
+        ],
+        values: vec![
+            Value::Bytes(node.workspace_id.to_vec()),
+            Value::Bytes(node.frontier_id.to_vec()),
+            Value::Bytes(fact.id.to_vec()),
+            Value::Bytes(node.owner_endpoint_id.to_vec()),
+            Value::Bytes(node.source_secret_id.to_vec()),
+            Value::U64(node.range_start),
+            Value::U64(node.range_width),
+            Value::U64(u64::from(node.bit_depth)),
+            Value::Bytes(node.fact_id_prefix.to_vec()),
+            Value::Bytes(node.tombstone_node_id.to_vec()),
+            Value::Bytes(node.node_secret.to_vec()),
+        ],
+    }));
+    if node.tombstone_node_id != [0; 32] {
+        output = output.row_mutation(RowMutation::InsertValues(TableInsert {
+            table: LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
+            columns: &["tombstone_node_id", "secret_id"],
+            values: vec![
+                Value::Bytes(node.tombstone_node_id.to_vec()),
+                Value::Bytes(fact.id.to_vec()),
+            ],
+        }));
     }
     Ok(output
         .offer(ContextOffer::range(

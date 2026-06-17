@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
 use crate::core::facts::{Fact, FactId, FactScope};
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 
 use crate::protocol::auth;
 use crate::protocol::connection::request::{
@@ -72,7 +72,7 @@ pub fn answered_request_ids(store: &Store) -> Result<BTreeSet<FactId>, String> {
 
 pub fn connection_rows(store: &Store) -> Result<Vec<ConnectionRow>, String> {
     store
-        .table_rows(CONNECTION_ROWS)
+        .table_rows_page(CONNECTION_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read connection rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_connection_row(&key, &value))

@@ -3,7 +3,7 @@
 //! This layer takes already-resolved semantic parameters plus the signer's
 //! private key and returns canonical fact bytes. API and CLI workflows that
 //! need store-queried local capabilities, or multi-fact orchestration belong
-//! in `commands.rs`.
+//! in `api.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey};
 use crate::core::facts::{Fact, FactId};

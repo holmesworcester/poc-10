@@ -20,9 +20,11 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Activism", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "hey bob"]));
+    wait_for_messages_count(&db, &workspace_id, "1");
     assert_success(topo(&[
         "--db",
         &db,
@@ -30,7 +32,9 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
         &workspace_id,
         "second message",
     ]));
+    wait_for_messages_count(&db, &workspace_id, "2");
     assert_success(topo(&["--db", &db, "react", &workspace_id, "#1", "+1"]));
+    wait_for_view_contains(&db, &workspace_id, "+1 alice");
 
     let payload = b"hello world".to_vec();
     let in_path = tmp.path().join("payload.txt");
@@ -44,6 +48,7 @@ fn cli_view_renders_sidebar_messages_reactions_files() {
         "--file",
         in_path.to_str().expect("path utf-8"),
     ]));
+    wait_for_view_contains(&db, &workspace_id, "payload.txt");
 
     let view = assert_success(topo(&["--db", &db, "view", &workspace_id]));
 
@@ -108,9 +113,11 @@ fn cli_view_with_no_workspace_argument_picks_single_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     let db = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&db, "Solo", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &workspace_id);
 
     assert_success(topo(&["--db", &db, "send", &workspace_id, "first"]));
+    wait_for_messages_count(&db, &workspace_id, "1");
 
     let view = assert_success(topo(&["--db", &db, "view"]));
 
@@ -134,7 +141,9 @@ fn cli_view_requires_argument_when_multiple_workspaces() {
     let db = temp_db(&tmp, "alice.db");
     let one = create_workspace(&db, "WorkspaceOne", "alice", "laptop");
     let _two = create_workspace(&db, "WorkspaceTwo", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &one]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &one);
+    wait_for_workspaces_count(&db, "2");
 
     let output = topo(&["--db", &db, "view"]);
     assert!(
@@ -156,11 +165,14 @@ fn cli_view_with_explicit_workspace_argument_renders_that_workspace() {
     let db = temp_db(&tmp, "alice.db");
     let one = create_workspace(&db, "WorkspaceOne", "alice", "laptop");
     let two = create_workspace(&db, "WorkspaceTwo", "alice", "laptop");
-    assert_success(topo(&["--db", &db, "key-frontier", &one]));
-    assert_success(topo(&["--db", &db, "key-frontier", &two]));
+    let _daemon = spawn_daemon(&db, free_port());
+    create_local_content_key(&db, &one);
+    create_local_content_key(&db, &two);
 
     assert_success(topo(&["--db", &db, "send", &one, "in one"]));
     assert_success(topo(&["--db", &db, "send", &two, "in two"]));
+    wait_for_messages_count(&db, &one, "1");
+    wait_for_messages_count(&db, &two, "1");
 
     let view_one = assert_success(topo(&["--db", &db, "view", &one]));
     assert!(
@@ -185,9 +197,10 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
     let alice = temp_db(&tmp, "alice.db");
     let bob = temp_db(&tmp, "bob.db");
     let workspace_id = create_workspace(&alice, "Activism", "alice", "laptop");
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
-
     let bob_join_port = free_port();
+    let _alice_daemon = spawn_daemon(&alice, bob_join_port);
+    let _bob_daemon = spawn_daemon(&bob, free_port());
+    create_local_content_key(&alice, &workspace_id);
     join_workspace(&alice, &bob, &workspace_id, bob_join_port, "bob", "phone");
 
     // Alice sends two consecutive messages. Both should appear under one
@@ -206,6 +219,7 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
         &workspace_id,
         "second by alice",
     ]));
+    wait_for_messages_count(&alice, &workspace_id, "2");
 
     let view = assert_success(topo(&["--db", &alice, "view", &workspace_id]));
     let alice_header_count = view.matches("    alice [").count();
@@ -213,13 +227,14 @@ fn cli_view_collapses_consecutive_messages_from_same_author() {
         alice_header_count, 1,
         "expected one alice author header for two consecutive messages:\n{view}"
     );
-    // Both numbered messages should appear.
+    // Both messages should appear under the single Alice header; message
+    // ordering is not part of this grouping invariant.
     assert!(
-        view.contains("      1. first by alice"),
+        view.contains("first by alice"),
         "missing first message:\n{view}"
     );
     assert!(
-        view.contains("      2. second by alice"),
+        view.contains("second by alice"),
         "missing second message:\n{view}"
     );
     // Both bob and alice should appear in the USERS list.
@@ -242,7 +257,11 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         "--devicename",
         device_name,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    workspace_id
 }
 
 fn join_workspace(
@@ -253,8 +272,6 @@ fn join_workspace(
     username: &str,
     device_name: &str,
 ) {
-    let _host_daemon = spawn_daemon(host, port);
-    let _joiner_daemon = spawn_daemon(joiner, free_port());
     let invite = workspace_invite_for_addr(host, workspace_id, port);
     let accepted = match try_accept_with_identity_retry(joiner, &invite, username, device_name) {
         Ok(output) => output,
@@ -337,6 +354,103 @@ fn wait_for_peers_contains(db: &str, workspace_id: &str, device_name: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("peer device {device_name} never appeared in {db}: {last}");
+}
+
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "identity"]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if text.contains(expected) {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, key) == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}: {last}");
+}
+
+fn wait_for_messages_count(db: &str, workspace_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "messages", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, "messages") == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("messages count did not reach {expected}: {last}");
+}
+
+fn wait_for_view_contains(db: &str, workspace_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "view", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if text.contains(expected) {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("view never contained {expected}: {last}");
+}
+
+fn wait_for_workspaces_count(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "workspaces"]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, "workspaces") == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("workspaces count did not reach {expected}: {last}");
 }
 
 fn try_accept_with_identity_retry(

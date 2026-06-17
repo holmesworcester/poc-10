@@ -3,7 +3,7 @@
 //! This layer takes an explicit authoring snapshot plus message text, derives
 //! crypto material from typed inputs, encrypts, encodes bytes, and returns a
 //! target fact. Runtime gathering and signature evidence belong in
-//! `commands.rs`.
+//! `api.rs`.
 
 use crate::core::command::{LocalEncryptionCapability, LocalSigningCapability, WorkspaceId};
 use crate::core::crypto::{self, XChaCha20Poly1305Nonce};

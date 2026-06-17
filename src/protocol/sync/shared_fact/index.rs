@@ -12,7 +12,7 @@
 
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::store::persisted_fact;
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow, DEFAULT_QUERY_LIMIT};
 use crate::protocol::{
     auth, connection,
     sync::{
@@ -775,7 +775,8 @@ mod tests {
         let local_secret = [11; 32];
         let local_endpoint = crypto::x25519_public_key(&local_secret);
         let remote_endpoint = [2; 32];
-        let invite = auth::invite_secret::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
+        let invite =
+            auth::invite_secret::fact::InviteSecretFact::scoped([21; 32], workspace_id, [22; 32]);
         let invite_fact = Fact::new(
             FactScope::Local,
             1,
@@ -1221,7 +1222,7 @@ fn connection_rows(
     store: &Store,
 ) -> Result<Vec<connection::connection::queries::ConnectionRow>, String> {
     store
-        .table_rows(connection::connection::CONNECTION_ROWS)
+        .table_rows_page(connection::connection::CONNECTION_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load connection rows for shareable sync: {err}"))?
         .into_iter()
         .map(|(key, value)| connection::connection::queries::decode_connection_row(&key, &value))
@@ -1250,7 +1251,10 @@ fn endpoint_shared_rows(
     store: &Store,
 ) -> Result<Vec<auth::endpoint_shared::queries::EndpointSharedRow>, String> {
     store
-        .table_rows(auth::endpoint_shared::ENDPOINT_SHARED_ROWS)
+        .table_rows_page(
+            auth::endpoint_shared::ENDPOINT_SHARED_ROWS,
+            DEFAULT_QUERY_LIMIT,
+        )
         .map_err(|err| format!("load endpoint memberships for shareable sync: {err}"))?
         .into_iter()
         .map(|(key, value)| {
@@ -1340,7 +1344,10 @@ fn connection_ephemeral_secrets(
     store: &Store,
 ) -> Result<Vec<connection::ephemeral_secret::fact::ConnectionEphemeralSecretFact>, String> {
     store
-        .table_rows(connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS)
+        .table_rows_page(
+            connection::ephemeral_secret::CONNECTION_EPHEMERAL_SECRET_ROWS,
+            DEFAULT_QUERY_LIMIT,
+        )
         .map_err(|err| format!("load connection ephemeral secrets for shareable sync: {err}"))?
         .into_iter()
         .map(|(key, value)| {
@@ -1358,7 +1365,7 @@ fn connection_ephemeral_secrets(
 
 pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, String> {
     store
-        .table_rows(SHAREABLE_FACT_ROWS)
+        .table_rows_page(SHAREABLE_FACT_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load shareable fact rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_shareable_fact_row(&key, &value))
@@ -1367,7 +1374,7 @@ pub fn shareable_fact_rows(store: &Store) -> Result<Vec<ShareableFactRow>, Strin
 
 pub fn negentropy_leaf_rows(store: &Store) -> Result<Vec<NegentropyLeafRow>, String> {
     store
-        .table_rows(NEGENTROPY_LEAF_ROWS)
+        .table_rows_page(NEGENTROPY_LEAF_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load negentropy leaf rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_negentropy_leaf_row(&key, &value))
@@ -1391,7 +1398,7 @@ pub fn negentropy_context_have_rows(
     store: &Store,
 ) -> Result<Vec<NegentropyContextHaveRow>, String> {
     store
-        .table_rows(NEGENTROPY_CONTEXT_HAVE_ROWS)
+        .table_rows_page(NEGENTROPY_CONTEXT_HAVE_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load negentropy context-have rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))
@@ -1400,7 +1407,7 @@ pub fn negentropy_context_have_rows(
 
 pub fn negentropy_node_rows(store: &Store) -> Result<Vec<NegentropyNodeRow>, String> {
     store
-        .table_rows(NEGENTROPY_NODE_ROWS)
+        .table_rows_page(NEGENTROPY_NODE_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load negentropy node rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_negentropy_node_row(&key, &value))
@@ -1414,7 +1421,7 @@ fn negentropy_context_have_rows_for_leaf(
 ) -> Result<Vec<NegentropyContextHaveRow>, String> {
     let prefix = negentropy_leaf_key(workspace_id, owner_fact_id);
     store
-        .table_rows_with_key_prefix(NEGENTROPY_CONTEXT_HAVE_ROWS, &prefix, usize::MAX)
+        .table_rows_with_key_prefix(NEGENTROPY_CONTEXT_HAVE_ROWS, &prefix, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load negentropy context-have rows for leaf: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))
@@ -1428,7 +1435,7 @@ pub fn negentropy_context_have_for_leaf(
 ) -> Result<Vec<FactId>, String> {
     let prefix = negentropy_leaf_key(workspace_id, owner_fact_id);
     let mut context_ids = store
-        .table_rows_with_key_prefix(NEGENTROPY_CONTEXT_HAVE_ROWS, &prefix, usize::MAX)
+        .table_rows_with_key_prefix(NEGENTROPY_CONTEXT_HAVE_ROWS, &prefix, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load negentropy context-have rows for leaf: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_negentropy_context_have_row(&key, &value))

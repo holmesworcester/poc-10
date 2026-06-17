@@ -16,25 +16,25 @@ allowlist, schema sources, and daemon hooks. From that point on, core does not
 ask what a protocol fact means. It only moves facts, context, rows, intents,
 time wakes, and opaque network bytes through the declared runtime workers.
 
-A normal command is a serialized runtime turn. Core opens the store, passes the
-store and command clock to protocol command code, and commits the command's
-authored facts. Core stores their immutable bytes, records local admission
-metadata, and marks them pending for projection. The command can return
-human-readable `CliOutput`, but command-authored durable protocol state must
-enter through facts; rows, purges, and intents come from projection or handler
-work.
+A normal command is a serialized store turn. Core opens the store, passes the
+current projected state and command clock to protocol command code, and commits
+the command's authored facts. Core stores their immutable bytes, records local
+admission metadata, and marks them pending for projection. The command can
+return human-readable `CliOutput`, but command-authored durable protocol state
+must enter through facts; rows, purges, and intents come from later projection
+or handler work.
 
-Every protocol query enters through `Runtime::query`. Runtime first drains only
-retained `pending_projection` work, then runs the read. That gives queries
-read-your-local-writes behavior for command-authored facts without consuming
-`incoming_facts`, admitting due time wakes, or dispatching handlers. Incoming
-facts, time wakes, and handler-derived rows are worker/daemon progress; callers
-that need those effects observe them eventually through the normal runtime loop.
+Protocol reads observe the currently projected rows. They do not privately drain
+projection before reading, and authoring commands do not read their own writes
+through projection. If one command authors several facts, it chains through the
+in-memory facts and receipts it just built. Incoming facts, time wakes,
+projection, and handler-derived rows are worker/daemon progress; callers that
+need those effects observe them eventually through the normal runtime loop.
 
 Projection is core's deterministic reaction step. Core drains
 `pending_projection`, loads one fact and the matched context attached to that
 pending row, resolves any newly declared needs that already match stored offers,
-calls the protocol projector until the item settles, and commits the output.
+calls the protocol projector once, and commits the complete output.
 That commit replaces the fact's owned needs and time wakes; appends newly
 emitted offers as durable evidence; applies allowed row mutations; admits
 emitted facts; queues follow-up intents; and wakes other fact owners whose
@@ -52,12 +52,12 @@ queue consumption. Retry leaves the row queued; success deletes the row with its
 effects.
 
 The daemon runs the same mechanics without a user command on the stack. Each
-tick accepts network frames, lets the protocol intake hook convert recognized
-bytes into `RuntimeEffects`, admits due time-wake ranges as pending projection,
-drains one projection batch, drains one intent batch, and leaves any
-handler-emitted facts queued for later projection work. The runtime lock ensures
-this daemon work cannot race with a CLI command that is admitting new facts into
-the same store.
+tick fires due recurring intents, accepts network frames, lets the protocol
+intake hook convert recognized bytes into `RuntimeEffects`, admits due
+time-wake ranges as pending projection, drains one high-volume projection batch,
+drains one intent batch, and leaves any handler-emitted facts queued for later
+projection work. The runtime lock ensures this daemon work cannot race with a
+CLI command that is admitting new facts into the same store.
 
 Core's job is therefore coordination, persistence, and mechanical validation.
 It owns the serialized turn shape, SQLite transaction boundaries, queue
@@ -81,9 +81,9 @@ Protocol code enters core through declarations and effect values:
   `HandlerContext` containing only declared input facts and returns
   `RuntimeEffects`.
 - `command` defines the protocol-neutral command clock, local capability value
-  types, and authored command output. User-facing commands receive `Store` and
-  `CommandClock` directly, then query protocol-owned state before authoring
-  facts.
+  types, and authored fact bundles. User-facing commands receive `Store` and
+  `CommandClock` directly when they need current projected state before
+  authoring facts.
 - `effects::RuntimeEffects` is the shared language for projector and handler
   facts to admit durably, incoming facts to stage for projection, purges, row
   mutations, durable intents, and local intents.
@@ -153,7 +153,7 @@ the owning projector decide whether that time proves anything.
   Retry errors leave the row queued.
 - Projection mode is sticky toward replay. If an owner is already queued in
   replay mode, later normal wakes do not downgrade it.
-- Needs are replacement subscriptions. The settled `ProjectionOutput` is the
+- Needs are replacement subscriptions. The committed `ProjectionOutput` is the
   complete standing need set for that fact; emitting no needs marks the fact no
   longer parked on context.
 - Durable offers are append-only evidence. Once a fact offers context, that
@@ -223,7 +223,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   `RuntimeEffects` names facts to admit, incoming facts, exact purges, row
   mutations, durable intents, and local intents. The shared commit helper writes
   this mechanical description atomically inside the caller's transaction;
-  commands use `AuthoredCommand` facts plus a receipt instead.
+  commands use `AuthoredFacts` facts plus a receipt instead.
 - `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
   fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
   `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
@@ -245,7 +245,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   recurring intent schedules, work status, and replay-mode dispatch context.
 - `perf_profile.rs`: env-gated performance instrumentation. It records coarse
   phase timings in thread-local state only when explicitly enabled, preserving
-  normal command output by default. It is for runtime profiling, not protocol
+  normal CLI output by default. It is for runtime profiling, not protocol
   measurement semantics.
 - `project_fact.rs`: one queued fact projection transaction. It loads matched
   context and due time ranges, runs the routed projector, applies
@@ -260,10 +260,9 @@ use core syntax and contracts, but core must not import their semantic rules.
   encode/decode helpers that protocol-owned row helpers can use without giving
   core protocol row semantics.
 - `runtime.rs`: executable engine for one selected protocol description. It
-  opens stores, applies declared schemas, submits command-authored facts, runs
-  query pre-settle over retained projection, exposes bounded projection and
-  intent queue drains, admits due time wakes, and composes `project_fact.rs` and
-  `handle_intent.rs` into bounded runtime turns.
+  opens stores, applies declared schemas, submits authored facts, exposes
+  bounded projection and intent queue drains, admits due time wakes, and
+  composes `project_fact.rs` and `handle_intent.rs` into bounded runtime turns.
 - `schema.rs`: core-owned SQL table inventory. It declares facts, local
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
@@ -329,11 +328,11 @@ mode.
 The write-side authoring path is:
 
 ```text
-command -> author -> encode -> protocol self-check -> AuthoredCommand facts -> admit -> projection
+command -> author -> encode -> protocol self-check -> AuthoredFacts facts -> admit -> projection
 ```
 
 Commands own user intent, argument parsing, local capability lookup, receipts,
-and the decision to author facts. They return `AuthoredCommand` facts plus a
+and the decision to author facts. They return `AuthoredFacts` facts plus a
 receipt, not row mutations, purges, or intents. Family `author.rs` owns
 construction crypto: signing, encryption, and typed assembly. Family
 `encode.rs` owns canonical byte encoding only. Before storage, the runtime may
@@ -436,7 +435,7 @@ content message fact
   -> pending_projection
   -> content message projector
      needs endpoint authority and key coverage
-  -> context matcher wakes it when auth offers arrive
+  -> an auth fact's projection commits an offer; that commit's match wakes it
   -> projector emits message rows and share_fact_with_sync intent
   -> sync handler records leaf contribution
   -> connection handler later frames the shared fact for a peer

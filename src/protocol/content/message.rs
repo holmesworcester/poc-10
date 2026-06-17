@@ -7,9 +7,9 @@
 //! other content facts depend on message context rather than duplicating message
 //! authority rules.
 
+pub mod api;
 pub mod author;
 pub mod cli;
-pub mod commands;
 pub mod encode;
 pub mod fact;
 pub mod project;

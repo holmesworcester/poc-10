@@ -6,9 +6,9 @@
 //! naming and admission policy here; endpoint/device facts represent concrete
 //! devices for a user.
 
+pub mod api;
 pub mod author;
 pub mod cli;
-pub mod commands;
 pub mod encode;
 pub mod fact;
 pub mod project;

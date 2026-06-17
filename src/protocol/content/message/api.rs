@@ -6,15 +6,16 @@
 //! call `author.rs`, self-check the authored fact, and return facts for
 //! admission.
 
-use crate::core::command::{CommandClock, CommandOutput, LocalEncryptionCapability, WorkspaceId};
+use crate::core::command::{AuthoredFacts, CommandClock, LocalEncryptionCapability, WorkspaceId};
 use crate::core::facts::{Fact, FactId};
 use crate::core::project_fact::ProjectionContext;
-use crate::core::store::{persisted_facts, Store};
+use crate::core::store::Store;
 use crate::protocol::auth;
 use crate::protocol::content::message::author;
 use crate::protocol::content::message::fact::MAX_TEXT_BYTES;
 use crate::protocol::content::message::queries;
 use crate::protocol::content::{message, retention_policy};
+use rusqlite::{params, OptionalExtension};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendReceipt {
@@ -49,11 +50,11 @@ pub fn send_message(
     clock: &dyn CommandClock,
     workspace_id: WorkspaceId,
     text: &str,
-) -> Result<CommandOutput<SendReceipt>, String> {
+) -> Result<AuthoredFacts<SendReceipt>, String> {
     let created_at_ms = clock.next_timestamp();
     let facts = build_message_facts(store, workspace_id, text, created_at_ms)?;
 
-    Ok(CommandOutput::new(SendReceipt {
+    Ok(AuthoredFacts::new(SendReceipt {
         workspace_id,
         message_fact_id: facts.message.id,
         created_at_ms,
@@ -67,7 +68,7 @@ pub fn generate_messages(
     workspace_id: WorkspaceId,
     count: usize,
     requested_message_text_bytes: usize,
-) -> Result<CommandOutput<GenerateReceipt>, String> {
+) -> Result<AuthoredFacts<GenerateReceipt>, String> {
     if count == 0 {
         return Err("generate count must be positive".to_string());
     }
@@ -103,7 +104,7 @@ pub fn generate_messages(
         facts.push(authored.signature);
     }
 
-    Ok(CommandOutput::new(GenerateReceipt {
+    Ok(AuthoredFacts::new(GenerateReceipt {
         workspace_id,
         generated_facts: count,
         message_text_bytes,
@@ -118,7 +119,7 @@ fn prepare_authoring(
     store: &Store,
     workspace_id: WorkspaceId,
 ) -> Result<MessageCommandAuthoring, String> {
-    let signing = auth::endpoint::commands::local_signing_capability(store, workspace_id)?;
+    let signing = auth::endpoint::api::local_signing_capability(store, workspace_id)?;
     let signer_private_key = signing.private_key;
     let encryption = local_encryption_capability(store, workspace_id)?;
     let author_user_id = local_author_user_id(store, workspace_id)?.unwrap_or(signing.signer_id);
@@ -249,19 +250,27 @@ fn latest_local_key_secret(
     store: &Store,
     workspace_id: [u8; 32],
 ) -> Result<auth::local_key_secret::fact::LocalKeySecretFact, String> {
-    persisted_facts(store)
-        .map_err(|err| format!("load local key facts: {err}"))?
-        .into_iter()
-        .filter_map(|fact| {
-            auth::local_key_secret::project::decode::decode_local_key_secret(fact.body())
-                .ok()
-                .filter(|secret| secret.workspace_id == workspace_id)
-        })
-        .max_by(|left, right| {
-            left.created_at_ms
-                .cmp(&right.created_at_ms)
-                .then_with(|| left.frontier_id.cmp(&right.frontier_id))
-        })
+    store
+        .conn()
+        .query_row(
+            "SELECT frontier_id, owner_endpoint_id, created_at_ms, key_secret
+             FROM local_key_secret_rows
+             WHERE workspace_id = ?1
+             ORDER BY created_at_ms DESC, frontier_id DESC
+             LIMIT 1",
+            params![workspace_id],
+            |row| {
+                Ok(auth::local_key_secret::fact::LocalKeySecretFact {
+                    workspace_id,
+                    frontier_id: row.get(0)?,
+                    owner_endpoint_id: row.get(1)?,
+                    created_at_ms: row.get::<_, i64>(2)? as u64,
+                    key_secret: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| format!("load latest local key row: {err}"))?
         .ok_or_else(|| "no local key frontier is available for this workspace".to_string())
 }
 
@@ -346,15 +355,30 @@ mod tests {
     use crate::core::runtime::Runtime;
     use crate::protocol::app::MATCH_RUNTIME;
 
+    fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
+        for _ in 0..max_rounds {
+            runtime
+                .drain_projection_once(limit)
+                .expect("drain projection batch");
+            runtime
+                .drain_intents_once(limit)
+                .expect("drain intent batch");
+            if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
+                return;
+            }
+        }
+        panic!("runtime work did not become idle within {max_rounds} rounds");
+    }
+
     #[test]
     fn generate_messages_reuses_store_queried_authoring_snapshot() {
         let mut runtime = Runtime::open_memory(&MATCH_RUNTIME).expect("runtime");
         let workspace_clock = FnClock(|| 1_000);
-        let workspace = crate::protocol::auth::workspace::commands::create_workspace_with_identity(
+        let workspace = crate::protocol::auth::workspace::api::create_workspace_with_identity(
             runtime.store(),
             &workspace_clock,
             "test",
-            crate::protocol::auth::workspace::commands::BootstrapIdentity {
+            crate::protocol::auth::workspace::api::BootstrapIdentity {
                 username: "alice",
                 device_name: "laptop",
                 ttl_minutes: Some(0),
@@ -363,25 +387,21 @@ mod tests {
         .expect("workspace command");
         let workspace_id = workspace.receipt.workspace_fact_id;
         runtime
-            .submit_command_output(workspace)
+            .submit_authored_facts(workspace)
             .expect("submit workspace");
-        runtime
-            .process_all_work_until_idle(8, 512)
-            .expect("project workspace");
-        let frontier = crate::protocol::auth::key_wrap::commands::create_key_frontier(
+        drain_runtime_work_for_test(&mut runtime, 8, 512);
+        let frontier = crate::protocol::auth::key_wrap::api::create_key_frontier(
             runtime.store(),
-            crate::protocol::auth::key_wrap::commands::CreateKeyFrontier {
+            crate::protocol::auth::key_wrap::api::CreateKeyFrontier {
                 created_at_ms: 2_000,
                 workspace_id,
             },
         )
         .expect("frontier command");
         runtime
-            .submit_command_output(frontier)
+            .submit_authored_facts(frontier)
             .expect("submit frontier");
-        runtime
-            .process_all_work_until_idle(8, 512)
-            .expect("project frontier");
+        drain_runtime_work_for_test(&mut runtime, 8, 512);
         let message_clock = FnClock(|| 10_000);
 
         let output = generate_messages(runtime.store(), &message_clock, workspace_id, 4, 32)
@@ -392,7 +412,7 @@ mod tests {
         )
         .expect("membership query")
         .expect("local membership");
-        let signing = crate::protocol::auth::endpoint::commands::local_signing_capability(
+        let signing = crate::protocol::auth::endpoint::api::local_signing_capability(
             runtime.store(),
             workspace_id,
         )

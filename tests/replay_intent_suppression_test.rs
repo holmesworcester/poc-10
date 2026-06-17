@@ -197,14 +197,24 @@ fn fact() -> Fact {
     Fact::new(FactScope::Global, 1, vec![FACT_TAG])
 }
 
+fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
+    for _ in 0..max_rounds {
+        runtime
+            .drain_projection_once(limit)
+            .expect("drain projection batch");
+        if runtime.pending_fact_count() == 0 {
+            return;
+        }
+    }
+    panic!("projection work did not become idle within {max_rounds} rounds");
+}
+
 #[test]
 fn live_projection_records_all_projector_intents() {
     let mut runtime = Runtime::open_memory(&RUNTIME).expect("runtime");
 
     runtime.submit_fact(fact());
-    runtime
-        .process_projection_until_idle(4, 32)
-        .expect("live projection");
+    drain_projection_for_test(&mut runtime, 4, 32);
 
     assert_eq!(
         runtime.pending_intent_count(),
@@ -217,9 +227,7 @@ fn live_projection_records_all_projector_intents() {
 fn replay_commits_and_dispatches_handler_followup_intents() {
     let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_AWARE).expect("runtime");
     runtime.submit_fact(fact());
-    runtime
-        .process_projection_until_idle(4, 32)
-        .expect("retain fact before replay");
+    drain_projection_for_test(&mut runtime, 4, 32);
 
     let report = runtime
         .replay(&[], topo::core::replay::ReplayOrder::Canonical)
@@ -240,9 +248,7 @@ fn replay_commits_and_dispatches_handler_followup_intents() {
 fn replay_dispatches_projector_live_work_to_handlers_in_replay_mode() {
     let mut runtime = Runtime::open_memory(&RUNTIME).expect("runtime");
     runtime.submit_fact(fact());
-    runtime
-        .process_projection_until_idle(4, 32)
-        .expect("retain fact before replay");
+    drain_projection_for_test(&mut runtime, 4, 32);
 
     let report = runtime
         .replay(&[], topo::core::replay::ReplayOrder::Canonical)
@@ -263,9 +269,7 @@ fn replay_dispatches_projector_live_work_to_handlers_in_replay_mode() {
 fn replay_projects_retained_facts_with_replay_context() {
     let mut runtime = Runtime::open_memory(&RUNTIME_REPLAY_NOOP).expect("runtime");
     runtime.submit_fact(fact());
-    runtime
-        .process_projection_until_idle(4, 32)
-        .expect("live projection");
+    drain_projection_for_test(&mut runtime, 4, 32);
     assert_eq!(
         runtime.pending_intent_count(),
         1,

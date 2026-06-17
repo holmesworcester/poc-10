@@ -4,7 +4,7 @@
 //! fact carries the invite-link bootstrap context needed to replay workspace
 //! admission and to let live connection maintenance rebuild bootstrap attempts.
 
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::FactId;
 use crate::protocol::auth;
@@ -33,7 +33,7 @@ pub struct AcceptInviteReceipt {
     pub bootstrap_hash: FactId,
 }
 
-pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>, String> {
+pub fn accept(input: AcceptInvite) -> Result<AuthoredFacts<AcceptInviteReceipt>, String> {
     validate_id("accepted_endpoint_id", &input.accepted_endpoint_id)?;
     validate_id("bootstrap_endpoint_id", &input.bootstrap_endpoint_id)?;
     validate_id("workspace_id", &input.workspace_id)?;
@@ -57,7 +57,7 @@ pub fn accept(input: AcceptInvite) -> Result<CommandOutput<AcceptInviteReceipt>,
         input.created_at_ms,
     )?;
 
-    Ok(CommandOutput::new(AcceptInviteReceipt {
+    Ok(AuthoredFacts::new(AcceptInviteReceipt {
         invite_accepted_fact_id: accepted_fact.id,
         bootstrap_hash,
     })

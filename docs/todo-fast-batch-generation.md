@@ -7,13 +7,13 @@ breaking the poc-10 pipeline model.
 
 The current poc-10 generate path is model-correct but expensive:
 
-1. The CLI builds a `CommandOutput` containing many message facts.
+1. The CLI builds `AuthoredFacts` containing many message facts.
 2. Runtime commits those facts and marks each one pending for projection.
-3. Projection drains pending facts.
+3. The daemon drains pending projection work.
 4. Projectors emit `share_fact_with_sync` intents.
 5. The share handler records sync contributions and updates negentropy state.
-6. Command settlement dispatches the allowed local handlers until the command can
-   observe projected rows.
+6. CLI-visible state appears through normal daemon work, so black-box tests wait
+   for projected rows instead of relying on command-local settlement.
 
 With durable projection transaction batching added, release CLI measurements on
 this worktree were:
@@ -43,7 +43,7 @@ poc-7 generation is faster because it is bulk-shaped across more of the stack:
   transaction guards no-op when an outer transaction is already active.
 - Sync range negentropy is mostly built lazily from `shared_event_index` and
   cached, rather than maintaining a richer projector-supplied tree contribution
-  for every generated event during command settlement.
+  for every generated event during daemon-driven projection and handler work.
 - Many perf helpers call the Rust generation path directly, avoiding extra
   black-box CLI process overhead.
 
@@ -59,7 +59,8 @@ Keep these constraints unless we intentionally create a test-only command:
 - Projectors remain the source of share/context/negentropy contributions.
 - The queued handler model stays intact: commands may enqueue effects, but
   daemon/network egress remains daemon-owned.
-- Batched work must preserve read-your-writes for facts in the same batch.
+- Batched projection work must preserve context visibility for facts processed
+  earlier in the same batch.
 - Batched work must be atomic at its chosen chunk boundary.
 - A later failure in a chunk must not leave earlier same-chunk projection or
   handler state half-committed.
@@ -78,8 +79,8 @@ load pending fact -> prepare projection effects -> commit projection effects
 ```
 
 The difference is that a chunk shares one SQLite write transaction. That removes
-per-fact transaction overhead while keeping projection order and read-your-writes
-behavior. Ephemeral projection stays on the old per-input path.
+per-fact transaction overhead while keeping projection order and same-batch
+context visibility. Ephemeral projection stays on the old per-input path.
 
 Tests should cover:
 
@@ -116,7 +117,7 @@ Tests should cover:
 
 - Mixed valid and invalid share intents roll back at the batch boundary.
 - Duplicate/idempotent share intents remain idempotent.
-- Command-excluded handlers are still excluded from synchronous command settle.
+- Commands still do not dispatch handlers while committing authored facts.
 - Live-tail network egress is not sent directly by the command path.
 
 ### 3. Batch Negentropy Path Updates
@@ -213,4 +214,4 @@ The goal is not just "generate is fast" but "normal fact creation is fast":
 - The code should still explain itself in pipeline terms: facts, projection,
   queued handler effects, and persisted sync contributions.
 - New batch APIs must have realistic tests for atomicity, idempotency, and
-  read-your-writes behavior.
+  same-batch context visibility.

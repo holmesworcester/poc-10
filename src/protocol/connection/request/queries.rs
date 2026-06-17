@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 
 use crate::core::facts::FactId;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 
 use crate::protocol::auth::endpoint::author::local_endpoint;
 use crate::protocol::auth::endpoint_shared::queries::all_memberships;
@@ -79,7 +79,7 @@ pub fn bootstrap_connection_attempt_rows(
     store: &Store,
 ) -> Result<Vec<BootstrapConnectionAttemptRow>, String> {
     store
-        .table_rows(BOOTSTRAP_CONNECTION_ATTEMPT_ROWS)
+        .table_rows_page(BOOTSTRAP_CONNECTION_ATTEMPT_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read bootstrap connection attempt rows: {err}"))?
         .into_iter()
         .map(|(key, value)| decode_bootstrap_connection_attempt_row(&key, &value))
@@ -149,7 +149,7 @@ pub fn pending_connection_requests(store: &Store) -> Result<Vec<PendingConnectio
     let answered = answered_request_ids(store)?;
     let mut pending = Vec::new();
     for (key, value) in store
-        .table_rows(CONNECTION_REQUEST_ROWS)
+        .table_rows_page(CONNECTION_REQUEST_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read membership connection request rows: {err}"))?
     {
         let row = decode_connection_request_row(&key, &value)?;

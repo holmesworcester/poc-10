@@ -39,7 +39,8 @@ fn cli_disappearing_set_advances_floor_automatically() {
     let alice = temp_db(&tmp, "alice.db");
 
     let workspace_id = create_workspace_with_ttl(&alice, "AutoFloor", "alice", "alice-laptop", 5);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&alice, free_port());
+    create_local_content_key(&alice, &workspace_id);
 
     // First set at minute 100, TTL=5: auto floor = max(0, 100 - 5) = 95.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
@@ -54,6 +55,7 @@ fn cli_disappearing_set_advances_floor_automatically() {
     assert_eq!(line_value(&first, "previous_floor_minute"), "0");
     assert_eq!(line_value(&first, "new_floor_minute"), "95");
     assert_eq!(line_value(&first, "floor_delta_minutes"), "95");
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "95");
 
     // Advance the clock to minute 200. Re-issue the same TTL: auto floor
     // should be max(95, 200 - 5) = 195. Same TTL; the floor still advances.
@@ -83,7 +85,8 @@ fn cli_disappearing_set_explicit_floor_below_previous_is_rejected() {
     let alice = temp_db(&tmp, "alice.db");
 
     let workspace_id = create_workspace_with_ttl(&alice, "Mono", "alice", "alice-laptop", 5);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&alice, free_port());
+    create_local_content_key(&alice, &workspace_id);
 
     // Establish a previous floor = 95.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
@@ -95,6 +98,7 @@ fn cli_disappearing_set_explicit_floor_below_previous_is_rejected() {
         "5",
     ]));
     assert_eq!(line_value(&first, "new_floor_minute"), "95");
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "95");
 
     // Try to regress to floor=10. Must fail.
     let regress = topo(&[
@@ -141,7 +145,8 @@ fn cli_disappearing_status_round_trips_known_setup() {
     let alice = temp_db(&tmp, "alice.db");
 
     let workspace_id = create_workspace_with_ttl(&alice, "Status", "alice", "alice-laptop", 5);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&alice, free_port());
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin clock to minute 100.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
@@ -153,10 +158,12 @@ fn cli_disappearing_status_round_trips_known_setup() {
         "5",
     ]));
     let policy_fact_id = line_value(&set_out, "policy_fact_id");
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "95");
 
     // Author 2 messages so live_messages == 2.
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "hello"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "world"]));
+    wait_for_message_count(&alice, &workspace_id, 2);
 
     let status = assert_success(topo(&[
         "--db",
@@ -195,18 +202,15 @@ fn cli_disappearing_tighten_yes_deletes_pre_floor_messages() {
     // Use a generous initial TTL so the messages stay live until the
     // tighten call moves the floor under them.
     let workspace_id = create_workspace_with_ttl(&alice, "Tighten", "alice", "alice-laptop", 60);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin clock to minute 100. Author 2 messages stamped at minute 100
     // with TTL=60 (expires_at_minute = 160 — well past the test window).
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "stale-1"]));
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "stale-2"]));
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
-
-    // Spawn the daemon BEFORE the tighten so projection work runs inside
-    // the polling window.
-    let _daemon = spawn_daemon(&alice, alice_port);
+    wait_for_message_count(&alice, &workspace_id, 2);
 
     // Advance clock to minute 200. Tighten with TTL=5: target floor =
     // 200 - 5 = 195. Both authored messages are at minute 100 < 195, so
@@ -267,7 +271,8 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
     let alice = temp_db(&tmp, "alice.db");
     let workspace_id =
         create_workspace_with_ttl(&alice, "Retention Floor", "alice", "alice-laptop", 1000);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&alice, free_port());
+    create_local_content_key(&alice, &workspace_id);
 
     assert_success(topo(&["--db", &alice, "clock", "set", "3000000"]));
     assert_success(topo(&[
@@ -285,6 +290,8 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
         &workspace_id,
         "above floor",
     ]));
+    wait_for_messages_contains(&alice, &workspace_id, "alice: below floor");
+    wait_for_messages_contains(&alice, &workspace_id, "alice: above floor");
 
     let pre_messages = messages_text(&alice, &workspace_id);
     assert!(
@@ -307,6 +314,7 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
     ]));
     assert_eq!(line_value(&floor, "previous_floor_minute"), "0");
     assert_eq!(line_value(&floor, "new_floor_minute"), "100");
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "100");
 
     let status = assert_success(topo(&[
         "--db",
@@ -315,6 +323,7 @@ fn cli_retention_floor_deletes_below_floor_messages_and_retains_above_floor_rows
         &workspace_id,
     ]));
     assert_eq!(line_value(&status, "current_floor_minute"), "100");
+    wait_for_content_count(&alice, &workspace_id, "1");
 
     let post_messages = messages_text(&alice, &workspace_id);
     assert!(
@@ -342,7 +351,8 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
     let alice = temp_db(&tmp, "alice.db");
 
     let workspace_id = create_workspace_with_ttl(&alice, "Compact", "alice", "alice-laptop", 30);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _daemon = spawn_daemon(&alice, free_port());
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin clock to minute 100. Set TTL=30 with the default auto floor
     // (= 100 - 30 = 70).
@@ -354,6 +364,7 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
         &workspace_id,
         "30",
     ]));
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "70");
     let pre = assert_success(topo(&[
         "--db",
         &alice,
@@ -365,7 +376,7 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
 
     // Author a live message stamped under TTL=30 (expires at minute 130).
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "live"]));
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 1);
+    wait_for_message_count(&alice, &workspace_id, 1);
 
     // Advance clock to minute 200 (still past the message's expiry, but
     // the test author didn't run the daemon so no expiry happens — the
@@ -382,6 +393,7 @@ fn cli_disappearing_compact_advances_floor_without_changing_ttl() {
     assert_eq!(line_value(&compact, "previous_floor_minute"), "70");
     assert_eq!(line_value(&compact, "new_floor_minute"), "170");
     assert_eq!(line_value(&compact, "floor_delta_minutes"), "100");
+    wait_for_disappearing_value(&alice, &workspace_id, "current_floor_minute", "170");
 
     // Active policy reflects the new floor; TTL is unchanged.
     let post = assert_success(topo(&[
@@ -411,14 +423,14 @@ fn cli_sync_status_reports_root_after_expiry() {
 
     let workspace_id = create_workspace_with_ttl(&alice, "Drain", "alice", "alice-laptop", 1);
     let daemon = spawn_daemon(&alice, alice_port);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin clock to minute 100; author 3 messages.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["a", "b", "c"] {
         assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
     }
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
+    wait_for_message_count(&alice, &workspace_id, 3);
     wait_for_sync_root_count_at_least(&alice, 3);
 
     // Capture the pre-expiry root fingerprint via `sync-status`.
@@ -476,12 +488,70 @@ fn create_workspace_with_ttl(
         "--ttl-minutes",
         &ttl,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    wait_for_disappearing_value(
+        db,
+        &workspace_id,
+        "current_ttl_minutes",
+        &ttl_minutes.to_string(),
+    );
+    workspace_id
 }
 
-fn message_lines(db: &str, workspace_id: &str) -> Vec<String> {
-    let out = assert_success(topo(&["--db", db, "messages", workspace_id]));
-    out.lines()
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
+}
+
+fn messages_text(db: &str, workspace_id: &str) -> String {
+    assert_success(topo(&["--db", db, "messages", workspace_id]))
+}
+
+fn wait_for_message_count(db: &str, workspace_id: &str, expected: usize) -> Vec<String> {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "messages", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            let lines = message_lines_from_output(&text);
+            if lines.len() == expected {
+                return lines;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("message count did not reach {expected}:\n{last}");
+}
+
+fn wait_for_messages_contains(db: &str, workspace_id: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "messages", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if text.contains(expected) {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("messages never contained {expected}:\n{last}");
+}
+
+fn message_lines_from_output(output: &str) -> Vec<String> {
+    output
+        .lines()
         .filter(|line| {
             let trimmed = line.trim_start();
             trimmed
@@ -495,8 +565,76 @@ fn message_lines(db: &str, workspace_id: &str) -> Vec<String> {
         .collect()
 }
 
-fn messages_text(db: &str, workspace_id: &str) -> String {
-    assert_success(topo(&["--db", db, "messages", workspace_id]))
+fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let users = topo(&["--db", db, "users", workspace_id]);
+        if users.status.success() {
+            let users = stdout(&users);
+            if users.contains(username) {
+                return;
+            }
+            last = users;
+        } else {
+            last = stderr(&users);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("user {username} never appeared in {db}: {last}");
+}
+
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let identity = topo(&["--db", db, "identity"]);
+        if identity.status.success() {
+            let identity = stdout(&identity);
+            if identity.contains(expected) {
+                return;
+            }
+            last = identity;
+        } else {
+            last = stderr(&identity);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
+}
+
+fn wait_for_disappearing_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "disappearing-status", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, key) == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("disappearing-status {key} did not reach {expected}:\n{last}");
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let text = stdout(&output);
+            if line_value(&text, key) == expected {
+                return;
+            }
+            last = text;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}:\n{last}");
 }
 
 fn wait_for_leaf_count(db: &str, workspace_id: &str, expected: &str) {

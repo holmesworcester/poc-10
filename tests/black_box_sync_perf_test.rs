@@ -260,7 +260,27 @@ fn poll_for_workspace_member(db: &str, workspace_id: &str, username: &str, timeo
 
 fn create_local_content_key(db: &str, workspace_id: &str) -> String {
     let frontier = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
     line_value(&frontier, "removal_frontier_id")
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} never reached {expected}: {last}");
 }
 
 fn generate(db: &str, workspace: &str, count: usize, size: usize) -> String {

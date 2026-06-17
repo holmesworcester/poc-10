@@ -8,7 +8,7 @@ use crate::core::crypto::Ed25519PublicKey;
 use crate::core::facts::FactId;
 use crate::core::row_schema::RowValue;
 use crate::core::runtime::Runtime;
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth;
 use crate::protocol::auth::endpoint_shared;
 use crate::protocol::connection;
@@ -36,7 +36,7 @@ pub struct WorkspaceSummary {
 pub fn list_workspaces(store: &Store) -> Result<Vec<WorkspaceSummary>, String> {
     let mut workspaces = Vec::new();
     for (key, value) in store
-        .table_rows(super::WORKSPACE_ROWS)
+        .table_rows_page(super::WORKSPACE_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read workspace rows: {err}"))?
     {
         let row = decode_workspace_row(&key, &value)?;
@@ -51,10 +51,17 @@ pub fn list_workspaces(store: &Store) -> Result<Vec<WorkspaceSummary>, String> {
 }
 
 pub fn workspace_by_id(store: &Store, workspace_id: FactId) -> Result<WorkspaceSummary, String> {
-    list_workspaces(store)?
-        .into_iter()
-        .find(|workspace| workspace.workspace_id == workspace_id)
-        .ok_or_else(|| format!("workspace row not found for {}", hex_id(&workspace_id)))
+    let value = store
+        .table_row(super::WORKSPACE_ROWS, &workspace_id)
+        .map_err(|err| format!("read workspace row: {err}"))?
+        .ok_or_else(|| format!("workspace row not found for {}", hex_id(&workspace_id)))?;
+    let row = decode_workspace_row(&workspace_id, &value)?;
+    Ok(WorkspaceSummary {
+        workspace_id: row.workspace_id,
+        created_at_ms: row.created_at_ms,
+        public_key: row.public_key,
+        name: row.name,
+    })
 }
 
 pub fn count_workspaces(store: &Store) -> Result<usize, String> {
@@ -90,24 +97,21 @@ pub fn local_memberships(store: &Store) -> Result<Vec<LocalWorkspaceMembership>,
     let Some(local_endpoint) = local_endpoint_id(store)? else {
         return Ok(Vec::new());
     };
-    let mut rows = store
-        .table_rows(endpoint_shared::ENDPOINT_SHARED_ROWS)
-        .map_err(|err| format!("load endpoint memberships: {err}"))?
-        .into_iter()
-        .map(|(key, value)| endpoint_shared::queries::decode_endpoint_shared_row(&key, &value))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|row| row.endpoint_id == local_endpoint)
-        .filter_map(|row| match workspace_name(store, row.workspace_id) {
-            Ok(Some(name)) => Some(Ok(LocalWorkspaceMembership {
-                workspace_id: row.workspace_id,
-                workspace_name: name,
-                endpoint_shared: row,
-            })),
-            Ok(None) => None,
-            Err(err) => Some(Err(err)),
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let mut rows = Vec::new();
+    for workspace in list_workspaces(store)? {
+        let Some(endpoint_shared) =
+            endpoint_shared::queries::peers_in_workspace(store, workspace.workspace_id)?
+                .into_iter()
+                .find(|row| row.endpoint_id == local_endpoint)
+        else {
+            continue;
+        };
+        rows.push(LocalWorkspaceMembership {
+            workspace_id: workspace.workspace_id,
+            workspace_name: workspace.name,
+            endpoint_shared,
+        });
+    }
     rows.sort_by(|left, right| {
         left.workspace_name
             .cmp(&right.workspace_name)
@@ -120,10 +124,14 @@ pub fn local_membership(
     store: &Store,
     workspace_id: FactId,
 ) -> Result<Option<EndpointSharedRow>, String> {
-    Ok(local_memberships(store)?
-        .into_iter()
-        .find(|membership| membership.workspace_id == workspace_id)
-        .map(|membership| membership.endpoint_shared))
+    let Some(local_endpoint) = local_endpoint_id(store)? else {
+        return Ok(None);
+    };
+    Ok(
+        endpoint_shared::queries::peers_in_workspace(store, workspace_id)?
+            .into_iter()
+            .find(|membership| membership.endpoint_id == local_endpoint),
+    )
 }
 
 fn local_endpoint_id(store: &Store) -> Result<Option<FactId>, String> {
@@ -139,14 +147,6 @@ fn local_endpoint_id(store: &Store) -> Result<Option<FactId>, String> {
                 .try_into()
                 .map_err(|_| "local endpoint row must be 32 bytes".to_string())
         })
-        .transpose()
-}
-
-fn workspace_name(store: &Store, workspace_id: FactId) -> Result<Option<String>, String> {
-    store
-        .table_row(super::WORKSPACE_ROWS, &workspace_id)
-        .map_err(|err| format!("load workspace row: {err}"))?
-        .map(|value| decode_workspace_row(&workspace_id, &value).map(|row| row.name))
         .transpose()
 }
 
@@ -174,25 +174,22 @@ pub fn runtime_count_report(runtime: &Runtime) -> Result<RuntimeCountReport, Str
         .store()
         .table_row_count(super::WORKSPACE_ROWS)
         .map_err(|err| format!("count workspace rows: {err}"))?;
-    let facts = runtime.facts().count();
+    let facts = runtime.fact_count();
     let sync_facts = shared_fact::sync_status(runtime.store())?.indexed_facts;
     let applied_facts = facts.saturating_sub(runtime.pending_fact_count());
     let pending_intents = runtime.pending_intent_count();
     let connections = runtime
         .store()
-        .table_rows(connection::connection::CONNECTION_ROWS)
-        .map_err(|err| format!("count connections: {err}"))?
-        .len();
+        .table_row_count(connection::connection::CONNECTION_ROWS)
+        .map_err(|err| format!("count connections: {err}"))?;
     let connection_requests = runtime
         .store()
-        .table_rows(connection::request::CONNECTION_REQUEST_ROWS)
-        .map_err(|err| format!("count connection requests: {err}"))?
-        .len();
+        .table_row_count(connection::request::CONNECTION_REQUEST_ROWS)
+        .map_err(|err| format!("count connection requests: {err}"))?;
     let invite_accepted = runtime
         .store()
-        .table_rows(auth::invite_accepted::INVITE_ACCEPTED_ROWS)
-        .map_err(|err| format!("count invite accepted: {err}"))?
-        .len();
+        .table_row_count(auth::invite_accepted::INVITE_ACCEPTED_ROWS)
+        .map_err(|err| format!("count invite accepted: {err}"))?;
     Ok(RuntimeCountReport {
         workspace_rows,
         facts,

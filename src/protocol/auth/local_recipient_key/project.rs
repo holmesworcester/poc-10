@@ -193,13 +193,14 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
+use crate::core::intents::{RowMutation, TableDeleteWhere, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::protocol::auth::key_wrap::project::{matched_payload_fact, require_local_scope};
 use crate::protocol::auth::recipient_key;
 
-use super::fact::LocalRecipientKeyFact;
+use super::{fact::LocalRecipientKeyFact, LOCAL_RECIPIENT_KEY_ROWS};
 
 /// Projector route metadata for the local_recipient_key fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -279,14 +280,41 @@ fn local_recipient_key(
         .need(superseded_need);
     // 3. Materialize: offer local-recipient context or self-purge.
     if is_superseded {
-        return Ok(output.purge_self(fact.id));
+        return Ok(output
+            .row_mutation(RowMutation::DeleteWhere(TableDeleteWhere {
+                table: LOCAL_RECIPIENT_KEY_ROWS,
+                columns: &["workspace_id", "recipient_key_id"],
+                values: vec![
+                    Value::Bytes(local.workspace_id.to_vec()),
+                    Value::Bytes(local.recipient_key_id.to_vec()),
+                ],
+            }))
+            .purge_self(fact.id));
     }
 
-    Ok(output.offer(ContextOffer::range(
-        fact.id,
-        "local_recipient_key",
-        scope,
-        local.recipient_key_id,
-        local.recipient_key_id,
-    )))
+    Ok(output
+        .row_mutation(RowMutation::InsertValues(TableInsert {
+            table: LOCAL_RECIPIENT_KEY_ROWS,
+            columns: &[
+                "workspace_id",
+                "recipient_key_id",
+                "fact_timestamp",
+                "recipient_key",
+                "recipient_secret",
+            ],
+            values: vec![
+                Value::Bytes(local.workspace_id.to_vec()),
+                Value::Bytes(local.recipient_key_id.to_vec()),
+                Value::U64(fact.timestamp),
+                Value::Bytes(local.recipient_key.to_vec()),
+                Value::Bytes(local.recipient_secret.to_vec()),
+            ],
+        }))
+        .offer(ContextOffer::range(
+            fact.id,
+            "local_recipient_key",
+            scope,
+            local.recipient_key_id,
+            local.recipient_key_id,
+        )))
 }

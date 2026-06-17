@@ -40,7 +40,9 @@ use crate::core::schema::{
 };
 use crate::core::wire::Writer;
 use rusqlite::{
-    params, params_from_iter, types::ValueRef, Connection as SqliteConnection, OptionalExtension,
+    params, params_from_iter,
+    types::{Value as SqliteValue, ValueRef},
+    Connection as SqliteConnection, OptionalExtension,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -163,6 +165,124 @@ pub struct TableRow {
     pub key: Vec<u8>,
     /// Opaque row value.
     pub value: Vec<u8>,
+}
+
+/// SQLite value carried by typed-table row mutations and internal SQL helpers.
+///
+/// Protocol row builders choose these values from their fact layout and table
+/// schema. Conversion into SQLite bind parameters is mechanical; store does
+/// not interpret what a column or parameter means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Bytes(Vec<u8>),
+    U64(u64),
+    Bool(bool),
+}
+
+impl Value {
+    pub(crate) fn as_sqlite_value(&self) -> rusqlite::Result<SqliteValue> {
+        match self {
+            Self::Bytes(value) => Ok(SqliteValue::Blob(value.clone())),
+            Self::U64(value) => i64::try_from(*value)
+                .map(SqliteValue::Integer)
+                .map_err(|_| {
+                    rusqlite::Error::InvalidParameterName(
+                        "SQL value exceeds SQLite integer range".to_string(),
+                    )
+                }),
+            Self::Bool(value) => Ok(SqliteValue::Integer(i64::from(*value))),
+        }
+    }
+}
+
+/// Delete one opaque row by key from a row table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDelete {
+    /// Table to delete from.
+    pub table: TableName,
+    /// Opaque row key to delete.
+    pub key: Vec<u8>,
+}
+
+/// Insert a typed-table row by column values.
+///
+/// This is for schema-declared tables whose key is not the generic
+/// `row_key/row_value` shape. The insert is idempotent only when an existing
+/// row has exactly the same column values. To change typed projection state,
+/// emit a matching `DeleteWhere` before the replacement insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableInsert {
+    /// Typed table to insert into.
+    pub table: TableName,
+    /// Columns supplied by this insert.
+    pub columns: &'static [&'static str],
+    /// Values corresponding to `columns`.
+    pub values: Vec<Value>,
+}
+
+/// Delete typed-table rows matching all supplied columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDeleteWhere {
+    /// Typed table to delete from.
+    pub table: TableName,
+    /// Predicate columns.
+    pub columns: &'static [&'static str],
+    /// Predicate values corresponding to `columns`.
+    pub values: Vec<Value>,
+}
+
+/// Protocol-owned typed table declaration.
+///
+/// This is the narrow schema surface shared by projection code and the runtime
+/// commit path. Protocol registry code owns the SQL DDL; row builders use this
+/// value to avoid re-declaring table names and column order beside every
+/// materialized read model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedTableSchema {
+    /// Typed table name.
+    pub table: TableName,
+    /// Full insert column order for this table's materialized row.
+    pub columns: &'static [&'static str],
+    /// Logical key columns used for delete/replacement mutations.
+    pub key_columns: &'static [&'static str],
+}
+
+impl TypedTableSchema {
+    /// Build an insert mutation using this schema's declared column order.
+    pub fn insert(self, values: Vec<Value>) -> TableInsert {
+        TableInsert {
+            table: self.table,
+            columns: self.columns,
+            values,
+        }
+    }
+
+    /// Build a delete mutation against this schema's logical key columns.
+    pub fn delete_by_key(self, values: Vec<Value>) -> TableDeleteWhere {
+        TableDeleteWhere {
+            table: self.table,
+            columns: self.key_columns,
+            values,
+        }
+    }
+}
+
+/// Row-level mutations a command, projector, or handler can request.
+///
+/// Core validates the target table against the runtime description before any
+/// mutation commits. The module that constructs the mutation owns the row
+/// layout and semantic meaning.
+///
+/// `PutRow` is an idempotent insert into an opaque key/value row table, not an
+/// upsert. Re-emitting the same key with different bytes is a conflict. Use
+/// typed-table mutations when projection needs explicit delete-then-insert
+/// state changes for the same logical row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowMutation {
+    PutRow(TableRow),
+    DeleteRow(TableDelete),
+    InsertValues(TableInsert),
+    DeleteWhere(TableDeleteWhere),
 }
 
 /// One raw row in the durable or local intent work table.
@@ -313,6 +433,12 @@ pub struct TableSummary {
     /// Row count in the table.
     pub count: usize,
 }
+
+/// Temporary upper bound for read helpers that still return Vec-backed pages.
+///
+/// Query modules should shrink this surface into caller-supplied paging or
+/// narrower SQL predicates as their fact families migrate fully to SQL.
+pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
 
 impl Store {
     /// Expose the underlying SQLite connection to core modules that own their
@@ -484,6 +610,21 @@ impl Store {
         quoted_table_name(table)
     }
 
+    /// Count retained fact byte rows.
+    pub fn fact_count(&self) -> rusqlite::Result<usize> {
+        self.table_row_count(FACTS)
+    }
+
+    /// Load one retained fact by id.
+    pub fn fact(&self, id: &FactId) -> Result<Option<Fact>, String> {
+        persisted_fact(self, id)
+    }
+
+    /// Return whether a retained fact row exists.
+    pub fn fact_exists(&self, id: &FactId) -> rusqlite::Result<bool> {
+        self.row_exists_by_blob_column(FACTS, "id", id.as_slice())
+    }
+
     // Critical path: callers put every atomic row mutation
     // through this closure, then use the transaction-local row helpers below.
     /// Run a write transaction.
@@ -550,16 +691,7 @@ impl Store {
         Ok(inserted)
     }
 
-    /// Delete rows by key from one declared table.
-    pub fn delete_table_rows(
-        &self,
-        table: TableName,
-        keys: Vec<Vec<u8>>,
-    ) -> rusqlite::Result<usize> {
-        self.write_transaction(|store| store.delete_table_rows_in_tx(table, keys))
-    }
-
-    /// Transaction-local form of `delete_table_rows`.
+    /// Delete rows by key from one declared row table inside a transaction.
     pub fn delete_table_rows_in_tx(
         &self,
         table: TableName,
@@ -598,6 +730,34 @@ impl Store {
                 row.get::<_, i64>(0)
             })
             .map(|count| count as usize)
+    }
+
+    /// Count rows from a declared typed table by one blob column.
+    pub(crate) fn count_rows_by_blob_column(
+        &self,
+        table: TableName,
+        column: &str,
+        value: &[u8],
+    ) -> rusqlite::Result<usize> {
+        let table = quoted_table_name(table)?;
+        let column = quoted_identifier(column)?;
+        self.conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                params![value],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count as usize)
+    }
+
+    /// Return whether a declared typed table has at least one matching blob row.
+    pub(crate) fn row_exists_by_blob_column(
+        &self,
+        table: TableName,
+        column: &str,
+        value: &[u8],
+    ) -> rusqlite::Result<bool> {
+        Ok(self.count_rows_by_blob_column(table, column, value)? > 0)
     }
 
     /// Delete rows from a declared typed table by its `owner` blob column.
@@ -824,16 +984,13 @@ impl Store {
             .map_err(|err| format!("read columns: {err}"))
     }
 
-    /// Scan one declared table in key order.
-    pub fn table_rows(&self, table: TableName) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let table_name = self.quoted_row_table_name(table)?;
-        self.query_key_value_rows(
-            &format!(
-                "SELECT row_key, row_value FROM {table_name}
-                    ORDER BY row_key"
-            ),
-            [],
-        )
+    /// Read a bounded page from one declared row table in key order.
+    pub fn table_rows_page(
+        &self,
+        table: TableName,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.table_rows_with_key_prefix(table, &[], limit)
     }
 
     /// Scan one declared table by lexicographic key prefix.
@@ -884,6 +1041,128 @@ impl Store {
         })?;
         rows.collect()
     }
+
+    /// Apply validated row mutations inside the caller's transaction.
+    ///
+    /// Projection and dispatch own the larger commit order. Store owns the SQL
+    /// mechanics for opaque row tables and typed table inserts/deletes.
+    pub(crate) fn apply_row_mutations_in_tx(
+        &self,
+        mutations: &[RowMutation],
+    ) -> rusqlite::Result<()> {
+        let mut rows = Vec::new();
+        let mut row_deletes = Vec::new();
+        for mutation in mutations {
+            match mutation {
+                RowMutation::PutRow(row) => rows.push(row.clone()),
+                RowMutation::DeleteRow(delete) => row_deletes.push(delete.clone()),
+                RowMutation::InsertValues(_) | RowMutation::DeleteWhere(_) => {}
+            }
+        }
+        self.insert_table_rows_in_tx(rows)?;
+        for delete in row_deletes {
+            self.delete_table_rows_in_tx(delete.table, vec![delete.key])?;
+        }
+        for mutation in mutations {
+            match mutation {
+                RowMutation::InsertValues(insert) => {
+                    self.insert_values_in_tx(insert)?;
+                }
+                RowMutation::DeleteWhere(delete) => {
+                    self.delete_where_in_tx(delete)?;
+                }
+                RowMutation::PutRow(_) | RowMutation::DeleteRow(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert a typed-table row idempotently in the caller's transaction.
+    pub(crate) fn insert_values_in_tx(&self, insert: &TableInsert) -> rusqlite::Result<usize> {
+        validate_columns_and_values(insert.columns, &insert.values, "insert")?;
+        let table = quoted_table_name(insert.table)?;
+        let columns = quoted_identifier_list(insert.columns)?;
+        let placeholders = placeholders(insert.values.len());
+        let values = sqlite_values(&insert.values)?;
+        let changed = self.conn.execute(
+            &format!("INSERT OR IGNORE INTO {table} ({columns}) VALUES ({placeholders})"),
+            params_from_iter(values.iter()),
+        )?;
+        if changed == 0 && !self.insert_values_match(insert, &values)? {
+            return Err(store_error(format!(
+                "conflicting row for {}",
+                insert.table.as_str()
+            )));
+        }
+        Ok(changed)
+    }
+
+    /// Delete typed-table rows by an exact column predicate in the caller's transaction.
+    pub(crate) fn delete_where_in_tx(&self, delete: &TableDeleteWhere) -> rusqlite::Result<usize> {
+        validate_columns_and_values(delete.columns, &delete.values, "delete")?;
+        let table = quoted_table_name(delete.table)?;
+        let predicate = where_clause(delete.columns)?;
+        let values = sqlite_values(&delete.values)?;
+        self.conn.execute(
+            &format!("DELETE FROM {table} WHERE {predicate}"),
+            params_from_iter(values.iter()),
+        )
+    }
+
+    fn insert_values_match(
+        &self,
+        insert: &TableInsert,
+        values: &[SqliteValue],
+    ) -> rusqlite::Result<bool> {
+        let table = quoted_table_name(insert.table)?;
+        let predicate = where_clause(insert.columns)?;
+        self.conn
+            .query_row(
+                &format!("SELECT 1 FROM {table} WHERE {predicate} LIMIT 1"),
+                params_from_iter(values.iter()),
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+    }
+}
+
+fn validate_columns_and_values(
+    columns: &[&str],
+    values: &[Value],
+    label: &str,
+) -> rusqlite::Result<()> {
+    if columns.is_empty() {
+        return Err(store_error(format!(
+            "{label} mutation requires at least one column"
+        )));
+    }
+    if columns.len() != values.len() {
+        return Err(store_error(format!(
+            "{label} mutation column/value count mismatch"
+        )));
+    }
+    Ok(())
+}
+
+fn sqlite_values(values: &[Value]) -> rusqlite::Result<Vec<SqliteValue>> {
+    values.iter().map(Value::as_sqlite_value).collect()
+}
+
+fn where_clause(columns: &[&str]) -> rusqlite::Result<String> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| Ok(format!("{} = ?{}", quoted_identifier(column)?, index + 1)))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map(|columns| columns.join(" AND "))
+}
+
+fn placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // === Fact storage primitives ===
@@ -953,29 +1232,6 @@ impl FactReadSource {
                  WHERE id = ?1
                  LIMIT 1"
             }
-        }
-    }
-
-    fn scan_sql(self) -> &'static str {
-        match self {
-            Self::Retained => {
-                "SELECT f.id, m.scope, m.scope_kind, m.scope_id, m.received_at, f.bytes
-                 FROM facts f
-                 JOIN local_fact_admissions m ON m.fact_id = f.id
-                 ORDER BY f.id"
-            }
-            Self::Incoming => {
-                "SELECT id, scope, scope_kind, scope_id, received_at, bytes
-                 FROM incoming_facts
-                 ORDER BY received_at, id"
-            }
-        }
-    }
-
-    fn scan_error(self) -> &'static str {
-        match self {
-            Self::Retained => "load fact rows",
-            Self::Incoming => "load incoming facts",
         }
     }
 }
@@ -1191,11 +1447,6 @@ pub fn persisted_fact(store: &Store, id: &FactId) -> Result<Option<Fact>, String
     fact_by_id_in_tx(store, id).map_err(|err| format!("load fact row: {err}"))
 }
 
-/// Load every stored fact.
-pub fn persisted_facts(store: &Store) -> Result<Vec<Fact>, String> {
-    facts_from(store, FactReadSource::Retained)
-}
-
 pub(crate) fn incoming_pending_fact_ids(
     store: &Store,
     limit: usize,
@@ -1217,19 +1468,6 @@ pub(crate) fn incoming_pending_fact_ids(
 
 pub(crate) fn incoming_fact_by_id(store: &Store, id: &FactId) -> Result<Option<Fact>, String> {
     incoming_fact_by_id_in_tx(store, id).map_err(|err| format!("load incoming fact: {err}"))
-}
-
-fn facts_from(store: &Store, source: FactReadSource) -> Result<Vec<Fact>, String> {
-    let label = source.scan_error();
-    let mut stmt = store
-        .conn()
-        .prepare(source.scan_sql())
-        .map_err(|err| format!("{label}: {err}"))?;
-    let rows = stmt
-        .query_map([], fact_from_sql_row)
-        .map_err(|err| format!("{label}: {err}"))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("{label}: {err}"))
 }
 
 fn incoming_ready_sql(select: &str, suffix: &str) -> Result<String, String> {
@@ -1618,8 +1856,8 @@ CREATE TABLE IF NOT EXISTS "test.typed_events" (
         );
 
         let rows = store
-            .table_rows_with_key_prefix(MEMORY_ROWS, &[0xff], usize::MAX)
-            .expect("scan unbounded all-ff prefix");
+            .table_rows_with_key_prefix(MEMORY_ROWS, &[0xff], DEFAULT_QUERY_LIMIT)
+            .expect("scan bounded all-ff prefix");
         assert_eq!(
             rows,
             vec![

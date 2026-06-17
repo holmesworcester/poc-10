@@ -3,7 +3,7 @@
 //! Commands receive stable context and compose deterministic constructors. They
 //! do not project, write rows, or call intent handlers.
 
-use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::crypto::{self, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId};
 use crate::core::project_fact::ProjectionContext;
@@ -18,6 +18,8 @@ use crate::protocol::content::retention_policy::fact::SCOPE_KIND_WORKSPACE;
 pub struct CreateWorkspaceReceipt {
     pub workspace_fact_id: FactId,
     pub created_at_ms: u64,
+    pub name: String,
+    pub user_id: Option<FactId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +33,7 @@ pub fn create_workspace(
     clock: &dyn CommandClock,
     public_key: Ed25519PublicKey,
     name: &str,
-) -> Result<CommandOutput<CreateWorkspaceReceipt>, String> {
+) -> Result<AuthoredFacts<CreateWorkspaceReceipt>, String> {
     let _ = (clock, public_key, name);
     Err(
         "create_workspace now requires a local signing key; use the bootstrap identity form"
@@ -44,9 +46,9 @@ pub fn create_workspace_with_identity(
     clock: &dyn CommandClock,
     name: &str,
     identity: BootstrapIdentity<'_>,
-) -> Result<CommandOutput<CreateWorkspaceReceipt>, String> {
+) -> Result<AuthoredFacts<CreateWorkspaceReceipt>, String> {
     let created_at_ms = clock.next_timestamp();
-    let endpoint_output = auth::endpoint::commands::local_or_create(store, created_at_ms + 4)?;
+    let endpoint_output = auth::endpoint::api::local_or_create(store, created_at_ms + 4)?;
     let endpoint = endpoint_output.receipt.endpoint;
     let user_public = endpoint.signing_public_key;
     let workspace_private_key = crypto::random_ed25519_private_key();
@@ -66,19 +68,18 @@ pub fn create_workspace_with_identity(
         user_public,
         workspace_private_key,
     )?;
-    let accepted =
-        auth::invite_accepted::commands::accept(auth::invite_accepted::commands::AcceptInvite {
-            created_at_ms: created_at_ms + 2,
-            accepted_endpoint_id: endpoint.endpoint,
-            bootstrap_secret: endpoint.signing_secret,
-            bootstrap_endpoint_id: endpoint.endpoint,
-            bootstrap_addr: "127.0.0.1:0".parse().expect("static bootstrap addr parses"),
-            workspace_id,
-            invite_fact_id: user_invite.fact.id,
-            user_authority_fact_id: None,
-            endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
-            identity_scope: true,
-        })?;
+    let accepted = auth::invite_accepted::api::accept(auth::invite_accepted::api::AcceptInvite {
+        created_at_ms: created_at_ms + 2,
+        accepted_endpoint_id: endpoint.endpoint,
+        bootstrap_secret: endpoint.signing_secret,
+        bootstrap_endpoint_id: endpoint.endpoint,
+        bootstrap_addr: "127.0.0.1:0".parse().expect("static bootstrap addr parses"),
+        workspace_id,
+        invite_fact_id: user_invite.fact.id,
+        user_authority_fact_id: None,
+        endpoint_role: auth::endpoint_shared::fact::EndpointRole::Device,
+        identity_scope: true,
+    })?;
     let user = user_fact(
         created_at_ms + 4,
         workspace_id,
@@ -134,9 +135,11 @@ pub fn create_workspace_with_identity(
         );
     }
     facts.extend(endpoint_output.facts);
-    Ok(CommandOutput::new(CreateWorkspaceReceipt {
+    Ok(AuthoredFacts::new(CreateWorkspaceReceipt {
         workspace_fact_id: workspace_id,
         created_at_ms,
+        name: name.to_string(),
+        user_id: Some(user_id),
     })
     .with_facts(facts))
 }

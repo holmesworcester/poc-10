@@ -61,7 +61,7 @@ Sync receives content share/retract work through sync-owned
 its own proof. Sync does not decide whether a message, reaction, file, or
 deletion is valid. Connection is only a carrier for content fact bytes.
 Received connection frames produce ordinary content facts plus receipts; the
-content projector then runs the same validation path as local command output.
+content projector then runs the same validation path as locally authored facts.
 
 ## Cross-Scope Row Reads
 

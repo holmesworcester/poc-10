@@ -11,7 +11,7 @@ use crate::core::facts::FactId;
 use crate::core::store::Store;
 use crate::protocol::content::file::queries::{self, ContentFileRow};
 
-use super::commands::DeleteFileReceipt;
+use super::api::DeleteFileReceipt;
 
 pub const DELETE_FILE_USAGE: &str = "delete-file WORKSPACE_ID_HEX FILE_SELECTOR";
 

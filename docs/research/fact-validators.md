@@ -40,7 +40,7 @@ The role boundaries remain useful even without core-owned stages:
   wakes, emitted facts, intents, deletion, retention, and purge.
 - `author.rs` owns local construction: assembly, signing, encryption,
   deterministic nonce use, and calls to `encode.rs`.
-- `commands.rs` owns command snapshots and receipts. It queries pre-command
+- `api.rs` owns command snapshots and receipts. It queries pre-command
   state through protocol-owned query helpers, reads the injected command clock,
   calls `author.rs`, and lets runtime submission route the authored bytes
   through protocol-local checks before storage.
@@ -134,7 +134,7 @@ compatibility.
 Creation is the write-side twin of projection:
 
 ```text
-cli args -> command args -> command fn -> queries -> author -> encode -> protocol self-check -> AuthoredCommand -> submit
+cli args -> command args -> command fn -> queries -> author -> encode -> protocol self-check -> AuthoredFacts -> submit
 ```
 
 The command function is the authoring boundary: load the needed store/key

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn rust_files(root: &Path) -> Vec<PathBuf> {
@@ -110,6 +111,61 @@ fn source_code_matches_in_paths(root: &Path, paths: Vec<PathBuf>, needles: &[&st
     matches.sort();
     matches.dedup();
     matches
+}
+
+fn broad_read_counts(root: &Path) -> Vec<String> {
+    let mut paths = rust_files(&root.join("src"));
+    paths.extend(rust_files(&root.join("tests")));
+    let mut counts = BTreeMap::<String, usize>::new();
+    for path in paths {
+        let relative = path.strip_prefix(root).unwrap().display().to_string();
+        if matches!(
+            relative.as_str(),
+            "tests/poc10_architecture_boundary_test.rs" | "tests/poc10_cutover_todo_test.rs"
+        ) {
+            continue;
+        }
+        let text = source_text(&path);
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            for needle in [
+                "persisted_facts(",
+                "runtime.facts()",
+                ".fact_page(",
+                ".table_rows(",
+                "pub fn fact_page(&self",
+                "pub fn table_rows(&self",
+                "pub fn facts(&self) -> impl Iterator<Item = Fact>",
+            ] {
+                let count = code.matches(needle).count();
+                if count > 0 {
+                    *counts.entry(format!("{relative}::{needle}")).or_default() += count;
+                }
+            }
+        }
+        let needle = ".table_rows_with_key_prefix(";
+        let mut offset = 0usize;
+        while let Some(found) = text[offset..].find(needle) {
+            let start = offset + found;
+            let end = text.len().min(start + 260);
+            if text[start..end].contains("usize::MAX") {
+                *counts
+                    .entry(format!(
+                        "{relative}::table_rows_with_key_prefix(...usize::MAX)"
+                    ))
+                    .or_default() += 1;
+            }
+            offset = start + needle.len();
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(key, count)| format!("{key} = {count}"))
+        .collect()
 }
 
 const PROTOCOL_SCOPES: [&str; 4] = ["auth", "connection", "content", "sync"];
@@ -419,9 +475,9 @@ fn poc10_runtime_effects_names_the_common_commit_shape() {
 }
 
 #[test]
-fn poc10_command_output_is_authored_receipt_plus_facts_only() {
-    let topo::core::command::AuthoredCommand { receipt, facts } =
-        topo::core::command::AuthoredCommand::new(());
+fn poc10_authored_facts_is_receipt_plus_facts_only() {
+    let topo::core::command::AuthoredFacts { receipt, facts } =
+        topo::core::command::AuthoredFacts::new(());
 
     assert_eq!(receipt, ());
     assert!(facts.is_empty());
@@ -430,14 +486,13 @@ fn poc10_command_output_is_authored_receipt_plus_facts_only() {
     let command = root.join("src/core/command.rs");
     let source = source_text(&command);
     for required in [
-        "pub struct AuthoredCommand<T>",
+        "pub struct AuthoredFacts<T>",
         "pub receipt: T",
         "pub facts: Vec<Fact>",
-        "pub type CommandOutput<T> = AuthoredCommand<T>",
     ] {
         assert!(
             source.contains(required),
-            "command output contract is missing {required:?}"
+            "authored facts contract is missing {required:?}"
         );
     }
 
@@ -461,16 +516,16 @@ fn poc10_command_output_is_authored_receipt_plus_facts_only() {
 }
 
 #[test]
-fn poc10_protocol_commands_do_not_hide_runtime_work_or_read_models() {
+fn poc10_protocol_apis_do_not_hide_runtime_work_or_read_models() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let command_files = rust_files(&root.join("src/protocol"))
+    let api_files = rust_files(&root.join("src/protocol"))
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "commands.rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name == "api.rs"))
         .collect::<Vec<_>>();
 
     let runtime_offenders = source_code_matches_in_paths(
         root,
-        command_files.clone(),
+        api_files.clone(),
         &[
             "use crate::core::runtime::Runtime",
             "RuntimeEffects",
@@ -485,13 +540,13 @@ fn poc10_protocol_commands_do_not_hide_runtime_work_or_read_models() {
     );
     assert!(
         runtime_offenders.is_empty(),
-        "simple protocol commands must only query, author facts, and return receipts; runtime work belongs in Runtime, daemon, handlers, projectors, or explicit workflows:\n{}",
+            "simple protocol APIs must only query, author facts, and return receipts; runtime work belongs in Runtime, daemon, handlers, projectors, or explicit workflows:\n{}",
         runtime_offenders.join("\n")
     );
 
     let read_model_offenders = source_code_matches_in_paths(
         root,
-        command_files,
+        api_files,
         &[
             "pub struct KeyWrapQuery",
             "pub struct KeyAccessQuery",
@@ -511,6 +566,18 @@ fn poc10_protocol_commands_do_not_hide_runtime_work_or_read_models() {
         read_model_offenders.is_empty(),
         "command modules must not expose read-model lookup/status/count APIs; put those in the owning queries.rs:\n{}",
         read_model_offenders.join("\n")
+    );
+}
+
+#[test]
+fn poc10_sql_only_migration_does_not_add_broad_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let observed = broad_read_counts(root);
+
+    assert_eq!(
+        observed,
+        Vec::<String>::new(),
+        "broad fact/row scans must stay out of runtime and protocol code"
     );
 }
 
@@ -824,16 +891,16 @@ fn poc10_target_projectors_emit_only_needs_offers_self_purge_and_intents() {
 #[test]
 fn poc10_accept_commands_leave_bootstrap_effects_to_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let accept_commands = source_text(&root.join("src/protocol/auth/invite_secret/commands.rs"));
+    let accept_api = source_text(&root.join("src/protocol/auth/invite_secret/api.rs"));
     let request_projector = source_text(&root.join("src/protocol/connection/request/project.rs"));
     let maintenance = source_text(&root.join("src/protocol/connection/maintain_connections.rs"));
 
     assert!(
-        !accept_commands.contains("queue_outgoing_frame_intent"),
+        !accept_api.contains("queue_outgoing_frame_intent"),
         "accept/link commands should create acceptance facts, not enqueue bootstrap IO directly"
     );
     assert!(
-        !accept_commands.contains("create_bootstrap"),
+        !accept_api.contains("create_bootstrap"),
         "accept/link commands should not create bootstrap request facts directly"
     );
     assert!(

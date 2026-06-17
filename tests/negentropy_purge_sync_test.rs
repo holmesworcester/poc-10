@@ -32,14 +32,15 @@ fn cli_negentropy_settles_root_after_expiry() {
     let alice_port = free_port();
 
     let workspace_id = create_workspace_with_ttl(&alice, "DrainerSolo", "alice", "alice-laptop", 1);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let alice_daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin the clock and author three messages so the workspace has a
     // non-trivial pre-expiry `root_fingerprint`.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["hello-1", "hello-2", "hello-3"] {
         assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
     wait_for_runtime_idle(&alice);
@@ -101,7 +102,7 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -217,7 +218,7 @@ fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -293,8 +294,8 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     let alice_port = free_port();
 
     let workspace_id = create_workspace_with_ttl(&alice, "Batch", "alice", "alice-laptop", 1);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let _alice_daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
 
     // Author N=10 messages all at the same minute so a single TTL-1
     // expiry transition retires all of them together.
@@ -303,6 +304,7 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     for i in 0..N {
         let body = format!("batch-{i}");
         assert_success(topo(&["--db", &alice, "send", &workspace_id, &body]));
+        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), N);
     wait_for_runtime_idle(&alice);
@@ -342,14 +344,17 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
 fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
+    let alice_port = free_port();
 
     let workspace_id = create_workspace_with_ttl(&alice, "NoOp", "alice", "alice-laptop", 60);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
 
     // Pin clock well under the TTL=60 horizon so nothing expires.
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["alpha", "beta"] {
         assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
 
@@ -411,7 +416,7 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -495,20 +500,23 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
     let alice_port = free_port();
 
     let workspace_id = create_workspace_with_ttl(&alice, "Restart", "alice", "alice-laptop", 1);
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
 
     // Author 4 messages at minute 100. Spawn the daemon under the expiry
     // horizon so messages get admitted but no expiry fires.
+    let daemon = spawn_daemon(&alice, alice_port);
+    create_local_content_key(&alice, &workspace_id);
     assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["r-1", "r-2", "r-3", "r-4"] {
         assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
     }
-    assert_eq!(message_lines(&alice, &workspace_id).len(), 4);
 
     // Bring the daemon up briefly and then stop it. This exercises the
     // "daemon was running, we stopped it, will restart" case rather than
     // a never-started cold start.
-    let daemon = spawn_daemon(&alice, alice_port);
+    for body in ["r-1", "r-2", "r-3", "r-4"] {
+        wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
+    }
+    assert_eq!(message_lines(&alice, &workspace_id).len(), 4);
     wait_for_runtime_idle(&alice);
     let pre_restart = wait_for_sync_indexed_count_at_least(&alice, 4);
     let pre_fp = line_value(&pre_restart, "root_fingerprint");
@@ -588,7 +596,7 @@ fn cli_negentropy_two_peers_same_id_independent_triggers_converge() {
     let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
     let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
 
-    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = create_local_content_key(&alice, &workspace_id);
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
 
     let _ = key_wrap_with_retry(
@@ -685,7 +693,26 @@ fn create_workspace_with_ttl(
         "--ttl-minutes",
         &ttl,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username, &[("db", db)]);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    if ttl_minutes > 0 {
+        wait_for_disappearing_value(
+            db,
+            &workspace_id,
+            "current_ttl_minutes",
+            &ttl_minutes.to_string(),
+        );
+    }
+    workspace_id
+}
+
+fn create_local_content_key(db: &str, workspace_id: &str) -> String {
+    let out = assert_success(topo(&["--db", db, "key-frontier", workspace_id]));
+    wait_for_keys_value(db, workspace_id, "local_key_secrets", "1");
+    wait_for_keys_value(db, workspace_id, "removal_frontiers", "1");
+    out
 }
 
 fn keys_value(db: &str, workspace_id: &str) -> String {
@@ -801,6 +828,42 @@ fn wait_for_content_count(db: &str, workspace_id: &str, expected: &str) {
         stderr(&output),
         daemon_diagnostics_block(&[("db", db)])
     );
+}
+
+fn wait_for_disappearing_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "disappearing-status", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("disappearing-status {key} did not reach {expected}:\n{last}");
+}
+
+fn wait_for_keys_value(db: &str, workspace_id: &str, key: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, key) == expected {
+                return;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("keys {key} did not reach {expected}:\n{last}");
 }
 
 fn wait_for_root_fingerprint_to_change(db: &str, previous: &str) -> String {
@@ -1047,6 +1110,24 @@ fn wait_for_local_workspace_join(db: &str, workspace_id: &str, username: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("workspace join never projected for {username}: {last}");
+}
+
+fn wait_for_identity_contains(db: &str, expected: &str) {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let identity = topo(&["--db", db, "identity"]);
+        if identity.status.success() {
+            let identity = stdout(&identity);
+            if identity.contains(expected) {
+                return;
+            }
+            last = identity;
+        } else {
+            last = stderr(&identity);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("identity never contained {expected}: {last}");
 }
 
 fn wait_for_users_contains(db: &str, workspace_id: &str, username: &str, daemons: &[(&str, &str)]) {

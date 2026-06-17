@@ -4,12 +4,13 @@
 //! removal frontiers, history nodes, and key wraps. They read projected auth
 //! state, construct facts, and return receipts suitable for CLI output.
 
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
 use crate::core::facts::{Fact, FactId};
-use crate::core::store::{persisted_fact, persisted_facts, Store};
+use crate::core::store::{persisted_fact, Store};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
+use rusqlite::{params, OptionalExtension};
 
 use crate::protocol::auth::local_history_node_secret::project::decode as local_history_layout_decode;
 use crate::protocol::auth::local_key_secret::project::decode as local_key_secret_layout_decode;
@@ -67,13 +68,13 @@ pub struct CreateHistoryNodeReceipt {
 pub fn create_recipient_key(
     store: &Store,
     input: CreateRecipientKey,
-) -> Result<CommandOutput<CreateRecipientKeyReceipt>, String> {
+) -> Result<AuthoredFacts<CreateRecipientKeyReceipt>, String> {
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     if membership.endpoint_role != auth::endpoint_shared::fact::EndpointRole::Device {
         return Err("local endpoint role cannot receive key wraps".to_string());
     }
-    let signing = auth::endpoint::commands::local_signing_capability(store, input.workspace_id)?;
+    let signing = auth::endpoint::api::local_signing_capability(store, input.workspace_id)?;
     if signing.signer_id != membership.endpoint_id {
         return Err("local signing capability does not match workspace endpoint".to_string());
     }
@@ -103,7 +104,7 @@ pub fn create_recipient_key(
         recipient_secret,
         input.created_at_ms,
     )?;
-    Ok(CommandOutput::new(CreateRecipientKeyReceipt {
+    Ok(AuthoredFacts::new(CreateRecipientKeyReceipt {
         local_recipient_key_id: local_fact.id,
         recipient_key_id: recipient_fact.id,
         recipient_key,
@@ -114,7 +115,7 @@ pub fn create_recipient_key(
 pub fn create_key_frontier(
     store: &Store,
     input: CreateKeyFrontier,
-) -> Result<CommandOutput<CreateKeyFrontierReceipt>, String> {
+) -> Result<AuthoredFacts<CreateKeyFrontierReceipt>, String> {
     let endpoint = auth::endpoint::author::local_endpoint(store)?
         .ok_or_else(|| "local endpoint is not initialized".to_string())?;
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
@@ -147,7 +148,7 @@ pub fn create_key_frontier(
         endpoint.signing_secret,
         input.created_at_ms,
     )?;
-    Ok(CommandOutput::new(CreateKeyFrontierReceipt {
+    Ok(AuthoredFacts::new(CreateKeyFrontierReceipt {
         workspace_id: input.workspace_id,
         removal_frontier_id: frontier_fact.id,
         local_key_secret_id: local_secret_fact.id,
@@ -164,7 +165,7 @@ pub fn create_key_frontier(
 pub fn create_history_node(
     store: &Store,
     input: CreateHistoryNode,
-) -> Result<CommandOutput<CreateHistoryNodeReceipt>, String> {
+) -> Result<AuthoredFacts<CreateHistoryNodeReceipt>, String> {
     if history_source_is_tombstoned(store, input.source_secret_id)? {
         return Err("history node source fact is missing".to_string());
     }
@@ -199,7 +200,7 @@ pub fn create_history_node(
         node_secret,
         input.created_at_ms,
     )?;
-    Ok(CommandOutput::new(CreateHistoryNodeReceipt {
+    Ok(AuthoredFacts::new(CreateHistoryNodeReceipt {
         workspace_id: input.workspace_id,
         removal_frontier_id: input.removal_frontier_id,
         local_history_node_secret_id: fact.id,
@@ -231,14 +232,17 @@ fn history_source_material(
 }
 
 fn history_source_is_tombstoned(store: &Store, source_secret_id: FactId) -> Result<bool, String> {
-    for fact in persisted_facts(store)? {
-        let Ok(node) = local_history_layout_decode::decode_local_history_node_secret(fact.body())
-        else {
-            continue;
-        };
-        if node.tombstone_node_id == source_secret_id {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    store
+        .conn()
+        .query_row(
+            "SELECT 1
+             FROM local_history_node_tombstone_rows
+             WHERE tombstone_node_id = ?1
+             LIMIT 1",
+            params![source_secret_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|err| format!("load local history tombstone rows: {err}"))
 }

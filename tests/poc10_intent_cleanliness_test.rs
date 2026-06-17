@@ -802,7 +802,7 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
     let mut offenders = Vec::new();
     for path in files {
         let text = source_text(&path);
-        for forbidden in ["/commands.rs", "::commands", "/cli.rs", "::cli"] {
+        for forbidden in ["/api.rs", "::api", "/cli.rs", "::cli"] {
             if text.contains(forbidden) {
                 offenders.push(format!(
                     "{} contains {forbidden:?}",
@@ -812,9 +812,9 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
         }
         for line in text.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("use crate::protocol::") && trimmed.contains("commands") {
+            if trimmed.starts_with("use crate::protocol::") && trimmed.contains("api") {
                 offenders.push(format!(
-                    "{} imports fact-module commands from reactive code: {trimmed}",
+                    "{} imports fact-module api from reactive code: {trimmed}",
                     path.strip_prefix(root).unwrap().display()
                 ));
             }
@@ -831,7 +831,7 @@ fn reactive_paths_do_not_call_user_facing_commands_or_cli_adapters() {
     offenders.dedup();
     assert!(
         offenders.is_empty(),
-        "projectors and handlers are automatic/reactive paths; they may share create.rs constructors but must not call user-facing commands.rs or cli.rs:\n{}",
+        "projectors and handlers are automatic/reactive paths; they may share author.rs constructors but must not call user-facing api.rs or cli.rs:\n{}",
         offenders.join("\n")
     );
 }
@@ -1218,7 +1218,7 @@ fn root_command_module_does_not_reappear() {
 
     assert!(
         offenders.is_empty(),
-        "there is no root command module. User-facing command primitives live in src/core/command.rs, and module commands stay under protocol fact modules:\n{}",
+        "there is no root command module. User-facing command primitives live in src/core/command.rs, and protocol operations stay under fact-family api.rs files:\n{}",
         offenders.join("\n")
     );
 
@@ -1356,7 +1356,7 @@ const STANDARD_FAMILY_FILES: [&str; 10] = [
     // project.rs so the projector owns the complete read path.
     "project.rs",
     "queries.rs",
-    "commands.rs",
+    "api.rs",
     "cli.rs",
     // Sync support roles that are not fact-family row detours.
     "index.rs",

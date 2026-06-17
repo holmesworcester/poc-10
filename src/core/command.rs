@@ -64,12 +64,12 @@ impl<F: Fn() -> u64> CommandClock for FnClock<F> {
 /// worker handles, or registry references. Runtime submission turns these facts
 /// into retained pending facts atomically.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthoredCommand<T> {
+pub struct AuthoredFacts<T> {
     pub receipt: T,
     pub facts: Vec<Fact>,
 }
 
-impl<T> AuthoredCommand<T> {
+impl<T> AuthoredFacts<T> {
     pub fn new(receipt: T) -> Self {
         Self {
             receipt,
@@ -86,5 +86,3 @@ impl<T> AuthoredCommand<T> {
         (self.receipt, self.facts)
     }
 }
-
-pub type CommandOutput<T> = AuthoredCommand<T>;

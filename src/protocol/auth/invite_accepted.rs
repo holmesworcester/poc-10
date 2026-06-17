@@ -6,8 +6,8 @@
 //! here create the local facts needed to accept an invite; invite creation stays
 //! in `auth::invite`.
 
+pub mod api;
 pub mod author;
-pub mod commands;
 pub mod encode;
 pub mod fact;
 pub mod project;

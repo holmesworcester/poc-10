@@ -2,7 +2,7 @@
 //!
 //! This layer takes already-resolved parameters and returns the canonical fact
 //! bytes. API and CLI workflows that need store-queried local capabilities,
-//! or multi-fact orchestration belong in `commands.rs`.
+//! or multi-fact orchestration belong in `api.rs`.
 
 use crate::core::crypto::{self, Ed25519PrivateKey, Ed25519PublicKey};
 use crate::core::facts::{Fact, FactId, FactScope};

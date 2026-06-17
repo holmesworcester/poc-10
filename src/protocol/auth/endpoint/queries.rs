@@ -1,7 +1,7 @@
 //! Read-only local endpoint public-state lookups.
 //!
 //! Private endpoint material is not query state. Commands and handlers that
-//! need local private keys use the capability helper in `commands.rs`; display
+//! need local private keys use the capability helper in `api.rs`; display
 //! and selection code use this module.
 
 use crate::core::facts::FactId;

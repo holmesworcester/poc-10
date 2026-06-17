@@ -5,14 +5,14 @@
 //! latest projected row. No user command queues sync work directly.
 
 use crate::core::cli::{encode_hex_32, CliArgs, CliOutput};
-use crate::core::command::{CommandClock, CommandOutput};
+use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::core::intents::RowMutation;
 use crate::core::project_fact::{
     verify_fact_id, FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
 use crate::core::row_schema::{RowField, RowTableSchema, RowValue};
-use crate::core::store::{Store, TableName, TableRow};
+use crate::core::store::{Store, TableName, TableRow, DEFAULT_QUERY_LIMIT};
 
 use super::compare::fact::TimestampRange;
 
@@ -152,10 +152,10 @@ fn parse_range_args(values: &[String]) -> Result<SyncSettingMode, String> {
 pub fn author_setting(
     clock: &dyn CommandClock,
     mode: SyncSettingMode,
-) -> Result<CommandOutput<SyncSettingReceipt>, String> {
+) -> Result<AuthoredFacts<SyncSettingReceipt>, String> {
     let effective_at_ms = clock.next_timestamp();
     let fact = setting_fact(effective_at_ms, mode)?;
-    Ok(CommandOutput::new(SyncSettingReceipt {
+    Ok(AuthoredFacts::new(SyncSettingReceipt {
         setting_fact_id: fact.id,
         effective_at_ms,
         mode,
@@ -178,7 +178,7 @@ pub fn setting_fact(effective_at_ms: u64, mode: SyncSettingMode) -> Result<Fact,
 pub fn current_setting(store: &Store) -> Result<Option<SyncSettingRow>, String> {
     let mut current = None;
     for (key, value) in store
-        .table_rows(SYNC_LOCAL_SETTING_ROWS)
+        .table_rows_page(SYNC_LOCAL_SETTING_ROWS, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("read sync local setting rows: {err}"))?
     {
         let row = decode_setting_row(&key, &value)?;

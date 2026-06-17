@@ -447,6 +447,12 @@ const FACT_REPLAY_TABLES: &[TableName] = &[
     read_models::FILE_SLICE_ROWS,
     auth::workspace::WORKSPACE_ROWS,
     auth::key_wrap::KEY_WRAP_ROWS,
+    auth::local_key_secret::LOCAL_KEY_SECRET_ROWS,
+    auth::local_history_node_secret::LOCAL_HISTORY_NODE_SECRET_ROWS,
+    auth::local_history_node_secret::LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
+    auth::local_recipient_key::LOCAL_RECIPIENT_KEY_ROWS,
+    auth::recipient_key::RECIPIENT_KEY_ROWS,
+    auth::removal_frontier::REMOVAL_FRONTIER_ROWS,
     auth::user::USER_ROWS,
     auth::endpoint::LOCAL_ENDPOINT_ROWS,
     auth::endpoint::LOCAL_ENDPOINT_SECRET_ROWS,
@@ -575,6 +581,77 @@ CREATE INDEX IF NOT EXISTS content_files_by_message
 CREATE INDEX IF NOT EXISTS content_files_by_file_id
     ON content_files (workspace_id, file_id);
 
+CREATE TABLE IF NOT EXISTS local_key_secret_rows (
+    workspace_id BLOB NOT NULL,
+    frontier_id BLOB NOT NULL,
+    secret_id BLOB NOT NULL,
+    owner_endpoint_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    key_secret BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, frontier_id, secret_id)
+);
+CREATE INDEX IF NOT EXISTS local_key_secret_rows_by_workspace_created
+    ON local_key_secret_rows (workspace_id, created_at_ms, frontier_id);
+
+CREATE TABLE IF NOT EXISTS local_history_node_secret_rows (
+    workspace_id BLOB NOT NULL,
+    frontier_id BLOB NOT NULL,
+    secret_id BLOB NOT NULL,
+    owner_endpoint_id BLOB NOT NULL,
+    source_secret_id BLOB NOT NULL,
+    range_start INTEGER NOT NULL,
+    range_width INTEGER NOT NULL,
+    bit_depth INTEGER NOT NULL,
+    fact_id_prefix BLOB NOT NULL,
+    tombstone_node_id BLOB NOT NULL,
+    node_secret BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, frontier_id, secret_id)
+);
+CREATE INDEX IF NOT EXISTS local_history_node_secret_rows_by_frontier_range
+    ON local_history_node_secret_rows (workspace_id, frontier_id, range_start, range_width);
+
+CREATE TABLE IF NOT EXISTS local_history_node_tombstone_rows (
+    tombstone_node_id BLOB NOT NULL,
+    secret_id BLOB NOT NULL,
+    PRIMARY KEY (tombstone_node_id, secret_id)
+);
+CREATE INDEX IF NOT EXISTS local_history_node_tombstone_rows_by_secret
+    ON local_history_node_tombstone_rows (secret_id);
+
+CREATE TABLE IF NOT EXISTS local_recipient_key_rows (
+    workspace_id BLOB NOT NULL,
+    recipient_key_id BLOB NOT NULL,
+    fact_timestamp INTEGER NOT NULL,
+    recipient_key BLOB NOT NULL,
+    recipient_secret BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, recipient_key_id)
+);
+CREATE INDEX IF NOT EXISTS local_recipient_key_rows_by_workspace_timestamp
+    ON local_recipient_key_rows (workspace_id, fact_timestamp, recipient_key_id);
+
+CREATE TABLE IF NOT EXISTS recipient_key_rows (
+    workspace_id BLOB NOT NULL,
+    recipient_key_id BLOB NOT NULL,
+    endpoint_id BLOB NOT NULL,
+    recipient_key BLOB NOT NULL,
+    previous_recipient_key_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    signer_public_key BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, recipient_key_id)
+);
+CREATE INDEX IF NOT EXISTS recipient_key_rows_by_endpoint
+    ON recipient_key_rows (workspace_id, endpoint_id);
+CREATE INDEX IF NOT EXISTS recipient_key_rows_by_previous
+    ON recipient_key_rows (workspace_id, previous_recipient_key_id);
+
+CREATE TABLE IF NOT EXISTS removal_frontier_rows (
+    workspace_id BLOB NOT NULL,
+    frontier_id BLOB NOT NULL,
+    owner_endpoint_id BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    signer_public_key BLOB NOT NULL,
+    PRIMARY KEY (workspace_id, frontier_id)
+);
 CREATE TABLE IF NOT EXISTS connection_ephemeral_secret_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS bootstrap_connection_attempt_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS connection_request_rows (row_key BLOB PRIMARY KEY NOT NULL, row_value BLOB NOT NULL);
@@ -704,11 +781,7 @@ pub const MATCH_COMMANDS: &[CliCommand<MatchCliContext>] = &[
         invite_server
     ),
     cli_command!("accept", auth::invite_secret::cli::ACCEPT_USAGE, accept),
-    cli_command!(
-        "connect",
-        connection::request::commands::CONNECT_USAGE,
-        connect
-    ),
+    cli_command!("connect", connection::request::api::CONNECT_USAGE, connect),
     cli_command!(
         "accept-invite-server",
         auth::invite_secret::cli::ACCEPT_INVITE_SERVER_USAGE,
@@ -852,6 +925,12 @@ pub(crate) const ROW_MUTATION_TABLES: &[TableName] = &[
     read_models::REACTION_ROWS,
     content::retention_policy::RETENTION_POLICY_ROWS,
     auth::key_wrap::KEY_WRAP_ROWS,
+    auth::local_key_secret::LOCAL_KEY_SECRET_ROWS,
+    auth::local_history_node_secret::LOCAL_HISTORY_NODE_SECRET_ROWS,
+    auth::local_history_node_secret::LOCAL_HISTORY_NODE_TOMBSTONE_ROWS,
+    auth::local_recipient_key::LOCAL_RECIPIENT_KEY_ROWS,
+    auth::recipient_key::RECIPIENT_KEY_ROWS,
+    auth::removal_frontier::REMOVAL_FRONTIER_ROWS,
     auth::admin::ADMIN_ROWS,
     auth::device_invite::DEVICE_INVITE_ROWS,
     auth::endpoint::LOCAL_ENDPOINT_ROWS,

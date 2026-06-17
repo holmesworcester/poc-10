@@ -6,9 +6,9 @@
 //! file coordinate. Keep deletion authorization here; file metadata and slice
 //! projection only consume the resulting context and remove their own state.
 
+pub mod api;
 pub mod author;
 pub mod cli;
-pub mod commands;
 pub mod encode;
 pub mod fact;
 pub mod project;

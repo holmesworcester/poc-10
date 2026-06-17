@@ -9,7 +9,7 @@ use topo::core::runtime::Runtime;
 use topo::protocol::app::MATCH_RUNTIME;
 use topo::protocol::auth::endpoint::{encode as endpoint_layout, fact::EndpointFact};
 use topo::protocol::auth::invite_secret::project::decode as invite_layout;
-use topo::protocol::connection::close::commands::close;
+use topo::protocol::connection::close::api::close;
 use topo::protocol::connection::connection::{
     author::{build_responder_connection, BuildResponderConnection},
     CONNECTION_ROWS,
@@ -20,7 +20,7 @@ use topo::protocol::connection::ephemeral_secret::{
     fact::ConnectionEphemeralSecretFact, CONNECTION_EPHEMERAL_SECRET_ROWS,
 };
 use topo::protocol::connection::frame_observation;
-use topo::protocol::connection::request::commands::{
+use topo::protocol::connection::request::api::{
     create_bootstrap, CreateBootstrapConnectionRequest,
 };
 use topo::protocol::connection::request::project::decode as request_layout;
@@ -33,6 +33,33 @@ impl CommandClock for FixedClock {
         self.0.set(next + 1);
         next
     }
+}
+
+fn drain_projection_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
+    for _ in 0..max_rounds {
+        runtime
+            .drain_projection_once(limit)
+            .expect("drain projection batch");
+        if runtime.pending_fact_count() == 0 {
+            return;
+        }
+    }
+    panic!("projection work did not become idle within {max_rounds} rounds");
+}
+
+fn drain_runtime_work_for_test(runtime: &mut Runtime, max_rounds: usize, limit: usize) {
+    for _ in 0..max_rounds {
+        runtime
+            .drain_projection_once(limit)
+            .expect("drain projection batch");
+        runtime
+            .drain_intents_once(limit)
+            .expect("drain intent batch");
+        if runtime.pending_fact_count() == 0 && runtime.pending_intent_count() == 0 {
+            return;
+        }
+    }
+    panic!("runtime work did not become idle within {max_rounds} rounds");
 }
 
 #[test]
@@ -72,11 +99,9 @@ fn closing_connection_purges_connection_fact_and_row() {
         .submit_facts([alice_endpoint_fact])
         .expect("submit local endpoint");
     runtime
-        .submit_command_output(request_output)
+        .submit_authored_facts(request_output)
         .expect("submit request");
-    runtime
-        .process_projection_until_idle(8, 64)
-        .expect("project request");
+    drain_projection_for_test(&mut runtime, 8, 64);
 
     let responder_ephemeral_private_key = [41; 32];
     let responder_ephemeral = ConnectionEphemeralSecretFact {
@@ -116,17 +141,20 @@ fn closing_connection_purges_connection_fact_and_row() {
     runtime
         .submit_facts([connection_fact.clone(), connection_observation_fact])
         .expect("submit connection");
-    runtime
-        .process_projection_until_idle(8, 64)
-        .expect("project connection");
+    drain_projection_for_test(&mut runtime, 8, 64);
 
     assert!(runtime
-        .facts()
-        .any(|fact| fact.id == initiator_ephemeral_id));
+        .store()
+        .fact_exists(&initiator_ephemeral_id)
+        .expect("initiator fact exists"));
     assert!(!runtime
-        .facts()
-        .any(|fact| fact.id == responder_ephemeral_id));
-    assert!(runtime.facts().any(|fact| fact.id == connection_id));
+        .store()
+        .fact_exists(&responder_ephemeral_id)
+        .expect("responder fact exists"));
+    assert!(runtime
+        .store()
+        .fact_exists(&connection_id)
+        .expect("connection fact exists"));
     assert_eq!(
         runtime
             .store()
@@ -145,19 +173,22 @@ fn closing_connection_purges_connection_fact_and_row() {
     let clock = FixedClock(Cell::new(2_000));
     let close_output = close(&clock, connection_id).expect("close connection");
     runtime
-        .submit_command_output(close_output)
+        .submit_authored_facts(close_output)
         .expect("submit close");
-    runtime
-        .process_all_work_until_idle(16, 64)
-        .expect("close cleanup");
+    drain_runtime_work_for_test(&mut runtime, 16, 64);
 
     assert!(runtime
-        .facts()
-        .any(|fact| fact.id == initiator_ephemeral_id));
+        .store()
+        .fact_exists(&initiator_ephemeral_id)
+        .expect("initiator fact exists after close"));
     assert!(!runtime
-        .facts()
-        .any(|fact| fact.id == responder_ephemeral_id));
-    assert!(!runtime.facts().any(|fact| fact.id == connection_id));
+        .store()
+        .fact_exists(&responder_ephemeral_id)
+        .expect("responder fact exists after close"));
+    assert!(!runtime
+        .store()
+        .fact_exists(&connection_id)
+        .expect("connection fact exists after close"));
     assert_eq!(
         runtime
             .store()
@@ -176,7 +207,10 @@ fn closing_connection_purges_connection_fact_and_row() {
     assert_eq!(runtime.pending_intent_count(), 0);
 
     assert!(
-        runtime.facts().any(|fact| fact.id == request_fact.id),
+        runtime
+            .store()
+            .fact_exists(&request_fact.id)
+            .expect("request fact exists"),
         "closing the connection must not purge the request history"
     );
     assert_eq!(initiator_ephemeral_fact.id, initiator_ephemeral_id);

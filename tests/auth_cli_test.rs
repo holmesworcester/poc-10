@@ -61,13 +61,7 @@ fn cli_key_wrap_derives_access_for_proactive_recipients() {
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
     assert_eq!(
         line_value(
-            &assert_success(topo(&[
-                "--db",
-                &alice,
-                "key-access",
-                &workspace_id,
-                &removal_frontier_id,
-            ])),
+            &wait_for_key_access(&alice, &workspace_id, &removal_frontier_id, "yes"),
             "access",
         ),
         "yes"
@@ -112,6 +106,7 @@ fn cli_invite_server_syncs_but_cannot_be_a_key_recipient() {
 
     let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+    wait_for_key_access(&alice, &workspace_id, &removal_frontier_id, "yes");
     assert_success(topo(&[
         "--db",
         &alice,
@@ -183,6 +178,18 @@ fn cli_recipient_rotation_keeps_new_content_working_and_rejects_retired_recipien
 
     let new_frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
     let new_frontier_id = line_value(&new_frontier, "removal_frontier_id");
+    let new_wrap = key_wrap_with_retry(
+        &alice,
+        &workspace_id,
+        &new_frontier_id,
+        &new_recipient_key_id,
+    );
+    assert_eq!(
+        line_value(&new_wrap, "recipient_key_id"),
+        new_recipient_key_id
+    );
+    wait_for_key_access(&alice, &workspace_id, &new_frontier_id, "yes");
+
     let old_wrap = topo(&[
         "--db",
         &alice,
@@ -202,17 +209,6 @@ fn cli_recipient_rotation_keeps_new_content_working_and_rejects_retired_recipien
         "{}",
         stderr(&old_wrap)
     );
-
-    let new_wrap = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &new_frontier_id,
-        &new_recipient_key_id,
-    );
-    assert_eq!(
-        line_value(&new_wrap, "recipient_key_id"),
-        new_recipient_key_id
-    );
     assert_success(topo(&[
         "--db",
         &alice,
@@ -220,9 +216,7 @@ fn cli_recipient_rotation_keeps_new_content_working_and_rejects_retired_recipien
         &workspace_id,
         "after rotation",
     ]));
-    let messages = messages_text(&alice, &workspace_id);
-    assert_eq!(line_value(&messages, "messages"), "1");
-    assert!(messages.contains("alice: after rotation"), "{messages}");
+    wait_for_messages_contains(&alice, &workspace_id, "alice: after rotation");
 }
 
 #[test]
@@ -230,6 +224,8 @@ fn cli_history_node_tombstone_rejects_derivation_from_retired_path() {
     let tmp = tempfile::tempdir().unwrap();
     let alice = temp_db(&tmp, "alice.db");
     let workspace_id = create_workspace(&alice, "Fs Keys", "alice", "alice-laptop");
+    let alice_port = free_port();
+    let _alice_daemon = spawn_daemon(&alice, alice_port);
 
     assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
     let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
@@ -260,6 +256,7 @@ fn cli_history_node_tombstone_rejects_derivation_from_retired_path() {
         &root_node_id,
     ]));
     assert_eq!(line_value(&sibling, "tombstoned_node_id"), root_node_id);
+    wait_for_key_status_value(&alice, &workspace_id, "local_history_node_tombstones", "1");
 
     let from_retired_root = topo(&[
         "--db",
@@ -383,7 +380,11 @@ fn create_workspace(db: &str, name: &str, username: &str, device_name: &str) -> 
         "--devicename",
         device_name,
     ]));
-    line_value(&out, "workspace_id")
+    let workspace_id = line_value(&out, "workspace_id");
+    let _daemon = spawn_daemon(db, free_port());
+    wait_for_users_contains(db, &workspace_id, username);
+    wait_for_identity_contains(db, "endpoint_role=device");
+    workspace_id
 }
 
 fn join_workspace_on_daemons(
@@ -631,6 +632,24 @@ fn wait_for_key_access(
     panic!("key access did not reach {expected}: {last}");
 }
 
+fn wait_for_key_status_value(db: &str, workspace_id: &str, field: &str, expected: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..300 {
+        let output = topo(&["--db", db, "keys", workspace_id]);
+        if output.status.success() {
+            let out = stdout(&output);
+            if line_value(&out, field) == expected {
+                return out;
+            }
+            last = out;
+        } else {
+            last = stderr(&output);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("key status {field} did not reach {expected}: {last}");
+}
+
 fn key_wrap_with_retry(
     db: &str,
     workspace_id: &str,
@@ -654,10 +673,6 @@ fn key_wrap_with_retry(
         thread::sleep(Duration::from_millis(100));
     }
     panic!("key-wrap never succeeded: {last}");
-}
-
-fn messages_text(db: &str, workspace_id: &str) -> String {
-    assert_success(topo(&["--db", db, "messages", workspace_id]))
 }
 
 fn wait_for_messages_contains(db: &str, workspace_id: &str, expected: &str) {
@@ -721,7 +736,9 @@ fn cli_membership_connect_reconnects_known_peer_without_invite() {
 
     // 1. Bootstrap join via invite; membership and a first message sync.
     join_workspace_on_daemons(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-    assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let frontier = assert_success(topo(&["--db", &alice, "key-frontier", &workspace_id]));
+    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
+    wait_for_key_access(&alice, &workspace_id, &removal_frontier_id, "yes");
     assert_success(topo(&["--db", &alice, "send", &workspace_id, "first"]));
     wait_for_content_count(&bob, &workspace_id, "1", &daemons);
 

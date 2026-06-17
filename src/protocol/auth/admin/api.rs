@@ -6,10 +6,10 @@
 //! file owns that local orchestration; projection still validates the signed
 //! grant when it is later submitted or received.
 
-use crate::core::command::CommandOutput;
+use crate::core::command::AuthoredFacts;
 use crate::core::crypto::Ed25519PrivateKey;
 use crate::core::facts::{Fact, FactId};
-use crate::core::store::Store;
+use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::auth;
 
 use super::author;
@@ -31,11 +31,11 @@ pub struct GrantAdminReceipt {
 pub fn grant_admin(
     store: &Store,
     input: GrantAdmin,
-) -> Result<CommandOutput<GrantAdminReceipt>, String> {
+) -> Result<AuthoredFacts<GrantAdminReceipt>, String> {
     let membership = auth::workspace::queries::local_membership(store, input.workspace_id)?
         .ok_or_else(|| "local endpoint has not joined this workspace".to_string())?;
     let authority_admin_id = store
-        .table_rows_with_key_prefix(super::ADMIN_ROWS, &input.workspace_id, usize::MAX)
+        .table_rows_with_key_prefix(super::ADMIN_ROWS, &input.workspace_id, DEFAULT_QUERY_LIMIT)
         .map_err(|err| format!("load admin rows: {err}"))?
         .into_iter()
         .map(|(key, value)| queries::decode_admin_row(&key, &value))
@@ -71,7 +71,7 @@ pub fn grant_admin(
         &local_endpoint.signing_secret,
         input.created_at_ms,
     )?;
-    Ok(CommandOutput::new(GrantAdminReceipt { admin_id: fact.id })
+    Ok(AuthoredFacts::new(GrantAdminReceipt { admin_id: fact.id })
         .with_facts(vec![fact, signature]))
 }
 

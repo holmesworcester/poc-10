@@ -205,6 +205,7 @@ pub mod adapt {
 
 use crate::core::context::{ContextNeed, ContextOffer};
 use crate::core::facts::Fact;
+use crate::core::intents::{RowMutation, TableInsert, Value};
 use crate::core::project_fact::{
     FactProjectorInfo, ProjectionContext, ProjectionOutput, Projector,
 };
@@ -217,7 +218,10 @@ use crate::protocol::auth::key_wrap::project::{
 use crate::protocol::auth::signature;
 use crate::protocol::sync::shared_fact::project::{context_have_from_needs, share_fact_with_sync};
 
-use super::fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY};
+use super::{
+    fact::{RecipientKeyFact, NO_PREVIOUS_RECIPIENT_KEY},
+    RECIPIENT_KEY_ROWS,
+};
 
 /// Projector route metadata for the recipient_key fact.
 pub const PROJECTOR_INFO: FactProjectorInfo =
@@ -348,6 +352,27 @@ fn recipient_key(
         fact,
         context_have,
     );
+    output = output.row_mutation(RowMutation::InsertValues(TableInsert {
+        table: RECIPIENT_KEY_ROWS,
+        columns: &[
+            "workspace_id",
+            "recipient_key_id",
+            "endpoint_id",
+            "recipient_key",
+            "previous_recipient_key_id",
+            "created_at_ms",
+            "signer_public_key",
+        ],
+        values: vec![
+            Value::Bytes(recipient.workspace_id.to_vec()),
+            Value::Bytes(fact.id.to_vec()),
+            Value::Bytes(recipient.endpoint_id.to_vec()),
+            Value::Bytes(recipient.recipient_key.to_vec()),
+            Value::Bytes(recipient.previous_recipient_key_id.to_vec()),
+            Value::U64(recipient.created_at_ms),
+            Value::Bytes(recipient.signer_public_key.to_vec()),
+        ],
+    }));
 
     if is_superseded {
         return Ok(output);
