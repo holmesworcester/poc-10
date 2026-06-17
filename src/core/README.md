@@ -196,10 +196,6 @@ use core syntax and contracts, but core must not import their semantic rules.
   duplicate command names, reports unknown commands with usage, carries
   positional arguments, and returns display lines. It does not parse
   protocol-specific options beyond handing arguments to the registered command.
-- `clock.rs`: store-local logical clock for deterministic authoring and tests.
-  It is local runtime metadata, not synced protocol state. Commands use it as a
-  lower bound for new timestamps without changing the timestamp semantics of
-  already-authored facts.
 - `command.rs`: command authoring primitives. It defines the command clock,
   local signing/encryption capability value types, workspace id alias, and
   authored receipt-plus-facts output. Commands query `Store` directly and do
@@ -267,8 +263,7 @@ use core syntax and contracts, but core must not import their semantic rules.
   admissions, context edges, time wakes, pending projection, incoming facts,
   pending projection matches, the `pending_time_ranges` work table, intent
   queues, local network
-  tables, and the local clock table. Protocol rows live in protocol schema
-  sources.
+  tables, and replay reset groups. Protocol rows live in protocol schema sources.
 - `store.rs`: SQLite substrate below runtime policy. It applies schema batches,
   opens transactions, quotes identifiers, validates opaque row-table allowlists,
   provides immutable fact storage primitives, and provides generic keyed row

@@ -15,7 +15,6 @@
 //! that owns it.
 
 use crate::core::cli::{decode_hex_32_named as decode_hex_32, encode_hex_32, CliArgs, CliOutput};
-use crate::core::clock;
 use crate::core::command::{AuthoredFacts, CommandClock};
 use crate::core::daemon;
 use crate::core::replay::{ReplayOrder, ReplayReport, StateSummary};
@@ -28,12 +27,17 @@ use std::path::{Path, PathBuf};
 
 pub struct MatchCliContext {
     db: Option<PathBuf>,
+    explicit_at_ms: Option<u64>,
     runtime: Runtime,
 }
 
 impl MatchCliContext {
-    pub fn new(runtime: Runtime, db: Option<PathBuf>) -> Self {
-        Self { db, runtime }
+    pub fn new(runtime: Runtime, db: Option<PathBuf>, explicit_at_ms: Option<u64>) -> Self {
+        Self {
+            db,
+            explicit_at_ms,
+            runtime,
+        }
     }
 
     fn db_path(&self, command: &str) -> Result<&PathBuf, String> {
@@ -54,8 +58,16 @@ impl MatchCliContext {
         &mut self,
         run: impl FnOnce(&Store, &dyn CommandClock) -> Result<T, String>,
     ) -> Result<T, String> {
-        let clock = SystemClock;
+        let clock = FixedClock(self.command_timestamp()?);
         run(self.runtime.store(), &clock)
+    }
+
+    fn command_timestamp(&self) -> Result<u64, String> {
+        next_cli_timestamp(self.runtime.store(), self.explicit_at_ms)
+    }
+
+    fn explicit_at_ms(&self) -> Option<u64> {
+        self.explicit_at_ms
     }
 
     fn query_store<T>(
@@ -259,8 +271,9 @@ pub(crate) fn key_access(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let query = auth::key_wrap::cli::key_access_args(args)?;
+    let now_ms = ctx.explicit_at_ms();
     let status =
-        ctx.query_runtime(|runtime| auth::key_wrap::queries::key_access(runtime, query))?;
+        ctx.query_runtime(|runtime| auth::key_wrap::queries::key_access(runtime, query, now_ms))?;
     Ok(auth::key_wrap::cli::key_access_status_output(&status))
 }
 
@@ -279,10 +292,11 @@ pub(crate) fn key_derive(
 
 pub(crate) fn key_node(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let args = auth::key_wrap::cli::key_node_args(args)?;
+    let created_at_ms = ctx.command_timestamp()?;
     let output = auth::key_wrap::api::create_history_node(
         ctx.runtime().store(),
         auth::key_wrap::api::CreateHistoryNode {
-            created_at_ms: SystemClock.next_timestamp(),
+            created_at_ms,
             workspace_id: args.workspace_id,
             removal_frontier_id: args.removal_frontier_id,
             source_secret_id: args.source_secret_id,
@@ -308,7 +322,7 @@ pub(crate) fn disappearing_set(
     cli_args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let args = content::retention_policy::cli::parse_disappearing_set_args(cli_args.values())?;
-    let now_ms = ctx.query_runtime(next_cli_timestamp)?;
+    let now_ms = ctx.command_timestamp()?;
     let output = content::retention_policy::api::author_set_with_auto_floor(
         ctx.runtime().store(),
         content::retention_policy::api::AuthorPolicy {
@@ -336,8 +350,9 @@ pub(crate) fn disappearing_status(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let workspace_id = content::retention_policy::cli::status_workspace_id(args)?;
+    let now_ms = ctx.explicit_at_ms();
     let report = ctx.query_store(|store| {
-        content::retention_policy::queries::status_report(store, workspace_id)
+        content::retention_policy::queries::status_report(store, workspace_id, now_ms)
     })?;
     Ok(content::retention_policy::cli::status_output(&report))
 }
@@ -350,7 +365,7 @@ pub(crate) fn disappearing_tighten(
     if !args.yes {
         return Err("disappearing-tighten requires --yes in the target CLI".to_string());
     }
-    let now_ms = ctx.query_runtime(next_cli_timestamp)?;
+    let now_ms = ctx.command_timestamp()?;
     let input = content::retention_policy::api::AuthorTighten {
         workspace_id: args.workspace_id,
         now_ms,
@@ -373,7 +388,7 @@ pub(crate) fn disappearing_compact(
     args: CliArgs<'_>,
 ) -> Result<CliOutput, String> {
     let workspace_id = content::retention_policy::cli::compact_workspace_id(args)?;
-    let now_ms = ctx.query_runtime(next_cli_timestamp)?;
+    let now_ms = ctx.command_timestamp()?;
     let output = content::retention_policy::api::author_compact(
         ctx.runtime().store(),
         content::retention_policy::api::AuthorCompact {
@@ -403,7 +418,7 @@ pub(crate) fn send(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOu
         .get(1)
         .ok_or_else(|| content::message::cli::SEND_USAGE.to_string())?
         .to_string();
-    let timestamp = ctx.query_runtime(next_cli_timestamp)?;
+    let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::send(ctx.runtime().store(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
@@ -415,7 +430,7 @@ pub(crate) fn react(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliO
         .get(0)
         .ok_or_else(|| content::message::cli::REACT_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
-    let timestamp = ctx.query_runtime(next_cli_timestamp)?;
+    let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::react(ctx.runtime().store(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
@@ -427,7 +442,7 @@ pub(crate) fn send_file(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<
         .get(0)
         .ok_or_else(|| content::message::cli::SEND_FILE_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
-    let timestamp = ctx.query_runtime(next_cli_timestamp)?;
+    let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::send_file(ctx.runtime().store(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
@@ -457,7 +472,7 @@ pub(crate) fn delete_file(
             args.get(1).unwrap(),
         )
     })?;
-    let timestamp = ctx.query_runtime(next_cli_timestamp)?;
+    let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
     let output = content::file_deletion::api::delete_file(
         ctx.runtime().store(),
@@ -478,7 +493,7 @@ pub(crate) fn delete_message(
         .get(0)
         .ok_or_else(|| content::message::cli::DELETE_MESSAGE_USAGE.to_string())
         .and_then(|value| decode_hex_32(value, "workspace id"))?;
-    let timestamp = ctx.query_runtime(next_cli_timestamp)?;
+    let timestamp = ctx.command_timestamp()?;
     let clock = FixedClock(timestamp);
     let output = content::message::cli::delete_message(ctx.runtime().store(), &clock, args)?;
     let receipt = ctx.submit_authored_facts(output)?;
@@ -519,9 +534,8 @@ pub(crate) fn generate(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<C
     );
     crate::core::perf_profile::add_duration("parse", parse_started.elapsed());
 
-    let timestamp = crate::core::perf_profile::measure_result("timestamp", || {
-        ctx.query_runtime(next_cli_timestamp)
-    })?;
+    let timestamp =
+        crate::core::perf_profile::measure_result("timestamp", || ctx.command_timestamp())?;
     let clock = crate::core::perf_profile::measure_result("context_setup", || {
         Ok::<FixedClock, String>(FixedClock(timestamp))
     })?;
@@ -571,11 +585,6 @@ pub(crate) fn content_count(
     Ok(content::message::cli::content_count_output(output))
 }
 
-pub(crate) fn clock(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
-    let observed_max = max_cli_timestamp(ctx.runtime().store())?;
-    clock::run_cli(ctx.runtime().store(), args, observed_max)
-}
-
 // Replay diagnostics.
 //
 // These commands exercise the core replay entry point and the deterministic
@@ -591,9 +600,7 @@ pub const INTENT_REGISTRY_USAGE: &str = "intent-registry";
 
 pub(crate) fn replay(ctx: &mut MatchCliContext, args: CliArgs<'_>) -> Result<CliOutput, String> {
     let order = parse_replay_order(args)?;
-    let report = ctx
-        .runtime_mut()
-        .replay(crate::protocol::app::REPLAYABLE_DAEMON_TIME_WAKES, order)?;
+    let report = ctx.runtime_mut().replay(order)?;
     Ok(replay_report_output(order, &report))
 }
 
@@ -615,9 +622,7 @@ pub(crate) fn replay_check(
     let scratch = scratch_dir_for(&db);
     std::fs::create_dir_all(&scratch)
         .map_err(|err| format!("create replay-check scratch dir: {err}"))?;
-    let result = ctx
-        .runtime()
-        .replay_check(&scratch, crate::protocol::app::REPLAYABLE_DAEMON_TIME_WAKES);
+    let result = ctx.runtime().replay_check(&scratch);
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(replay_check_output(&result?))
 }
@@ -687,7 +692,6 @@ fn replay_report_output(order: ReplayOrder, report: &ReplayReport) -> CliOutput 
         format!("projected_facts: {}", report.projected_facts),
         format!("emitted_facts: {}", report.emitted_facts),
         format!("purged_facts: {}", report.purged_facts),
-        format!("semantic_time_wakes: {}", report.semantic_time_wakes),
         format!("standing_time_wakes: {}", report.standing_time_wakes),
         format!("replayed_intents: {}", report.replayed_intents),
         format!("context_edges: {}", report.context_edges),
@@ -717,13 +721,14 @@ fn scratch_dir_for(db: &Path) -> PathBuf {
     parent.join(format!(".topo-replay-check-{}", std::process::id()))
 }
 
-fn next_cli_timestamp(runtime: &Runtime) -> Result<u64, String> {
-    let observed_max = max_cli_timestamp(runtime.store())?;
-    clock::next_timestamp(runtime.store(), observed_max)
-}
-
-fn max_cli_timestamp(store: &crate::core::store::Store) -> Result<u64, String> {
-    content::message::queries::max_created_at_ms(store)
+fn next_cli_timestamp(store: &Store, explicit_at_ms: Option<u64>) -> Result<u64, String> {
+    if let Some(timestamp) = explicit_at_ms {
+        return Ok(timestamp);
+    }
+    let observed_max = content::message::queries::max_created_at_ms(store)?;
+    Ok(SystemClock
+        .next_timestamp()
+        .max(observed_max.saturating_add(1)))
 }
 
 struct SystemClock;

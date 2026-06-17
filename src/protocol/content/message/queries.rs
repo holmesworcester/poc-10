@@ -95,7 +95,7 @@ pub(crate) fn max_created_at_ms(store: &Store) -> Result<u64, String> {
             [],
             |row| row.get::<_, i64>(0).map(|value| value as u64),
         )
-        .map_err(|err| format!("load content messages for clock: {err}"))
+        .map_err(|err| format!("load content message timestamp lower bound: {err}"))
 }
 
 pub fn content_message_rows(

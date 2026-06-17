@@ -3,9 +3,8 @@
 //! This file is the durable and memory table inventory for the generic
 //! runtime: facts, local admissions, standing context, time wakes, pending
 //! projection, pending projection matches, incoming facts, intent
-//! queues, and the store-local clock. It exposes one executable `SchemaSource`
-//! plus typed `TableName` constants so the rest of core does not repeat string
-//! literals.
+//! queues. It exposes one executable `SchemaSource` plus typed `TableName`
+//! constants so the rest of core does not repeat string literals.
 //!
 //! These tables are the shared substrate behind the runtime work documented in
 //! `src/core/README.md` and the projection boundary documented in
@@ -13,9 +12,7 @@
 //! `facts` and `local_fact_admissions` store immutable inputs and their local
 //! visibility metadata. `context_edges`, `time_wakes`, `pending_projection`,
 //! and `pending_projection_matches` drive fact projection. `intents` and
-//! `local_intents` drive handler dispatch. The clock table is store-local
-//! operator metadata used by command hosts, not a protocol fact, and replay
-//! clears it with the other non-fact runtime state.
+//! `local_intents` drive handler dispatch.
 //!
 //! Core schema is deliberately small and mechanical. It records the runtime
 //! queues and indexes needed to move work; it does not encode protocol policy
@@ -50,9 +47,6 @@ pub(crate) const INTENTS: TableName = TableName::new("intents");
 pub(crate) const LOCAL_INTENTS: TableName = TableName::new("local_intents");
 /// Volatile fact table for outside-origin incoming inputs.
 pub(crate) const INCOMING_FACTS: TableName = TableName::new("incoming_facts");
-/// Store-local trusted clock observation table.
-pub(crate) const CLOCK: TableName = TableName::new("clock");
-
 const CORE_REPLAY_PROTECTED_TABLES: &[TableName] = &[FACTS, LOCAL_FACT_ADMISSIONS];
 
 const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
@@ -64,7 +58,6 @@ const CORE_REPLAY_RESET_TABLES: &[TableName] = &[
     INTENTS,
     LOCAL_INTENTS,
     INCOMING_FACTS,
-    CLOCK,
 ];
 
 const CORE_REPLAY_SUMMARY_TABLES: &[TableName] = &[FACTS, CONTEXT_EDGES, TIME_WAKES];
@@ -183,10 +176,6 @@ CREATE TEMP TABLE IF NOT EXISTS incoming_facts (
 CREATE INDEX IF NOT EXISTS incoming_facts_by_received_at
     ON incoming_facts (received_at, id);
 
-CREATE TABLE IF NOT EXISTS clock (
-    key TEXT PRIMARY KEY NOT NULL,
-    timestamp INTEGER NOT NULL
-);
 "#,
     row_tables: &[],
     row_schemas: &[],

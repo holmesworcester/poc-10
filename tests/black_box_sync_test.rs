@@ -317,15 +317,11 @@ fn cli_sync_setting_range_delivers_transitive_admin_and_message_context() {
         .expect("message timestamp")
         .saturating_add(1)
         .to_string();
-    let clock = assert_success(topo(&["--db", &carol, "clock", "set", &policy_at]));
-    assert_eq!(line_value(&clock, "next_timestamp"), policy_at);
-    let policy = assert_success(topo(&[
-        "--db",
+    let policy = assert_success(topo_at(
         &carol,
-        "disappearing-set",
-        &workspace,
-        "120",
-    ]));
+        &policy_at,
+        &["disappearing-set", &workspace, "120"],
+    ));
     assert_eq!(line_value(&policy, "ttl_minutes"), "120");
     set_sync_range_until_visible(&carol, &workspace, &policy_at, &policy_at, 30_000);
     poll_for_disappearing_value(&alice, &workspace, "current_ttl_minutes", "120", 10_000);

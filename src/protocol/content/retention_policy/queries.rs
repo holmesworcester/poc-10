@@ -6,7 +6,6 @@
 //! policy without re-decoding every historical fact. Keep supersession rules
 //! here and row creation in the retention policy projector.
 
-use crate::core::clock;
 use crate::core::facts::FactId;
 use crate::core::store::{Store, DEFAULT_QUERY_LIMIT};
 use crate::protocol::content;
@@ -133,13 +132,16 @@ pub fn count_messages_below_minute(
     Ok(message_ids.len())
 }
 
-pub fn status_report(store: &Store, workspace_id: FactId) -> Result<StatusReport, String> {
+pub fn status_report(
+    store: &Store,
+    workspace_id: FactId,
+    now_ms: Option<u64>,
+) -> Result<StatusReport, String> {
     let active = active_for_workspace(store, workspace_id)?;
     let policy_fact_id = active.as_ref().map(|row| row.policy_id);
     let ttl_minutes = active.as_ref().map(|row| row.ttl_minutes);
     let policy_floor_minute = active.as_ref().map(|row| row.retire_minute).unwrap_or(0);
-    let now_minute =
-        clock::logical_time(store)?.map(|ms| ms / content::message::fact::UNIX_MINUTE_MS);
+    let now_minute = now_ms.map(|ms| ms / content::message::fact::UNIX_MINUTE_MS);
     let horizon_floor = now_minute
         .map(|minute| minute.saturating_sub(30 * 24 * 60))
         .unwrap_or(0);

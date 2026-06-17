@@ -19,12 +19,27 @@ fn generate_cli_uses_real_store_and_reports_applied_facts() {
         .parse::<usize>()
         .expect("facts count before generate");
 
-    let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "7", "128"]));
+    let generated = assert_success(topo(&[
+        "--db",
+        &db,
+        "--at",
+        "4000000000000",
+        "generate",
+        &workspace_id,
+        "7",
+        "128",
+    ]));
     assert!(generated.contains("generated_facts: 7"), "{generated}");
     assert!(generated.contains("applied_facts: 7"), "{generated}");
     assert!(generated.contains("message_text_bytes: 108"), "{generated}");
-    assert!(generated.contains("first_timestamp: 1"), "{generated}");
-    assert!(generated.contains("last_timestamp: 7"), "{generated}");
+    assert!(
+        generated.contains("first_timestamp: 4000000000000"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("last_timestamp: 4000000000006"),
+        "{generated}"
+    );
     wait_for_content_count(&db, &workspace_id, "7");
 
     let messages = assert_success(topo(&["--db", &db, "messages", &workspace_id]));
@@ -80,35 +95,40 @@ fn generate_cli_can_profile_runtime_phases_to_stderr() {
 }
 
 #[test]
-fn clock_cli_sets_logical_timestamp_lower_bound_for_generated_facts() {
+fn explicit_at_sets_generated_fact_timestamps() {
     let tmp = tempfile::tempdir().unwrap();
-    let db = temp_db(&tmp, "clocked-generate.db");
+    let db = temp_db(&tmp, "explicit-at-generate.db");
     let workspace_id = create_workspace(&db);
     let _daemon = spawn_daemon(&db, free_port());
     create_local_content_key(&db, &workspace_id);
 
-    let set = assert_success(topo(&["--db", &db, "clock", "set", "5000"]));
-    assert_eq!(line_value(&set, "logical_time"), "5000");
-    assert_eq!(line_value(&set, "next_timestamp"), "5000");
-
-    let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "3", "32"]));
-    assert_eq!(line_value(&generated, "first_timestamp"), "5000");
-    assert_eq!(line_value(&generated, "last_timestamp"), "5002");
+    let generated = assert_success(topo(&[
+        "--db",
+        &db,
+        "--at",
+        "4000000005000",
+        "generate",
+        &workspace_id,
+        "3",
+        "32",
+    ]));
+    assert_eq!(line_value(&generated, "first_timestamp"), "4000000005000");
+    assert_eq!(line_value(&generated, "last_timestamp"), "4000000005002");
     wait_for_content_count(&db, &workspace_id, "3");
 
-    let advanced = assert_success(topo(&["--db", &db, "clock", "advance", "100"]));
-    assert_eq!(line_value(&advanced, "logical_time"), "5100");
-    assert_eq!(line_value(&advanced, "max_observed_timestamp"), "5002");
-    assert_eq!(line_value(&advanced, "next_timestamp"), "5100");
-
-    let generated = assert_success(topo(&["--db", &db, "generate", &workspace_id, "1", "32"]));
-    assert_eq!(line_value(&generated, "first_timestamp"), "5100");
-    assert_eq!(line_value(&generated, "last_timestamp"), "5100");
+    let generated = assert_success(topo(&[
+        "--db",
+        &db,
+        "--at",
+        "4000000005100",
+        "generate",
+        &workspace_id,
+        "1",
+        "32",
+    ]));
+    assert_eq!(line_value(&generated, "first_timestamp"), "4000000005100");
+    assert_eq!(line_value(&generated, "last_timestamp"), "4000000005100");
     wait_for_content_count(&db, &workspace_id, "4");
-
-    let cleared = assert_success(topo(&["--db", &db, "clock", "clear"]));
-    assert_eq!(line_value(&cleared, "logical_time"), "unset");
-    assert_eq!(line_value(&cleared, "next_timestamp"), "5101");
 }
 
 #[test]

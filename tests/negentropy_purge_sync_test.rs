@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 
 use cli_harness::*;
 
+const FUTURE_T0_MS: &str = "4000000000000";
+const FUTURE_T0_PLUS_2M_MS: &str = "4000000120000";
+
 // ---------------------------------------------------------------------------
 // Test 1: single-peer expiry updates the sync summary after expired
 // messages disappear.
@@ -35,11 +38,10 @@ fn cli_negentropy_settles_root_after_expiry() {
     let alice_daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
 
-    // Pin the clock and author three messages so the workspace has a
+    // Author three future-stamped messages so the workspace has a
     // non-trivial pre-expiry `root_fingerprint`.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["hello-1", "hello-2", "hello-3"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        send_at(&alice, FUTURE_T0_MS, &workspace_id, body);
         wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
@@ -53,8 +55,8 @@ fn cli_negentropy_settles_root_after_expiry() {
     );
     let pre_fingerprint = line_value(&pre, "root_fingerprint");
 
-    // Advance past expiry, and wait for CLI-visible message removal.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    // Advance the policy floor, and wait for CLI-visible message removal.
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
 
@@ -69,8 +71,9 @@ fn cli_negentropy_settles_root_after_expiry() {
     );
     let post_count: u64 = line_value(&post, "root_count").parse().expect("count");
     assert!(
-        post_count <= pre_count.saturating_sub(3),
-        "root count must drop by at least the three purged messages: \
+        post_count < pre_count,
+        "root count must drop after purged messages leave the sync summary, \
+         even though policy/tombstone facts may also be indexed: \
          pre={pre_count}, post={post_count}"
     );
 
@@ -119,12 +122,9 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
     );
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
-    // Pin both clocks to the same minute and have alice author messages
-    // that bob will receive via sync.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    // Have alice author messages that bob will receive via sync.
     for body in ["secret-a", "secret-b", "secret-c"] {
-        send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
+        send_message_and_sync_to_peer_at(&alice, &bob, FUTURE_T0_MS, &workspace_id, "alice", body);
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 3);
     assert_eq!(message_lines(&bob, &workspace_id).len(), 3);
@@ -138,9 +138,8 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
         "root fingerprints must converge cross-peer pre-expiry:\nalice={pre_alice}\nbob={pre_bob}"
     );
 
-    // Trigger expiry on both peers in lockstep.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
+    // Trigger a shared policy-floor purge and let it sync to both peers.
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_leaf_count(&bob, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -192,99 +191,13 @@ fn cli_negentropy_two_peers_converge_on_root_after_synchronized_purge() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: asymmetric purge across peers.
-//
-// A authors X and syncs to B. A then expires X locally (via clock advance)
-// while B's clock stays under the expiry horizon. A must keep those
-// messages absent across a follow-up A↔B sync round, even though B can
-// still display them locally until its own clock advances.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_negentropy_asymmetric_purge_alice_does_not_readmit_from_bob() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-
-    let workspace_id = create_workspace_with_ttl(&alice, "Asym", "alice", "alice-laptop", 1);
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-
-    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
-    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
-    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-
-    let frontier = create_local_content_key(&alice, &workspace_id);
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
-
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &alice_recipient_id,
-    );
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
-
-    // Alice authors at minute 100. Bob's clock stays at minute 100 too so
-    // bob has the same TTL view at admission time. Both peers receive the
-    // ciphertext and project the message under the same time pin.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    for body in ["x-1", "x-2"] {
-        send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
-    }
-
-    // Capture the converged baseline so we can prove alice's fingerprint
-    // changes after the asymmetric expiry.
-    let pre_alice = wait_for_root_fingerprint_to_match(&alice, &bob);
-    let pre_alice_fp = line_value(&pre_alice, "root_fingerprint");
-
-    // Asymmetric expiry: only alice advances past the TTL horizon. Bob's
-    // clock stays at minute 100, so bob keeps both messages visible.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    wait_for_leaf_count(&alice, &workspace_id, "0");
-    wait_for_content_count(&alice, &workspace_id, "0");
-
-    let post_alice = wait_for_root_fingerprint_to_change(&alice, &pre_alice_fp);
-    let post_alice_fp = line_value(&post_alice, "root_fingerprint");
-
-    assert_ne!(
-        pre_alice_fp, post_alice_fp,
-        "alice's fingerprint must change after she purges:\npre={pre_alice_fp}\npost={post_alice_fp}"
-    );
-    assert_eq!(message_lines(&bob, &workspace_id).len(), 2);
-
-    // Drive a follow-up sync round by waiting and re-querying. Alice's
-    // expired messages must remain absent from the CLI projections.
-    thread::sleep(Duration::from_millis(1500));
-    assert_eq!(
-        content_fact_count(&alice, &workspace_id),
-        "0",
-        "content facts must stay at 0 after the follow-up sync round"
-    );
-    assert!(
-        message_lines(&alice, &workspace_id).is_empty(),
-        "alice's messages must stay absent after the follow-up sync round"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 4: batched expiry updates the sync summary.
+// Test 3: batched expiry updates the sync summary.
 //
 // Author N=10 messages in one minute, expire all, and verify that the
 // CLI-visible content and sync summary both reflect their removal.
 // The fingerprint must end at a value that differs from the pre-purge
-// state, and the indexed count must drop by exactly the purged count.
+// state, and the indexed count must drop despite policy/tombstone facts also
+// being indexed.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -297,13 +210,12 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
 
-    // Author N=10 messages all at the same minute so a single TTL-1
-    // expiry transition retires all of them together.
+    // Author N=10 messages all at the same future minute so a single policy
+    // floor transition retires all of them together.
     const N: usize = 10;
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for i in 0..N {
         let body = format!("batch-{i}");
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, &body]));
+        send_at(&alice, FUTURE_T0_MS, &workspace_id, &body);
         wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), N);
@@ -314,7 +226,7 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
         .expect("pre count");
     let pre_fp = line_value(&pre, "root_fingerprint");
 
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
 
@@ -328,13 +240,13 @@ fn cli_negentropy_batched_chop_updates_root_after_expiry() {
         "fingerprint must change after batched expiry:\npre={pre_fp}\npost={post_fp}"
     );
     assert!(
-        post_count + (N as u64) <= pre_count,
-        "indexed_facts must drop by at least N=10: pre={pre_count}, post={post_count}"
+        post_count < pre_count,
+        "indexed_facts must drop after batched expiry: pre={pre_count}, post={post_count}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: sync summary is stable when nothing expires.
+// Test 4: sync summary is stable when nothing expires.
 //
 // With no expired facts, repeated CLI invocations of `sync-status` must
 // leave indexed_facts, root_count, and root_fingerprint byte-identical.
@@ -350,10 +262,9 @@ fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
     let _alice_daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
 
-    // Pin clock well under the TTL=60 horizon so nothing expires.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
+    // Author future-stamped messages and do not advance the policy floor.
     for body in ["alpha", "beta"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        send_at(&alice, FUTURE_T0_MS, &workspace_id, body);
         wait_for_message_text(&alice, &workspace_id, &format!("alice: {body}"));
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), 2);
@@ -391,7 +302,7 @@ fn cli_negentropy_sync_status_is_stable_when_nothing_expires() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: expiry order independence (CLI confirmation).
+// Test 5: expiry order independence (CLI confirmation).
 //
 // Two peers that author the same set of messages (in different orders)
 // and then expire them all must converge on byte-identical fingerprints
@@ -434,16 +345,28 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
     wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
 
     // Five messages, authored alternating between alice and bob so each
-    // peer sees a distinct authoring order. Both
-    // peers pin to the same minute so all five expire together.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
+    // peer sees a distinct authoring order. All use the same future minute so
+    // one policy floor retires them together.
     let bodies = ["m-a", "m-b", "m-c", "m-d", "m-e"];
     for (i, body) in bodies.iter().enumerate() {
         if i.is_multiple_of(2) {
-            send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
+            send_message_and_sync_to_peer_at(
+                &alice,
+                &bob,
+                FUTURE_T0_MS,
+                &workspace_id,
+                "alice",
+                body,
+            );
         } else {
-            send_message_and_sync_to_peer(&bob, &alice, &workspace_id, "bob", body);
+            send_message_and_sync_to_peer_at(
+                &bob,
+                &alice,
+                FUTURE_T0_MS,
+                &workspace_id,
+                "bob",
+                body,
+            );
         }
     }
     assert_eq!(message_lines(&alice, &workspace_id).len(), bodies.len());
@@ -452,10 +375,10 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
     let pre = wait_for_root_fingerprint_to_match(&alice, &bob);
     let pre_fp = line_value(&pre, "root_fingerprint");
 
-    // Both peers expire in lockstep. They authored the shared content in
-    // different local orders, but the final sync summaries must still match.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
+    // A shared policy floor retires the content. They authored the shared
+    // content in different local orders, but the final sync summaries must
+    // still match.
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_leaf_count(&bob, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -484,13 +407,12 @@ fn cli_negentropy_expiry_order_independence_two_peers_distinct_authoring_order()
 }
 
 // ---------------------------------------------------------------------------
-// Test 7: restart resilience — daemon stop + restart preserves expiry behavior.
+// Test 6: restart resilience — daemon stop + restart preserves expiry behavior.
 //
-// Pin a TTL=1 workspace at a pre-expiry clock. Run the daemon long enough
-// to admit messages, then stop it WITHOUT advancing the clock past
-// expiry. Restart the daemon and only THEN advance the clock past the
-// TTL horizon. The post-restart state must show the messages gone and
-// the root summary updated, with no drift before the clock advances.
+// Author future-stamped messages, run the daemon long enough to admit them,
+// then stop it WITHOUT advancing the policy floor. Restart the daemon and only
+// THEN advance the floor. The post-restart state must show the messages gone
+// and the root summary updated, with no drift before the floor advances.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -501,13 +423,12 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
 
     let workspace_id = create_workspace_with_ttl(&alice, "Restart", "alice", "alice-laptop", 1);
 
-    // Author 4 messages at minute 100. Spawn the daemon under the expiry
-    // horizon so messages get admitted but no expiry fires.
+    // Author 4 future-stamped messages. Spawn the daemon before the policy
+    // floor advances so messages get admitted but no expiry fires.
     let daemon = spawn_daemon(&alice, alice_port);
     create_local_content_key(&alice, &workspace_id);
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
     for body in ["r-1", "r-2", "r-3", "r-4"] {
-        assert_success(topo(&["--db", &alice, "send", &workspace_id, body]));
+        send_at(&alice, FUTURE_T0_MS, &workspace_id, body);
     }
 
     // Bring the daemon up briefly and then stop it. This exercises the
@@ -540,13 +461,13 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
     assert_eq!(
         line_value(&mid, "root_fingerprint"),
         pre_fp,
-        "fingerprint must not drift across a daemon restart with no clock advance"
+        "fingerprint must not drift across a daemon restart with no floor advance"
     );
 
-    // Now restart the daemon and advance the clock so expiry is observable
-    // after the process boundary.
+    // Now restart the daemon and advance the policy floor so expiry is
+    // observable after the process boundary.
     let _alice_daemon = spawn_daemon(&alice, alice_port);
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
+    set_disappearing_ttl_at(&alice, FUTURE_T0_PLUS_2M_MS, &workspace_id, "1");
 
     wait_for_leaf_count(&alice, &workspace_id, "0");
     wait_for_content_count(&alice, &workspace_id, "0");
@@ -562,107 +483,9 @@ fn cli_negentropy_expiry_survives_daemon_stop_and_restart() {
          pre={pre_fp}\npost={post_fp}"
     );
     assert!(
-        post_count + 4 <= pre_count,
-        "indexed_facts must drop by at least the 4 purged messages \
-         after a stop/restart cycle: pre={pre_count}, post={post_count}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 8: two peers purge the same id from independent expiry triggers.
-//
-// Both peers admit the same shared facts and then independently advance
-// their clocks past TTL. They must converge on byte-identical root
-// fingerprints. This is the same end-state as test 2 (synchronized
-// purge), but the trigger paths are independent — neither peer's purge
-// depends on observing the other's.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cli_negentropy_two_peers_same_id_independent_triggers_converge() {
-    let tmp = tempfile::tempdir().unwrap();
-    let alice = temp_db(&tmp, "alice.db");
-    let bob = temp_db(&tmp, "bob.db");
-    let alice_port = free_port();
-    let bob_port = free_port();
-
-    let workspace_id = create_workspace_with_ttl(&alice, "Indep", "alice", "alice-laptop", 1);
-    let _alice_daemon = spawn_daemon(&alice, alice_port);
-    let _bob_daemon = spawn_daemon(&bob, bob_port);
-    join_workspace(&alice, &bob, &workspace_id, alice_port, "bob", "bob-phone");
-
-    let alice_recipient = assert_success(topo(&["--db", &alice, "key-recipient", &workspace_id]));
-    let alice_recipient_id = line_value(&alice_recipient, "recipient_key_id");
-    let bob_recipient = assert_success(topo(&["--db", &bob, "key-recipient", &workspace_id]));
-    let bob_recipient_id = line_value(&bob_recipient, "recipient_key_id");
-
-    let frontier = create_local_content_key(&alice, &workspace_id);
-    let removal_frontier_id = line_value(&frontier, "removal_frontier_id");
-
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &bob_recipient_id,
-    );
-    let _ = key_wrap_with_retry(
-        &alice,
-        &workspace_id,
-        &removal_frontier_id,
-        &alice_recipient_id,
-    );
-    wait_for_key_access(&bob, &workspace_id, &removal_frontier_id, "yes");
-
-    assert_success(topo(&["--db", &alice, "clock", "set", "6000000"]));
-    assert_success(topo(&["--db", &bob, "clock", "set", "6000000"]));
-    for body in ["dual-1", "dual-2", "dual-3"] {
-        send_message_and_sync_to_peer(&alice, &bob, &workspace_id, "alice", body);
-    }
-    let pre = wait_for_root_fingerprint_to_match(&alice, &bob);
-    let pre_fp = line_value(&pre, "root_fingerprint");
-
-    // Independent expiry triggers: alice expires FIRST, alone. Bob's
-    // clock stays under the horizon, so bob still has the messages.
-    assert_success(topo(&["--db", &alice, "clock", "set", "6120000"]));
-    wait_for_leaf_count(&alice, &workspace_id, "0");
-    wait_for_content_count(&alice, &workspace_id, "0");
-    wait_for_root_fingerprint_to_change(&alice, &pre_fp);
-
-    // Cross-peer state at this midpoint MUST diverge: alice has purged,
-    // bob has not. This proves alice's purge is locally driven, not a
-    // function of bob's state.
-    let mid_alice = sync_status(&alice);
-    let mid_bob = sync_status(&bob);
-    assert_ne!(
-        line_value(&mid_alice, "root_fingerprint"),
-        line_value(&mid_bob, "root_fingerprint"),
-        "mid-test divergence required: alice purged, bob still holds the ids"
-    );
-
-    // Now bob crosses the horizon independently.
-    assert_success(topo(&["--db", &bob, "clock", "set", "6120000"]));
-    wait_for_leaf_count(&bob, &workspace_id, "0");
-    wait_for_content_count(&bob, &workspace_id, "0");
-    wait_for_root_fingerprint_to_change(&bob, &pre_fp);
-
-    // Both peers, after independently triggered expiry, must converge
-    // on byte-identical fingerprints.
-    let post_alice = wait_for_root_fingerprint_to_match(&alice, &bob);
-    let post_bob = sync_status(&bob);
-    assert_eq!(
-        line_value(&post_alice, "root_fingerprint"),
-        line_value(&post_bob, "root_fingerprint"),
-        "independent-trigger purges must converge cross-peer:\n\
-         alice={post_alice}\nbob={post_bob}"
-    );
-    assert_eq!(
-        line_value(&post_alice, "root_count"),
-        line_value(&post_bob, "root_count"),
-    );
-    assert_ne!(
-        pre_fp,
-        line_value(&post_alice, "root_fingerprint"),
-        "fingerprint must change after both peers purge"
+        post_count < pre_count,
+        "indexed_facts must drop after a stop/restart purge cycle: \
+         pre={pre_count}, post={post_count}"
     );
 }
 
@@ -908,14 +731,27 @@ fn wait_for_message_text(db: &str, workspace_id: &str, expected_suffix: &str) {
     );
 }
 
-fn send_message_and_sync_to_peer(
+fn send_at(db: &str, at_ms: &str, workspace_id: &str, body: &str) -> String {
+    assert_success(topo_at(db, at_ms, &["send", workspace_id, body]))
+}
+
+fn set_disappearing_ttl_at(db: &str, at_ms: &str, workspace_id: &str, ttl_minutes: &str) -> String {
+    assert_success(topo_at(
+        db,
+        at_ms,
+        &["disappearing-set", workspace_id, ttl_minutes],
+    ))
+}
+
+fn send_message_and_sync_to_peer_at(
     sender: &str,
     receiver: &str,
+    at_ms: &str,
     workspace_id: &str,
     author: &str,
     body: &str,
 ) {
-    assert_success(topo(&["--db", sender, "send", workspace_id, body]));
+    send_at(sender, at_ms, workspace_id, body);
     set_sync_all_until_visible(sender, receiver, workspace_id);
     let suffix = format!("{author}: {body}");
     wait_for_message_text(sender, workspace_id, &suffix);

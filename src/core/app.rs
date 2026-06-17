@@ -15,10 +15,10 @@
 //!
 //! This file sits between `main.rs` and the protocol. The binary supplies argv;
 //! the protocol supplies declarations; this runner supplies the stable process
-//! shape: `--db`, daemon lifecycle commands, help, runtime opening, and command
-//! dispatch. Change this file when every protocol should gain a new hosting
-//! behavior. Change the protocol registry or command modules when only the
-//! concrete protocol changes.
+//! shape: `--db`, optional command time, daemon lifecycle commands, help,
+//! runtime opening, and command dispatch. Change this file when every protocol
+//! should gain a new hosting behavior. Change the protocol registry or command
+//! modules when only the concrete protocol changes.
 //!
 //! The runner deliberately returns display lines only at the edge. Commands
 //! produce facts, intents, rows, or query output through their own modules; core
@@ -45,7 +45,7 @@ pub struct ProtocolDescription<C: 'static> {
     /// Non-daemon command registry.
     pub commands: &'static [CliCommand<C>],
     /// Convert an opened runtime into the protocol-owned CLI context.
-    pub context: fn(Runtime, Option<PathBuf>) -> C,
+    pub context: fn(Runtime, Option<PathBuf>, Option<u64>) -> C,
 }
 
 /// Run one protocol CLI invocation.
@@ -94,7 +94,7 @@ pub fn usage<C: 'static>(description: &ProtocolDescription<C>, reason: &str) -> 
     ]);
     for command in description.commands {
         lines.push(format!(
-            "  {} --db PATH {}",
+            "  {} --db PATH [--at TIMESTAMP_MS] {}",
             description.command_name, command.usage
         ));
     }
@@ -181,6 +181,7 @@ fn run_assert<C: 'static>(
             description,
             ParsedArgs {
                 db: Some(db.clone()),
+                at: parsed.at,
                 command: assertion.command.clone(),
             },
         )?;
@@ -239,7 +240,7 @@ fn run_protocol_command<C: 'static>(
         .ok_or_else(|| format!("{command_name} requires --db PATH"))?;
     let _turn = daemon::RuntimeTurnLock::acquire(&db)?;
     let runtime = Runtime::open_disk(&description.runtime, &db)?;
-    let mut context = (description.context)(runtime, parsed.db);
+    let mut context = (description.context)(runtime, parsed.db, parsed.at);
     cli::run(
         description.command_name,
         description.commands,
@@ -445,12 +446,14 @@ fn with_usage_footer<C: 'static>(description: &ProtocolDescription<C>, err: Stri
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedArgs {
     db: Option<PathBuf>,
+    at: Option<u64>,
     command: Vec<String>,
 }
 
 impl ParsedArgs {
     fn parse(argv: Vec<String>) -> Result<Self, String> {
         let mut db = None;
+        let mut at = None;
         let mut command = Vec::new();
         let mut iter = argv.into_iter();
         while let Some(arg) = iter.next() {
@@ -468,9 +471,23 @@ impl ParsedArgs {
                         return Err("--db may be supplied only once".to_string());
                     }
                 }
+                "--at" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--at requires a timestamp".to_string())?;
+                    let value = value
+                        .parse::<u64>()
+                        .map_err(|_| "--at requires a u64 timestamp".to_string())?;
+                    if i64::try_from(value).is_err() {
+                        return Err("--at timestamp exceeds SQLite integer range".to_string());
+                    }
+                    if at.replace(value).is_some() {
+                        return Err("--at may be supplied only once".to_string());
+                    }
+                }
                 _ => command.push(arg),
             }
         }
-        Ok(Self { db, command })
+        Ok(Self { db, at, command })
     }
 }

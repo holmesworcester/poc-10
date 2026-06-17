@@ -468,8 +468,6 @@ fn core_readmes_document_runtime_boundaries() {
         "generic process runner over a `ProtocolDescription`",
         "cli.rs",
         "tiny command registry and text-output boundary",
-        "clock.rs",
-        "store-local logical clock for deterministic authoring and tests",
         "command.rs",
         "command authoring primitives",
         "context.rs",

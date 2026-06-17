@@ -20,19 +20,17 @@ intents, context, and time wakes; `project_fact` commits that output atomically.
 
 ## Remove The Persistent Clock
 
-The store-local logical clock is frontend/operator state, not protocol truth.
-Remove the `clock` table and `core::clock` writer. Runtime authoring should use
-system time by default. Deterministic CLI tests should pass time explicitly, for
-example:
+Command time is frontend/operator input, not protocol truth. Runtime authoring
+uses system time by default, and deterministic CLI tests pass time explicitly,
+for example:
 
 ```text
 con --at 5000 message send WORKSPACE_ID "first"
 con --at 5100 message send WORKSPACE_ID "second"
 ```
 
-This removes one local writer and one replay-reset exception. Status/report
-paths that need "now" should receive it from the CLI/app boundary or omit it
-when no explicit value is supplied.
+Status/report paths that need "now" receive it from the CLI/app boundary or
+omit it when no explicit value is supplied.
 
 ## `schema.rs`
 
@@ -608,27 +606,6 @@ SELECT id, 'replay'
 FROM facts;
 ```
 
-Ordered replay diagnostics:
-
-```sql
-SELECT f.id
-FROM facts f
-JOIN local_fact_admissions a ON a.fact_id = f.id
-ORDER BY a.received_at, f.id;
-```
-
-Replay time-wake enqueue:
-
-```sql
-INSERT OR IGNORE INTO pending_time_ranges
-    (owner, timeline, has_start, start_exclusive, end_inclusive)
-VALUES
-    (?1, ?2, ?3, ?4, ?5);
-
-INSERT OR IGNORE INTO pending_projection (owner, mode)
-VALUES (?1, 'replay');
-```
-
 Replay should return basic counters and assert that replay did not produce
 forbidden live output, such as network rows. Full-state hashing belongs in a
 separate diagnostic/test module.
@@ -639,12 +616,24 @@ separate diagnostic/test module.
 and hash selected tables after each run to prove replay determinism. This keeps
 whole-table summary scans out of replay's primary rebuild path.
 
+Ordered replay diagnostics:
+
+```sql
+SELECT f.id
+FROM facts f
+JOIN local_fact_admissions a ON a.fact_id = f.id
+ORDER BY a.received_at, f.id;
+```
+
 `replay_check.rs` can maintain its own diagnostic table list or accept one from
 the CLI/test harness. That list does not need to be first-class core schema
 metadata unless production code needs it, which it should not.
 
 Diagnostic summary scans are allowed here because they are explicitly
-debug/test behavior and do not become general query APIs.
+debug/test behavior and do not become general query APIs. Keep these scans out
+of `db.rs`; if a small shared row-hashing helper is useful, put it in a narrow
+module such as `db_helpers.rs`, or in `db_test_helpers.rs` when only tests use
+it.
 
 ```sql
 SELECT col_a, col_b, col_c

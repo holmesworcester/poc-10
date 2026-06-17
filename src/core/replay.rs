@@ -2,10 +2,10 @@
 //!
 //! Replay rebuilds all non-fact runtime state from retained facts. It is the
 //! mechanism behind a safe upgrade: queued intents, projected rows, standing
-//! context, time wakes, incoming inputs, outgoing network queues, and local clock state
+//! context, time wakes, incoming inputs, and outgoing network queues
 //! are not protocol truth, so a process can drop them and reproject retained
-//! facts to recover read-model rows, standing context, semantic time wakes,
-//! sync indexes, and key material. The same entry point backs the
+//! facts to recover read-model rows, standing context, time wakes, sync indexes,
+//! and key material. The same entry point backs the
 //! `replay`/`replay-check` diagnostics, which prove that replay is idempotent
 //! and independent of fact projection order.
 //!
@@ -16,11 +16,11 @@
 //! facts behave in replay through `ProjectionContext::is_replay()`.
 //!
 //! Invariants. Replay must not perform network IO or run operational wall-clock
-//! decisions. It admits wall-clock context only through the replayable semantic
-//! time-wake timelines the caller supplies, and it asserts that no network queue
-//! rows were produced. Any network row means a replay-mode handler crossed into
-//! transport output, and replay returns an error instead of a report. Recurring
-//! operational schedules are not installed during replay, so they cannot fire.
+//! decisions. It re-materializes standing time wakes but does not decide that
+//! any of them are due. Any network row means a replay-mode handler crossed
+//! into transport output, and replay returns an error instead of a report.
+//! Recurring operational schedules are not installed during replay, so they
+//! cannot fire.
 //!
 //! State summary. `state_summary` hashes the store-declared replay summary
 //! tables in a canonical, order-independent way. Core and protocol schema
@@ -28,7 +28,6 @@
 //! state, and summary-visible derived state, so replay never decides by ad hoc
 //! SQLite table enumeration.
 
-use crate::core::daemon::DaemonTimeWake;
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{dispatch_intents, HandlerRoute, HandlerSet, WorkStatus};
 use crate::core::intents::HandlerMode;
@@ -81,8 +80,6 @@ pub struct ReplayReport {
     pub emitted_facts: usize,
     /// Facts purged during replay (for example via retirement projection).
     pub purged_facts: usize,
-    /// Due time-wake rows admitted from replayable semantic timelines.
-    pub semantic_time_wakes: usize,
     /// Standing time-wake rows remaining after replay drains.
     pub standing_time_wakes: usize,
     /// Intents dispatched before the replay barrier.
@@ -208,7 +205,6 @@ pub fn run_replay(
     routes: &'static [HandlerRoute],
     allowed_tables: &[TableName],
     fact_admission: Option<FactAdmissionFn>,
-    replay_time_wakes: &[DaemonTimeWake],
     order: ReplayOrder,
 ) -> Result<ReplayReport, String> {
     let mut report = ReplayReport {
@@ -221,14 +217,7 @@ pub fn run_replay(
     report.wiped_tables = wipe_derived_state(store)?;
     report.retained_facts = table_count(store, FACTS)?;
 
-    let drive = ReplayDrive::new(
-        store,
-        projector,
-        allowed_tables,
-        fact_admission,
-        replay_time_wakes,
-        routes,
-    );
+    let drive = ReplayDrive::new(store, projector, allowed_tables, fact_admission, routes);
     let mut counters = ReplayCounters::default();
     match order {
         ReplayOrder::Canonical => {
@@ -248,7 +237,6 @@ pub fn run_replay(
     report.emitted_facts = facts_after.difference(&facts_before).count();
     report.purged_facts = facts_before.difference(&facts_after).count();
     report.projected_facts = counters.projected_facts;
-    report.semantic_time_wakes = counters.time_wake_admissions;
     report.replayed_intents = counters.replayed_intents;
     report.standing_time_wakes = table_count(store, TIME_WAKES)?;
     report.context_edges = table_count(store, CONTEXT_EDGES)?;
@@ -301,22 +289,19 @@ pub fn state_summary(store: &Store) -> Result<StateSummary, String> {
 #[derive(Debug, Clone, Default)]
 struct ReplayCounters {
     projected_facts: usize,
-    time_wake_admissions: usize,
     replayed_intents: usize,
 }
 
 /// Replay-mode work driver over the ordinary projection and dispatch workers.
 ///
 /// It instantiates the ordinary handler routes and passes replay mode through
-/// handler context. Each step admits due replay time wakes, drains one
-/// projection batch, and drains one intent batch; the barrier repeats that
-/// visible queue order until a step is idle.
+/// handler context. Each step drains one projection batch and one intent batch;
+/// the barrier repeats that visible queue order until a step is idle.
 struct ReplayDrive<'a> {
     store: &'a Store,
     projector: &'a dyn Projector,
     allowed_tables: &'a [TableName],
     fact_admission: Option<FactAdmissionFn>,
-    replay_time_wakes: &'a [DaemonTimeWake],
     handlers: HandlerSet,
 }
 
@@ -326,7 +311,6 @@ impl<'a> ReplayDrive<'a> {
         projector: &'a dyn Projector,
         allowed_tables: &'a [TableName],
         fact_admission: Option<FactAdmissionFn>,
-        replay_time_wakes: &'a [DaemonTimeWake],
         routes: &'static [HandlerRoute],
     ) -> Self {
         let handlers = HandlerSet::new(routes);
@@ -335,7 +319,6 @@ impl<'a> ReplayDrive<'a> {
             projector,
             allowed_tables,
             fact_admission,
-            replay_time_wakes,
             handlers,
         }
     }
@@ -351,7 +334,6 @@ impl<'a> ReplayDrive<'a> {
 
     fn drain_one_step(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
         let mut status = WorkStatus::idle();
-        status.merge(self.admit_time_wakes(counters)?);
         status.merge(self.drain_projection(counters)?);
         status.merge(self.dispatch_replay(counters)?);
         Ok(status)
@@ -367,24 +349,6 @@ impl<'a> ReplayDrive<'a> {
         )?;
         counters.projected_facts += progress.projected;
         Ok(progress.status)
-    }
-
-    fn admit_time_wakes(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {
-        let mut admitted = 0;
-        for wake in self.replay_time_wakes {
-            let Some(end_inclusive) = (wake.end_inclusive)(self.store)? else {
-                continue;
-            };
-            admitted += project_fact::process_due_time_range_for_replay(
-                self.store,
-                (wake.timeline)(),
-                None,
-                end_inclusive,
-                REPLAY_WORK_LIMIT,
-            )?;
-        }
-        counters.time_wake_admissions += admitted;
-        Ok(WorkStatus::progressed(admitted > 0))
     }
 
     fn dispatch_replay(&self, counters: &mut ReplayCounters) -> Result<WorkStatus, String> {

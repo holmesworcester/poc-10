@@ -16,7 +16,6 @@
 //! and frame interpretation live in connection fact and intake modules.
 
 use crate::core::app::ProtocolDescription;
-use crate::core::clock;
 use crate::core::daemon::{DaemonDescription, DaemonTimeWake, InboundNetworkFrame};
 use crate::core::effects::RuntimeEffects;
 use crate::core::runtime::RuntimeDescription;
@@ -49,23 +48,12 @@ pub const MATCH_PROTOCOL: ProtocolDescription<MatchCliContext> = ProtocolDescrip
     context: MatchCliContext::new,
 };
 
-/// Daemon-owned time wakes.
+/// Live daemon time wakes.
 ///
-/// Every daemon time wake must be replayable: its high-water mark derives from
-/// retained protocol state, not fresh wall-clock. The set is therefore exactly
-/// the replayable timelines. Operational wall-clock loops such as connection
-/// peer retry are not daemon time wakes; that work is the live recurring
-/// `maintain_connections` intent.
-const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = REPLAYABLE_DAEMON_TIME_WAKES;
-
-/// Replayable semantic time-wake timelines.
-///
-/// Replay admits wall-clock context only through these timelines, whose
-/// high-water mark derives from retained protocol state (the store-local
-/// logical clock), not fresh wall-clock. `content_message_expiry` qualifies
-/// because it only advances disappearing-message expiry, which is replayable
-/// protocol state.
-pub const REPLAYABLE_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
+/// These wakes are driven by the daemon's current wall time. Replay does not
+/// run daemon wall-clock work; it reprojects retained facts and leaves standing
+/// time wakes for the next live daemon tick.
+const MATCH_DAEMON_TIME_WAKES: &[DaemonTimeWake] = &[DaemonTimeWake {
     timeline: content::message::expiration_timeline,
     end_inclusive: current_message_expiration_minute,
 }];
@@ -82,6 +70,6 @@ fn receive_network_frame_effects(input: InboundNetworkFrame) -> Result<RuntimeEf
     )
 }
 
-fn current_message_expiration_minute(store: &Store) -> Result<Option<u64>, String> {
-    Ok(clock::logical_time(store)?.map(|now_ms| now_ms / 60_000))
+fn current_message_expiration_minute(_store: &Store) -> Result<Option<u64>, String> {
+    Ok(Some(crate::core::daemon::now_ms() / 60_000))
 }
