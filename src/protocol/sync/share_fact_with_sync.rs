@@ -8,7 +8,6 @@
 //! dependency closure from fact bodies.
 
 use crate::core::{
-    fact_db::persisted_fact,
     intents::{
         HandlerContext, HandlerError, HandlerFactId, HandlerFactId as FactId, HandlerResult,
         Intent, IntentHandler, IntentKind,
@@ -188,7 +187,7 @@ impl IntentHandler for ShareFactWithSyncHandler {
                             // Context links came from projector-validated offers. A context fact may
                             // already be purged by the time this queued handler runs.
                             for fact_id in &input.context_have {
-                                let Some(fact) = persisted_fact(context.db()?, fact_id)? else {
+                                let Some(fact) = context.db()?.fact(fact_id)? else {
                                     continue;
                                 };
                                 HandlerContext::with_facts([fact])

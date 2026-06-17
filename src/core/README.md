@@ -220,9 +220,6 @@ use core syntax and contracts, but core must not import their semantic rules.
   mutations, durable intents, and local intents. The shared commit helper writes
   this mechanical description atomically inside the caller's transaction;
   commands use `AuthoredFacts` facts plus a receipt instead.
-- `fact_db.rs`: SQL storage for protocol-neutral fact bytes. It owns retained
-  facts, local admissions, incoming facts, fact purge cleanup, and
-  pending-projection admission rows.
 - `facts.rs`: protocol-neutral fact identity and visibility scope. It defines
   fact ids as BLAKE3 hashes of immutable bytes, the `Fact` container, and the
   `Global`, `Local`, and protocol-defined `Scoped` visibility model. It does
@@ -246,10 +243,11 @@ use core syntax and contracts, but core must not import their semantic rules.
   phase timings in thread-local state only when explicitly enabled, preserving
   normal CLI output by default. It is for runtime profiling, not protocol
   measurement semantics.
-- `project_fact.rs`: one queued fact projection transaction. It loads matched
-  context and due time ranges, runs the routed projector, applies
-  durable/incoming source rules, replaces the owner's needs/time wakes,
-  appends offers, wakes matched owners, and commits emitted effects.
+- `project_fact.rs`: one queued fact projection transaction plus fact lifecycle
+  SQL. It admits retained and incoming facts, queues pending projection, loads
+  matched context and due time ranges, runs the routed projector, applies source
+  rules, purges exact fact-owned state, wakes matched owners, and commits
+  emitted effects.
 - `replay.rs`: replay entry point. It resets schema-declared derived state,
   reprojects retained facts in canonical, reverse, or deterministic scrambled
   order, and enforces replay constraints such as no network rows.

@@ -7,7 +7,6 @@
 use crate::core::command::AuthoredFacts;
 use crate::core::crypto;
 use crate::core::db::Db;
-use crate::core::fact_db::persisted_fact;
 use crate::core::facts::{Fact, FactId};
 use crate::protocol::auth;
 use crate::protocol::auth::local_history_node_secret::fact::TIME_TREE_BIT_DEPTH;
@@ -170,12 +169,14 @@ pub fn create_history_node(
     if history_source_is_tombstoned(store, input.source_secret_id)? {
         return Err("history node source fact is missing".to_string());
     }
-    let source = persisted_fact(store, &input.source_secret_id)?
+    let source = store
+        .fact(&input.source_secret_id)?
         .ok_or_else(|| "history node source fact is missing".to_string())?;
     let (owner_endpoint_id, source_secret) =
         history_source_material(&source, input.workspace_id, input.removal_frontier_id)?;
     if input.tombstone_node_id != [0; 32] {
-        let tombstone = persisted_fact(store, &input.tombstone_node_id)?
+        let tombstone = store
+            .fact(&input.tombstone_node_id)?
             .ok_or_else(|| "history node tombstone fact is missing".to_string())?;
         local_history_layout_decode::decode_local_history_node_secret(&tombstone.bytes)
             .map_err(|_| "history node tombstone fact is not a history node".to_string())?;

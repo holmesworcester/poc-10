@@ -28,7 +28,6 @@
 
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::effects::RuntimeEffects;
-use crate::core::fact_db::persisted_fact;
 use crate::core::intents::{
     HandlerContext, HandlerError, HandlerMode, Intent, IntentHandler, IntentWorkRow,
 };
@@ -520,7 +519,7 @@ fn load_handler_context<'a>(
 ) -> Result<HandlerContext<'a>, String> {
     let mut facts = Vec::new();
     for id in handler.input_fact_ids(intent)? {
-        if let Some(fact) = persisted_fact(store, &id)? {
+        if let Some(fact) = store.fact(&id)? {
             facts.push(fact);
         }
     }
@@ -716,7 +715,7 @@ mod tests {
             "dispatcher should yield so projection can run before later handlers"
         );
         assert_eq!(
-            persisted_fact(&store, &emitted.id).expect("load emitted fact"),
+            store.fact(&emitted.id).expect("load emitted fact"),
             Some(emitted),
             "intent-created fact should be retained immediately"
         );

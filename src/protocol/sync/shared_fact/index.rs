@@ -11,7 +11,6 @@
 //! file to ask what a peer is allowed to learn.
 
 use crate::core::db::{Db, TableInsert, TableName, TypedTableSchema, Value, DEFAULT_QUERY_LIMIT};
-use crate::core::fact_db::persisted_fact;
 use crate::core::facts::{Fact, FactId, FactScope};
 use crate::protocol::{
     auth, connection,
@@ -709,8 +708,8 @@ mod tests {
         let owner = fact(workspace_id, 20, 2);
         store
             .write_transaction(|tx| {
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &context)?;
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &owner)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -788,9 +787,9 @@ mod tests {
 
         store
             .write_transaction(|tx| {
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &request_fact)?;
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &shareable)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &invite_fact)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &request_fact)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &shareable)?;
                 Ok(())
             })
             .expect("persist facts");
@@ -1221,7 +1220,7 @@ fn connection_workspaces(
     let Some(invite_secret_id) = connection_invite_secret_id(store, connection)? else {
         return Ok(workspace_ids);
     };
-    if let Some(invite_secret) = persisted_fact(store, &invite_secret_id)? {
+    if let Some(invite_secret) = store.fact(&invite_secret_id)? {
         let invite = auth::invite_secret::project::decode::decode_fact(&invite_secret.bytes)
             .map_err(|_| "connection invite context is not an invite secret".to_string())?;
         if let Some(workspace_id) = invite.workspace_id {
@@ -1248,7 +1247,7 @@ fn open_unified_connection_request_for_sync(
     connection: &connection::connection::queries::ConnectionRow,
 ) -> Result<Option<connection::request::fact::ConnectionRequestFact>, String> {
     let mut request_bytes = Vec::new();
-    if let Some(request_fact) = persisted_fact(store, &connection.request_id)? {
+    if let Some(request_fact) = store.fact(&connection.request_id)? {
         request_bytes.push(request_fact.bytes);
     }
     if let Some(row) = connection::request::queries::request_by_id(store, &connection.request_id)? {
@@ -1437,7 +1436,7 @@ pub fn negentropy_context_have_for_leaf(
 }
 
 fn fact_for_shareable_row(store: &Db, row: &ShareableFactRow) -> Result<Option<Fact>, String> {
-    let Some(fact) = persisted_fact(store, &row.fact_id)? else {
+    let Some(fact) = store.fact(&row.fact_id)? else {
         return Ok(None);
     };
     if fact.timestamp != row.timestamp_ms {

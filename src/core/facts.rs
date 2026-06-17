@@ -60,6 +60,45 @@ pub enum FactScope {
     Scoped { kind: ScopeKind, id: FactId },
 }
 
+/// The all-zero [`FactId`] stored in the scope columns of non-scoped facts.
+const EMPTY_FACT_ID: FactId = [0u8; 32];
+
+impl FactScope {
+    /// Convert scope into the storage columns used by core fact tables.
+    pub(crate) fn storage_columns(&self) -> (&'static str, &str, &FactId) {
+        match self {
+            FactScope::Global => ("global", "", &EMPTY_FACT_ID),
+            FactScope::Local => ("local", "", &EMPTY_FACT_ID),
+            FactScope::Scoped { kind, id } => ("scoped", kind.as_str(), id),
+        }
+    }
+
+    /// Decode the storage columns used by core fact tables.
+    pub(crate) fn from_storage_columns(
+        scope: &str,
+        scope_kind: &str,
+        scope_id: &FactId,
+    ) -> Result<Self, String> {
+        match scope {
+            "global" | "local" => {
+                if !scope_kind.is_empty() || scope_id != &EMPTY_FACT_ID {
+                    return Err(format!("{scope} fact scope has scoped columns set"));
+                }
+                Ok(if scope == "global" {
+                    FactScope::Global
+                } else {
+                    FactScope::Local
+                })
+            }
+            "scoped" => Ok(FactScope::Scoped {
+                kind: ScopeKind::new(scope_kind.to_string())?,
+                id: *scope_id,
+            }),
+            other => Err(format!("invalid fact scope {other:?}")),
+        }
+    }
+}
+
 /// Immutable fact bytes plus the local admission metadata core needs to route them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
@@ -88,6 +127,26 @@ impl Fact {
     /// Return the exact bytes whose hash is `id`.
     pub fn body(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Decode one fact row after the SQL owner has loaded typed storage columns.
+    pub(crate) fn from_storage_columns(
+        id: FactId,
+        scope: &str,
+        scope_kind: &str,
+        scope_id: FactId,
+        timestamp: u64,
+        bytes: Vec<u8>,
+    ) -> Result<Self, String> {
+        if fact_id(&bytes) != id {
+            return Err("fact row key does not match fact bytes".to_string());
+        }
+        Ok(Self {
+            id,
+            scope: FactScope::from_storage_columns(scope, scope_kind, &scope_id)?,
+            timestamp,
+            bytes,
+        })
     }
 }
 

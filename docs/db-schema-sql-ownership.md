@@ -10,11 +10,11 @@ table's behavior.
   declarations.
 - `core/db.rs` owns the SQLite connection, schema execution, transactions,
   trusted identifier quoting, and generic typed row mutation mechanics.
-- `core/fact_db.rs` owns retained facts, local fact admissions, incoming facts,
-  fact purge cleanup, and pending-projection admission rows.
-- `core/project_fact.rs` owns projection queue selection, projection commit
-  ordering, standing context SQL, due time wake SQL, and row mutation commit.
-- `core/handle_intent.rs` owns durable and local intent queue SQL.
+- `core/project_fact.rs` owns retained and incoming fact admission, pending
+  projection queue selection, projection commit ordering, exact fact purge
+  cleanup, standing context SQL, due time wake SQL, and row mutation commit.
+- `core/handle_intent.rs` owns durable and local intent queue SQL plus exact
+  handler input fact loading.
 - `core/network.rs` owns network queue SQL.
 - `core/replay.rs` owns replay reset and replay-mode work driving.
 - `core/replay_check.rs` owns diagnostic replay summaries and pass comparison.
@@ -55,10 +55,16 @@ owns a table, that module writes the SQL shape it needs.
 
 ## Facts
 
-`fact_db.rs` is the protocol-neutral fact table owner. It stores immutable fact
-bytes by content id, records the first local admission metadata, handles
-incoming fact rows, queues retained facts for projection, and purges
-core-owned rows keyed by a fact id.
+Core fact tables are declared in `schema.rs` and acted on by the runtime
+boundary that changes their lifecycle. `project_fact.rs` stores immutable fact
+bytes by content id, records local admission metadata, stages incoming fact
+rows, queues retained facts for projection, and purges core-owned rows keyed by
+a fact id.
+
+`facts` stores the content-addressed bytes. `local_fact_admissions` stores the
+first local admission metadata needed for deterministic ordering and scope
+checks. Incoming rows remain separate until their projection either retains the
+fact or drops it as a one-shot input.
 
 Fact SQL does not decode protocol payloads. Protocol meaning belongs to
 fact-family projectors and query modules.

@@ -8,13 +8,14 @@ tables, and protocol query modules run bounded SQL over projected tables.
 
 - `core/db.rs` owns the SQLite connection, schema execution, transactions,
   trusted identifier quoting, and generic typed row mutation mechanics.
-- `core/fact_db.rs` owns retained fact rows, local fact admissions, incoming
-  fact rows, fact purge cleanup, and pending-projection admission rows.
-- `core/project_fact.rs` owns projection commit ordering: pending queue claim,
-  context replacement, due time wakes, row mutations, emitted facts, intents,
-  and queue deletion.
-- `core/handle_intent.rs` owns intent queue SQL, handler dispatch, retry
-  behavior, and atomic commit of handler output.
+- `core/schema.rs` declares retained fact tables, local fact admission tables,
+  incoming fact tables, queue tables, and replay lifecycle groups.
+- `core/project_fact.rs` owns fact lifecycle SQL and projection commit ordering:
+  retained and incoming admission, pending queue selection, context
+  replacement, due time wakes, exact fact purges, row mutations, emitted facts,
+  intents, and queue deletion.
+- `core/handle_intent.rs` owns intent queue SQL, handler input fact loading,
+  handler dispatch, retry behavior, and atomic commit of handler output.
 - `core/replay.rs` owns replay reset and replay-mode projection/intent driving.
 - `core/replay_check.rs` owns state summaries and replay-check pass diffs.
 - `core/network.rs` owns TCP and memory-local network queue SQL.

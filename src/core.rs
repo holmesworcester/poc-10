@@ -14,8 +14,8 @@
 //! meaning of projected rows.
 //!
 //! Start in `runtime` for the host-facing facade, `project_fact` for projection
-//! contracts and one fact projection transaction, `handle_intent` for one intent
-//! transaction, `fact_db` for fact persistence, `schema` for core tables, and
+//! contracts, fact admission, and one fact projection transaction,
+//! `handle_intent` for one intent transaction, `schema` for core tables, and
 //! `db` for the SQLite substrate.
 //! Use `app`, `daemon`, and `cli` when working on process or command hosting. If
 //! a change requires knowing what a workspace, message, invite, key wrap, or sync
@@ -29,7 +29,6 @@ pub mod crypto;
 pub mod daemon;
 pub mod db;
 pub mod effects;
-pub(crate) mod fact_db;
 pub mod facts;
 pub(crate) mod handle_intent;
 pub mod intents;

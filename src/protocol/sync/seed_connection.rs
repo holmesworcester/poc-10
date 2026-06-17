@@ -336,8 +336,8 @@ mod tests {
 
         store
             .write_transaction(|tx| {
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &context_fact)?;
-                crate::core::fact_db::insert_fact_and_pending_in_tx(tx, &owner_fact)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &context_fact)?;
+                crate::core::project_fact::insert_fact_and_pending_in_tx(tx, &owner_fact)?;
                 Ok(())
             })
             .expect("persist facts");
