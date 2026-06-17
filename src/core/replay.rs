@@ -30,7 +30,7 @@
 use crate::core::db::{quoted_table_name, Db, TableName};
 use crate::core::facts::FactId;
 use crate::core::handle_intent::{
-    dispatch_one_intent, next_intent_queue_key, HandlerRoute, HandlerSet, IntentQueue, WorkStatus,
+    dispatch_one_intent, HandlerRoute, HandlerSet, IntentQueue, WorkStatus,
 };
 use crate::core::intents::HandlerMode;
 use crate::core::network::OUTGOING_TABLE;
@@ -296,18 +296,7 @@ fn drain_replay_intent_queue(
     counters: &mut ReplayCounters,
 ) -> Result<WorkStatus, String> {
     let mut status = WorkStatus::idle();
-    let mut retried_local = BTreeSet::new();
-    let kinds = handlers.intent_kinds();
     for _ in 0..REPLAY_WORK_LIMIT {
-        if queue == IntentQueue::Local {
-            let Some(next_key) = next_intent_queue_key(db, queue, &kinds)? else {
-                break;
-            };
-            if retried_local.contains(&next_key) {
-                break;
-            }
-        }
-
         let report = dispatch_one_intent(
             db,
             handlers,
@@ -324,12 +313,6 @@ fn drain_replay_intent_queue(
             counters.replayed_intents += 1;
         }
         status.merge(report.status);
-        if let Some(key) = report.retry_key {
-            if queue == IntentQueue::Local {
-                retried_local.insert(key);
-                continue;
-            }
-        }
         if report.status.retried {
             break;
         }

@@ -197,12 +197,6 @@ impl IntentQueue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct IntentQueueKey {
-    kind: String,
-    idempotence_key: Vec<u8>,
-}
-
 fn intent_queue_error(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
@@ -399,11 +393,9 @@ fn handle_intent_with_policy(
         if status.retried && queued.queue == IntentQueue::Local {
             rotate_local_retry_to_tail(store, &queued.intent)?;
         }
-        let retry_key = status.retried.then(|| queued.queue_key());
         return Ok(IntentDispatchReport {
             status,
             dispatched: false,
-            retry_key,
         });
     };
     validate_runtime_effects_for_admission(&output, allowed_tables, fact_admission)?;
@@ -418,7 +410,6 @@ fn handle_intent_with_policy(
     Ok(IntentDispatchReport {
         status,
         dispatched: status.progressed,
-        retry_key: None,
     })
 }
 
@@ -464,15 +455,6 @@ fn next_intent_work_in_queue<'a>(
         .handler_for_kind(kind)
         .ok_or_else(|| format!("no handler registered for intent kind {kind}"))?;
     Ok(Some(IntentWork { queued, handler }))
-}
-
-/// Return the identity of the next queued row in one selected intent queue.
-pub(crate) fn next_intent_queue_key(
-    store: &Db,
-    queue: IntentQueue,
-    allowed_kinds: &[&str],
-) -> Result<Option<IntentQueueKey>, String> {
-    Ok(next_queued_intent_in_queue(store, queue, allowed_kinds)?.map(|queued| queued.queue_key()))
 }
 
 /// Return the first queued intent matching a declared handler route.
@@ -596,19 +578,9 @@ pub(crate) struct QueuedIntent {
     pub(crate) intent: Intent,
 }
 
-impl QueuedIntent {
-    fn queue_key(&self) -> IntentQueueKey {
-        IntentQueueKey {
-            kind: self.intent.kind.as_str().to_owned(),
-            idempotence_key: self.intent.key.clone(),
-        }
-    }
-}
-
 pub(crate) struct IntentDispatchReport {
     pub(crate) status: WorkStatus,
     pub(crate) dispatched: bool,
-    pub(crate) retry_key: Option<IntentQueueKey>,
 }
 
 impl IntentDispatchReport {
@@ -616,7 +588,6 @@ impl IntentDispatchReport {
         Self {
             status: WorkStatus::idle(),
             dispatched: false,
-            retry_key: None,
         }
     }
 }
@@ -628,7 +599,6 @@ mod tests {
     use crate::core::facts::{Fact, FactScope};
     use crate::core::intents::{retry_intent, HandlerResult, IntentKind};
     use crate::core::schema::{CORE_SCHEMA_SOURCE, INCOMING_FACTS, PENDING_PROJECTION};
-    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static RETRY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -665,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn local_retries_rotate_and_do_not_spin_in_one_drain() {
+    fn local_retry_rotates_to_tail_and_stops_drain() {
         RETRY_CALLS.store(0, Ordering::SeqCst);
         let store = Db::open_memory_with_schema_sources(&[CORE_SCHEMA_SOURCE]).expect("open db");
         let first = test_intent("retrying", b"first");
@@ -685,7 +655,7 @@ mod tests {
         )
         .expect("dispatch retrying local intents");
 
-        assert_eq!(RETRY_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(RETRY_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(progress.dispatched, 0);
         assert!(progress.status.retried);
         assert_eq!(
@@ -698,8 +668,8 @@ mod tests {
                 .expect("queued local")
                 .intent
                 .key,
-            first.key,
-            "the first retried row should be back at the head after both rows had one attempt"
+            b"second".to_vec(),
+            "the retried row should rotate behind the next local row"
         );
     }
 
@@ -848,18 +818,7 @@ mod tests {
         effect_mode: RuntimeEffectMode,
     ) -> Result<TestIntentProgress, String> {
         let mut progress = TestIntentProgress::default();
-        let mut retried_local = BTreeSet::new();
-        let kinds = handlers.intent_kinds();
         for _ in 0..limit {
-            if queue == IntentQueue::Local {
-                let Some(next_key) = next_intent_queue_key(store, queue, &kinds)? else {
-                    break;
-                };
-                if retried_local.contains(&next_key) {
-                    break;
-                }
-            }
-
             let report = dispatch_one_intent(
                 store,
                 handlers,
@@ -876,12 +835,6 @@ mod tests {
                 progress.dispatched += 1;
             }
             progress.status.merge(report.status);
-            if let Some(key) = report.retry_key {
-                if queue == IntentQueue::Local {
-                    retried_local.insert(key);
-                    continue;
-                }
-            }
             if report.status.retried {
                 break;
             }

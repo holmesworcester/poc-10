@@ -24,15 +24,12 @@ use crate::core::command::AuthoredFacts;
 use crate::core::db::{Db, SchemaSource, TableName};
 use crate::core::effects::RuntimeEffects;
 use crate::core::facts::Fact;
-use crate::core::handle_intent::{
-    dispatch_one_intent, next_intent_queue_key, HandlerSet, IntentQueue,
-};
+use crate::core::handle_intent::{dispatch_one_intent, HandlerSet, IntentQueue};
 use crate::core::intents::{HandlerMode, Intent};
 use crate::core::project_fact::{
     self, FactAdmissionFn, FactRoute, ProjectionSource, Projector, RuntimeEffectMode, Timeline,
 };
 use crate::core::schema::{CORE_SCHEMA_SOURCE, INTENTS, LOCAL_INTENTS};
-use std::collections::BTreeSet;
 use std::path::Path;
 
 pub use crate::core::handle_intent::{
@@ -251,9 +248,9 @@ impl Runtime {
 
     /// Drain at most `limit` local intents using the live handler set.
     ///
-    /// Local retries are rotated to the tail by `handle_intent`; this loop tracks
-    /// which local keys already retried so one bounded pass cannot spin forever
-    /// on retry-only local work.
+    /// Local retries are rotated to the tail by `handle_intent`. A retry stops
+    /// this queue's current bounded pass; the next daemon tick can try the next
+    /// local row.
     pub fn drain_local_intents(&mut self, limit: usize) -> Result<WorkStatus, String> {
         self.drain_intent_queue(IntentQueue::Local, limit)
     }
@@ -264,18 +261,7 @@ impl Runtime {
         limit: usize,
     ) -> Result<WorkStatus, String> {
         let mut status = WorkStatus::idle();
-        let mut retried_local = BTreeSet::new();
-        let kinds = self.handlers.intent_kinds();
         for _ in 0..limit {
-            if queue == IntentQueue::Local {
-                let Some(next_key) = next_intent_queue_key(&self.db, queue, &kinds)? else {
-                    break;
-                };
-                if retried_local.contains(&next_key) {
-                    break;
-                }
-            }
-
             let report = dispatch_one_intent(
                 &self.db,
                 &self.handlers,
@@ -290,12 +276,6 @@ impl Runtime {
             }
 
             status.merge(report.status);
-            if let Some(key) = report.retry_key {
-                if queue == IntentQueue::Local {
-                    retried_local.insert(key);
-                    continue;
-                }
-            }
             if report.status.retried {
                 break;
             }
